@@ -20,8 +20,8 @@ function run(bin: string, args: string[], cwd = process.cwd()): string {
 }
 
 test('help coverage is derived exactly from completion public paths', () => {
-  assert.equal(TOP_LEVEL_COMMANDS.length, 45);
-  assert.equal(PUBLIC_COMMAND_PATHS.length, 59);
+  assert.equal(TOP_LEVEL_COMMANDS.length, 46);
+  assert.equal(PUBLIC_COMMAND_PATHS.length, 60);
   assert.deepEqual([...HELP_PATHS].sort(), [...PUBLIC_COMMAND_PATHS].sort());
   assert.deepEqual(missingHelpPaths(), []);
   for (const path of PUBLIC_COMMAND_PATHS) {

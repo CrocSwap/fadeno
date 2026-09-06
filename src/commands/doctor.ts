@@ -20,6 +20,8 @@ import { catalogLayerVersions, explainSuppressedBuiltin } from '../lib/config-la
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
 import { codexUserAgentDir, readVerifiedModels, userPaths } from '../lib/user-paths.ts';
 import {
+  CODEX_IDENTITY_REMEDIATION,
+  describeCodexAgentIdentityRow,
   effectiveCodexAgentCandidates,
   findSpawnableCodexAgent,
   readCodexAgentFile,
@@ -536,11 +538,19 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     ));
   }
   if (status.codexMaterialization?.restartRequired) {
+    const drifted = status.codexMaterialization.agents.filter(
+      (agent) => agent.status === 'stale' || agent.status === 'missing',
+    );
+    const detail = drifted
+      .map((agent) => (agent.status === 'missing' ? `${agent.archetype} file missing` : describeCodexAgentIdentityRow(agent)))
+      .join('; ');
     findings.push(finding(
       'codex-agents',
       'warning',
-      `managed host agents are missing or stale in ${status.codexMaterialization.path}`,
-      'Run `fadeno setup --codex` to rewrite them; a fresh Codex session picks them up.',
+      `managed host agents are missing or stale in ${status.codexMaterialization.path}${detail === '' ? '' : ` — ${detail}`}`,
+      // One remediation, printed from where it is defined: `status`, `dial` and
+      // `doctor` re-spelling it separately is how the three drift apart.
+      `${status.codexMaterialization.remediation ?? CODEX_IDENTITY_REMEDIATION}.`,
     ));
   } else if (status.codexMaterialization != null) {
     findings.push(finding('codex-agents', 'ok', 'managed host-agent state is current'));

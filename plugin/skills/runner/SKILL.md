@@ -30,6 +30,13 @@ bodies at canonical run paths; workers never invoke Fadeno ledger commands.
 3. Select the best playbook from the effective bundled-plus-project catalog
    using each playbook's `when_to_use`. Project files shadow bundled names. If
    the user named one, use it. State which you chose and why.
+   `parallel-workstreams` is the one to reach for when the collision risk
+   between concurrent changes has to be managed; when the interfaces are settled
+   and ownership is obvious, independent role dispatches (isolated) plus one
+   review carry the same receipts without a contract gate. Where it does run,
+   the contract's weight is the coordinator's judgement and stays proportional
+   to that risk — the human gate presents what the contract is, ownership and
+   interfaces.
 4. Validate required declared inputs are present; preserve long specifications
    as `fadeno new-run --input Name=path` files rather than shortening them.
 5. Create a new run directory lazily with `fadeno new-run <playbook> "<task>"`.

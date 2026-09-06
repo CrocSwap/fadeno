@@ -609,6 +609,21 @@ writes the completion row when its spawn unblocks, normally
 already completed, or when no claim exists on this machine, because either
 would mean claiming to have stopped work this call never touched.
 
+**Supervising an actor call? Pass the progress sidecar path.** `superviseArgv`
+takes an optional trailing absolute path (a leading `--fadeno-supervise-progress`
+sentinel in the argv, so every existing caller's argv is byte-identical without
+it). Given it, the supervisor mirrors the agent's cooperative sidecar onto its
+in-flight claim once a second and `readClaimProgress` can then describe a live
+attempt; omitted, the mirror is silently dormant — the failure mode is a working
+agent reported as silent, which nothing errors on. Any new call site that
+supervises an **actor call** must build the path as
+`join(spawnCwd, ...attemptProgressRelPath(runId, stepId, role).split('/'))`
+(`src/commands/drive.ts`, `beginCommandAttempt`) and never restate the sidecar
+spelling — `attemptProgressRelPath` delegates to `prompt.ts`'s
+`progressSidecarPath`, which is what told the agent where to write. Ad-hoc
+dispatches (`tool-exec.ts`, `dispatch.ts`) have no actor call and so no sidecar;
+they pass nothing.
+
 **Isolated host workspaces.** `fadeno dispatch-prepare <run> <dispatch-id> --isolate` is the opt-in isolated-host primitive: it validates `run` and `dispatch-id` against `HOST_WORKSPACE_SEGMENT_RE`, guards against traversal/symlink escape, serializes with `.fadeno/local/.host-workspace.lock`, creates an idempotent detached worktree at `.fadeno/local/host-worktrees/<run>/<dispatch-id>` from `HEAD`, replays the caller's tracked and untracked/unignored changes as a synthetic baseline commit under the short read-window lease, and atomically records `workspace_mode: isolated` state at `.fadeno/local/host-workspaces/<run>/<dispatch-id>.json` (`workspace`, `base_commit`, `prepared_at`, plus `diff_snapshot`/`diff_bytes`/`finalized_at` after collection). After preparation, `dispatch-prompt` includes `workspace_mode: isolated` and the absolute workspace path (prompt bytes and digest unchanged); `dispatch-start` stamps `workspace_mode: isolated`/`workspace`/`base_commit` on `actor_dispatched` and bypasses the shared writer lease; `dispatch-complete`/`dispatch-fail` collect a binary staged diff of only post-baseline host changes to `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff` before the terminal receipt (proving the worktree is the registered linked worktree before any `git add`/`diff` or removal), stamping `workspace_mode: isolated` plus `workspace`/`base_commit` and `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven worktree. `dispatch-fail` degrades to a terminal receipt without diff keys whenever evidence is absent, unverifiable, or unrecoverable — including a missing or malformed machine-local state file — while a collection failure with the state present still refuses, preserving the worktree for retry; `dispatch-complete` may recover and collect from a verified ledger-named worktree when the state vanished but still refuses success when evidence cannot be collected. The worktree is removed only after the receipt is durable and only when proven registered (failures and degraded paths preserve the worktree for manual recovery; idempotent terminals reuse the receipt and retry cleanup only when verified; nothing auto-merges). `fadeno show` projects `workspaceMode`/`workspace`/`baseCommit`/`diffSnapshot`/`diffBytes` on `HostRequestView` (ledger-first, prepared-but-not-started degrades to isolated via machine-local state, missing state → shared/null, never throws) and prints isolated facts as non-gating observability; `verify` checks only ledger consistency and never requires machine-local state. See `src/lib/host-workspace.ts`, `src/commands/dispatch-prepare.ts`, `src/lib/host-dispatch.ts`.
 
 **Cancelling a running engine attempt.** `fadeno cancel <run>` (or a unique run

@@ -1,5 +1,10 @@
 import { resolve } from 'node:path';
-import { HostDispatchError, isDuplicateStartError, readHostDispatchRequest } from '../lib/host-dispatch.ts';
+import {
+  HostDispatchError,
+  hostRequestTerminalState,
+  isDuplicateStartError,
+  readHostDispatchRequest,
+} from '../lib/host-dispatch.ts';
 import { prepareHostWorkspace } from '../lib/host-workspace.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 
@@ -7,6 +12,20 @@ export class DispatchPrepareError extends Error {}
 
 function alreadyStartedMessage(dispatchId: string): string {
   return `host dispatch "${dispatchId}" already started; it cannot be prepared for isolated delivery.`;
+}
+
+/**
+ * A withdraw is terminal like a completion, but unlike a completion it is
+ * RETRYABLE — the work still has to happen, under a request that has not been
+ * withdrawn. The generic "already has a terminal receipt" would hide that
+ * difference, and this message is the only place it reaches the operator.
+ */
+function withdrawnMessage(dispatchId: string, run: string): string {
+  return (
+    `host dispatch "${dispatchId}" was withdrawn; a withdrawn request is never delivered, ` +
+    `so no workspace is prepared for it. Run \`fadeno drive ${run}\` to mint a fresh request ` +
+    `for the same actor call, then prepare that dispatch id.`
+  );
 }
 
 export interface DispatchPrepareOptions {
@@ -54,15 +73,18 @@ export function runDispatchPrepare(opts: DispatchPrepareOptions): DispatchPrepar
     }
     throw err;
   }
-  const events = lookup.events;
-  const starts = events.filter((event) => event.type === 'actor_dispatched' && event.extra.dispatch_id === dispatchId);
-  const terminals = events.filter(
-    (event) => (event.type === 'actor_completed' || event.type === 'actor_failed') && event.extra.dispatch_id === dispatchId,
-  );
-  if (terminals.length > 0) {
+  // One reading of "what happened to this request", shared with `show` and the
+  // receipt writers, rather than a local list of terminal event types that has
+  // to be taught about each new receipt separately — which is exactly how a
+  // withdrawn request kept earning a worktree nothing could ever start.
+  const lifecycle = hostRequestTerminalState(lookup.events, dispatchId);
+  if (lifecycle === 'withdrawn') {
+    throw new DispatchPrepareError(withdrawnMessage(dispatchId, lookup.runId));
+  }
+  if (lifecycle === 'completed' || lifecycle === 'failed') {
     throw new DispatchPrepareError(`host dispatch "${dispatchId}" already has a terminal receipt; it cannot be prepared for isolated delivery.`);
   }
-  if (starts.length > 0) {
+  if (lifecycle === 'started') {
     throw new DispatchPrepareError(alreadyStartedMessage(dispatchId));
   }
   const { state, idempotent } = prepareHostWorkspace({ repoRoot, run: lookup.runId, dispatchId, now: opts.now });

@@ -11,6 +11,7 @@ import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
 import { runDispatchStart, runDispatchComplete, runDispatchFail } from '../src/commands/dispatch.ts';
+import { runDispatchWithdraw } from '../src/commands/dispatch-withdraw.ts';
 import { HostDispatchError } from '../src/lib/host-dispatch.ts';
 import { HostWorkspaceError, hostWorktreePath, hostWorkspaceStatePath, hostIsolatedDiffPath, readHostWorkspaceState } from '../src/lib/host-workspace.ts';
 
@@ -135,6 +136,27 @@ test('dispatch-prepare fails if already terminal', (t) => {
     assert.match((err as Error).message, /already has a terminal receipt/);
     return true;
   });
+});
+
+test('dispatch-prepare refuses a withdrawn request and creates no workspace for it', (t) => {
+  const { root, runId, request } = seedPrepareRun(t);
+  runDispatchWithdraw({ repoRoot: root, run: runId, dispatchId: request.dispatchId, reason: 'rebound to another executor' });
+
+  const worktreeAbs = resolve(root, hostWorktreePath(runId, request.dispatchId));
+  const statePath = join(root, '.fadeno', 'local', 'host-workspaces', runId, `${request.dispatchId}.json`);
+  assert.throws(() => runDispatchPrepare({ repoRoot: root, run: runId, dispatchId: request.dispatchId, isolate: true }), (err: unknown) => {
+    assert.ok(err instanceof DispatchPrepareError);
+    // A withdraw is retryable where a completion is not, so the refusal must
+    // say which one this is and where the next request comes from.
+    assert.match((err as Error).message, /was withdrawn/);
+    assert.match((err as Error).message, /fadeno drive/);
+    assert.doesNotMatch((err as Error).message, /already has a terminal receipt/);
+    return true;
+  });
+  // The point of the refusal: a leftover worktree, minted seconds after the
+  // withdraw removed the previous one, is exactly what it exists to prevent.
+  assert.equal(existsSync(worktreeAbs), false, 'a withdrawn request must not earn a worktree');
+  assert.equal(existsSync(statePath), false, 'a withdrawn request must not earn a workspace state file');
 });
 
 test('dispatch-prepare worktree re-created at recorded base_commit after manual removal', (t) => {

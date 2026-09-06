@@ -300,7 +300,10 @@ test('SIGKILLed supervisor preserves the production lease and claim until its or
   const root = seedExecutor(t, [
     'node',
     '-e',
-    "let i=0;const f=require('node:fs');setInterval(()=>f.writeFileSync('orphan-tick-'+(++i)+'.txt','x'),100)",
+    // Bounded at 600 ticks (60s): the `t.after` teardown below cannot run when
+    // the test runner is itself SIGKILLed, and an unbounded ticker then writes
+    // files forever. The assertions need 400ms of ticking.
+    "let i=0;const f=require('node:fs');const t=setInterval(()=>{f.writeFileSync('orphan-tick-'+(++i)+'.txt','x');if(i>=600){clearInterval(t);process.exit(0);}},100)",
   ]);
   const kernel = spawn(process.execPath, [join(REPO, 'src', 'cli.ts'), 'dispatch', '--archetype', 'worker', '--tag', 'sigkill-orphan'], {
     cwd: root,
@@ -347,7 +350,9 @@ test('a kernel that exits before supervisor initialization still reaps its execu
   const executor = [
     process.execPath,
     '-e',
-    "let i=0;const f=require('node:fs');setInterval(()=>f.writeFileSync('startup-race-'+(++i)+'.txt','x'),100)",
+    // Bounded for the same reason as the orphan ticker above; the assertion
+    // reads `ticks < 20` at 3s.
+    "let i=0;const f=require('node:fs');const t=setInterval(()=>{f.writeFileSync('startup-race-'+(++i)+'.txt','x');if(i>=600){clearInterval(t);process.exit(0);}},100)",
   ];
   const launcherSource = [
     `import { spawn } from 'node:child_process';`,

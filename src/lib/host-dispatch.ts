@@ -67,6 +67,42 @@ export interface HostDispatchReceipt {
   outputSha256?: string;
 }
 
+/** Every state a minted host request can be observed in, most terminal first. */
+export type HostRequestState = 'requested' | 'started' | 'completed' | 'failed' | 'withdrawn';
+
+/**
+ * The ONE list of terminal receipt types, most terminal first. Every consumer
+ * that asks "is this request over?" reads it through `terminalsFor` or
+ * `hostRequestTerminalState` below; a private copy of the list somewhere else
+ * is how a new receipt (the withdraw) ends up terminal in most of the codebase
+ * and invisible in the one caller that spelled it out for itself.
+ */
+const TERMINAL_RECEIPTS: ReadonlyArray<{ type: string; state: HostRequestState }> = [
+  { type: 'actor_completed', state: 'completed' },
+  { type: 'actor_failed', state: 'failed' },
+  { type: 'host_dispatch_withdrawn', state: 'withdrawn' },
+];
+
+/**
+ * The single reading of "what happened to this request", for every consumer
+ * that renders or reasons about one (`show`, `dispatch-prepare`, and the
+ * withdraw preconditions).
+ *
+ * Precedence is terminal-receipt first and `started` last on purpose: a ledger
+ * carrying BOTH a withdraw and a start is corrupt, and the honest render of a
+ * corrupt pair is the terminal receipt, not the start that should never have
+ * followed it. `verify`'s `host-dispatch-lifecycle` is what reports the
+ * corruption; this function's job is to never hide it behind `started`.
+ */
+export function hostRequestTerminalState(events: RunEvent[], dispatchId: string): HostRequestState {
+  const mine = events.filter((event) => event.extra.dispatch_id === dispatchId);
+  for (const receipt of TERMINAL_RECEIPTS) {
+    if (mine.some((event) => event.type === receipt.type)) return receipt.state;
+  }
+  if (mine.some((event) => event.type === 'actor_dispatched')) return 'started';
+  return 'requested';
+}
+
 export type DispatchProgressState = 'running' | 'waiting_input' | 'blocked' | 'idle';
 export type DispatchProgressSource = 'agent' | 'harness' | 'director';
 
@@ -200,6 +236,26 @@ export interface DispatchFailOptions {
   now?: Date;
 }
 
+export interface DispatchWithdrawOptions {
+  run: string;
+  dispatchId: string;
+  reason: string;
+  repoRoot?: string;
+  cwd?: string;
+  now?: Date;
+}
+
+export interface HostDispatchWithdrawReceipt {
+  dispatchId: string;
+  state: 'withdrawn';
+  idempotent: boolean;
+  reason: string;
+  /** True when a prepared isolated workspace existed and is now gone. */
+  workspaceRemoved: boolean;
+  /** Non-null when a prepared workspace survived removal; names the leftover path. */
+  workspaceError: string | null;
+}
+
 export interface DispatchProgressOptions {
   run: string;
   dispatchId: string;
@@ -273,7 +329,14 @@ function parseProgressReport(bytes: Buffer): DispatchProgressReport {
   };
 }
 
-function assertCurrentLedger(repoRoot: string, runQuery: string): { runDir: string; runId: string } {
+/**
+ * The statuses `fadeno run --status` treats as final. Duplicated from
+ * `run.ts` rather than imported: that module's set is private, and importing
+ * a command module from a lib module is the wrong direction of dependency.
+ */
+const RUN_TERMINAL_STATUSES: ReadonlySet<string> = new Set(['completed', 'failed', 'aborted']);
+
+function assertCurrentLedger(repoRoot: string, runQuery: string): { runDir: string; runId: string; status: string | null } {
   let run;
   try {
     run = resolveRun(repoRoot, runQuery);
@@ -288,7 +351,7 @@ function assertCurrentLedger(repoRoot: string, runQuery: string): { runDir: stri
         : `run "${run.runId}" has ledger schema_version "${run.schemaVersion}"; host dispatch writes only ${RUN_LEDGER_SCHEMA_VERSION}.`,
     );
   }
-  return { runDir: run.dir, runId: run.runId };
+  return { runDir: run.dir, runId: run.runId, status: run.status };
 }
 
 function eventsFor(runDir: string): RunEvent[] {
@@ -367,10 +430,24 @@ function startsFor(events: RunEvent[], dispatchId: string): RunEvent[] {
   return events.filter((event) => event.type === 'actor_dispatched' && event.extra.dispatch_id === dispatchId);
 }
 
+/**
+ * Every TERMINAL receipt for a dispatch — a withdraw among them.
+ *
+ * One list, every guard: `startHostDispatch`, `completeHostDispatch`,
+ * `failHostDispatch` and `readHostDispatchRequest` (and through it steering's
+ * live delivery and the command-fallback replay) all ask this one question,
+ * so making withdraw terminal HERE is what makes it terminal everywhere
+ * instead of in the one caller that remembered to ask.
+ */
 function terminalsFor(events: RunEvent[], dispatchId: string): RunEvent[] {
   return events.filter(
-    (event) => (event.type === 'actor_completed' || event.type === 'actor_failed') && event.extra.dispatch_id === dispatchId,
+    (event) => TERMINAL_RECEIPTS.some((receipt) => receipt.type === event.type) && event.extra.dispatch_id === dispatchId,
   );
+}
+
+/** Withdraw receipts only, for the withdraw preconditions' idempotency check. */
+function withdrawalsFor(events: RunEvent[], dispatchId: string): RunEvent[] {
+  return events.filter((event) => event.type === 'host_dispatch_withdrawn' && event.extra.dispatch_id === dispatchId);
 }
 
 /**
@@ -1642,6 +1719,120 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
     releaseHostLease(repoRoot, runId, opts.dispatchId);
     return { dispatchId: opts.dispatchId, state: 'failed', idempotent: false, agentId: typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined };
   }
+}
+
+/**
+ * Retire a host request that was minted and never started.
+ *
+ * Before this there was no way to say "this request will never run": the only
+ * terminal receipts, `dispatch-complete` and `dispatch-fail`, both require a
+ * `dispatch-start` first, so a request minted for an executor the host cannot
+ * reach left the run pinned to it forever — `drive` kept reporting it pending
+ * and refused to re-mint under a corrected binding, and the only exits were a
+ * fabricated start or a hand-edited ledger.
+ *
+ * A withdraw is a TERMINAL receipt for a request with NO execution behind it,
+ * which is why it records no agent, no output, and no attestation: there is
+ * nothing to attest. The request stays in the ledger as the fact it is — the
+ * engine minted attempt n, it was retired, attempt n+1 follows under whatever
+ * the cascade or binding now says.
+ */
+export function withdrawHostDispatch(opts: DispatchWithdrawOptions): HostDispatchWithdrawReceipt {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { runDir, runId, status } = assertCurrentLedger(repoRoot, opts.run);
+  const reason = opts.reason?.trim() ?? '';
+  if (!reason) throw new HostDispatchError('--reason must not be empty.');
+  if (status != null && RUN_TERMINAL_STATUSES.has(status)) {
+    throw new HostDispatchError(
+      `run "${runId}" is already ${status}; a terminal run cannot withdraw host dispatch "${opts.dispatchId}".`,
+    );
+  }
+  const events = eventsFor(runDir);
+  const { request } = findRequest(runId, events, opts.dispatchId);
+  const starts = startsFor(events, opts.dispatchId);
+  if (starts.length > 0) {
+    throw new HostDispatchError(
+      `host dispatch "${opts.dispatchId}": cannot withdraw after dispatch-start; use dispatch-fail or dispatch-complete.`,
+    );
+  }
+  const finals = events.filter(
+    (event) => (event.type === 'actor_completed' || event.type === 'actor_failed') && event.extra.dispatch_id === opts.dispatchId,
+  );
+  if (finals.length > 0) {
+    throw new HostDispatchError(
+      `host dispatch "${opts.dispatchId}" already has an ${finals[0]!.type} receipt; it cannot be withdrawn.`,
+    );
+  }
+  const priorWithdrawals = withdrawalsFor(events, opts.dispatchId);
+  if (priorWithdrawals.length > 0) {
+    const prior = priorWithdrawals[0]!;
+    if (prior.extra.reason === reason) {
+      // Replay what the recorded receipt says, never a fresh guess: the
+      // repeat is answering for the withdraw that already happened.
+      return {
+        dispatchId: opts.dispatchId,
+        state: 'withdrawn',
+        idempotent: true,
+        reason,
+        workspaceRemoved: prior.extra.workspace_removed === true,
+        workspaceError: null,
+      };
+    }
+    throw new HostDispatchError(
+      `host dispatch "${opts.dispatchId}" was already withdrawn for a different reason (${String(prior.extra.reason)}).`,
+    );
+  }
+
+  // A request prepared with `dispatch-prepare --isolate` owns a worktree that
+  // nothing will ever write into now. Removing it is part of the withdraw, not
+  // a follow-up chore — but a removal that does not take is reported rather
+  // than asserted: the receipt is a ledger fact and never waits on the disk.
+  let state: HostWorkspaceState | null = null;
+  try {
+    state = readHostWorkspaceState(repoRoot, runId, opts.dispatchId);
+  } catch (err) {
+    if (!(err instanceof HostWorkspaceError)) throw err;
+  }
+  if (state != null && !isHostPathSafe(repoRoot, state.workspace)) state = null;
+  const canonicalRel = hostWorktreePath(runId, opts.dispatchId);
+  const workspaceRel = state?.workspace
+    ?? (isHostPathSafe(repoRoot, canonicalRel) && existsSync(resolve(repoRoot, canonicalRel)) ? canonicalRel : null);
+  let workspaceRemoved = false;
+  let workspaceError: string | null = null;
+  if (workspaceRel != null) {
+    try {
+      if (state != null) removeHostWorkspace({ repoRoot, state });
+      else removeHostWorkspaceByPath({ repoRoot, run: runId, dispatchId: opts.dispatchId, workspaceRel });
+    } catch (err) {
+      if (!(err instanceof HostWorkspaceError)) throw err;
+    }
+    workspaceRemoved = !existsSync(resolve(repoRoot, workspaceRel));
+    if (!workspaceRemoved) {
+      workspaceError =
+        `host dispatch "${opts.dispatchId}" is withdrawn, but the isolated workspace prepared for it ` +
+        `remains at ${workspaceRel}; remove it manually.`;
+    }
+  }
+
+  append(
+    runDir,
+    {
+      type: 'host_dispatch_withdrawn',
+      step: request.step,
+      actor: request.actor,
+      dispatch_id: request.dispatchId,
+      step_execution_id: request.stepExecutionId,
+      actor_call_id: request.actorCallId,
+      attempt: request.attempt,
+      executor: request.executor,
+      reason,
+      withdrawn_by: 'host',
+      ...(workspaceRel != null ? { workspace: workspaceRel, workspace_removed: workspaceRemoved } : {}),
+    },
+    opts.now,
+  );
+  return { dispatchId: opts.dispatchId, state: 'withdrawn', idempotent: false, reason, workspaceRemoved, workspaceError };
 }
 
 export function listHostDispatchRequests(runDir: string): HostDispatchRequest[] {

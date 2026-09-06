@@ -465,7 +465,8 @@ function checkHostDispatchRequests(run: RunSummary, events: RunEvent[], mode: Le
       event.type !== 'actor_dispatched' &&
       event.type !== 'host_dispatch_progress' &&
       event.type !== 'actor_completed' &&
-      event.type !== 'actor_failed'
+      event.type !== 'actor_failed' &&
+      event.type !== 'host_dispatch_withdrawn'
     ) continue;
     if (event.extra.dispatch_id != null && typeof event.extra.dispatch_id !== 'string') problems.push(`${event.type} has a non-string dispatch_id`);
     if (typeof event.extra.dispatch_id === 'string' && !counts.has(event.extra.dispatch_id)) problems.push(`${event.type} references orphan dispatch ${event.extra.dispatch_id}`);
@@ -554,10 +555,39 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
     const progress = events.filter(
       (event) => event.type === 'host_dispatch_progress' && event.extra.dispatch_id === id,
     );
+    // A withdraw is the terminal receipt for a request that never ran, so its
+    // whole claim is an ABSENCE: no start, no progress, no completion or
+    // failure. Checking that claim is the only thing that makes the receipt
+    // worth anything — a ledger free to record a withdraw and then dispatch
+    // the same request anyway would be recording nothing.
+    const withdrawals = events.filter(
+      (event) => event.type === 'host_dispatch_withdrawn' && event.extra.dispatch_id === id,
+    );
+    const withdrawn = withdrawals[0] ?? null;
+    if (withdrawals.length > 1) problems.push(`${id}: withdrawn ${withdrawals.length} times`);
+    if (withdrawn != null) {
+      for (const field of ['step', 'actor', 'step_execution_id', 'actor_call_id', 'attempt', 'executor'] as const) {
+        const requestValue = field === 'step' ? request.step : request.extra[field];
+        const withdrawValue = field === 'step' ? withdrawn.step : withdrawn.extra[field];
+        if (withdrawValue !== requestValue) problems.push(`${id}: withdraw ${field} does not match request`);
+      }
+      if (typeof withdrawn.extra.reason !== 'string' || withdrawn.extra.reason.length === 0) {
+        problems.push(`${id}: withdraw receipt lacks a reason`);
+      }
+      if (withdrawn.extra.withdrawn_by !== 'host') problems.push(`${id}: withdraw receipt is not attributed to the host`);
+      if (events.indexOf(withdrawn) <= events.indexOf(request)) {
+        problems.push(`${id}: host_dispatch_withdrawn must follow host_dispatch_requested`);
+      }
+      if (starts.length > 0) problems.push(`${id}: started after withdraw`);
+      if (progress.length > 0) problems.push(`${id}: progress receipt after withdraw`);
+      if (terminals.length > 0) problems.push(`${id}: terminal receipt after withdraw`);
+    }
     if (starts.length === 0) {
       if (progress.length > 0) problems.push(`${id}: progress receipt has no actor_dispatched start`);
       if (terminals.length > 0) problems.push(`${id}: terminal receipt has no actor_dispatched start`);
-      else if (run.status === 'completed') problems.push(`${id}: completed run has no actor_dispatched start`);
+      // A withdrawn request is accounted for: the run completed BECAUSE the
+      // request was retired and a later attempt carried the work.
+      else if (run.status === 'completed' && withdrawn == null) problems.push(`${id}: completed run has no actor_dispatched start`);
       continue;
     }
     if (starts.length > 1) problems.push(`${id}: started ${starts.length} times`);
@@ -1018,7 +1048,7 @@ function checkSessionContinuity(events: RunEvent[]): Finding {
 }
 
 const ATTEMPT_REASONS_FIRST = new Set(['initial']);
-const ATTEMPT_REASONS_RETRY = new Set(['schema_repair', 'executor_override', 'user_retry', 'merge_conflict', 'host_resolved']);
+const ATTEMPT_REASONS_RETRY = new Set(['schema_repair', 'executor_override', 'user_retry', 'merge_conflict', 'host_resolved', 'withdrawn']);
 
 /**
  * A merge conflict is resolved on the branch, never on the caller's tree, and
@@ -1121,6 +1151,21 @@ function checkActorAttempts(run: RunSummary, events: RunEvent[]): Finding {
     });
     byCall.set(callId, list);
   }
+  // A WITHDRAWN attempt occupies its ordinal and never dispatches, so the
+  // contiguity check has to count it or a legitimate `request → withdraw →
+  // re-mint → dispatch` reads as "attempts are 2, expected 1..1". The reason
+  // checks below stay on dispatch rows: a withdraw receipt carries no
+  // `attempt_reason` — its reason is the withdraw's own, which
+  // `host-dispatch-lifecycle` is what checks.
+  const withdrawnByCall = new Map<string, number[]>();
+  for (const event of events) {
+    if (event.type !== 'host_dispatch_withdrawn') continue;
+    if (typeof event.extra.actor_call_id !== 'string' || typeof event.extra.attempt !== 'number') continue;
+    const list = withdrawnByCall.get(event.extra.actor_call_id) ?? [];
+    list.push(event.extra.attempt);
+    withdrawnByCall.set(event.extra.actor_call_id, list);
+  }
+
   if (byCall.size === 0) return skip(check, 'no engine dispatches recorded');
 
   const problems: string[] = [];
@@ -1131,7 +1176,10 @@ function checkActorAttempts(run: RunSummary, events: RunEvent[]): Finding {
       if (!d.hasIds) problems.push(`${callId}: dispatch missing step_execution_id/actor_call_id`);
       if (d.attempt == null) problems.push(`${callId}: dispatch missing attempt ordinal`);
     }
-    const attempts = list.map((d) => d.attempt).filter((a): a is number => a != null).sort((a, b) => a - b);
+    const attempts = [
+      ...list.map((d) => d.attempt).filter((a): a is number => a != null),
+      ...(withdrawnByCall.get(callId) ?? []),
+    ].sort((a, b) => a - b);
     for (let i = 0; i < attempts.length; i += 1) {
       if (attempts[i] !== i + 1) {
         problems.push(`${callId}: attempts are ${attempts.join(',')}, expected 1..${attempts.length}`);
@@ -1259,9 +1307,15 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
   let currentLayers: { session: Record<string, DialRef>; repo: Record<string, DialRef>; user: Record<string, DialRef> } = { session: {}, repo: {}, user: {} };
   for (const event of events) {
     if (event.type === 'executor_override') {
+      // `--unbind` records a CLEARED override (`executor: null, cleared:
+      // true`): the role is released, so the recomputation below must check it
+      // against the cascade again rather than excusing it as bound.
       const role = typeof event.extra.role === 'string' ? event.extra.role : null;
       const executor = typeof event.extra.executor === 'string' ? event.extra.executor : null;
-      if (role != null && executor != null) overridesInForce.set(role, executor);
+      if (role != null) {
+        if (event.extra.cleared === true || executor == null) overridesInForce.delete(role);
+        else overridesInForce.set(role, executor);
+      }
       continue;
     }
     if (event.type === 'resolution_snapshot') {

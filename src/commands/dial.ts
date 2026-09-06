@@ -47,12 +47,22 @@ import {
 } from '../lib/lane.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
+  codexUserAgentDir,
   isModelVerified,
   readUserDials,
   recordVerifiedModel,
   writeUserDials,
   type UserPathOptions,
 } from '../lib/user-paths.ts';
+import { maintainedHarnesses } from '../lib/installations.ts';
+import {
+  CODEX_IDENTITY_REMEDIATION,
+  codexAgentIdentityStatus,
+  describeCodexAgentIdentityRow,
+  readCodexAgentFile,
+  type CodexAgentIdentityRow,
+  type CodexDialIdentity,
+} from '../lib/codex-agent-file.ts';
 
 export class DialError extends Error {}
 
@@ -389,6 +399,25 @@ export interface DialSetResult {
   narrative: string;
   /** Loud advisories (unregistered fall-through, probe fail-open) for the CLI to print. */
   notes: string[];
+  /**
+   * The Codex managed agent file for this archetype still carries a different
+   * identity than the dial just set, and only re-materializing it will change
+   * that.
+   *
+   * `fadeno dial` deliberately does not rewrite `~/.codex/agents/*`: a Codex
+   * agent file is a frozen identity that the session loads at start, so
+   * editing it under a running session would make `status` and the session
+   * disagree, and rewriting a machine-wide surface from a `dial` that may have
+   * landed on a session layer is the same reach violation `dialLayersForApply`
+   * refuses. What it CAN do is stop being silent about it — the friction that
+   * put this here was a director dialing a role and then spawning the old
+   * model for the rest of the session.
+   *
+   * Non-null only when Codex is maintained and the file's identity differs, so
+   * `stale` is true whenever the field is present; read the field rather than
+   * the null-ness, which is what a later "current" notice would change.
+   */
+  codex_materialization: { stale: boolean; detail: string; remediation: string } | null;
 }
 
 export interface DialSetManyOptions extends DialCommonOptions {
@@ -572,6 +601,45 @@ function unroutablePrimaryNote(params: {
     'so this shadow attachment can never be sampled and every dispatch will silently run unpaired.\n' +
     `${routability.reason}`
   );
+}
+
+/**
+ * The Codex managed-agent notice for the dial that was just set, or null when
+ * there is nothing to say.
+ *
+ * The dial's own compiled delivery supplies the expected identity — the model
+ * id and effective effort `renderCodexHostAgent` bakes — and `harness` decides
+ * whether the file is cut for it at all: a dial on any other harness
+ * materializes as a command broker whose identity is the relay's, which the
+ * shared `codexAgentIdentityStatus` then declines to judge.
+ */
+function codexIdentityNotice(
+  archetype: string,
+  compiled: CompiledDelivery,
+  userPathOptions: UserPathOptions | undefined,
+): DialSetResult['codex_materialization'] {
+  if (!maintainedHarnesses(userPathOptions).includes('codex')) return null;
+  const state = readCodexAgentFile(join(codexUserAgentDir(userPathOptions), `fadeno-${archetype}.toml`));
+  if (state == null) return null;
+  const file = { model: state.model, effort: state.reasoningEffort };
+  const neutral = compiled.modelId === 'current-host';
+  const dial: CodexDialIdentity = {
+    model: neutral ? null : compiled.modelId,
+    effort: neutral ? null : compiled.effectiveEffort,
+    lane: compiled.harness === 'codex' ? 'host' : 'command',
+  };
+  const row: CodexAgentIdentityRow = {
+    archetype,
+    file,
+    dial,
+    status: codexAgentIdentityStatus(file, dial),
+  };
+  if (row.status !== 'stale') return null;
+  return {
+    stale: true,
+    detail: describeCodexAgentIdentityRow(row),
+    remediation: CODEX_IDENTITY_REMEDIATION,
+  };
 }
 
 export function runDialSet(opts: DialSetOptions): DialSetResult {
@@ -785,6 +853,7 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     verification,
     narrative,
     notes: [...notes, ...(probeNote != null ? [probeNote] : [])],
+    codex_materialization: codexIdentityNotice(archetype, compiled, opts.userPathOptions),
   };
 }
 

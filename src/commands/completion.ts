@@ -4,6 +4,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { editDistance, loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
 import { listRuns, readEvents, type RunSummary } from '../lib/run-ledger.ts';
+import { hostRequestTerminalState } from '../lib/host-dispatch.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { userPaths } from '../lib/user-paths.ts';
 import { listDefinitionNames, resolvePlaybookFile } from '../lib/definitions.ts';
@@ -38,6 +39,8 @@ type ValueKind =
   | 'dialed-model'
   | 'archetype'
   | 'bind'
+  /** A bare role name from the selected run's playbook — what `--unbind` takes. */
+  | 'role'
   | 'input'
   | 'free';
 
@@ -182,6 +185,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   'dispatch-progress': command({ '--file': PATH, '--source': { kind: 'enum', values: ['agent', 'harness', 'director'] } }, ['run', 'dispatch-id']),
   'dispatch-complete': command({ '--output': { kind: 'path-or-stdin' }, '--commit': { kind: 'free' } }, ['run', 'dispatch-id']),
   'dispatch-fail': command({ '--reason': { kind: 'free' } }, ['run', 'dispatch-id']),
+  'dispatch-withdraw': command({ '--reason': { kind: 'free' } }, ['run', 'dispatch-id']),
   run: command(
     {
       '--step': { kind: 'step' },
@@ -210,7 +214,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     ['run', 'step'],
   ),
   next: command({ '--legacy': NONE }, ['run']),
-  drive: command({ '--bind': { kind: 'bind' }, '--max-transitions': { kind: 'free' }, '--parallel': { kind: 'free' }, '--timeout': { kind: 'free' }, '--diagnostics': NONE }, ['run']),
+  drive: command({ '--bind': { kind: 'bind' }, '--unbind': { kind: 'role' }, '--max-transitions': { kind: 'free' }, '--parallel': { kind: 'free' }, '--timeout': { kind: 'free' }, '--diagnostics': NONE }, ['run']),
   cancel: command({ '--actor-call': { kind: 'free' } }, ['run']),
   decide: command({ '--decision': { kind: 'free' }, '--feedback': { kind: 'free' } }, ['run', 'free']),
   'attempt-accept': command({}, ['run', 'free']),
@@ -520,17 +524,19 @@ function readPendingDispatchIds(repoRoot: string, runRef: string): string[] {
   if (run == null) return [];
   try {
     const events = readEvents(run.dir).events;
-    const terminal = new Set(
-      events
-        .filter((event) => event.type === 'actor_completed' || event.type === 'actor_failed')
-        .map((event) => event.extra.dispatch_id)
-        .filter((value): value is string => typeof value === 'string'),
-    );
+    // "Still open" asked of the one shared reading, rather than a local list of
+    // terminal event types: a withdrawn request is retired and must not be
+    // offered to `dispatch-start`, and a fourth receipt added later drops out
+    // here without anyone having to remember this file.
+    const open = (dispatchId: string): boolean => {
+      const state = hostRequestTerminalState(events, dispatchId);
+      return state === 'requested' || state === 'started';
+    };
     return uniqueSorted(
       events
         .filter((event) => event.type === 'host_dispatch_requested')
         .map((event) => event.extra.dispatch_id)
-        .filter((value): value is string => typeof value === 'string' && !terminal.has(value)),
+        .filter((value): value is string => typeof value === 'string' && open(value)),
     );
   } catch {
     return [];
@@ -606,6 +612,8 @@ function dynamicValues(
       return startsWith(userCatalogModels(), prefix);
     case 'dialed-model':
       return startsWith(dialedModelRefs(repoRoot, cwd), prefix);
+    case 'role':
+      return startsWith(runRef == null ? [] : readPlaybookRoles(repoRoot, runRef), prefix);
     case 'bind': {
       const equals = prefix.indexOf('=');
       const rolePrefix = equals < 0 ? '' : prefix.slice(0, equals + 1);

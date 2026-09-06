@@ -67,6 +67,7 @@ import {
   type RunEvent,
 } from '../lib/run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
+import { attemptProgressRelPath } from '../lib/attempt-progress.ts';
 import { reduceCollective } from '../lib/collective.ts';
 import {
   INFLIGHT_DIR,
@@ -102,10 +103,14 @@ import {
 // from the dispatch command rather than reimplemented: two spellings of
 // "replay the workspace" is exactly how the two paths would drift.
 import { applyWorkspaceBaseline, captureWorkspaceBaseline, mergeBackReapplyCommand, settleIsolatedWork, type MergeBackResult } from '../lib/workspace-baseline.ts';
-import { CONDITION_REGISTRY, GateError, runGate, SUPPORTED_CONDITIONS, type GateCondition } from './gate.ts';
-import { requestHostDispatch, type HostDispatchRequest } from '../lib/host-dispatch.ts';
-import { PromptError, runPrompt } from './prompt.ts';
-import { RunError, runRun } from './run.ts';
+// Ledger-writing imports arrive under `write*` names and are re-exposed below
+// as same-named local wrappers that flush the deferred prelude first; see
+// `planResolutionSnapshot`. Importing them directly is what a future edit
+// would do by habit, so the habit is made to be the correct one.
+import { CONDITION_REGISTRY, GateError, runGate as writeGateRows, SUPPORTED_CONDITIONS, type GateCondition } from './gate.ts';
+import { requestHostDispatch as writeHostRequestRow, type HostDispatchRequest } from '../lib/host-dispatch.ts';
+import { PromptError, runPrompt as writePromptRow } from './prompt.ts';
+import { RunError, runRun as writeRunRow } from './run.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
 import {
   DIAGNOSTICS_MAX_BYTES,
@@ -114,7 +119,7 @@ import {
   truncateDiagnostics,
   isDiagnosticsEnabled,
 } from '../lib/diagnostics.ts';
-import { executeToolCore, ToolExecError, recoverInterruptedToolDispatchesShared } from '../lib/tool-exec.ts';
+import { executeToolCore as writeToolRows, ToolExecError, recoverInterruptedToolDispatchesShared } from '../lib/tool-exec.ts';
 import { bodyOwnerOf, countIterationStarts, scopeStartIndex, stepStartedInScope } from '../lib/run-scope.ts';
 
 export class DriveError extends Error {}
@@ -142,6 +147,22 @@ export interface DriveDecision {
   step: string;
   prompt: string;
   options: string[];
+  /**
+   * What the approver is being asked about: the run's most recent artifact,
+   * described so the decision line is readable without opening the file.
+   * Display only — the gate is still the recorded human decision, and this
+   * never participates in it. Null when nothing has been produced yet or the
+   * file cannot be read.
+   */
+  artifact: GatedArtifactPreview | null;
+}
+
+export interface GatedArtifactPreview {
+  /** Run-directory-relative, the same spelling the ledger recorded. */
+  path: string;
+  bytes: number;
+  /** Markdown headings, in document order, capped. */
+  headings: string[];
 }
 
 export interface DriveOptions {
@@ -150,6 +171,12 @@ export interface DriveOptions {
   maxTransitions?: number;
   /** Session binding overrides, each `role=dialRef`. Recorded as events. */
   bind?: string[];
+  /**
+   * Roles to release from a binding an earlier invocation of this run made.
+   * Recorded as a cleared `executor_override`, which is what lets the engine
+   * start new work for the role again without repeating `--bind`.
+   */
+  unbind?: string[];
   /** Hard executor deadline in milliseconds; 0 disables, null/undefined uses the route default. */
   timeoutMs?: number | null;
   /** Bounded opt-in process output diagnostics (per-stream 32 KiB / 500 lines). */
@@ -216,6 +243,10 @@ interface EngineCtx {
   dialLayers: DialLayers;
   /** Explicit `--bind` overrides: role key → refString (executor name). */
   overrides: Map<string, string>;
+  /** This invocation's `--bind` roles, for the dropped-binding refusal. */
+  binds: Map<string, string>;
+  /** This invocation's `--unbind` roles, for the same refusal. */
+  unbinds: Set<string>;
   /** Actor calls that already consumed their one bounded repair this invocation. */
   repaired: Set<string>;
   /** Conflict rounds granted per actor call; see MAX_MERGE_CONFLICT_ROUNDS. */
@@ -254,9 +285,56 @@ function loadValidatedPlaybook(runDir: string, repoRoot: string, name: string, s
   return playbook;
 }
 
+/**
+ * The one row this invocation has computed but not yet earned.
+ *
+ * `resolution_snapshot` is DERIVED bookkeeping — "here is where every declared
+ * role lands if this invocation dispatches" — and it used to be appended at the
+ * top of `runDrive`, before any per-role admission check had run. A dropped
+ * binding then produced the worst row in the ledger: the refusal exists
+ * precisely because the role now resolves somewhere else, so the snapshot
+ * recorded `source: cascade` naming the very executor the refusal was about to
+ * reject, and only then did the engine refuse. `refuseDroppedBinding` promises
+ * that a run stopping there is indistinguishable from one that was never
+ * driven; it was distinguishable, and what distinguished it was a wrong answer.
+ *
+ * So the row is a PRELUDE: the first ledger write the invocation actually makes
+ * flushes it first, and an invocation that writes nothing writes no snapshot
+ * either. It has to be the FIRST write and not a trailing one, because
+ * ordering is load-bearing: `verify`'s `executor-bindings` check walks the
+ * ledger in order and holds each dispatch against the resolution in force at
+ * that point, so a snapshot appended after the dispatch it explains fails the
+ * run. Every writer the engine can reach therefore flushes before it appends —
+ * `appendEvent` below, and the five imported writers wrapped under it.
+ *
+ * One slot rather than a map keyed by run: `runDrive` is synchronous end to
+ * end and clears the slot in a `finally`, so a pending prelude cannot outlive
+ * the invocation that computed it.
+ */
+let pendingPrelude: { runDir: string; event: Record<string, unknown>; now?: Date } | null = null;
+
+/** Hold `event` until this invocation records something of its own. */
+function deferPrelude(runDir: string, event: Record<string, unknown>, now?: Date): void {
+  pendingPrelude = { runDir, event, now };
+}
+
+/** Write the held row, if any, immediately before the caller's own append. */
+function flushPrelude(): void {
+  const pending = pendingPrelude;
+  if (pending == null) return;
+  pendingPrelude = null; // cleared first: `appendEvent` re-enters this on the way in
+  appendEvent(pending.runDir, pending.event, pending.now);
+}
+
+/** Drop a prelude the invocation never earned (refusal, error, or no work). */
+function discardPrelude(): void {
+  pendingPrelude = null;
+}
+
 /** Fresh writer per append: runRun/runGate/runPrompt each construct their own
  *  writer, so a cached `lastSeq` here would go stale and double-assign. */
 function appendEvent(runDir: string, event: Record<string, unknown>, now?: Date): void {
+  flushPrelude();
   let writer: LedgerWriter;
   try {
     writer = new LedgerWriter(runDir);
@@ -265,6 +343,37 @@ function appendEvent(runDir: string, event: Record<string, unknown>, now?: Date)
     throw err;
   }
   writer.append(event, now ?? new Date());
+}
+
+// The five other commands and libraries that write rows into the run this
+// engine is driving. Each is wrapped rather than called directly so the
+// prelude cannot be forgotten by a future call site: the name in scope is the
+// wrapper, and reaching the underlying writer takes a deliberate rename.
+
+function runRun(opts: Parameters<typeof writeRunRow>[0]): ReturnType<typeof writeRunRow> {
+  flushPrelude();
+  return writeRunRow(opts);
+}
+
+function runPrompt(opts: Parameters<typeof writePromptRow>[0]): ReturnType<typeof writePromptRow> {
+  // `record: false` renders a prompt and writes nothing, so it earns nothing.
+  if (opts.record === true) flushPrelude();
+  return writePromptRow(opts);
+}
+
+function runGate(opts: Parameters<typeof writeGateRows>[0]): ReturnType<typeof writeGateRows> {
+  flushPrelude();
+  return writeGateRows(opts);
+}
+
+function requestHostDispatch(opts: Parameters<typeof writeHostRequestRow>[0]): ReturnType<typeof writeHostRequestRow> {
+  flushPrelude();
+  return writeHostRequestRow(opts);
+}
+
+function executeToolCore(opts: Parameters<typeof writeToolRows>[0]): ReturnType<typeof writeToolRows> {
+  flushPrelude();
+  return writeToolRows(opts);
 }
 
 function freshEvents(runDir: string): RunEvent[] {
@@ -472,6 +581,102 @@ function parseBinds(bind: string[] | undefined): Map<string, string> {
   return out;
 }
 
+function parseUnbinds(unbind: string[] | undefined, binds: Map<string, string>): Set<string> {
+  const out = new Set<string>();
+  for (const entry of unbind ?? []) {
+    const role = entry.trim();
+    if (role.length === 0 || role.includes('=')) {
+      throw new DriveError(`Invalid --unbind "${entry}"; expected a role name.`);
+    }
+    if (binds.has(role)) {
+      throw new DriveError(
+        `--bind ${role}=${binds.get(role)} and --unbind ${role} contradict each other; pass one or the other.`,
+      );
+    }
+    out.add(role);
+  }
+  return out;
+}
+
+/**
+ * Which roles this RUN currently holds a binding for, folding `--unbind`'s
+ * cleared overrides in.
+ *
+ * `executor_override` is an append-only record of intent, so "is R bound?" is
+ * a fold over every one of them and never a lookup of the last: a cleared
+ * override (`executor: null, cleared: true`) is the record that R was
+ * RELEASED, and a reader that only asks whether an override exists for R
+ * would keep enforcing a binding the user explicitly dropped.
+ *
+ * Three readers share this fold — the dropped-binding NOTE, the refusal below,
+ * and `--unbind`'s own "was anything bound?" check.
+ */
+function bindingsInForce(events: RunEvent[]): Map<string, string> {
+  const inForce = new Map<string, string>();
+  for (const event of events) {
+    if (event.type !== 'executor_override') continue;
+    const role = typeof event.extra.role === 'string' ? event.extra.role : null;
+    if (role == null) continue;
+    const executor = typeof event.extra.executor === 'string' ? event.extra.executor : null;
+    if (event.extra.cleared === true || executor == null) {
+      inForce.delete(role);
+      continue;
+    }
+    inForce.set(role, executor);
+  }
+  return inForce;
+}
+
+/**
+ * Refuse to START NEW WORK for a role whose binding this invocation dropped.
+ *
+ * The NOTE `warnDroppedBindings` prints was the right diagnosis and the wrong
+ * force. A run is driven across several invocations because every host
+ * dispatch exits the engine, so forgetting `--bind` on the second call is the
+ * ordinary mistake — and a note scrolls past while the engine goes ahead and
+ * dispatches the work to the executor the binding existed to avoid. That is
+ * silent-wrong-answer shaped: both invocations are individually consistent, so
+ * `verify` cannot object either.
+ *
+ * So NEW work refuses and says how to proceed; a request already minted is
+ * still honored (the caller checks pending first, and `pendingResolutionNote`
+ * keeps that divergence visible). The refusal appends NO event — a run that
+ * stops here must be indistinguishable from one that was never driven.
+ */
+function refuseDroppedBinding(ctx: EngineCtx, role: string | null): void {
+  const key = role ?? '*';
+  if (ctx.binds.has(key) || ctx.unbinds.has(key)) return;
+  const bound = bindingsInForce(freshEvents(ctx.runDir)).get(key);
+  if (bound == null) return;
+  let now: string | null = null;
+  try { now = resolveChain(ctx, role).executor; } catch { now = null; }
+  if (now === bound) return; // the cascade agrees; nothing moved
+  throw new DriveError(
+    `role "${key}" was bound to "${bound}" earlier in this run; this invocation would start new work for ` +
+      `it on "${now ?? 'nothing'}". Pass --bind ${key}=${bound} to keep the binding or --unbind ${key} to release it.`,
+  );
+}
+
+/** Record each `--unbind <role>` as the cleared override that releases it. */
+function recordUnbinds(ctx: EngineCtx, unbinds: Set<string>): void {
+  if (unbinds.size === 0) return;
+  const inForce = bindingsInForce(freshEvents(ctx.runDir));
+  for (const role of unbinds) {
+    const prior = inForce.get(role) ?? null;
+    if (prior == null) {
+      ctx.act(`--unbind ${role}: no binding is in force for this role in this run; nothing recorded.`);
+      continue;
+    }
+    ctx.overrides.delete(role);
+    appendEvent(
+      ctx.runDir,
+      { type: 'executor_override', step: null, role, executor: null, cleared: true, prior },
+      ctx.now,
+    );
+    ctx.act(`binding released: ${role} (was ${prior}); the role resolves through the cascade from here.`);
+  }
+}
+
 /** Snapshot the repo profile into the run dir on first engine contact; later
  *  invocations run against the snapshot (the run's truth), never a silently
  *  edited repo profile. */
@@ -595,24 +800,22 @@ function resolveChain(
  * `verify` cannot object either: the ledger honestly records that the role was
  * bound for one dispatch and resolved normally for the next.
  *
- * So this warns rather than refuses or re-applies. Re-applying would break the
- * recovery path; refusing would make a legitimate pattern an error. Saying it
- * out loud is what was actually missing.
+ * So this warns rather than re-applies: re-applying would break the recovery
+ * path. What it does NOT cover is new work — a note scrolls past while the
+ * dispatch goes to the executor the binding existed to avoid — and that case
+ * is `refuseDroppedBinding`'s. This note is what remains: the role is not
+ * starting anything new this invocation (a pending request is being continued,
+ * or its step is already done), so there is nothing to refuse and the
+ * divergence is still worth saying.
  *
  * Found by dogfood 2026-08-21: an implementer bound to a command-lane executor
  * silently reverted to its repo pin — and therefore to the host lane — on the
  * next invocation of the same run.
  */
-function warnDroppedBindings(ctx: EngineCtx, binds: Map<string, string>): void {
-  const boundEarlier = new Map<string, string>();
-  for (const event of freshEvents(ctx.runDir)) {
-    if (event.type !== 'executor_override') continue;
-    const role = typeof event.extra.role === 'string' ? event.extra.role : null;
-    const executor = typeof event.extra.executor === 'string' ? event.extra.executor : null;
-    if (role != null && executor != null) boundEarlier.set(role, executor);
-  }
+function warnDroppedBindings(ctx: EngineCtx, binds: Map<string, string>, unbinds: Set<string>): void {
+  const boundEarlier = bindingsInForce(freshEvents(ctx.runDir));
   for (const [role, executor] of boundEarlier) {
-    if (binds.has(role)) continue;
+    if (binds.has(role) || unbinds.has(role)) continue;
     let now: string | null = null;
     try { now = resolveChain(ctx, role).executor; } catch { now = null; }
     if (now === executor) continue; // the cascade agrees; nothing moved
@@ -712,13 +915,21 @@ function effectiveTimeoutMs(ctx: EngineCtx, spec: ExecutorSpec): number | null {
 }
 
 /**
- * Record where every declared role lands under this invocation's resolution
- * (dial layers + source, per-role resolved identity), and echo it so a
- * user burning a metered subscription sees which provider the run spends. The
- * ledger event is appended only when the resolution differs from the last
- * recorded snapshot; the echo prints every invocation.
+ * Compute where every declared role lands under this invocation's resolution
+ * (dial layers + source, per-role resolved identity), echo it so a user burning
+ * a metered subscription sees which provider the run spends, and HOLD the row
+ * as this invocation's prelude.
+ *
+ * The echo is display and prints every invocation, including one that goes on
+ * to refuse — it is the context the refusal is about. The ledger row is
+ * different: it is a claim that the run resolved this way for work it went on
+ * to record, so it is deferred (see `pendingPrelude`) and written by the first
+ * thing this invocation actually records. Nothing recorded, nothing claimed.
+ *
+ * The row is still held only when the resolution differs from the last one in
+ * the ledger; an unchanged resolution stays quiet as before.
  */
-function recordResolutionSnapshot(ctx: EngineCtx): void {
+function planResolutionSnapshot(ctx: EngineCtx): void {
   const rolesDoc = ctx.playbook.roles;
   const roleNames =
     rolesDoc != null && typeof rolesDoc === 'object' && !Array.isArray(rolesDoc)
@@ -794,7 +1005,7 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
   ) {
     return; // unchanged since last recorded — the ledger stays quiet
   }
-  appendEvent(ctx.runDir, { type: 'resolution_snapshot', step: null, ...payload }, ctx.now);
+  deferPrelude(ctx.runDir, { type: 'resolution_snapshot', step: null, ...payload }, ctx.now);
 }
 
 
@@ -1576,6 +1787,13 @@ function beginCommandAttempt(
     holder: leaseHolder,
   };
   const spawnCwd = worktree?.abs ?? ctx.repoRoot;
+  // The agent was told this exact path by its own prompt (`prompt.ts:259`), and
+  // it writes it relative to the workspace it runs in — the isolated worktree
+  // when the attempt is isolated. Handing it to the supervisor is what makes
+  // the mirror fire; without it nothing ever reads a command attempt's
+  // self-report. `stepId`/`role` are the same values `runPrompt` was given
+  // above, so the producing and watching spellings cannot diverge.
+  const progressAbs = join(spawnCwd, ...attemptProgressRelPath(ctx.runId, stepId, role).split('/'));
   let promptFd: number | null = null;
   let outFd: number | null = null;
   let errFd: number | null = null;
@@ -1584,7 +1802,7 @@ function beginCommandAttempt(
     promptFd = openSync(promptFdPath, 'r');
     outFd = openSync(outputSnapshotAbs, 'w');
     errFd = openSync(stderrSnapshotAbs, 'w');
-    child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, effectiveTimeout), {
+    child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, effectiveTimeout, progressAbs), {
       stdio: [promptFd, outFd, errFd],
       cwd: spawnCwd,
       // Same provenance the ad-hoc kernel stamps: an engine-dispatched actor is
@@ -2341,9 +2559,16 @@ function pendingHostRequest(events: RunEvent[], actorCallId: string, runId: stri
     const event = requested[i]!;
     const dispatchId = event.extra.dispatch_id;
     if (typeof dispatchId !== 'string') continue;
+    // A withdraw is terminal exactly like a completion or a failure: the
+    // request will never run, so it is not pending, it does not hold the
+    // `awaiting N host dispatch(es)` set open, and the loop falls through to
+    // the older attempts (there are none that are not themselves terminal) and
+    // then returns null so a fresh attempt is minted.
     const terminal = events.some(
       (candidate) =>
-        (candidate.type === 'actor_completed' || candidate.type === 'actor_failed') &&
+        (candidate.type === 'actor_completed' ||
+          candidate.type === 'actor_failed' ||
+          candidate.type === 'host_dispatch_withdrawn') &&
         candidate.extra.dispatch_id === dispatchId,
     );
     if (terminal) continue;
@@ -2507,6 +2732,84 @@ function hostRequestAttempts(events: RunEvent[], actorCallId: string): number {
   ).length;
 }
 
+interface HostAttemptPlan {
+  attempt: number;
+  reason: string;
+  repairErrors: string[] | null;
+}
+
+/** What the ladder below needs to know about the attempt it is naming. */
+interface HostAttemptFacts {
+  /** Host requests already minted for this actor call. */
+  priorRequests: number;
+  /** The prior attempt returned an artifact that failed its schema. */
+  invalidPriorOutput: boolean;
+  /** The executor this attempt would be minted for. */
+  executor: string;
+  /** The executor the prior request was minted for, if there was one. */
+  priorExecutor: string | null;
+  /** The prior request was retired by `dispatch-withdraw`. */
+  priorWithdrawn: boolean;
+}
+
+/**
+ * Why the next host request for an actor call exists — the ONE ladder, read by
+ * the serial member loop, the parallel wave, and the compositional re-mint.
+ *
+ * Every lane computed this inline, which is exactly the shape that goes wrong
+ * quietly: `withdrawn` was added to the promptable copy and the compositional
+ * one, and `executor_override` — the arm ABOVE it — was only ever in the first,
+ * so a re-drive with a changed `--bind` after a withdraw recorded `withdrawn`
+ * on one engine path and `executor_override` on the other. The same fact, a
+ * different answer depending on which path ran, and nothing to say so.
+ *
+ * The facts differ between the lanes (the compositional path finds the prior
+ * outcome by actor call, the promptable ones by dispatch id), so the INPUTS are
+ * parameterised and the decision is not.
+ *
+ * Precedence is the contract's: `executor_override` outranks `withdrawn`,
+ * because when the executor moved that is the more specific truth about why
+ * this attempt exists, and `withdrawn` outranks `user_retry`, because a
+ * retired request is not a user asking for another go.
+ */
+function hostAttemptReason(facts: HostAttemptFacts): string {
+  if (facts.priorRequests === 0) return 'initial';
+  if (facts.invalidPriorOutput) return 'schema_repair';
+  if (facts.executor !== facts.priorExecutor) return 'executor_override';
+  if (facts.priorWithdrawn) return 'withdrawn';
+  return 'user_retry';
+}
+
+/**
+ * What ordinal and `attempt_reason` the next host request for an actor call
+ * carries, for the lanes that find the prior outcome by dispatch id.
+ */
+function planHostAttempt(events: RunEvent[], actorCallId: string, executor: string): HostAttemptPlan {
+  const priorHostAttempts = hostRequestAttempts(events, actorCallId);
+  const priorHostRequest = events
+    .filter((event) => event.type === 'host_dispatch_requested' && event.extra.actor_call_id === actorCallId)
+    .at(-1);
+  const priorDispatchId = typeof priorHostRequest?.extra.dispatch_id === 'string' ? priorHostRequest.extra.dispatch_id : null;
+  const priorHostTerminal = priorDispatchId == null
+    ? null
+    : events.findLast(
+        (event) => (event.type === 'actor_completed' || event.type === 'actor_failed') && event.extra.dispatch_id === priorDispatchId,
+      );
+  const priorWithdrawn = priorDispatchId != null
+    && events.some((event) => event.type === 'host_dispatch_withdrawn' && event.extra.dispatch_id === priorDispatchId);
+  const reason = hostAttemptReason({
+    priorRequests: priorHostAttempts,
+    invalidPriorOutput: priorHostTerminal?.type === 'actor_completed' && priorHostTerminal.extra.output_valid === false,
+    executor,
+    priorExecutor: typeof priorHostRequest?.extra.executor === 'string' ? priorHostRequest.extra.executor : null,
+    priorWithdrawn,
+  });
+  const repairErrors = reason === 'schema_repair' && priorHostTerminal != null && Array.isArray(priorHostTerminal.extra.validation_errors)
+    ? priorHostTerminal.extra.validation_errors.filter((error): error is string => typeof error === 'string')
+    : null;
+  return { attempt: priorHostAttempts + 1, reason, repairErrors };
+}
+
 /** Drive one promptable step: every pending actor call, then the collective. */
 function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutcome | null {
   const step = comp.step!;
@@ -2571,14 +2874,10 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         hostRequests.push(pendingDispatch);
         continue;
       }
+      refuseDroppedBinding(ctx, role);
       const binding = effectiveBinding(ctx, role);
       if (binding.spec.adapter === 'host') {
-        const priorHostAttempts = hostRequestAttempts(events, actorCallId);
-        const attempt = priorHostAttempts + 1;
-        const priorHostRequest = events.filter((e) => e.type === 'host_dispatch_requested' && e.extra.actor_call_id === actorCallId).at(-1);
-        const priorHostTerminal = priorHostRequest == null ? null : events.findLast((e) => (e.type === 'actor_completed' || e.type === 'actor_failed') && e.extra.dispatch_id === priorHostRequest.extra.dispatch_id);
-        const reason = priorHostAttempts === 0 ? 'initial' : priorHostTerminal?.type === 'actor_completed' && priorHostTerminal.extra.output_valid === false ? 'schema_repair' : binding.executor !== priorHostRequest?.extra.executor ? 'executor_override' : 'user_retry';
-        const repairErrors = reason === 'schema_repair' && priorHostTerminal != null && Array.isArray(priorHostTerminal.extra.validation_errors) ? priorHostTerminal.extra.validation_errors.filter((e): e is string => typeof e === 'string') : null;
+        const { attempt, reason, repairErrors } = planHostAttempt(events, actorCallId, binding.executor);
         const promptRes = (() => {
           try {
             return runPrompt({ run: ctx.runId, step: stepId, actor: role ?? undefined, iteration: step.loop.in_body ? generation : undefined, record: true, repoRoot: ctx.repoRoot, now: ctx.now });
@@ -2679,6 +2978,15 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
       queue.push({ role, outputRel, ids, kind: 'host_pending', pending: pendingDispatch });
       continue;
     }
+    // Every parallel member reaches new work through THIS builder — the
+    // all-command fast path below hands its members straight to
+    // `runCommandWave`, which never sees a role again — so the dropped-binding
+    // refusal belongs here and not at the two admission sites. It also lands
+    // before any member is admitted, so a refusal in the parallel lane appends
+    // nothing at all, not even a sibling's dispatch. The two skips above are
+    // the exemptions the contract names: an artifact already recorded is not
+    // new work, and a pending request is being continued rather than minted.
+    refuseDroppedBinding(ctx, role);
     // Binding determines host vs command; let DriveError propagate to preserve true error.
     const binding = effectiveBinding(ctx, role);
     if (binding.spec.adapter === 'host') {
@@ -2759,13 +3067,10 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         if (head.kind === 'host') {
           // Fresh host: create durable request now, in canonical order.
           events = freshEvents(ctx.runDir);
+          // No refusal here: the queue builder above already checked every
+          // member's binding, before anything was admitted.
           const binding = effectiveBinding(ctx, head.role);
-          const priorHostAttempts = hostRequestAttempts(events, head.ids.actorCallId);
-          const attempt = priorHostAttempts + 1;
-          const priorHostRequest = events.filter((e) => e.type === 'host_dispatch_requested' && e.extra.actor_call_id === head.ids.actorCallId).at(-1);
-          const priorHostTerminal = priorHostRequest == null ? null : events.findLast((e) => (e.type === 'actor_completed' || e.type === 'actor_failed') && e.extra.dispatch_id === priorHostRequest.extra.dispatch_id);
-          const reason = priorHostAttempts === 0 ? 'initial' : priorHostTerminal?.type === 'actor_completed' && priorHostTerminal.extra.output_valid === false ? 'schema_repair' : binding.executor !== priorHostRequest?.extra.executor ? 'executor_override' : 'user_retry';
-          const repairErrors = reason === 'schema_repair' && priorHostTerminal != null && Array.isArray(priorHostTerminal.extra.validation_errors) ? priorHostTerminal.extra.validation_errors.filter((e): e is string => typeof e === 'string') : null;
+          const { attempt, reason, repairErrors } = planHostAttempt(events, head.ids.actorCallId, binding.executor);
           const promptRes = (() => {
             try { return runPrompt({ run: ctx.runId, step: stepId, actor: head.role ?? undefined, iteration: step.loop.in_body ? generation : undefined, record: true, repoRoot: ctx.repoRoot, now: ctx.now }); } catch (err) { if (err instanceof PromptError) throw new DriveError(err.message); throw err; }
           })();
@@ -2773,7 +3078,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
           mixedQueue.shift();
           continue;
         }
-        // Command head
+        // Command head (binding already checked in the queue builder above).
         const binding = effectiveBinding(ctx, head.role);
         const needsLease = true;
         if (needsLease && inflight.some((p) => p.leaseHolder != null)) break;
@@ -2974,6 +3279,43 @@ function driveGate(ctx: EngineCtx, comp: NextComputation): void {
   }
 }
 
+const GATE_PREVIEW_MAX_BYTES = 512 * 1024;
+const GATE_PREVIEW_MAX_HEADINGS = 12;
+
+/**
+ * Describe the artifact a human gate is about.
+ *
+ * A gate that says only "approve or reject" makes the approver go and find the
+ * thing themselves; naming the file, its size and its headings is the cheapest
+ * honest summary of what they are being asked to approve. It is display only:
+ * it is derived at print time, recorded nowhere, and cannot affect the gate.
+ */
+function gatedArtifactPreview(ctx: EngineCtx, events: RunEvent[]): GatedArtifactPreview | null {
+  const created = events.findLast(
+    (event) => event.type === 'artifact_created' && typeof event.extra.artifact === 'string',
+  );
+  const rel = created == null ? null : (created.extra.artifact as string);
+  if (rel == null) return null;
+  try {
+    const abs = join(ctx.runDir, ...rel.split('/'));
+    const stat = statSync(abs);
+    if (!stat.isFile()) return null;
+    const headings: string[] = [];
+    if (stat.size <= GATE_PREVIEW_MAX_BYTES && /\.(md|markdown)$/i.test(rel)) {
+      for (const line of readFileSync(abs, 'utf8').split(/\r?\n/)) {
+        if (!/^#{1,6}\s+\S/.test(line)) continue;
+        headings.push(line.trim());
+        if (headings.length >= GATE_PREVIEW_MAX_HEADINGS) break;
+      }
+    }
+    return { path: rel, bytes: stat.size, headings };
+  } catch {
+    // An unreadable artifact must not break the pause: the decision is still
+    // the point, and a missing preview is only a missing convenience.
+    return null;
+  }
+}
+
 /** Persist (or reuse) the durable named decision for a blocked human gate. */
 function ensureDecisionRequested(ctx: EngineCtx, comp: NextComputation): DriveDecision {
   const stepId = comp.step!.id;
@@ -2999,6 +3341,7 @@ function ensureDecisionRequested(ctx: EngineCtx, comp: NextComputation): DriveDe
       step: stepId,
       prompt: typeof pending.extra.prompt === 'string' ? pending.extra.prompt : prompt,
       options: opts,
+      artifact: gatedArtifactPreview(ctx, events),
     };
   }
 
@@ -3009,7 +3352,7 @@ function ensureDecisionRequested(ctx: EngineCtx, comp: NextComputation): DriveDe
     ctx.now,
   );
   ctx.act(`decision requested: ${decisionId} — ${prompt}`);
-  return { decisionId, step: stepId, prompt, options };
+  return { decisionId, step: stepId, prompt, options, artifact: gatedArtifactPreview(ctx, events) };
 }
 
 interface CompositePromptPlan {
@@ -3158,6 +3501,7 @@ function compositeRequest(
   const events = freshEvents(ctx.runDir);
   const pending = pendingHostRequest(events, actorCallId, ctx.runId);
   if (pending != null) return pending;
+  refuseDroppedBinding(ctx, action.actor);
   const binding = effectiveBinding(ctx, action.actor);
   if (binding.spec.adapter !== 'host') {
     throw new DriveError(
@@ -3185,7 +3529,28 @@ function compositeRequest(
     ? priorTerminal.extra.validation_errors.filter((item): item is string => typeof item === 'string')
     : null;
   const attempt = priorRequests.length + 1;
-  const reason = attempt === 1 ? 'initial' : validationErrors != null ? 'schema_repair' : 'user_retry';
+  // The SAME ladder the promptable lanes read, not a second spelling of it:
+  // this path carried its own copy, and the copy was missing the
+  // `executor_override` arm, so a re-mint after a withdraw with a changed
+  // `--bind` recorded `withdrawn` here and `executor_override` there — one
+  // fact, two answers, decided by which engine path happened to run.
+  //
+  // Only the FACTS differ between the lanes: this one finds the prior outcome
+  // by actor call (a compositional instance has no dispatch id to key on until
+  // it mints one) and the promptable lanes find it by dispatch id.
+  const priorRequest = priorRequests.at(-1);
+  const priorDispatchId = typeof priorRequest?.extra.dispatch_id === 'string'
+    ? priorRequest.extra.dispatch_id
+    : null;
+  const priorWithdrawn = priorDispatchId != null
+    && events.some((event) => event.type === 'host_dispatch_withdrawn' && event.extra.dispatch_id === priorDispatchId);
+  const reason = hostAttemptReason({
+    priorRequests: priorRequests.length,
+    invalidPriorOutput: priorTerminal?.type === 'actor_completed' && priorTerminal.extra.output_valid === false,
+    executor: binding.executor,
+    priorExecutor: typeof priorRequest?.extra.executor === 'string' ? priorRequest.extra.executor : null,
+    priorWithdrawn,
+  });
   return hostRequestFor(
     ctx,
     action.step,
@@ -3359,6 +3724,7 @@ interface OpenedEngine {
   run: ReturnType<typeof resolveRun>;
   actions: string[];
   bindMapEarly: Map<string, string>;
+  unbindsEarly: Set<string>;
 }
 
 /**
@@ -3404,6 +3770,7 @@ function openEngine(opts: DriveOptions, repoRoot: string): OpenedEngine {
   const harness = activeHarness(undefined, opts.userPathOptions);
   // Parse --bind refs early for snapshot extraRefs
   const bindMapEarly = parseBinds(opts.bind);
+  const unbindsEarly = parseUnbinds(opts.unbind, bindMapEarly);
   const bindRefsForSnapshot: DialRef[] = [];
   for (const v of bindMapEarly.values()) {
     try { bindRefsForSnapshot.push(parseDialRef(v, 'bind')); } catch {}
@@ -3419,6 +3786,8 @@ function openEngine(opts: DriveOptions, repoRoot: string): OpenedEngine {
     task: run.task ?? '',
     schemas,
     overrides: new Map<string, string>(),
+    binds: bindMapEarly,
+    unbinds: unbindsEarly,
     repaired: new Set<string>(),
     conflictRounds: new Map<string, number>(),
     diagnostics: opts.diagnostics,
@@ -3457,21 +3826,35 @@ function openEngine(opts: DriveOptions, repoRoot: string): OpenedEngine {
     worktreeCarry,
     dialLayers,
   };
-  return { ctx, run, actions, bindMapEarly };
+  return { ctx, run, actions, bindMapEarly, unbindsEarly };
 }
 
+/**
+ * The engine entry point, wrapped so this invocation's prelude cannot leak out
+ * of it. Every exit is covered: the refusals throw, and a `DriveError` leaving
+ * here must leave the ledger exactly as it found it.
+ */
 export function runDrive(opts: DriveOptions): DriveResult {
+  try {
+    return driveEngine(opts);
+  } finally {
+    discardPrelude();
+  }
+}
+
+function driveEngine(opts: DriveOptions): DriveResult {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
 
-  const { ctx, run, actions, bindMapEarly } = openEngine(opts, repoRoot);
+  const { ctx, run, actions, bindMapEarly, unbindsEarly } = openEngine(opts, repoRoot);
   // Handle recorded dialLayers for in-flight comparison? Load last snapshot's dials to detect change note (not needed)
   recoverInterruptedCommandDispatches(ctx);
   recoverInterruptedToolDispatches(ctx);
   // Bind overrides: validate and record
   recordOverrides(ctx, bindMapEarly);
-  warnDroppedBindings(ctx, bindMapEarly);
-  recordResolutionSnapshot(ctx);
+  recordUnbinds(ctx, unbindsEarly);
+  warnDroppedBindings(ctx, bindMapEarly, unbindsEarly);
+  planResolutionSnapshot(ctx);
 
   const maxTransitions = opts.maxTransitions ?? MAX_TRANSITIONS_DEFAULT;
   if (hasCompositeContainers(ctx.playbook)) return driveComposite(ctx, maxTransitions, actions);

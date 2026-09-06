@@ -172,7 +172,7 @@ with **one bounded schema repair** (rejected bytes parked under
 `artifacts/attempts/` as evidence, never at the planned path), and minting
 runtime identity on its events: `step_execution_id`, `actor_call_id`,
 `attempt` + `attempt_reason` (`initial`/`schema_repair`/`executor_override`/
-`user_retry`). Human gates pause the engine with a durable named
+`user_retry`/`withdrawn`). Human gates pause the engine with a durable named
 `decision_requested`; `fadeno decide <run> <option>` records the idempotent,
 conflict-refusing `decision_resolved` (also readable by the cursor). Explicit
 substitution is `fadeno drive --bind role=executor`, recorded as

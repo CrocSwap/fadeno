@@ -15,6 +15,7 @@ import {
   type RunEvent,
   type RunSummary,
 } from '../lib/run-ledger.ts';
+import { hostRequestTerminalState } from '../lib/host-dispatch.ts';
 import { INFLIGHT_DIR, readInflightClaim, readSupervisorStatus } from '../lib/supervisor.ts';
 import { readWorkspaceLease, workspaceLeaseHolderKey, WORKSPACE_LEASE_FILE } from '../lib/workspace-lease.ts';
 import { HostWorkspaceError, readHostWorkspaceState } from '../lib/host-workspace.ts';
@@ -125,6 +126,19 @@ export interface HarnessObservedProcessView {
   endedAt: string | null;
   /** True when alive and no output for five minutes — prominent, non-gating. */
   outputIdleWarning: boolean;
+  /**
+   * The agent's own progress sidecar as the supervisor last mirrored it onto
+   * the claim (`progress_source: 'agent'`). A SELF-REPORT, not a measurement:
+   * it is rendered as such and never gates. Null on every branch with no live
+   * claim to read (dead attempts, the repo-wide lease, unreadable records).
+   */
+  progressState: string | null;
+  progressPhase: string | null;
+  progressCurrent: string | null;
+  progressUpdatedAt: string | null;
+  progressSource: string | null;
+  /** The executor argv the supervisor spawned, for print-at-exit reasoning. */
+  command: string[] | null;
   /** Always `harness-observed` — process facts are not ledger and never gate. */
   observationSource: 'harness-observed';
   /** Harness-observed facts never control gates. */
@@ -160,7 +174,9 @@ export interface HostRequestView {
   executor: string;
   model: string | null;
   reasoningEffort: string | null;
-  state: 'requested' | 'running' | 'waiting' | 'blocked' | 'completed' | 'failed';
+  state: 'requested' | 'running' | 'waiting' | 'blocked' | 'completed' | 'failed' | 'withdrawn';
+  /** Why a never-started request was retired; null unless `state` is withdrawn. */
+  withdrawnReason: string | null;
   agentId: string | null;
   requestedAt: string | null;
   startedAt: string | null;
@@ -347,6 +363,12 @@ function blankHarnessFact(
     signal: null,
     endedAt: null,
     outputIdleWarning: false,
+    progressState: null,
+    progressPhase: null,
+    progressCurrent: null,
+    progressUpdatedAt: null,
+    progressSource: null,
+    command: null,
     observationSource: 'harness-observed',
     gating: 'non-gating',
   };
@@ -419,6 +441,12 @@ export function collectHarnessObserved(
             signal: status.signal,
             endedAt: status.endedAt,
             outputIdleWarning: outputIdleWarning('dead', status.lastOutputAt, statusOutputAgeMs, statusRuntimeMs),
+            progressState: null,
+            progressPhase: null,
+            progressCurrent: null,
+            progressUpdatedAt: null,
+            progressSource: null,
+            command: null,
             observationSource: 'harness-observed',
             gating: 'non-gating',
           });
@@ -460,6 +488,12 @@ export function collectHarnessObserved(
             signal: null,
             endedAt: null,
             outputIdleWarning: outputIdleWarning(observed.state, claim.lastOutputAt, claimOutputAgeMs, claimRuntimeMs),
+            progressState: claim.progressState,
+            progressPhase: claim.progressPhase,
+            progressCurrent: claim.progressCurrent,
+            progressUpdatedAt: claim.progressUpdatedAt,
+            progressSource: claim.progressSource,
+            command: claim.command,
             observationSource: 'harness-observed',
             gating: 'non-gating',
           });
@@ -526,6 +560,12 @@ export function collectHarnessObserved(
         signal: null,
         endedAt: null,
         outputIdleWarning: outputIdleWarning(observed.state, lease.last_output_at, leaseOutputAgeMs, leaseRuntimeMs),
+        progressState: null,
+        progressPhase: null,
+        progressCurrent: null,
+        progressUpdatedAt: null,
+        progressSource: null,
+        command: null,
         observationSource: 'harness-observed',
         gating: 'non-gating',
       });
@@ -795,7 +835,9 @@ function projectRun(
       actor = { actor: actorName, state: 'pending', runtimeMs: null, phase: null, summary: null, completed: [], current: null, next: null, blockers: [], updatedAt: null, progressAgeMs: null, source: null };
       step.actors.push(actor);
     }
-    actor.state = request.state === 'requested' ? 'pending' : request.state;
+    // A withdrawn request retires an attempt that never started: the actor call
+    // is pending again, waiting for the next `drive` to mint attempt n+1.
+    actor.state = request.state === 'requested' || request.state === 'withdrawn' ? 'pending' : request.state;
     actor.runtimeMs = request.runtimeMs;
     actor.phase = request.phase;
     actor.summary = request.summary;
@@ -902,6 +944,9 @@ function projectHostRequests(repoRoot: string, runId: string, events: RunEvent[]
     const terminal = events.find(
       (candidate) => (candidate.type === 'actor_completed' || candidate.type === 'actor_failed') && candidate.extra.dispatch_id === dispatchId,
     );
+    const withdrawal = events.findLast(
+      (candidate) => candidate.type === 'host_dispatch_withdrawn' && candidate.extra.dispatch_id === dispatchId,
+    );
     const progress = events.findLast(
       (candidate) => candidate.type === 'host_dispatch_progress' && candidate.extra.dispatch_id === dispatchId,
     );
@@ -910,17 +955,23 @@ function projectHostRequests(repoRoot: string, runId: string, events: RunEvent[]
       ? progress.extra.reported_at
       : progress?.timestamp ?? null;
     const progressSource = progress?.extra.observation_source;
-    const state: HostRequestView['state'] = terminal?.type === 'actor_completed'
+    // One reading of the lifecycle for every surface: `hostRequestTerminalState`
+    // is what `verify`, `drive` and the withdraw command already agree on, and
+    // it is the only one that sees the third terminal receipt.
+    const settled = hostRequestTerminalState(events, dispatchId);
+    const state: HostRequestView['state'] = settled === 'completed'
       ? 'completed'
-      : terminal?.type === 'actor_failed'
+      : settled === 'failed'
         ? 'failed'
-        : progressState === 'blocked'
-          ? 'blocked'
-          : progressState === 'waiting_input' || progressState === 'idle'
-            ? 'waiting'
-            : start
-              ? 'running'
-              : 'requested';
+        : settled === 'withdrawn'
+          ? 'withdrawn'
+          : progressState === 'blocked'
+            ? 'blocked'
+            : progressState === 'waiting_input' || progressState === 'idle'
+              ? 'waiting'
+              : start
+                ? 'running'
+                : 'requested';
     // Ledger-first workspace projection; prepared-but-not-started may read machine-local state.
     let workspaceMode: 'shared' | 'isolated' = 'shared';
     let workspace: string | null = null;
@@ -975,10 +1026,11 @@ function projectHostRequests(repoRoot: string, runId: string, events: RunEvent[]
       model: typeof event.extra.model === 'string' ? event.extra.model : null,
       reasoningEffort: typeof event.extra.reasoning_effort === 'string' ? event.extra.reasoning_effort : null,
       state,
+      withdrawnReason: state === 'withdrawn' && typeof withdrawal?.extra.reason === 'string' ? withdrawal.extra.reason : null,
       agentId: typeof start?.extra.agent_id === 'string' ? start.extra.agent_id : null,
       requestedAt: event.timestamp,
       startedAt: start?.timestamp ?? null,
-      endedAt: terminal?.timestamp ?? null,
+      endedAt: terminal?.timestamp ?? withdrawal?.timestamp ?? null,
       runtimeMs: start == null ? null : elapsed(start.timestamp, terminal?.timestamp ?? null, now),
       phase: typeof progress?.extra.phase === 'string' ? progress.extra.phase : null,
       summary: typeof progress?.extra.summary === 'string' ? progress.extra.summary : null,

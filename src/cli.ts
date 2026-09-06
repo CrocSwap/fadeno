@@ -63,10 +63,11 @@ import { EVIDENCE_MODES, isEvidenceMode, type EvidenceMode } from './lib/bakeoff
 import { runSteeringApply, runSteeringApplyClaude, runSteeringApplyOpenCode, runSteeringApplyOmp, runSteeringResolve } from './commands/steering.ts';
 import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
 import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
+import { runDispatchWithdraw } from './commands/dispatch-withdraw.ts';
 import { runToolComplete } from './commands/tool-complete.ts';
 import { runToolRun } from './commands/tool-run.ts';
 import { runSetup } from './commands/setup.ts';
-import { runStatus } from './commands/status.ts';
+import { runStatus, type CodexMaterialization } from './commands/status.ts';
 import { runDoctor, type DoctorFinding } from './commands/doctor.ts';
 import { runVendor } from './commands/vendor.ts';
 import { runEvidencePromote } from './commands/evidence.ts';
@@ -82,6 +83,8 @@ import type { SchemaKind, ValidationIssue } from './lib/playbook-validate.ts';
 import { findRepoRoot, packageVersion } from './lib/paths.ts';
 import type { RunEvent, RunSummary } from './lib/run-ledger.ts';
 import type { DispatchProgressSource } from './lib/host-dispatch.ts';
+import { describeCodexAgentIdentityRow } from './lib/codex-agent-file.ts';
+import { describeIdleOutput, readClaimProgress } from './lib/attempt-progress.ts';
 import type { ValidateOutcome } from './commands/validate.ts';
 import type { ShowProjection, ShowResult, StepView } from './commands/show.ts';
 import { readInstallationManifest, syncManagedRuntime } from './lib/installations.ts';
@@ -459,9 +462,26 @@ function printProjection(projection: ShowProjection): void {
       const ended = fact.endedAt == null ? '' : ` ended_at=${fact.endedAt}`;
       const error = fact.observationError == null ? '' : `  observation_error=${fact.observationError}`;
       console.log(`  ${holder}  ${state}${outcome}${ended}  ${mode}  ${correlation}  ${pids}  ${times}  ${bytes}  claim=${fact.claimPath}${error}`);
+      const selfReport = readClaimProgress(fact);
+      if (selfReport != null) {
+        // The agent's own account, never a measurement and never a gate: it sits
+        // next to the byte counters precisely so a reader can tell them apart.
+        const reportedAt = Date.parse(selfReport.updatedAt);
+        const reportAge = Number.isFinite(reportedAt) ? formatDuration(Math.max(0, Date.now() - reportedAt)) : null;
+        const phase = selfReport.phase ?? selfReport.state ?? 'progress';
+        const current = selfReport.current == null ? '' : ` — ${truncateWithEllipsis(selfReport.current, 120)}`;
+        const stateNote = selfReport.state == null ? '' : ` (${selfReport.state})`;
+        console.log(
+          `    agent: "${phase}"${stateNote}${current}${reportAge == null ? '' : `, ${reportAge} ago`} (agent self-report, non-gating)`,
+        );
+      }
       if (fact.outputIdleWarning) {
-        const idleDuration = fact.outputAgeMs != null ? formatDuration(fact.outputAgeMs) : fact.runtimeMs != null ? formatDuration(fact.runtimeMs) : '5m';
-        console.log(`    WARNING: no output observed for ${idleDuration ?? '5m'} (non-gating)`);
+        const described = describeIdleOutput({
+          idleMs: fact.outputAgeMs ?? fact.runtimeMs ?? null,
+          progress: readClaimProgress(fact),
+          argv: fact.command,
+        });
+        console.log(`    WARNING: ${described.text}`);
       }
     }
   }
@@ -483,6 +503,7 @@ function printProjection(projection: ShowProjection): void {
         const member = request.actor ?? '(anonymous)';
         const model = request.model != null && request.reasoningEffort != null ? `${request.model}/${request.reasoningEffort}` : request.executor;
         const details: string[] = [request.state];
+        if (request.withdrawnReason != null) details.push(truncateWithEllipsis(request.withdrawnReason, 120));
         const runtime = formatDuration(request.runtimeMs);
         if (runtime != null) details.push(runtime);
         if (request.phase != null) details.push(request.phase);
@@ -966,6 +987,10 @@ function printDrive(result: DriveResult): number {
       const d = result.decision!;
       console.log(`paused at ${d.step} — ${d.prompt}`);
       console.log(`  decision: ${d.decisionId}   options: ${d.options.join(' | ')}`);
+      if (d.artifact != null) {
+        console.log(`  artifact: ${d.artifact.path} (${d.artifact.bytes} B)`);
+        for (const heading of d.artifact.headings) console.log(`      ${heading}`);
+      }
       console.log(`  resolve:  fadeno decide ${result.run} <option>   then re-run fadeno drive ${result.run}`);
       return 0;
     }
@@ -1138,6 +1163,7 @@ function main(argv: string[]): number {
         inline: { type: 'boolean' },
         'no-record': { type: 'boolean' },
         bind: { type: 'string', multiple: true },
+        unbind: { type: 'string', multiple: true },
         'max-transitions': { type: 'string' },
         parallel: { type: 'string' },
         'actor-call': { type: 'string' },
@@ -1306,9 +1332,17 @@ function main(argv: string[]): number {
       if ((result as any).staleProjectPin) console.log(`stale project pin: ${(result as any).staleProjectPin}`);
       if ((result as any).staleUserPin) console.log(`stale user pin: ${(result as any).staleUserPin}`);
       if ((result as any).codexMaterialization) {
-        const m = (result as any).codexMaterialization;
-        const fix = m.fresh ? '' : `; run \`fadeno setup --codex\` then start a fresh Codex session`;
-        console.log(`Codex managed agents: ${m.fresh ? 'current' : 'missing/stale'}${m.restartRequired ? ' (restart required)' : ''}${fix}`);
+        const m = (result as any).codexMaterialization as CodexMaterialization;
+        const drifted = m.agents.filter((agent) => agent.status === 'stale' || agent.status === 'missing');
+        const detail = drifted
+          .map((agent) => (agent.status === 'missing' ? `${agent.archetype} file missing` : describeCodexAgentIdentityRow(agent)))
+          .join('; ');
+        console.log(
+          m.fresh
+            ? 'Codex managed agents: current'
+            : `Codex managed agents: stale — ${detail}; ${m.remediation}`,
+        );
+        if (values.verbose) console.log(JSON.stringify({ codexMaterialization: m }, null, 2));
       }
       if ((result as any).opencodeMaterialization) {
         const m = (result as any).opencodeMaterialization;
@@ -1816,7 +1850,7 @@ function main(argv: string[]): number {
     }
     case 'drive': {
       const run = positionals[1];
-      if (!run) throw new Error('Usage: fadeno drive <run> [--bind role=executor] [--max-transitions n] [--parallel n] [--diagnostics] [--timeout <seconds>]');
+      if (!run) throw new Error('Usage: fadeno drive <run> [--bind role=executor] [--unbind role] [--max-transitions n] [--parallel n] [--diagnostics] [--timeout <seconds>]');
       let maxTransitions: number | undefined;
       if (values['max-transitions'] != null) {
         const n = Number(values['max-transitions']);
@@ -1847,6 +1881,7 @@ function main(argv: string[]): number {
       const result = (runDrive as any)({
         run,
         bind: values.bind,
+        unbind: values.unbind,
         maxTransitions,
         parallel,
         timeoutMs,
@@ -2063,6 +2098,11 @@ function main(argv: string[]): number {
             if (note.startsWith('WARNING:')) console.error(note);
             else console.log(note);
           }
+          if (result.codex_materialization != null) {
+            console.log(
+              `NOTE: Codex managed agent still says ${result.codex_materialization.detail}; ${result.codex_materialization.remediation}`,
+            );
+          }
         }
         return 0;
       }
@@ -2236,6 +2276,20 @@ function main(argv: string[]): number {
       }
       const result = runDispatchFail({ run, dispatchId, reason: values.reason });
       console.log(`${result.dispatchId} failed${result.idempotent ? ' (idempotent)' : ''}`);
+      return 0;
+    }
+    case 'dispatch-withdraw': {
+      const [, run, dispatchId] = positionals;
+      if (!run || !dispatchId || !values.reason) {
+        throw new Error('Usage: fadeno dispatch-withdraw <run> <dispatch-id> --reason <text>');
+      }
+      const result = runDispatchWithdraw({ run, dispatchId, reason: values.reason });
+      console.log(
+        `${result.dispatchId} withdrawn${result.idempotent ? ' (idempotent)' : ''}` +
+          `${result.workspaceRemoved ? '; isolated workspace removed' : ''}`,
+      );
+      if (result.workspaceError != null) console.error(result.workspaceError);
+      console.log(`Resume with \`fadeno drive ${run}\`.`);
       return 0;
     }
     case 'attempt-accept': {

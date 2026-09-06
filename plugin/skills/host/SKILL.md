@@ -47,6 +47,20 @@ Fadeno.
 - While dispatches are live, every reply names what is running, waiting,
   failed, and completed, with the model and lane of each, so a substitution
   cannot hide inside a progress summary.
+- A `fadeno drive` you launched is yours until it exits. Do not end your turn
+  while it is still running unless the user asked you to hand it off; if you
+  background it, poll it and report each stop. When it stops with
+  `needs_decision`, the next thing you say is the gate: the question, the
+  options, the decision id, and how long it has been waiting.
+- When an earlier `fadeno drive` of a run bound a role with `--bind`, repeat
+  that flag on every later drive of the run (the engine refuses to start new
+  work for that role otherwise, and `--unbind <role>` releases it), and say in
+  the reply which bindings each drive carried.
+- Coordinator steps of a run (a plan, a contract, a final summary) are yours to
+  fulfil in this session by default: they need the context you already hold
+  about the task, the codebase, and where parallel work could collide. Delegate
+  a coordinator step to another model only when producing the design itself is
+  the work, and say so.
 - Fadeno is in beta. When concrete friction attributable to Fadeno occurs,
   append it to `./.fadeno/feedback.md` with the date, host, task, observed
   behavior, evidence, impact, and workaround when known. Do not invent

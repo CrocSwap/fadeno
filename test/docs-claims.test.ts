@@ -769,6 +769,45 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // The third terminal receipt. A doc that still enumerates two, or a source
+    // that stops minting the event, is the drift this catches.
+    id: 'host-dispatch-withdraw',
+    doc: {
+      files: ['docs/experimental/host-dispatch-contract.md', 'docs/architecture.md'],
+      patterns: [/dispatch-withdraw/, /host_dispatch_withdrawn/, /hostRequestTerminalState/],
+    },
+    src: {
+      files: ['src/commands/dispatch-withdraw.ts', 'src/lib/host-dispatch.ts', 'src/cli.ts', 'src/commands/show.ts'],
+      patterns: [/runDispatchWithdraw/, /host_dispatch_withdrawn/, /case 'dispatch-withdraw'/, /hostRequestTerminalState/],
+    },
+  },
+  {
+    // Producer (agent sidecar) → mirror (supervisor claim) → readers. Losing
+    // any name means a live command attempt is silently undescribable again.
+    id: 'command-lane-progress-mirror',
+    doc: {
+      files: ['docs/architecture.md', EXTENDING],
+      patterns: [/attempt-progress/, /attemptProgressRelPath/, /readClaimProgress/, /describeIdleOutput/, /progress_source/],
+    },
+    src: {
+      files: ['src/lib/attempt-progress.ts', 'src/lib/supervisor.ts', 'src/commands/drive.ts', 'src/cli.ts'],
+      patterns: [/attemptProgressRelPath/, /readClaimProgress/, /describeIdleOutput/, /progress_source/],
+    },
+  },
+  {
+    // One spelling of the fix, in one place: `status` and `dial` both print
+    // this constant rather than either re-spelling it.
+    id: 'codex-identity-remediation',
+    doc: {
+      files: ['docs/architecture.md'],
+      patterns: [/CODEX_IDENTITY_REMEDIATION/, /codexAgentIdentityStatus/, /not_applicable/],
+    },
+    src: {
+      files: ['src/lib/codex-agent-file.ts', 'src/commands/status.ts', 'src/commands/dial.ts'],
+      patterns: [/CODEX_IDENTITY_REMEDIATION/, /codexAgentIdentityStatus/, /not_applicable/],
+    },
+  },
+  {
     id: 'omp-host-adapter',
     doc: {
       files: ['README.md', 'docs/kickoff-memo.md'],

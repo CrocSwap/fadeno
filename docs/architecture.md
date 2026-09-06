@@ -295,8 +295,34 @@ back to ordinary file completion when no specialized candidates apply.
   escalates to SIGKILL after 5s; lease and claim release still waits for
   `close`, so cancellation and timeout are similarly proven only after the
   group is gone. Idle output is never a termination signal — `show`
-  surfaces `WARNING: no output observed for <duration> (non-gating)` after
-  five minutes via `OUTPUT_IDLE_WARNING_MS` and `HarnessObservedProcessView.outputIdleWarning`.
+  surfaces a warning after five minutes via `OUTPUT_IDLE_WARNING_MS` and
+  `HarnessObservedProcessView.outputIdleWarning`, worded by
+  `describeIdleOutput` (`lib/attempt-progress.ts`) for what is actually known:
+  the agent's mirrored self-report when it moved during the silence
+  (`no stdout/stderr for <duration>; agent progress "<phase>" <age> ago`), the
+  print-at-exit note when the argv is `claude -p` or `codex exec`
+  (`… (this executor prints only at exit; not a stall signal)`), and otherwise
+  the unchanged `no output observed for <duration> (non-gating)`.
+- **The command-lane progress mirror** — every engine actor prompt asks its
+  agent to keep a cooperative progress sidecar, and until 0.6.1 nothing on the
+  reading side ever opened one for a *command* attempt: the file was written
+  into the attempt's workspace (an isolated worktree, usually) and left there,
+  so a live attempt could only be described by byte counters. Three parties
+  now: the **producer** is the agent, writing
+  `attempt-progress`'s `attemptProgressRelPath(run, step, actor)` — the same
+  spelling `prompt.ts` put in its prompt, delegated to rather than restated so
+  the two cannot drift; the **mirror** is the supervisor, which reads that file
+  on each heartbeat (plus at startup and at `close`) and copies
+  `progress_state`/`progress_phase`/`progress_current`/`progress_updated_at`
+  with `progress_source: 'agent'` onto its in-flight claim, and clears all five
+  fields whenever that read fails (absent, unreadable, unparsable, not an
+  object, or carrying no non-empty `updated_at`) so a report that has stopped
+  arriving reads as absent rather than as current — the cost being that a
+  rename-torn read drops the fields for one tick; the **readers** are
+  `readClaimProgress` in `show` and `cli.ts`. It is machine-local, harness-
+  observed and never ledger evidence, and — this is the whole discipline — it
+  is the agent's SELF-REPORT, not a measurement: it is labelled as such
+  wherever it is printed and it never gates.
 - **`collective.ts`** — `reduceCollective`, the one reduction of a map's member
   parts into its collective. `drive` writes a collective through it and
   receipts the reduction (`collective_assembled`: parts in order, digest,
@@ -532,7 +558,7 @@ receipt commands:
   `tests_pass`; `--report` remains a deprecated alias. This is the
   **advisory→enforced bridge**: the same check the runner applies can run in CI, a
   pre-commit hook, or a Claude Code `Stop` hook. See `enforcement.md`.
-- **`dispatch-prompt|dispatch-start|dispatch-progress|dispatch-complete|dispatch-fail`** are
+- **`dispatch-prompt|dispatch-start|dispatch-progress|dispatch-complete|dispatch-fail|dispatch-withdraw`** are
   host receipts. A
   host executor request is durable before host work begins; receipts record
   the requested model/effort/type, host agent id, provenance-labelled
@@ -540,7 +566,17 @@ receipt commands:
   internally checked but stays visibly unverified unless a future host supplies
   authoritative runtime metadata. `dispatch-prompt` emits the immutable engine
   assignment envelope and recorded prompt bytes without host-side
-  reconstruction. `show` reloads the run's playbook so the projection
+  reconstruction. `dispatch-withdraw <run> <dispatch-id> --reason <text>` is
+  the third terminal receipt and the only one for work that never began: it
+  retires a minted-but-unstarted request (`host_dispatch_withdrawn`, removing a
+  prepared isolated workspace if one exists), is refused once an
+  `actor_dispatched` start exists, and is idempotent for the same reason. The
+  request stops being pending, so the next `fadeno drive` mints attempt *n+1*
+  for the same actor call under the current cascade or binding with
+  `attempt_reason: withdrawn` — `hostRequestAttempts` keeps counting minted
+  requests, so the withdrawn attempt keeps its ordinal. `hostRequestTerminalState`
+  (`lib/host-dispatch.ts`) is the single reading of the lifecycle that `verify`,
+  `drive`, `show` and completion all share. `show` reloads the run's playbook so the projection
   retains graph order and pending actors, then overlays lifecycle/progress
   events and derives actor/step/total runtime. It labels semantic progress as
   agent/harness/director-attested and presents machine-local process facts in a
@@ -564,14 +600,20 @@ while `verify` recomputes path, parent, member, generation, and dispatch ids. Fo
 
 Two evidence surfaces sit beside the step lifecycle:
 
-- **`resolution_snapshot`** — appended by `drive` at first engine contact
+- **`resolution_snapshot`** — computed by `drive` at first engine contact
   (right after the repo profile is snapshotted into the run dir as
   `profile.yaml`), recording the effective dial table and, per
   declared role, its `(archetype, executor, model, resolution source, dial_source)`. Later
-  invocations re-append it **only when the resolution in force changed** (a
+  invocations re-record it **only when the resolution in force changed** (a
   dial switch, a `--bind` override); the echo prints on every invocation
   regardless, so the ledger stays quiet while the user still sees which
-  provider the run is spending. `new-run` prints a best-effort preview of the
+  provider the run is spending. The row is the invocation's **prelude**: it is
+  written by the first thing the invocation actually records, and an invocation
+  that records nothing — including one that refuses a dropped binding — records
+  no snapshot either, because the snapshot is a claim about work that happened.
+  It cannot be a trailing row instead: `verify` holds each dispatch against the
+  resolution in force *at that point in the ledger*, so the snapshot has to
+  precede the rows it explains. `new-run` prints a best-effort preview of the
   same table but writes no ledger event — resolution is computed at dispatch
   time and the engine owns the durable record. `verify`'s executor-bindings
   check replays these events (plus `executor_override`s, in order) to recompute
@@ -666,8 +708,19 @@ ownership in the user state directory. Managed agents point at that stable
 runtime, never at a versioned plugin cache path. Setup is strictly user-scoped
 and does not modify the current repository. For Claude it also merges one exact
 stable-runtime Bash allow rule into user settings; uninstall removes only that
-recorded rule. Later `fadeno dial` switches refresh managed agents
-automatically where needed. `fadeno steering apply --codex --scope project` remains the explicit project override and
+recorded rule. `fadeno dial` never writes `~/.codex/agents/*`: the managed
+agent is a frozen identity, so a dial that moves an archetype's model leaves
+Codex spawning the old one until the files are re-materialized. Both surfaces
+now say so instead of leaving it to be discovered. `fadeno status` judges each
+managed file's `model`/`model_reasoning_effort` against what
+`steering resolve` reports for that archetype (`codexAgentIdentityStatus` →
+`current` | `stale` | `missing` | `not_applicable`, the last for a slot the
+dial resolves onto another provider's command lane, whose file identity is
+reported but not judged), and prints the drift with the one frozen fix,
+`CODEX_IDENTITY_REMEDIATION`. `fadeno dial` returns the same fact as
+`codex_materialization` when the archetype it just set has drifted. File
+EXISTENCE was the whole test until 2026-09-05, which reported `current` at the
+exact moment it mattered least. `fadeno steering apply --codex --scope project` remains the explicit project override and
 then materializes every required slot into session-static role TOML: host slots
 become host agents using their configured model/effort, while command slots
 become cheap brokers that delegate through `fadeno dispatch`. Before each task,

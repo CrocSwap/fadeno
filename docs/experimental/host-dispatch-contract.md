@@ -12,12 +12,22 @@ is:
 - `actor_dispatched` — the host has started it and attested the host agent.
 - `actor_completed` / `actor_failed` — the host has submitted the one terminal
   receipt.
+- `host_dispatch_withdrawn` — the third terminal receipt: a request that was
+  minted and never started is retired with a reason, with no start and no
+  result. The next `fadeno drive` mints attempt *n+1* for the same actor call
+  under the current cascade or binding (`attempt_reason: withdrawn`, unless the
+  executor changed, where `executor_override` still wins).
 
-The receipt commands are `dispatch-start`, `dispatch-complete`, and
-`dispatch-fail`. Start accepts a `--agent-id`; completion accepts a
+The receipt commands are `dispatch-start`, `dispatch-complete`,
+`dispatch-fail`, and `dispatch-withdraw`. Start accepts a `--agent-id`; completion accepts a
 temporary output file and optional commit; failure accepts host text. Start is
 idempotent for the same host agent id, and terminal receipt submission is
-idempotent for the same output digest.
+idempotent for the same output digest. Withdrawal takes `--reason` and is
+refused once a start exists (`dispatch-fail` or `dispatch-complete` is the
+receipt for work that began); repeating the same reason is idempotent. A
+withdrawal that removes a prepared isolated workspace records
+`workspace_removed`, and a failed removal still records the receipt while
+naming the leftover path.
 
 A host executor may declare an exact `fallback_command` argv. When the current
 Codex role is materialized for another host executor, `dispatch-fallback`

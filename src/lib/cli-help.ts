@@ -101,13 +101,24 @@ const TOP_LEVEL: Record<string, PageSeed> = {
   'dispatch-progress': page('Record an attested host progress observation.', 'fadeno dispatch-progress <run> <dispatch-id> --file <status.json> [options]'),
   'dispatch-complete': page('Submit a host dispatch result.', 'fadeno dispatch-complete <run> <dispatch-id> --output <path|-> [options]'),
   'dispatch-fail': page('Submit a host dispatch failure.', 'fadeno dispatch-fail <run> <dispatch-id> --reason <text>'),
+  'dispatch-withdraw': page(
+    'Retire a host request that was minted and never started.',
+    'fadeno dispatch-withdraw <run> <dispatch-id> --reason <text>',
+    [
+      'Records a terminal receipt with no start; the next `fadeno drive` mints the next attempt under the current cascade or binding.',
+      'Refuses after `dispatch-start` (use `dispatch-fail`). Repeating the same `--reason` is idempotent.',
+    ],
+  ),
   run: page('Append attested updates to a run ledger.', 'fadeno run <run> [options]'),
   'tool-run': page('Execute a registered ready tool step.', 'fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]', ['The registered tool determines its output artifact; there is no `--output` override. Use `--timeout 0` to disable a route deadline.']),
   'tool-complete': page('Record a manually produced tool result.', 'fadeno tool-complete <run> --output <artifact-path>'),
   gate: page('Evaluate a deterministic gate from an artifact.', 'fadeno gate <run> <condition> [--artifact <path>]'),
   prompt: page('Assemble and optionally record an actor prompt.', 'fadeno prompt <run> <step> [options]'),
   next: page('Emit the next actionable run step.', 'fadeno next <run> [--legacy]'),
-  drive: page('Advance a run until it is terminal or paused.', 'fadeno drive <run> [options]', ['Use `--timeout 0` to disable a route deadline; none by default.']),
+  drive: page('Advance a run until it is terminal or paused.', 'fadeno drive <run> [options]', [
+    'Use `--timeout 0` to disable a route deadline; none by default.',
+    'Release a role bound by an earlier `--bind` of this run with `--unbind <role>`. Without it, an invocation that would start new work for a bound role on a different executor is refused.',
+  ]),
   cancel: page('Cancel a live engine attempt.', 'fadeno cancel <run> [--actor-call <id>]', ['Sends SIGTERM to the single live engine command claim; the engine records the terminal receipt.']),
   decide: page('Resolve a pending named human decision.', 'fadeno decide <run> <option> [options]'),
   'attempt-accept': page('Accept a hand-resolved isolated attempt.', 'fadeno attempt-accept <run> <actor-call>'),
@@ -164,13 +175,14 @@ const OPTION_HINTS: Record<string, string> = {
   '--no-steering': 'Do not scaffold steering', '--non-interactive': 'Never prompt during setup', '--omp': 'Target omp',
   '--opencode': 'Target OpenCode', '--output': 'Output artifact path or selector', '--parallel': 'Concurrent deliveries in isolated worktrees',
   '--prepare': 'Write blinded judge prompts', '--prompt-file': 'Read prompt from file', '--prompt-sha256': 'Prompt content SHA-256',
-  '--purge-user-data': 'Also remove shared user data', '--rate': 'Shadow sampling rate', '--reason': 'Failure reason',
+  '--purge-user-data': 'Also remove shared user data', '--rate': 'Shadow sampling rate', '--reason': 'Failure or withdrawal reason',
   '--record': 'Record supplied host judgments', '--repo': 'Repository scope', '--report': 'Legacy artifact-path spelling',
   '--reset-runtime': 'Allow runtime downgrade', '--role': 'Role name', '--run': 'Immutable engine run id',
   '--schema': 'Document schema kind', '--scope': 'Steering installation scope', '--session': 'Local session scope',
   '--shadow': 'One-shot challenger reference', '--shared': 'Run in the current worktree', '--source': 'Progress observation source',
   '--status': 'Run status', '--step': 'Run step id', '--strict': 'Fail on an unreachable listing too',
   '--tag': 'Dispatch recovery label', '--tail': 'Number of recent entries',
+  '--unbind': 'Release a role bound earlier in this run',
   '--timeout': 'Deadline in seconds (0 disables)', '--tool': 'Registered tool name', '--user': 'User-default scope',
   '--verbose': 'Include diagnostic detail', '--version': 'Show Fadeno version',
   '--wait': 'Wait before recovering output', '--with-hooks': 'Scaffold enforcement hooks', '--with-steering': 'Deprecated compatibility alias; steering is already default',
@@ -195,7 +207,7 @@ const OPTION_FORMS: Record<string, string> = {
   '--tail': '--tail <count>', '--wait': '--wait <seconds>', '--cancel': '--cancel <id|tag>', '--merge': '--merge <id|tag>',
   '--arm': '--arm <arm>', '--shadow': '--shadow <ref>', '--evidence': '--evidence <mode>', '--comparison': '--comparison <path>',
   '--adversarial': '--adversarial <path>', '--judge': '--judge <ref>', '--scope': '--scope <project|user>',
-  '--from': '--from <bin-dir>',
+  '--from': '--from <bin-dir>', '--unbind': '--unbind <role>',
 };
 
 const withGlobals = (...flags: string[]): readonly string[] => ['--help', '--version', ...flags];
@@ -232,13 +244,14 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   'dispatch-progress': withGlobals('--file', '--source'),
   'dispatch-complete': withGlobals('--output', '--commit'),
   'dispatch-fail': withGlobals('--reason'),
+  'dispatch-withdraw': withGlobals('--reason'),
   run: withGlobals('--step', '--status', '--event', '--artifact', '--member', '--field'),
   'tool-run': withGlobals('--tool', '--timeout'),
   'tool-complete': withGlobals('--output'),
   gate: withGlobals('--artifact'),
   prompt: withGlobals('--actor', '--iteration', '--inline', '--no-record', '--format'),
   next: withGlobals('--legacy'),
-  drive: withGlobals('--bind', '--max-transitions', '--parallel', '--timeout', '--diagnostics'),
+  drive: withGlobals('--bind', '--unbind', '--max-transitions', '--parallel', '--timeout', '--diagnostics'),
   cancel: withGlobals('--actor-call'),
   decide: withGlobals('--decision', '--feedback'),
   'attempt-accept': withGlobals(),
@@ -364,7 +377,7 @@ Models and delivery
 
 Host dispatch protocol
   dispatch-prepare, dispatch-prompt, dispatch-start, dispatch-progress,
-  dispatch-complete, dispatch-fail, dispatch-fallback
+  dispatch-complete, dispatch-fail, dispatch-withdraw, dispatch-fallback
 
 Setup and maintenance
   setup, status, doctor, vendor, unvendor, clean, uninstall, plugin, completion

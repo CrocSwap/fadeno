@@ -96,6 +96,107 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Added
 
+- **`fadeno dispatch-withdraw <run> <dispatch-id> --reason <text>` — retire a
+  host request that was never started.** A minted request had exactly two exits,
+  both of which claim work happened: `dispatch-complete` and `dispatch-fail`. A
+  director who minted a request under the wrong executor, or simply changed
+  their mind before starting it, had no honest way to retire it — the run stayed
+  `awaiting_host_dispatch` forever, or the ledger got a failure receipt for work
+  nobody did. `host_dispatch_withdrawn` is the third terminal receipt and the
+  only one for work that never began: it carries the reason and
+  `withdrawn_by`, removes a prepared isolated workspace if one exists (recording
+  `workspace_removed`, and naming the leftover path rather than losing the
+  receipt if removal fails), is refused once an `actor_dispatched` start exists,
+  and is idempotent for the same reason. The request stops being pending, so the
+  next `fadeno drive` mints attempt *n+1* for the same actor call under the
+  current cascade or binding with `attempt_reason: withdrawn` (an executor that
+  also changed still reads `executor_override`, which outranks it); the
+  withdrawn attempt keeps its ordinal. That precedence is one ladder,
+  `hostAttemptReason`, read by the serial member loop, the parallel wave and the
+  compositional re-mint alike — the compositional path had its own copy with the
+  `executor_override` arm missing, so the same fact recorded a different reason
+  depending on which engine path ran. `verify` audits the new shape — a start after a withdraw is a
+  finding, and a withdrawn request no longer trips "completed run has no
+  `actor_dispatched` start". `show` renders the request as `withdrawn` with its
+  reason and the actor call as pending again, through
+  `hostRequestTerminalState`, now the one reading of the lifecycle that
+  `verify`, `drive`, `show`, `dispatch-prepare` and completion all share — so
+  `dispatch-prepare` refuses a withdrawn id instead of cutting an isolated
+  worktree nothing could ever start, seconds after the withdraw removed the
+  previous one. Its refusal says the request was *withdrawn* and that
+  `fadeno drive` mints a fresh one, because a withdraw is retryable where a
+  completion is not, and the message is the only place that difference reaches
+  the operator.
+- **`fadeno drive --unbind <role>`, and a loud refusal when a `--bind` is
+  silently dropped.** `--bind role=executor` binds a role for the invocation
+  that passes it. Any later `drive` of the same run that forgot the flag
+  quietly resolved the role through the cascade instead and started new work on
+  a different executor — a whole attempt delivered by the wrong model, visible
+  only afterwards in the ledger. Before minting a host request or starting a
+  command attempt for a role bound earlier in the run, the engine now refuses:
+  `role "R" was bound to "X" earlier in this run; this invocation would start
+  new work for it on "Y". Pass --bind R=X to keep the binding or --unbind R to
+  release it.` A run that stops there is indistinguishable from one that was
+  never driven: `events.jsonl` is byte-identical across the refusing invocation.
+  That required moving the `resolution_snapshot` — derived bookkeeping that used
+  to be appended at the top of every drive, which meant a refusing drive first
+  recorded that the role resolves to the very executor it was about to reject.
+  The row is now the invocation's prelude, written by the first thing the
+  invocation actually records, and not at all when it records nothing.
+  `--unbind <role>`
+  (repeatable) releases the binding for good, recorded as a cleared
+  `executor_override` that `warnDroppedBindings`, `verify` and `show` all read
+  as "no binding". Continuing an already-minted request is unaffected.
+- **`fadeno status` and `fadeno dial` tell the truth about Codex managed-agent
+  identity.** File EXISTENCE was the whole test, so `status` reported the
+  managed agents `current` at the exact moment it mattered least: a Codex
+  director whose `reviewer` dial had moved to another model kept spawning the
+  old identity, because the agent file is a frozen identity that no spawn value
+  corrects. `status` now compares each file's `model`/`model_reasoning_effort`
+  against what `steering resolve` reports for that archetype — the same resolver
+  `steering apply` and the spawn guard ask, never a second cascade — and reports
+  `current` | `stale` | `missing` | `not_applicable` per slot (the last for a
+  slot the dial resolves onto another provider's command lane, whose identity is
+  reported but not judged). A stale line names the drift and the fix:
+  `Codex managed agents: stale — reviewer file gpt-5.6-luna/high vs dial
+  gpt-5.6-terra/xhigh; run \`fadeno steering apply --codex --scope user\`, then
+  start a fresh Codex session`. `fadeno dial` returns and prints the same fact
+  as `codex_materialization` when the archetype it just set has drifted; it
+  still never writes `~/.codex/agents/*`. One remediation string
+  (`CODEX_IDENTITY_REMEDIATION`) and one formatter feed both surfaces, so they
+  cannot drift apart. **Scope, stated because the review caught it:** both
+  surfaces judge the USER-scope `fadeno-<archetype>.toml`. A project-scope
+  `.codex/agents/<archetype>.toml` shadows that file for Codex entirely, and an
+  unmarked (non-`managed`) file that happens to match is still reported
+  `current` even though `findSpawnableCodexAgent` would refuse it. Judging the
+  effective candidate is not done here.
+- **A live command attempt can say what it is doing** — an ENGINE actor call;
+  ad-hoc `fadeno dispatch` still passes no progress path and remains as opaque
+  as before. Every engine actor prompt
+  asks its agent to keep a cooperative progress sidecar, and nothing on the
+  reading side had ever opened one for a *command* attempt: the file was written
+  into the attempt's workspace — an isolated worktree, usually — and left there,
+  so `show` could describe six minutes of work only as byte counters. The
+  supervisor now mirrors that sidecar onto its in-flight claim on each heartbeat
+  (plus at startup and at `close`, where the agent's last write usually lands).
+  A sidecar that is absent, unreadable, unparsable or missing its `updated_at`
+  clears all five fields, so the claim carries no progress at all rather than a
+  self-report that stopped arriving still reading as current.
+  `show` prints it as the agent's SELF-REPORT — `agent: "<phase>" (<state>) —
+  <current>, <age> ago (agent self-report, non-gating)` — never as a
+  measurement, and it never gates. The idle warning is honest about which of
+  three things it knows (`describeIdleOutput`): the streams are quiet but the
+  agent's own report moved during the silence; or there is no report and this
+  executor (`claude -p`, `codex exec`) prints only at exit, so silence is its
+  normal shape and not a stall signal; or neither, which keeps today's sentence
+  byte-for-byte. New `src/lib/attempt-progress.ts` holds the pure readers, and
+  `attemptProgressRelPath` delegates to the prompt's own spelling so the path
+  the agent was told and the path the supervisor watches cannot diverge.
+- **A human gate says what it is gating.** `fadeno drive` now prints the gated
+  artifact's path, byte size and markdown headings under the decision line, so
+  an approver can see what they are being asked to approve without going to find
+  the file. Display only: derived at print time, recorded nowhere, and unable to
+  affect the decision.
 - **Four catalog-rot checks in `fadeno doctor`.** All four answer the same
   question — what in a setup that still *works* has quietly stopped being
   true?
@@ -283,6 +384,49 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Changed
 
+- **The host skill: a `drive` you launched is yours until it exits.** Three
+  bullets in the `fadeno-host` policy list, from the same dogfood session. Do
+  not end your turn while a drive you launched is still running unless the user
+  asked for a hand-off; if you background it, poll it and report each stop — and
+  when it stops with `needs_decision`, the next thing you say is the gate: the
+  question, the options, the decision id, and how long it has been waiting.
+  Repeat a `--bind` on every later drive of the run (the engine now refuses to
+  start new work for that role otherwise) and say in the reply which bindings
+  each drive carried. Coordinator steps of a run — a plan, a contract, a final
+  summary — are the session's to fulfil by default, because they need the
+  context the session already holds; delegate one only when producing the design
+  itself is the work, and say so.
+- **The parallel-workstreams contract: collision avoidance is the purpose, and
+  its weight is judgement.** The coordinator role prescribed the contract's form
+  ("freeze the shared contract — names, schemas, interface tokens") and said
+  nothing about why it exists, and the observed result was a 29 KB coordination
+  contract for three workers on an already-designed feature. The purpose now
+  leads: find where the parallel changes could collide — the same file, the same
+  name, the same interface — and prevent it before any fan-out. The file-disjoint
+  ownership manifest, every cross-cutting file belonging to the integrator, is
+  named as the one invariant, with the reason (the engine fans out on it and the
+  integrator reconciles against it); the rest is as short as the collision risk
+  allows, citing design docs rather than restating them. The `Contract`
+  artifact's own `instructions` — the operative text, the one the coordinator
+  reads when it writes the document — says the same thing now, rather than
+  "state the shared contract first: exact names, schemas and interface tokens
+  every workstream must use verbatim"; the manifest invariant, the generation
+  precedence and the closing reconciliation sentence are kept verbatim. On
+  rejection, the
+  sentence forbidding "a diff or patch" is gone: correct what the feedback names
+  and keep everything it did not touch — still one complete document, highest
+  generation authoritative. The `accept_contract` gate says what the approver is
+  approving (ownership and interfaces, not a design review), and the runner
+  skill now names the lighter path: when interfaces are settled and ownership is
+  obvious, independent isolated role dispatches plus one review carry the same
+  receipts without a contract gate. Prose only — every step id, gate, artifact
+  name, `when_to_use` token and role name is byte-identical, and a new
+  structural test pins that.
+- **Two supervisor test fixtures are bounded.** The `sigkill-orphan` and
+  startup-race fixtures ticked forever by design, on the assumption their
+  `t.after` teardown would always run — which it does not when the test runner
+  is itself SIGKILLed. One of them wrote 271,863 files that way. Both now stop
+  at 600 ticks (60s), far beyond what either assertion needs.
 - **Host mode now treats a Fadeno failure as a user-facing event.** The policy
   the host-mode hook injects (and its twin in the `fadeno-host` skill) says a
   refused, failed, timed-out or empty dispatch — plus a resolver error, an

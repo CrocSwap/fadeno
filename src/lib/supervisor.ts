@@ -55,6 +55,15 @@ const HEARTBEAT_INTERVAL_MS = 1_000;
 export const SPAWN_FAILED_MARKER = 'fadeno-supervisor: spawn-failed: ';
 
 /**
+ * Leading token that marks the argv form carrying a progress-sidecar path.
+ *
+ * Exported so a test can assert the wire form rather than reproduce the
+ * literal; callers never write it themselves, they pass a path to
+ * `superviseArgv` and it decides.
+ */
+export const SUPERVISE_PROGRESS_SENTINEL = '--fadeno-supervise-progress';
+
+/**
  * The spawn error the supervisor reported, or null when it reported none.
  * Restores what `spawnSync(cmd).error` used to say now that `spawnSync` runs
  * the supervisor rather than the executor.
@@ -96,8 +105,18 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const rawArgs = process.argv.slice(1);
 let parentRaw, inflightPath, statusPath, leaseReleaseRaw, timeoutMsRaw, deadlineAtRaw, cmd;
+let progressPath = '';
 let args;
-if (rawArgs.length >= 7 && (rawArgs[4] === '' || /^\\d+$/.test(rawArgs[4])) && (rawArgs[5] === '' || /^\\d{4}-\\d{2}-\\d{2}T/.test(rawArgs[5]))) {
+// A leading sentinel rather than another positional slot. The two forms below
+// are told apart by SNIFFING slots 4 and 5, and a sixth optional path — which
+// may be empty, absolute, or Windows-drive-prefixed — has no shape that could
+// not also be an executor argument. The sentinel is unambiguous by
+// construction, and \`superviseArgv\` emits it only when there is a progress
+// path to carry, so every existing argv keeps its exact byte layout.
+if (rawArgs[0] === ${JSON.stringify(SUPERVISE_PROGRESS_SENTINEL)}) {
+  [, parentRaw, inflightPath, statusPath, leaseReleaseRaw, timeoutMsRaw, deadlineAtRaw, progressPath, cmd, ...args] = rawArgs;
+  if (args == null) args = [];
+} else if (rawArgs.length >= 7 && (rawArgs[4] === '' || /^\\d+$/.test(rawArgs[4])) && (rawArgs[5] === '' || /^\\d{4}-\\d{2}-\\d{2}T/.test(rawArgs[5]))) {
   [parentRaw, inflightPath, statusPath, leaseReleaseRaw, timeoutMsRaw, deadlineAtRaw, cmd, ...args] = rawArgs;
   if (args == null) args = [];
 } else if (rawArgs.length >= 4) {
@@ -125,6 +144,16 @@ let timeoutMs = null;
 let deadlineAt = null;
 let timedOut = false;
 let deadlineTimer = null;
+// The agent's own account of what it is doing, mirrored from the cooperative
+// sidecar the engine's prompt told it to keep. See src/lib/attempt-progress.ts
+// for why this process is the one that reads it. Harness-observed, never
+// ledger, never gating — and always labeled \`agent\` so a reader cannot mistake
+// a self-report for a measurement.
+let progressState = null;
+let progressPhase = null;
+let progressCurrent = null;
+let progressUpdatedAt = null;
+let progressSource = null;
 try {
   if (timeoutMsRaw && timeoutMsRaw !== '' && timeoutMsRaw !== 'null') {
     const parsed = Number(timeoutMsRaw);
@@ -209,6 +238,49 @@ function reportStatus(extra) {
 // Claims distinguish supervisor_pid, executor_pid, process_group_id,
 // started_at, heartbeat_at, last_output_at, stdout_bytes, stderr_bytes.
 // This is harness-observed state below .fadeno/local/ and never ledger.
+// Mirror the cooperative sidecar. Read on the heartbeat rather than watched:
+// one small stat+read per second costs nothing next to an executor, and a
+// watcher would have to survive the agent replacing the file by rename.
+//
+// A read that fails CLEARS all five fields instead of leaving the last good
+// values in place. The mirror is a self-report that gates nothing, so the only
+// thing it owes a reader is that it stops claiming to be current the moment it
+// stops arriving: absent, unreadable, unparsable, not an object, or carrying no
+// non-empty \`updated_at\` all mean the agent is saying nothing right now, and
+// the claim then carries no progress fields at all — the same shape as an
+// attempt that was never given a sidecar path.
+//
+// Known cost, recorded rather than designed around: absent and torn are both
+// transient (the agent has not written yet, or is replacing the file by rename
+// as we read), so a claim written inside that window drops the fields for a
+// tick and the next tick restores them. A reader that sees no progress fields
+// must read "nothing reported", never "the agent stopped".
+function refreshProgress() {
+  if (!progressPath) return;
+  const clear = () => {
+    progressState = null;
+    progressPhase = null;
+    progressCurrent = null;
+    progressUpdatedAt = null;
+    progressSource = null;
+  };
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(progressPath, 'utf8'));
+  } catch {
+    clear();
+    return;
+  }
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) { clear(); return; }
+  if (typeof raw.updated_at !== 'string' || raw.updated_at === '') { clear(); return; }
+  const str = (value) => (typeof value === 'string' && value !== '' ? value : null);
+  progressState = str(raw.state);
+  progressPhase = str(raw.phase);
+  progressCurrent = str(raw.current);
+  progressUpdatedAt = raw.updated_at;
+  progressSource = 'agent';
+}
+
 function writeClaim() {
   if (!inflightPath) return;
   try {
@@ -225,6 +297,23 @@ function writeClaim() {
       last_output_at: lastOutputAt,
       stdout_bytes: stdoutBytes,
       stderr_bytes: stderrBytes,
+      // The executor's own argv. A reporter reading this claim has to decide
+      // whether silence is a stall, and the answer depends entirely on WHICH
+      // executor is silent — \`claude -p\` and \`codex exec\` print only at exit,
+      // so quiet is their healthy state. This process is the only one holding
+      // both the argv and the byte counters at the same time; without it a
+      // reader would have to re-derive the command from the ledger to say
+      // anything honest about the silence.
+      command: [cmd, ...args],
+      // Omitted entirely when the agent has said nothing, so "no sidecar yet"
+      // and "a sidecar that says nothing" stay distinguishable to a reader.
+      ...(progressUpdatedAt != null ? {
+        progress_state: progressState,
+        progress_phase: progressPhase,
+        progress_current: progressCurrent,
+        progress_updated_at: progressUpdatedAt,
+        progress_source: progressSource,
+      } : {}),
     };
     atomicWrite(inflightPath, JSON.stringify(claim), ++claimWrite);
   } catch {}
@@ -233,7 +322,7 @@ function dropClaim() {
   try { if (inflightPath) fs.unlinkSync(inflightPath); } catch {}
 }
 try {
-  if (inflightPath) writeClaim();
+  if (inflightPath) { refreshProgress(); writeClaim(); }
 } catch {}
 process.on('exit', () => { if (!ownerAlive()) dropClaim(); });
 
@@ -242,6 +331,7 @@ process.on('exit', () => { if (!ownerAlive()) dropClaim(); });
 const heartbeat = setInterval(() => {
   if (settled) return;
   heartbeatAt = new Date().toISOString();
+  refreshProgress();
   writeClaim();
   claimDirty = false;
   updateLease();
@@ -465,6 +555,9 @@ child.on('close', (code, signal) => {
   clearInterval(claimFlush);
   if (deadlineTimer) { try { clearTimeout(deadlineTimer); } catch {} }
   heartbeatAt = new Date().toISOString();
+  // One last mirror: the agent's final sidecar write often lands moments
+  // before it exits, and on the handoff path this claim outlives us.
+  refreshProgress();
   // The owner keeps the attempt exclusive through synthesis and attribution;
   // we only hand the guards back when nobody is left to own them.
   if (ownerAlive()) {
@@ -534,7 +627,34 @@ export function superviseArgv(
   statusPath = '',
   leaseRelease?: SupervisorLeaseReleaseDescriptor,
   timeoutMs?: number | null,
+  /**
+   * Absolute path of the attempt's cooperative progress sidecar, when the
+   * caller has a run context to name one — `<workspace>/` +
+   * `attemptProgressRelPath(runId, stepExecutionId)`. Given it, the supervisor
+   * mirrors the agent's self-report onto its claim once a second. Omitted for
+   * ad-hoc dispatches, which have no actor call and therefore no sidecar.
+   */
+  progressPath?: string | null,
 ): string[] {
+  const effectiveTimeout = typeof timeoutMs === 'number' && Number.isInteger(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : null;
+  if (typeof progressPath === 'string' && progressPath !== '') {
+    return [
+      '-e',
+      SUPERVISOR_SOURCE,
+      '--',
+      SUPERVISE_PROGRESS_SENTINEL,
+      String(process.pid),
+      inflightPath,
+      statusPath,
+      leaseRelease == null ? '' : JSON.stringify(leaseRelease),
+      effectiveTimeout == null ? '' : String(effectiveTimeout),
+      effectiveTimeout == null ? '' : new Date(Date.now() + effectiveTimeout).toISOString(),
+      progressPath,
+      ...command,
+    ];
+  }
   if (typeof timeoutMs === 'number' && Number.isInteger(timeoutMs) && timeoutMs > 0) {
     const deadlineAt = new Date(Date.now() + timeoutMs).toISOString();
     return [
@@ -670,6 +790,24 @@ export interface InflightClaim {
   lastOutputAt: string | null;
   stdoutBytes: number | null;
   stderrBytes: number | null;
+  /**
+   * The agent's own account of what it is doing, mirrored from its cooperative
+   * sidecar. Absent on every claim whose supervisor was given no sidecar path
+   * and on every attempt whose agent has not written one yet. Read it through
+   * `readClaimProgress` in `attempt-progress.ts`, which is where the meaning of
+   * these fields — a self-report, aged, never gating — is documented.
+   */
+  progressState: string | null;
+  progressPhase: string | null;
+  progressCurrent: string | null;
+  progressUpdatedAt: string | null;
+  progressSource: string | null;
+  /**
+   * The executor's argv, so a reader can tell a stalled streaming executor
+   * from a healthy print-at-exit one. Null on claims written before this
+   * field existed. Feed it to `isPrintAtExitArgv` / `describeIdleOutput`.
+   */
+  command: string[] | null;
 }
 
 /**
@@ -795,6 +933,7 @@ export function readInflightClaim(path: string, read: (p: string) => string): In
   // Normalize null vs missing for legacy files
   const stdout = stdoutBytes ?? (parsed.stdout_bytes != null ? 0 : null);
   const stderr = stderrBytes ?? (parsed.stderr_bytes != null ? 0 : null);
+  const text = (value: unknown): string | null => (typeof value === 'string' && value !== '' ? value : null);
   return {
     pid,
     startedAt,
@@ -806,6 +945,14 @@ export function readInflightClaim(path: string, read: (p: string) => string): In
     lastOutputAt,
     stdoutBytes: stdout,
     stderrBytes: stderr,
+    progressState: text(parsed.progress_state),
+    progressPhase: text(parsed.progress_phase),
+    progressCurrent: text(parsed.progress_current),
+    progressUpdatedAt: text(parsed.progress_updated_at),
+    progressSource: text(parsed.progress_source),
+    command: Array.isArray(parsed.command) && parsed.command.every((part) => typeof part === 'string')
+      ? (parsed.command as string[])
+      : null,
   };
 }
 

@@ -233,6 +233,102 @@ export function findSpawnableCodexAgent(
   ) ?? null;
 }
 
+// --- Managed identity truth: what the file says vs what the dial says ---
+
+/**
+ * The identity a managed Codex agent file is EXPECTED to carry for one
+ * archetype, as the dial resolves it.
+ *
+ * `model`/`effort` are the values `renderCodexHostAgent` would bake, so a
+ * neutral `current-host` slot — whose file states no identity at all by
+ * construction — is represented as two nulls rather than as the sentinel
+ * string. The caller does that mapping because the sentinel's name lives in
+ * `src/commands/steering.ts`, and this module sits underneath it.
+ *
+ * `lane` is the lane the FILE is cut for, not the lane a given call would
+ * take: `host` means `steering apply` writes a host agent that bakes this
+ * identity, `command` means it writes a command broker whose only identity is
+ * the relay's. A broker's model is therefore never the dial's, which is why
+ * the command lane is reported and not judged.
+ */
+export interface CodexDialIdentity {
+  model: string | null;
+  effort: string | null;
+  lane: 'host' | 'command';
+}
+
+/** One archetype's row: what its file says, what its dial says, and the verdict. */
+export interface CodexAgentIdentityRow {
+  archetype: string;
+  file: { model: string | null; effort: string | null } | null;
+  dial: CodexDialIdentity | null;
+  status: 'current' | 'stale' | 'missing' | 'not_applicable';
+}
+
+/**
+ * The one command that rewrites the user-scope managed agent files with the
+ * dialed identity, frozen here so `status` and `dial` cannot drift apart.
+ *
+ * Chosen against the alternatives by running them (see
+ * `test/status-codex-identity.test.ts`, which executes this exact argv against
+ * a temp user dir and asserts the drift clears):
+ *
+ *  - `fadeno steering apply <loadout> --codex --force` is not a command. The
+ *    CLI refuses any positional after `apply` (`src/cli.ts`, the `sub ===
+ *    'apply'` branch), so the `<loadout>` word alone makes it exit non-zero —
+ *    and without `--scope user` it would write `.codex/agents/` in the repo,
+ *    which is not the directory `status` reads.
+ *  - `fadeno setup --codex` does reach the same apply (`src/commands/setup.ts`
+ *    calls `runSteeringApply` with `scope: 'user'`), but it also syncs the
+ *    managed runtime, migrates persisted state, and rewrites the installation
+ *    manifest — a much larger action than the drift calls for.
+ *
+ * `--force` is deliberately absent: at user scope it changes nothing (a file
+ * carrying the managed header is refreshed on content difference, and a
+ * foreign file at that path is preserved with or without it — see
+ * `managedAgentEmit`), so including it would only teach a habit that matters
+ * at project scope.
+ */
+export const CODEX_IDENTITY_REMEDIATION =
+  'run `fadeno steering apply --codex --scope user`, then start a fresh Codex session';
+
+/**
+ * The verdict for one archetype, from the file's identity and the dial's.
+ *
+ * A missing file outranks everything: whatever lane the dial lands on, Codex
+ * has no agent to load for that role. Beyond that, only a HOST slot's identity
+ * is judged — a command broker carries the relay's model and effort on
+ * purpose, so comparing it against the dial would report drift that is not
+ * there. An unresolvable dial (`null`) is the same "reported, not judged"
+ * case.
+ */
+export function codexAgentIdentityStatus(
+  file: { model: string | null; effort: string | null } | null,
+  dial: CodexDialIdentity | null,
+): CodexAgentIdentityRow['status'] {
+  if (file == null) return 'missing';
+  if (dial == null || dial.lane === 'command') return 'not_applicable';
+  return file.model === dial.model && file.effort === dial.effort ? 'current' : 'stale';
+}
+
+function identityText(identity: { model: string | null; effort: string | null } | null): string {
+  if (identity == null) return 'missing';
+  if (identity.model == null) return 'the session baseline';
+  return identity.effort == null ? identity.model : `${identity.model}/${identity.effort}`;
+}
+
+/**
+ * One drifted row as a person reads it: `reviewer file gpt-5.6-luna/high vs
+ * dial gpt-5.6-terra/xhigh`.
+ *
+ * The single formatter `status` and `dial` both print through — the two
+ * surfaces state the same fact, and a second spelling of it is exactly the
+ * one-fact-two-readers drift this codebase keeps paying for.
+ */
+export function describeCodexAgentIdentityRow(row: CodexAgentIdentityRow): string {
+  return `${row.archetype} file ${identityText(row.file)} vs dial ${identityText(row.dial)}`;
+}
+
 /**
  * How a file's own identity reads in an advisory that has to name it.
  *

@@ -15,6 +15,15 @@ import { maintainedHarnesses, readInstallationManifest, compareFadenoVersions, r
 import type { DialRef } from '../lib/executors.ts';
 import { inspectOpenCodeMaterialization, type OpenCodeMaterialization } from '../lib/opencode-steering.ts';
 import { inspectOmpMaterialization, type OmpMaterialization } from '../lib/omp-steering.ts';
+import {
+  CODEX_IDENTITY_REMEDIATION,
+  CODEX_STEERING_ARCHETYPES,
+  codexAgentIdentityStatus,
+  readCodexAgentFile,
+  type CodexAgentIdentityRow,
+  type CodexDialIdentity,
+} from '../lib/codex-agent-file.ts';
+import { NEUTRAL_HOST_EXECUTOR, runSteeringResolve } from './steering.ts';
 
 export class StatusError extends Error {}
 
@@ -48,7 +57,7 @@ export interface StatusResult {
   legacy_pin_note: string | null;
   roles: StatusRole[];
   external: StatusRole[];
-  codexMaterialization: { path: string; fresh: boolean; restartRequired: boolean } | null;
+  codexMaterialization: CodexMaterialization | null;
   opencodeMaterialization: OpenCodeMaterialization | null;
   ompMaterialization: OmpMaterialization | null;
   projectCustomized: boolean;
@@ -78,26 +87,97 @@ function harnessOf(target: StatusOptions['target'], userPathOptions?: UserPathOp
   return activeHarness(target ?? undefined, userPathOptions);
 }
 
+export interface CodexMaterialization {
+  path: string;
+  /** No file missing and no host slot's identity drifted. */
+  fresh: boolean;
+  restartRequired: boolean;
+  agents: CodexAgentIdentityRow[];
+  /** The exact command that fixes it, or null when nothing is wrong. */
+  remediation: string | null;
+}
+
+/**
+ * What Codex would actually load for the three role slots, judged against what
+ * the dials say — not merely whether the files are there.
+ *
+ * File EXISTENCE was the whole test until 2026-09-05, and it reported
+ * `current` at the exact moment it mattered least: a Codex director whose
+ * `reviewer` dial had moved to another model kept spawning the old identity,
+ * because the agent file is a frozen identity that no spawn value can correct
+ * (`findSpawnableCodexAgent`), and `status` said the managed agents were fine.
+ *
+ * The dial side comes from `runSteeringResolve`, so this asks the same
+ * resolver `steering apply` and the spawn guard ask rather than re-deriving a
+ * second cascade. Two things it must be told, both of which would otherwise be
+ * read off the ambient session:
+ *
+ *  - The HARNESS. These files are Codex's whatever this session runs inside,
+ *    and the resolver reads its host from `activeHarness`, which reads the
+ *    injected env — so the harness is forced through the same options object
+ *    the user paths already travel in, never by touching `process.env`.
+ *  - Nothing else: the dial cascade, the catalog, and the effort are the
+ *    resolver's own answers.
+ *
+ * A slot is JUDGED when its dial is host-shaped on codex (`adapter: 'host'`
+ * and `harness: 'codex'`) — precisely the case where `steering apply` bakes
+ * the dialed identity into the file. Anything else materializes as a command
+ * broker carrying the relay's identity, which is not the dial's and must not
+ * be compared to it. `SteeringResolution.lane` cannot answer this: it also
+ * folds in "is this the session's own baseline", which `status` has no host
+ * executor to prove and which would mark every dialed slot `command`.
+ *
+ * Known corner: a codex-harness model that the host lane's own `eligibility:`
+ * excludes for one archetype is materialized as a broker while still
+ * resolving with `adapter: 'host'`. The shipped catalog declares no such
+ * exclusion; if one appears, this predicate is where it gets read.
+ */
 function materialization(
-  _profile: import('../lib/executors.ts').ExecutorProfile,
   codexMaintained: boolean,
+  repoRoot: string,
   userPathOptions?: UserPathOptions,
-): StatusResult['codexMaterialization'] {
+): CodexMaterialization | null {
   if (!codexMaintained) return null;
   const path = codexUserAgentDir(userPathOptions);
-  const needed = ['worker', 'reviewer', 'judge'];
-  let allFresh = true;
-  let anyHost = false;
-  for (const arch of needed) {
-    const file = join(path, `fadeno-${arch}.toml`);
-    if (!existsSync(file)) {
-      allFresh = false;
-    } else {
-      anyHost = true;
+  const codexOptions: UserPathOptions = {
+    ...userPathOptions,
+    env: { ...(userPathOptions?.env ?? process.env), FADENO_HARNESS: 'codex' },
+  };
+  const agents = CODEX_STEERING_ARCHETYPES.map((archetype): CodexAgentIdentityRow => {
+    const state = readCodexAgentFile(join(path, `fadeno-${archetype}.toml`));
+    const file = state == null ? null : { model: state.model, effort: state.reasoningEffort };
+    let dial: CodexDialIdentity | null = null;
+    try {
+      const resolved = runSteeringResolve({
+        archetype,
+        repoRoot,
+        userPathOptions: codexOptions,
+        env: codexOptions.env as NodeJS.ProcessEnv,
+      });
+      // The neutral sentinel names no provider-servable model, and
+      // `renderCodexHostAgent` omits both identity lines for it — so the
+      // identity a correct file carries is "none", not the sentinel string.
+      const neutral = resolved.model === NEUTRAL_HOST_EXECUTOR;
+      dial = {
+        model: neutral ? null : resolved.model,
+        effort: neutral ? null : resolved.effort,
+        lane: resolved.adapter === 'host' && resolved.harness === 'codex' ? 'host' : 'command',
+      };
+    } catch {
+      // An uncompilable dial is reported as unjudged rather than as drift:
+      // `status` must not turn a catalog problem into an identity accusation.
+      dial = null;
     }
-  }
-  if (!anyHost && allFresh) return { path, fresh: true, restartRequired: false };
-  return { path, fresh: allFresh, restartRequired: !allFresh };
+    return { archetype, file, dial, status: codexAgentIdentityStatus(file, dial) };
+  });
+  const fresh = agents.every((agent) => agent.status === 'current' || agent.status === 'not_applicable');
+  return {
+    path,
+    fresh,
+    restartRequired: !fresh,
+    agents,
+    remediation: fresh ? null : CODEX_IDENTITY_REMEDIATION,
+  };
 }
 
 export function runStatus(opts: StatusOptions = {}): StatusResult {
@@ -162,16 +242,19 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim()
     || (installation.runtime != null && resolve(process.argv[1] ?? '') === resolve(installation.runtime.path) ? 'managed' : 'path');
   const codexMaintained = maintainedHarnesses(opts.userPathOptions).includes('codex');
-  let codexProfile: import('../lib/executors.ts').ExecutorProfile | null = null;
+  // The codex profile still gates the report — a catalog that cannot be loaded
+  // for that harness has no dial to judge a file against — but the identity
+  // comparison itself goes through `runSteeringResolve`, which loads its own.
+  let codexProfileLoads = false;
   if (codexMaintained) {
     try {
-      const loaded = loadLayeredProfile(repoRoot, opts.userPathOptions, 'codex');
-      codexProfile = loaded.profile;
+      loadLayeredProfile(repoRoot, opts.userPathOptions, 'codex');
+      codexProfileLoads = true;
     } catch {
-      codexProfile = null;
+      codexProfileLoads = false;
     }
   }
-  const materialized = codexProfile == null ? null : materialization(codexProfile, true, opts.userPathOptions);
+  const materialized = codexProfileLoads ? materialization(true, repoRoot, opts.userPathOptions) : null;
   const opencodeMaterialized = harness === 'opencode'
     ? inspectOpenCodeMaterialization(
       repoRoot,

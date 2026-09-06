@@ -15,12 +15,20 @@ when_to_use:
 roles:
   coordinator:
     purpose: >
-      Freeze the shared contract — names, schemas, interface tokens — and one
-      ownership manifest per workstream BEFORE any fan-out, then own the final
-      summary. Manifests must be file-disjoint; every cross-cutting file belongs
-      to the integrator, not to a workstream. On rejection, produce one complete
-      replacement contract addressing the recorded feedback — never a diff or patch
-      against generation 1; the highest generation is authoritative.
+      Keep the parallel changes from colliding: find where they could — the same
+      file, the same name, the same interface — and prevent it BEFORE any
+      fan-out, then own the final summary. Give each workstream a file-disjoint
+      ownership manifest, with every cross-cutting file belonging to the
+      integrator; that manifest shape is the one invariant, because the engine
+      fans out on it and the integrator reconciles against it. Freeze the
+      interfaces the workstreams must agree on, and no more. The rest is
+      judgement: make the contract as short as the collision risk allows — an
+      ownership table and a few names when the interfaces are already settled, a
+      real design section only when the design itself is unsettled — and cite the
+      design docs and specs that already exist instead of restating them. On
+      rejection, correct what the recorded feedback names and keep everything it
+      did not touch; the result is still one complete contract, and the highest
+      generation is authoritative.
   workstream_1:
     purpose: >
       Implement workstream 1 against the frozen contract, touching only the
@@ -75,8 +83,10 @@ flow:
     kind: human_gate
     input: [Contract]
     prompt: >
-      Review the frozen contract and ownership manifests. Approve to fan out the
-      workstreams, or reject with feedback to request one regeneration.
+      Review the ownership manifests and the interfaces the contract freezes:
+      what you are approving is that the parallel changes cannot collide, not a
+      design review. Approve to fan out the workstreams, or reject with feedback
+      to request one regeneration.
     on_approve: run_workstreams
     on_reject: revise_contract
 
@@ -226,13 +236,19 @@ artifact_contracts:
   Contract:
     media_type: text/markdown
     instructions: >
-      State the shared contract first — exact names, schemas, and interface
-      tokens every workstream must use verbatim — then one ownership manifest
-      per workstream listing the files it alone may edit. Manifests must be
-      file-disjoint; assign cross-cutting and generated files to the integrator.
-      Each generation is a complete, self-contained replacement and the highest
-      generation is authoritative; close with the reconciliation rules workers
-      cannot decide for themselves.
+      Say where the parallel changes could collide — the same file, the same
+      name, the same interface — and settle it. Give each workstream an
+      ownership manifest of the files it alone may edit; the manifests must be
+      file-disjoint, with cross-cutting and generated files assigned to the
+      integrator, because the fan-out and the integration both read that shape.
+      Freeze the names, schemas and interface tokens the workstreams must
+      actually agree on, and no more. The weight of the rest is proportional to
+      the collision risk: an ownership table and a few names when the interfaces
+      are already settled, a design section only when the design itself is
+      unsettled, and a citation of the design docs and specs that already exist
+      rather than a restatement of them. Each generation is a complete,
+      self-contained replacement and the highest generation is authoritative;
+      close with the reconciliation rules workers cannot decide for themselves.
   WorkstreamReport:
     media_type: text/markdown
     instructions: >
