@@ -236,3 +236,37 @@ test('a withdrawn dispatch stops holding "last" open and stops overlapping later
   assert.equal(resolved.dispatchId, other);
   assert.equal(resolved.resolvedBy, 'recency');
 });
+
+test('known non-dispatch rows are read, not counted as unreadable damage', (t) => {
+  // The regression this pins: every one of these events is written by fadeno
+  // itself, and each used to fall through to `skipped` — so `fadeno dispatches`
+  // told the reader that an intact log had unreadable rows in it and sent them
+  // to repair nothing.
+  const root = seed(t, [
+    { format: '1.1', event: 'dispatch_requested', dispatch_id: 'd1', archetype: 'worker' },
+    { format: '1.1', event: 'dispatch_completed', dispatch_id: 'd1', exit_code: 0 },
+    { format: '1.1', event: 'dispatch_cancelled', dispatch_id: 'd1' },
+    { format: '1.1', event: 'dispatch_merged', dispatch_id: 'd1' },
+    { format: '1.1', event: 'artifact_created', dispatch_id: 'd1' },
+    { format: '1.1', event: 'shadow_apply', pair_id: 'p1' },
+    { format: '1.1', event: 'workspace_lease_recovered' },
+    { format: '1.1', event: 'workspace_lease_reclaim_denied' },
+  ]);
+
+  const res = runDispatches({ cwd: root, repoRoot: root });
+  assert.equal(res.skipped, 0, 'no row here is unreadable');
+  assert.equal(res.skippedNewerFormat, 0);
+  assert.ok(!res.summary.includes('unreadable'), `summary claimed damage: ${res.summary}`);
+  assert.equal(res.entries.length, 1, 'only the dispatch itself is an entry');
+});
+
+test('a genuinely unknown row is still counted as unreadable', (t) => {
+  // The half that makes the count mean something: widening the known-events
+  // set must not turn the counter off.
+  const root = seed(t, [
+    { format: '1.1', event: 'dispatch_requested', dispatch_id: 'd1', archetype: 'worker' },
+    { format: '1.1', event: 'something_this_reader_never_heard_of' },
+  ]);
+  const res = runDispatches({ cwd: root, repoRoot: root });
+  assert.equal(res.skipped, 1);
+});

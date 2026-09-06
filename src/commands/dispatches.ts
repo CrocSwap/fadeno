@@ -1656,7 +1656,21 @@ function summarize(
  * ledger *writer* must refuse it outright.
  */
 /** What one evidence row was to the reader that folded it. */
-type RowFold = 'read' | 'skipped' | 'newer-format';
+type RowFold = 'read' | 'skipped' | 'newer-format' | 'no-entry';
+
+/**
+ * Events this reader knows and deliberately renders no entry for. Membership
+ * means "understood, produces nothing", which is not the same as `skipped`
+ * ("could not read this"). See the fold's tail for why each is here.
+ */
+const KNOWN_NON_ENTRY_EVENTS = new Set([
+  'dispatch_cancelled',
+  'dispatch_merged',
+  'artifact_created',
+  'shadow_apply',
+  'workspace_lease_recovered',
+  'workspace_lease_reclaim_denied',
+]);
 
 /**
  * Fold ONE evidence row into an entry list — the single row reader shared by
@@ -1760,6 +1774,25 @@ function foldEvidenceRow(
     }
     return 'read';
   }
+  // Rows this log carries ON PURPOSE that are not themselves dispatches.
+  // They are READ — the reader understands every one of them — they simply
+  // produce no entry. Counting them as `skipped` told the reader that an
+  // intact log had unreadable damage in it, and sent them to repair nothing:
+  // a repo that had merged one dispatch and applied one shadow arm reported
+  // two "unreadable rows". That is the same silent-wrong-answer shape the
+  // rest of this file is built to avoid, pointed at the log's own health.
+  //
+  //   dispatch_cancelled  a cancel is a REQUEST, not a receipt (see
+  //                       `commandDispatchTerminalState`), so it deliberately
+  //                       folds onto nothing and the receipt arrives later.
+  //   dispatch_merged     merge-back of an already-completed dispatch.
+  //   artifact_created    an artifact written beside a dispatch.
+  //   shadow_apply        a shadow arm applied to the tree.
+  //   workspace_lease_*   lease bookkeeping. Kept readable even as the leasing
+  //                       itself is removed: logs written before that removal
+  //                       still carry these rows, and a reader that forgets a
+  //                       retired event starts calling old evidence damage.
+  if (KNOWN_NON_ENTRY_EVENTS.has(event ?? '')) return 'no-entry';
   return 'skipped'; // some other row kind: not renderable as a dispatch
 }
 
