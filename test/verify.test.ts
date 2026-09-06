@@ -167,9 +167,17 @@ test('happy path: a completed run with a recomputable passing gate verifies clea
       'tool-result-coherence',
       'tool-command-digest',
       'tool-lifecycle',
+      'concurrent-writes',
+      'discarded-output',
     ],
   );
   assert.ok(result.findings.every((f) => f.status !== 'fail'));
+  // A clean run states the LEDGER'S SILENCE, not that it was alone in the
+  // tree. The distinction is the whole reason these two are `ok` here and
+  // `warn` — never `fail` — when a stamp exists.
+  assert.equal(finding(result, 'concurrent-writes').status, 'ok');
+  assert.match(finding(result, 'concurrent-writes').detail, /no receipt carries a concurrent_write stamp/);
+  assert.equal(finding(result, 'discarded-output').status, 'ok');
   assert.equal(finding(result, 'ledger-version').detail, 'schema_version 0.3');
   assert.equal(finding(result, 'events-seq').detail, 'seq contiguous 1..4');
   assert.equal(finding(result, 'terminal-events').detail, 'run_completed agrees with run.yaml status');

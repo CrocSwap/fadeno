@@ -16,6 +16,13 @@ import {
   type RunSummary,
 } from '../lib/run-ledger.ts';
 import { hostRequestTerminalState } from '../lib/host-dispatch.ts';
+import {
+  describeConcurrentWrite,
+  describeIgnoredOutput,
+  parseConcurrentWriteStamps,
+  parseIgnoredOutputDiscarded,
+  type OverlapAttribution,
+} from '../lib/receipt-attestations.ts';
 import { INFLIGHT_DIR, readInflightClaim, readSupervisorStatus } from '../lib/supervisor.ts';
 import { readWorkspaceLease, workspaceLeaseHolderKey, WORKSPACE_LEASE_FILE } from '../lib/workspace-lease.ts';
 import { HostWorkspaceError, readHostWorkspaceState } from '../lib/host-workspace.ts';
@@ -165,6 +172,61 @@ export interface ShowProjection {
   requests: HostRequestView[];
   /** Harness-observed process facts (workspace lease + live inflight claims). */
   harnessObserved: HarnessObservedProcessView[];
+  /**
+   * Deliveries that wrote the same paths as this run's receipts, in windows
+   * that overlapped in time (`concurrent_write`). Empty when no receipt
+   * carries a stamp — which reports the ledger's silence, not a positive
+   * claim that the run was alone in the tree.
+   */
+  workspaceOverlaps: WorkspaceOverlapView[];
+  /**
+   * Gitignored content that no diff carried out of a worktree before it was
+   * torn down (`ignored_output_discarded`). Empty when nothing was recorded.
+   */
+  discardedOutput: DiscardedOutputView[];
+}
+
+/**
+ * One `concurrent_write` stamp, located at the receipt that carries it.
+ *
+ * Non-gating, like every other attestation in this projection. It is here
+ * because nothing prevents a concurrent writer any more — the repo-wide
+ * writer lease is deleted — so this projection is where the overlap becomes
+ * visible or it does not become visible at all.
+ */
+export interface WorkspaceOverlapView {
+  step: string | null;
+  actor: string | null;
+  /** The OTHER delivery's dispatch id. */
+  dispatchId: string;
+  attribution: OverlapAttribution | null;
+  pathsIntersecting: number | null;
+  paths: string[];
+  /** The other window had not closed: overlap in time only. */
+  pending: boolean;
+  /** A listing was incomplete, so the intersection is a floor. */
+  degraded: boolean;
+  /** The rendered sentence, so every surface says this the same way. */
+  detail: string;
+}
+
+/**
+ * One `ignored_output_discarded` stamp, located at the receipt that carries it.
+ *
+ * Unlike an overlap this is not an attestation about who touched what: the
+ * named content existed in the worktree and no diff carried it out. It sits
+ * ABOVE the artifact list in the rendered projection deliberately — a reader
+ * who sees the artifacts first concludes they are the whole product.
+ */
+export interface DiscardedOutputView {
+  step: string | null;
+  actor: string | null;
+  paths: string[];
+  /** The listing is a FLOOR, not the set: more may have been destroyed. */
+  truncated: boolean;
+  /** A worktree still holding it, when the writer said so. */
+  retainedAt: string | null;
+  detail: string;
 }
 
 export interface HostRequestView {
@@ -933,7 +995,52 @@ function projectRun(
     failures,
     requests,
     harnessObserved,
+    ...collectWorkspaceAttestations(events),
   };
+}
+
+/**
+ * Pull the two workspace attestations off whatever receipts carry them.
+ *
+ * Every event is scanned rather than a named list of receipt types. The
+ * fields are written by `drive.ts` onto `actor_completed` and `actor_failed`
+ * today, but a hard-coded list here would be a second copy of the writer's
+ * choice — the one-list-two-consumers shape that produces a reader silently
+ * saying "clean" the day a third writer appears.
+ */
+function collectWorkspaceAttestations(
+  events: RunEvent[],
+): { workspaceOverlaps: WorkspaceOverlapView[]; discardedOutput: DiscardedOutputView[] } {
+  const workspaceOverlaps: WorkspaceOverlapView[] = [];
+  const discardedOutput: DiscardedOutputView[] = [];
+  for (const event of events) {
+    const actor = typeof event.extra.actor === 'string' ? event.extra.actor : null;
+    for (const stamp of parseConcurrentWriteStamps(event.extra.concurrent_write) ?? []) {
+      workspaceOverlaps.push({
+        step: event.step,
+        actor,
+        dispatchId: stamp.dispatchId,
+        attribution: stamp.attribution,
+        pathsIntersecting: stamp.pathsIntersecting,
+        paths: stamp.paths,
+        pending: stamp.pending,
+        degraded: stamp.degraded,
+        detail: describeConcurrentWrite(stamp),
+      });
+    }
+    const ignored = parseIgnoredOutputDiscarded(event.extra.ignored_output_discarded);
+    if (ignored != null) {
+      discardedOutput.push({
+        step: event.step,
+        actor,
+        paths: ignored.paths,
+        truncated: ignored.truncated,
+        retainedAt: ignored.retainedAt,
+        detail: describeIgnoredOutput(ignored),
+      });
+    }
+  }
+  return { workspaceOverlaps, discardedOutput };
 }
 
 function projectHostRequests(repoRoot: string, runId: string, events: RunEvent[], now: Date): HostRequestView[] {

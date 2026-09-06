@@ -16,6 +16,12 @@ import {
 } from '../lib/node-instance.ts';
 import { SchemaSet, schemaErrorMessages, type SchemaKind } from '../lib/playbook-validate.ts';
 import {
+  describeConcurrentWrite,
+  describeIgnoredOutput,
+  parseConcurrentWriteStamps,
+  parseIgnoredOutputDiscarded,
+} from '../lib/receipt-attestations.ts';
+import {
   ledgerMode,
   LEGACY_EVENT_RENAMES,
   listRuns,
@@ -28,6 +34,7 @@ import {
   type RunEvent,
   type RunSummary,
 } from '../lib/run-ledger.ts';
+import { findAdhocHostDispatch } from './dispatch-adhoc.ts';
 import { CONDITION_REGISTRY, SUPPORTED_CONDITIONS, type GateCondition } from './gate.ts';
 import { extractSchemaEnvelope } from '../lib/schema-envelope.ts';
 
@@ -48,7 +55,34 @@ export interface VerifyOptions {
   repoRoot?: string;
 }
 
-export type FindingStatus = 'ok' | 'fail' | 'skip';
+/**
+ * What one check concluded.
+ *
+ * The first three are RECOMPUTATION verdicts and share one axis: `ok` means
+ * the ledger's claim was recomputed and holds, `fail` that it was recomputed
+ * and does not, `skip` that it could not be recomputed at all.
+ *
+ * `warn` is a different axis, and it exists because the ledger carries facts
+ * that verification can neither confirm nor deny. A `concurrent_write` stamp
+ * names a window log that is machine-local and already overwritten; an
+ * `ignored_output_discarded` stamp names a worktree that no longer exists.
+ * On the recomputation axis both are `skip` — which is how they stayed
+ * invisible, since a skip reads as "nothing here to see". `warn` says the
+ * opposite: the run STATED something a reader has to act on, and this
+ * verifier is not the thing that can adjudicate it.
+ *
+ * `warn` never fails the run, and that is deliberate rather than timid. A
+ * failing `verify` exits non-zero and `fadeno evidence` refuses to promote
+ * the run at all (`evidence.ts`), with `--allow-failed` — which means
+ * "accept an honest failed terminal" — as the only escape. Neither
+ * attestation is proof that the run is wrong: two deliveries touching one
+ * file may both be fine, and discarding gitignored output is the DECLARED
+ * behaviour of the `ignored_output: discardable` default. Gating on either
+ * would make ordinary runs unpromotable and teach readers to reach for
+ * `--allow-failed`, which is how a check becomes one people route around.
+ * `doctor` draws the same line with `ok | warning | error`.
+ */
+export type FindingStatus = 'ok' | 'fail' | 'skip' | 'warn';
 
 export interface Finding {
   check: string;
@@ -60,12 +94,44 @@ export interface VerifyResult {
   run: RunSummary;
   mode: LedgerMode;
   findings: Finding[];
-  /** True when no finding failed. */
+  /** True when no finding failed. A `warn` is a finding, not a failure. */
   ok: boolean;
 }
 
 function resolveArtifact(runDir: string, rel: string): string {
   return isAbsolute(rel) ? rel : join(runDir, rel);
+}
+
+/**
+ * What `verify` says when the thing it was handed is not a run.
+ *
+ * `fadeno verify` audits RUN LEDGERS: contiguity of attempt ordinals, the
+ * playbook snapshot's digest, gate coherence, the host-dispatch lifecycle.
+ * A RUNLESS host dispatch (`fadeno dispatch-open` / `dispatch-close`) has none
+ * of those by construction — no playbook, no ledger, no engine attempts — and
+ * lives in `.fadeno/dispatches.jsonl` instead. So `verify` never sees one and
+ * can never falsely fail it.
+ *
+ * What it CAN do wrong is answer "No run matching <id>" to an operator holding
+ * a perfectly good ad-hoc dispatch id, which reads as "your evidence is gone"
+ * rather than "you are asking the wrong command". This says which, and where
+ * the evidence actually is. It never invents a verdict: an ad-hoc host
+ * dispatch is not verified by this message, it is REDIRECTED by it.
+ */
+function adhocAwareRunLookupMessage(repoRoot: string, query: string, err: RunLedgerError): string {
+  const record = findAdhocHostDispatch(repoRoot, query);
+  if (record == null) return err.message;
+  const id8 = record.dispatchId.slice(0, 8);
+  const state = record.closed
+    ? `closed (${record.outcome ?? 'outcome unstated'}${record.closeReason != null ? `: ${record.closeReason}` : ''})`
+    : 'still open — no terminal receipt';
+  return (
+    `"${query}" is an ad-hoc host dispatch (${id8}, ${state}), not a playbook run. ` +
+    'It was opened with `fadeno dispatch-open`, so it has no run ledger, no playbook snapshot and no engine ' +
+    'attempts — the three things `fadeno verify` audits — and there is nothing here for it to verify or to ' +
+    'fail. Its request row and terminal receipt are in .fadeno/dispatches.jsonl: read them with ' +
+    `\`fadeno dispatches\`${record.tag != null ? ` (tag: ${record.tag})` : ''}.`
+  );
 }
 
 function summaryFromDirectory(dir: string): RunSummary {
@@ -154,7 +220,12 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
     if (runs.length === 0) throw new VerifyError('No runs found under .fadeno/runs.');
     run = runs[0]!;
   } else {
-    run = resolveRun(repoRoot, opts.run!);
+    try {
+      run = resolveRun(repoRoot, opts.run!);
+    } catch (err) {
+      if (err instanceof RunLedgerError) throw new VerifyError(adhocAwareRunLookupMessage(repoRoot, opts.run!, err));
+      throw err;
+    }
   }
 
   // Readers refuse unversioned/unknown ledgers: a legacy ledger is not
@@ -348,8 +419,150 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   findings.push(checkToolCommandDigest(run, events, mode));
   findings.push(checkToolLifecycle(run, events, mode));
 
+  // 28-29. Kernel attestations about the WORKSPACE, which the writer lease
+  // and the merge-back could detect but not prevent. Neither is recomputable
+  // here — the window log is machine-local and the worktree is gone — so both
+  // report as warnings rather than being skipped into silence. See
+  // `FindingStatus`.
+  findings.push(
+    legacy || compatibility
+      ? skip('concurrent-writes', 'overlap detection postdates this ledger format')
+      : checkConcurrentWrites(events),
+  );
+  findings.push(
+    legacy || compatibility
+      ? skip('discarded-output', 'ignored-output detection postdates this ledger format')
+      : checkDiscardedOutput(events),
+  );
+
   const ok = !findings.some((f) => f.status === 'fail');
   return { run, mode, findings, ok };
+}
+
+/** Where a receipt's attestation happened, for a finding a human has to locate. */
+function receiptLabel(event: RunEvent): string {
+  const actor = typeof event.extra.actor === 'string' ? event.extra.actor : null;
+  const attempt = typeof event.extra.attempt === 'number' ? `#${event.extra.attempt}` : '';
+  return `${event.step ?? '(run)'}${actor != null ? `/${actor}` : ''}${attempt}`;
+}
+
+/**
+ * 28. concurrent-writes — another delivery wrote the same paths, in a window
+ * that overlapped this one.
+ *
+ * This is what replaced the repo-wide writer lease. The lease PREVENTED a
+ * second writer (and, being unable to prove a pid-less holder dead, wedged
+ * repos doing it); nothing prevents one now, so the whole safety story rests
+ * on the overlap being SEEN. It was stamped onto receipts and read by
+ * nothing, which is the same shape as the relay-fidelity failure that warned
+ * on a stream nobody reads while returning success.
+ *
+ * Reported as a warning, never a failure: an overlap is not proof of damage.
+ * The detail carries the strength of the evidence instead — `delivery` is the
+ * other side's own worktree diff and is attributable to it, `workspace` is a
+ * shared tree's delta and is an attestation only, `degraded` means a listing
+ * was incomplete so the intersection is a floor, and `pending` means the
+ * overlap in time is known but the other window had not closed.
+ *
+ * The `ok` branch reports the LEDGER'S SILENCE rather than claiming the run
+ * was alone. It is a weaker statement on purpose: a delivery whose own path
+ * listing failed, and a window log that could not be read, both produce a
+ * receipt with no stamp on it.
+ */
+function checkConcurrentWrites(events: RunEvent[]): Finding {
+  const check = 'concurrent-writes';
+  const lines: string[] = [];
+  let receipts = 0;
+  let settled = 0;
+  let pendingOnly = 0;
+  let degraded = 0;
+  for (const event of events) {
+    const stamps = parseConcurrentWriteStamps(event.extra.concurrent_write);
+    if (stamps == null) continue;
+    receipts += 1;
+    for (const stamp of stamps) {
+      if (stamp.pending) pendingOnly += 1;
+      else settled += 1;
+      if (stamp.degraded) degraded += 1;
+      lines.push(`${receiptLabel(event)}: ${describeConcurrentWrite(stamp)}`);
+    }
+  }
+  if (lines.length === 0) {
+    return {
+      check,
+      status: 'ok',
+      detail: 'no receipt carries a concurrent_write stamp (the ledger records no overlapping delivery)',
+    };
+  }
+  const counted = [
+    `${settled} with an intersecting path set`,
+    pendingOnly > 0 ? `${pendingOnly} recorded while the other window was still open` : null,
+    degraded > 0 ? `${degraded} from an incomplete listing (a floor, not the set)` : null,
+  ].filter((part): part is string => part != null).join(', ');
+  return {
+    check,
+    status: 'warn',
+    detail:
+      `${lines.length} overlap${lines.length === 1 ? '' : 's'} across ${receipts} receipt${receipts === 1 ? '' : 's'} ` +
+      `(${counted}). Nothing prevents a concurrent writer any more, so this is the record that one happened — ` +
+      `it is not proof either side lost work. ${lines.join(' | ')}`,
+  };
+}
+
+/**
+ * 29. discarded-output — gitignored content that died with a worktree.
+ *
+ * An isolated delivery reaches the caller's tree as a patch from `git add -A`
+ * + `git diff --binary --cached`, and `git add -A` RESPECTS `.gitignore`. So
+ * anything the executor produced at an ignored path was staged by nothing,
+ * diffed by nothing, applied by nothing, and then removed with the worktree.
+ * A repo whose `.gitignore` carries a broad `data`-prefixed wildcard loses a
+ * `data/research/` deliverable exactly this way, with the run reporting
+ * success. It has happened, twice, to the same directory.
+ *
+ * Stronger evidence than an overlap and worded as such: this is a positive
+ * statement that named content existed and is gone, not an attestation that
+ * two windows met. It is still a warning rather than a failure, because
+ * `ignored_output: discardable` is the archetype DEFAULT and discarding a
+ * built `dist/` under it is the system doing what it was told — verify
+ * cannot tell that apart from a lost deliverable, and failing on both would
+ * make the check one people route around. The lever for the cases that
+ * should never have been discarded is the policy (`ignored_output: kept`
+ * makes the kernel run shared rather than isolate), not this exit code.
+ *
+ * `truncated` matters more here than anywhere else: the scan is capped and a
+ * git failure returns a partial listing, so a truncated record is a floor on
+ * what was destroyed and must never read as though the named paths were all
+ * of it.
+ */
+function checkDiscardedOutput(events: RunEvent[]): Finding {
+  const check = 'discarded-output';
+  const lines: string[] = [];
+  let truncated = 0;
+  let named = 0;
+  for (const event of events) {
+    const record = parseIgnoredOutputDiscarded(event.extra.ignored_output_discarded);
+    if (record == null) continue;
+    if (record.truncated) truncated += 1;
+    named += record.paths.length;
+    lines.push(`${receiptLabel(event)}: ${describeIgnoredOutput(record)}`);
+  }
+  if (lines.length === 0) {
+    return {
+      check,
+      status: 'ok',
+      detail: 'no receipt carries an ignored_output_discarded stamp (the ledger records no destroyed output)',
+    };
+  }
+  return {
+    check,
+    status: 'warn',
+    detail:
+      `${lines.length} receipt${lines.length === 1 ? '' : 's'} report gitignored output that no diff carried out of ` +
+      `its worktree${truncated > 0 ? `, ${truncated} of them from a listing that is a FLOOR rather than the set` : ''} ` +
+      `(${named} path${named === 1 ? '' : 's'} named). This content is not in the caller's tree and was not ` +
+      `recovered. ${lines.join(' | ')}`,
+  };
 }
 
 function checkNodeInstances(events: RunEvent[]): Finding {

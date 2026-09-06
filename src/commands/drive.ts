@@ -1782,7 +1782,17 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
   let workspaceSettled = false;
   let mergeStamp: MergeBackResult | null = null;
   let mergeDiff: { rel: string; bytes: number } | null = null;
-  let mergeIgnored: string[] | null = null;
+  /**
+   * The ignored-output stamp, in the OBJECT shape `dispatch.ts` writes.
+   *
+   * This was a bare `string[]`, which threw away the two things the scan
+   * exists to state. A capped or failed listing became indistinguishable from
+   * a complete one, and the worst case — `truncated` with nothing enumerated
+   * — was recorded as `[]`, spelling "I could not tell what was destroyed"
+   * exactly the way "nothing was destroyed" is spelled. Old array rows still
+   * read (see `parseIgnoredOutputDiscarded`); nothing writes one now.
+   */
+  let mergeIgnored: { paths: string[]; truncated?: true; note?: string } | null = null;
   const settleWorkspace = (): void => {
     if (workspaceSettled) return;
     workspaceSettled = true;
@@ -1792,7 +1802,13 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
       // Before the diff, because `git add -A` respects .gitignore and the
       // teardown below is final: whatever this names is about to die.
       const ignored = scanIgnoredOutput(wt.abs, ctx.worktreeCarry);
-      if (ignored.paths.length > 0 || ignored.truncated) mergeIgnored = ignored.paths;
+      if (ignored.paths.length > 0 || ignored.truncated) {
+        mergeIgnored = {
+          paths: ignored.paths,
+          ...(ignored.truncated ? { truncated: true as const } : {}),
+          ...(ignored.note != null ? { note: ignored.note } : {}),
+        };
+      }
       const diff = collectIsolatedDiff({ repoRoot: ctx.repoRoot, worktreeAbs: wt.abs, diffAbs: wt.diffAbs, diffRel: wt.diffRel });
       mergeDiff = { rel: diff.diffRel, bytes: diff.diffBytes };
       if (diff.diffBytes === 0) {

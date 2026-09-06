@@ -616,6 +616,31 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // The other half, and the half that was missing for a release: the stamp
+    // above was written by three modules and READ by none, which is the same
+    // outcome as never detecting an overlap. Every projection a human meets is
+    // named here, so deleting one fails by name rather than quietly restoring
+    // the silence.
+    id: 'concurrent-write-is-projected',
+    doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/concurrent-writes/] },
+    src: {
+      files: ['src/commands/verify.ts', 'src/commands/show.ts', 'src/commands/dispatches.ts'],
+      patterns: [/concurrent_write/],
+    },
+  },
+  {
+    // A worktree merges back through `git add -A`, which respects .gitignore,
+    // so an executor's output at an ignored path is staged by nothing and dies
+    // with the worktree. `ignored_output_discarded` says so — and reached only
+    // the `dispatches` listing, which is not where the loss was noticed.
+    id: 'discarded-output-is-projected',
+    doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/ignored_output_discarded/] },
+    src: {
+      files: ['src/commands/verify.ts', 'src/commands/show.ts', 'src/commands/dispatches.ts', 'src/commands/drive.ts'],
+      patterns: [/ignored_output_discarded/],
+    },
+  },
+  {
     id: 'idle-output-warning',
     doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/OUTPUT_IDLE_WARNING_MS/] },
     src: { files: ['src/commands/show.ts', 'src/cli.ts'], patterns: [/OUTPUT_IDLE_WARNING_MS/] },
