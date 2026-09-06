@@ -8,10 +8,15 @@ import { emitCodexSteeringBrokers, runSteeringApply } from '../src/commands/stee
 import {
   CODEX_IDENTITY_REMEDIATION,
   CODEX_PROJECT_IDENTITY_REMEDIATION,
+  CODEX_TAMPERED_IDENTITY_REMEDIATION,
   CODEX_UNMANAGED_IDENTITY_REMEDIATION,
   codexAgentIdentityStatus,
+  codexManagedBody,
+  codexManagedDigest,
+  codexStandingReason,
   describeCodexAgentIdentityRow,
   readCodexAgentFile,
+  stampCodexManagedAgent,
   type CodexAgentIdentityRow,
 } from '../src/lib/codex-agent-file.ts';
 import { packageVersion } from '../src/lib/paths.ts';
@@ -82,16 +87,34 @@ function row(materialization: CodexMaterialization, archetype: string): CodexAge
   return found;
 }
 
+/**
+ * Rewrite a materialized file's BODY and re-stamp its managed header, so what
+ * lands on disk is a file `steering apply` could itself have written.
+ *
+ * Every fixture below that stands in for "an older build wrote this" or "the
+ * dial has since moved" has to go through here, because since 2026-09-06 an
+ * edit that leaves the header's `digest=` behind is its own verdict
+ * (`tampered`) and that verdict deliberately masks the others. A fixture that
+ * skips the re-stamp is not testing the case its name claims — it is testing
+ * tampering, with the assertion of a different check. The one test that DOES
+ * want tampering edits the file directly and says so.
+ */
+function rewriteAsApplied(path: string, edit: (text: string) => string): void {
+  const before = readFileSync(path, 'utf8');
+  const version = /^# fadeno:managed\b[^\n]*?\bversion=(\S+)/.exec(before)?.[1];
+  assert.ok(version != null, `${path} must carry a managed header to be re-stamped`);
+  writeFileSync(path, stampCodexManagedAgent(edit(codexManagedBody(before)), version), 'utf8');
+}
+
 /** Hand-edit one materialized file's identity, the way a dial change leaves it. */
 function driftFile(fx: Fixture, archetype: string, model: string, effort: string): void {
   drift(join(fx.agentDir, `fadeno-${archetype}.toml`), model, effort);
 }
 
 function drift(path: string, model: string, effort: string): void {
-  const text = readFileSync(path, 'utf8')
+  rewriteAsApplied(path, (body) => body
     .replace(/^model = ".*"$/m, `model = ${JSON.stringify(model)}`)
-    .replace(/^model_reasoning_effort = ".*"$/m, `model_reasoning_effort = ${JSON.stringify(effort)}`);
-  writeFileSync(path, text, 'utf8');
+    .replace(/^model_reasoning_effort = ".*"$/m, `model_reasoning_effort = ${JSON.stringify(effort)}`));
 }
 
 /** Where Codex looks FIRST: `<repo>/.codex/agents/<archetype>.toml`. */
@@ -410,10 +433,27 @@ test('a missing file outranks the lane it would have been cut for', (t) => {
  * which is precisely why nothing could see it.
  */
 function retireSettings(path: string): void {
-  const text = readFileSync(path, 'utf8')
+  rewriteAsApplied(path, (body) => body
     .replace(/^sandbox_mode = ".*"$/m, 'sandbox_mode = "workspace-write"')
-    .replace(/^approval_policy = ".*"\n/m, '');
-  writeFileSync(path, text, 'utf8');
+    .replace(/^approval_policy = ".*"\n/m, ''));
+}
+
+/**
+ * The other half of the same "an older build wrote this" fixture: a file whose
+ * `steering resolve` invocation predates `--prompt-file`.
+ *
+ * Not hypothetical — it is the state `doctor`'s project-shadow branch has
+ * described since it was written, and the reason `CODEX_RESOLVE_FLAGS` exists.
+ *
+ * EVERY mention goes, not just the one in the invocation, because
+ * `missingFlags` is a whole-text `includes` and a current render also names the
+ * flag in the prose that tells the agent never to omit it. A build that
+ * predates the flag mentions it nowhere; one that stripped only the invocation
+ * would be a file no renderer has ever produced, and testing against it would
+ * be testing the fixture.
+ */
+function dropPromptFileFlag(path: string): void {
+  rewriteAsApplied(path, (body) => body.replaceAll('--prompt-file', ''));
 }
 
 /**
@@ -578,4 +618,254 @@ test('no report at all when Codex is not a maintained harness', (t) => {
     'utf8',
   );
   assert.equal(runStatus({ repoRoot: fx.root, userPathOptions: fx.user }).codexMaterialization, null);
+});
+
+// --- Contract drift: the resolve flags a file's own lane should pass ---
+
+/**
+ * `missingFlags` had been computed by `readCodexAgentFile` since the parser
+ * existed and no verdict ever read it. Measured on this tree before the fix: a
+ * managed user-scope file with `--prompt-file` stripped reported
+ * `status: 'current'`, `fresh: true`, `remediation: null`, under a `doctor`
+ * line reading "managed host-agent state is current".
+ *
+ * The damage is not cosmetic. The resolver hashes the prompt bytes that flag
+ * points at to decide whether a spawn is paired with a shadow challenger, so a
+ * repo whose agent omits it drops out of shadow pairing entirely — silently,
+ * with nothing on disk looking wrong. It is `outdated` rather than a fourth
+ * verdict because it is the same disagreement `outdated` already names (the
+ * file's TEXT vs this build's renderers) and the same single apply clears it.
+ */
+test('a managed file whose resolve invocation omits --prompt-file is outdated, not current', (t) => {
+  const fx = fixture(t);
+  writeUserDials(fx.user, { reviewer: { model: 'terra' } });
+  materialize(fx);
+  const path = join(fx.agentDir, 'fadeno-reviewer.toml');
+  dropPromptFileFlag(path);
+
+  const state = readCodexAgentFile(path)!;
+  assert.deepEqual(state.missingFlags, ['--prompt-file']);
+  assert.equal(state.digestValid, true, 'an older build stamped its own body correctly; only the text is behind');
+
+  const materialization = inspect(fx);
+  const reviewer = row(materialization, 'reviewer');
+  assert.equal(reviewer.status, 'outdated');
+  // The identity still agrees with the dial, which is the point: the
+  // comparison that was doing all the judging could never have caught this.
+  assert.equal(codexAgentIdentityStatus(reviewer.file, reviewer.dial), 'current');
+  assert.equal(materialization.fresh, false);
+  assert.equal(materialization.restartRequired, true);
+  assert.equal(materialization.remediation, CODEX_IDENTITY_REMEDIATION);
+
+  // Every renderer, told: the standing question, the row sentence, the fix.
+  assert.equal(
+    codexStandingReason(reviewer),
+    'carries no `--prompt-file` in its `steering resolve` invocation where this build\'s renderers pass it',
+  );
+  const detail = describeCodexAgentIdentityRow(reviewer);
+  assert.match(detail, /--prompt-file/);
+  assert.match(detail, new RegExp(`cut by fadeno ${packageVersion().replace(/\./g, '\\.')}`));
+  // And it must NOT claim the settings are the problem — the sentence used to
+  // end "what applies this build's lane permissions" for every outdated file.
+  assert.equal(/lane permissions/.test(detail), false, detail);
+  assert.equal(/sandbox_mode/.test(detail), false, detail);
+
+  assert.equal(row(materialization, 'worker').status, 'current', 'an untouched slot stays current');
+  assert.equal(row(materialization, 'judge').status, 'current');
+});
+
+/**
+ * A file can be behind on both at once, and the answer has to be ONE row: the
+ * two clauses are two symptoms of the same "this file predates this build",
+ * and `fadeno steering apply` clears both in one go. A verdict that named only
+ * whichever check happened to run first would send its reader to fix half a
+ * problem and watch the warning come back.
+ */
+test('a file with BOTH retired settings and a missing resolve flag names both in one outdated row', (t) => {
+  const fx = fixture(t);
+  writeUserDials(fx.user, { reviewer: { model: 'terra' } });
+  materialize(fx);
+  const path = join(fx.agentDir, 'fadeno-reviewer.toml');
+  retireSettings(path);
+  dropPromptFileFlag(path);
+
+  const materialization = inspect(fx);
+  const reviewer = row(materialization, 'reviewer');
+  assert.equal(reviewer.status, 'outdated');
+  assert.deepEqual(reviewer.missingFlags, ['--prompt-file']);
+  assert.equal(reviewer.settingDrift.length, 2);
+
+  for (const sentence of [codexStandingReason(reviewer)!, describeCodexAgentIdentityRow(reviewer)]) {
+    assert.match(sentence, /sandbox_mode = "workspace-write" where this build renders "danger-full-access"/);
+    assert.match(sentence, /no approval_policy where this build renders "never"/);
+    assert.match(sentence, /no `--prompt-file` in its `steering resolve` invocation/);
+  }
+  // One problem, one fix — not the same command printed three times.
+  assert.equal(materialization.remediation, CODEX_IDENTITY_REMEDIATION);
+});
+
+/**
+ * The false positive the naive version of this check would have shipped, and
+ * the reason `missingFlags` is filtered by lane.
+ *
+ * `renderCodexCommandBroker` has NEVER written `--host-executor` — a broker's
+ * identity travels in the dispatch argv — so an unfiltered "which of
+ * CODEX_RESOLVE_FLAGS is absent" reports the flag missing on every managed
+ * command broker Fadeno has ever written, at every scope, on every machine.
+ * Measured on this tree: a freshly emitted broker had
+ * `missingFlags: ['--host-executor']` while being exactly correct.
+ */
+test('a freshly emitted command broker owes no --host-executor and is never outdated for it', (t) => {
+  const fx = fixture(t);
+  emitCodexSteeringBrokers({ repoRoot: fx.root, userPathOptions: fx.user });
+
+  for (const archetype of ['worker', 'reviewer', 'judge']) {
+    const state = readCodexAgentFile(projectPath(fx, archetype))!;
+    assert.equal(state.managed, true, archetype);
+    assert.equal(state.hostExecutor, null, `${archetype} is a broker: it bakes no --host-executor`);
+    assert.deepEqual(state.missingFlags, [], `${archetype} broker must owe no resolve flag`);
+    assert.equal(state.digestValid, true, `${archetype} broker's own stamp must verify`);
+  }
+});
+
+// --- The stamped digest, finally read ---
+
+/**
+ * The writer and the reader of `digest=` are one function's inverse, and this
+ * is what says so. Getting the hashed bytes wrong by a single newline would
+ * report every managed Codex file on every machine as tampered, which is
+ * strictly worse than not checking — so the round trip is asserted against a
+ * file `steering apply` actually wrote, not against a hand-built string.
+ */
+test('the digest a real applied file carries is the one this build recomputes for it', (t) => {
+  const fx = fixture(t);
+  materialize(fx);
+
+  for (const archetype of ['worker', 'reviewer', 'judge']) {
+    const path = join(fx.agentDir, `fadeno-${archetype}.toml`);
+    const text = readFileSync(path, 'utf8');
+    const stamped = /^# fadeno:managed\b[^\n]*?\bdigest=([0-9a-f]{64})/.exec(text)?.[1];
+    assert.ok(stamped != null, `${archetype} must be stamped with a sha256`);
+    assert.equal(codexManagedDigest(codexManagedBody(text)), stamped, archetype);
+    // And the pair is an inverse, so a body survives a stamp unchanged.
+    assert.equal(codexManagedBody(stampCodexManagedAgent(codexManagedBody(text), '9.9.9')), codexManagedBody(text));
+    assert.equal(readCodexAgentFile(path)!.digestValid, true, archetype);
+  }
+
+  // A clean file is still simply `current`: the new check is quiet when it has
+  // nothing to say, which is the whole cost of adding it.
+  const materialization = inspect(fx);
+  assert.equal(materialization.fresh, true);
+  assert.equal(materialization.remediation, null);
+  for (const archetype of ['worker', 'reviewer', 'judge']) {
+    assert.equal(row(materialization, archetype).status, 'current', archetype);
+  }
+});
+
+/**
+ * The gap: `steering apply` has stamped `digest=<sha256 of the body>` since
+ * 02bdc54 and nothing ever compared it back. So a hand-edited managed file was
+ * undetectable — the header survives the edit, the digest goes stale, and the
+ * enumerated checks only cover the two settings keys they know about. An edit
+ * to `model`, to `developer_instructions`, or to the resolve line was invisible
+ * on every surface.
+ *
+ * Note the edit below is one `settingDrift` WOULD have caught. `tampered` still
+ * wins, and must: on a file whose bytes are not Fadeno's, "carries the retired
+ * sandbox setting, re-cut it" names a symptom of the edit while the edit itself
+ * — which could equally have moved anything no check enumerates — goes
+ * unmentioned, and the remediation quietly destroys it.
+ */
+test('a hand-edited managed file is tampered, and tampering outranks the checks its edit would trip', (t) => {
+  const fx = fixture(t);
+  writeUserDials(fx.user, { reviewer: { model: 'terra' } });
+  materialize(fx);
+  const path = join(fx.agentDir, 'fadeno-reviewer.toml');
+  // Edited in place, header untouched — exactly what a hand edit leaves.
+  writeFileSync(
+    path,
+    readFileSync(path, 'utf8').replace(/^sandbox_mode = ".*"$/m, 'sandbox_mode = "workspace-write"'),
+    'utf8',
+  );
+
+  const state = readCodexAgentFile(path)!;
+  assert.equal(state.managed, true, 'the header survives the edit — that is the point');
+  assert.equal(state.digestValid, false);
+  assert.ok(state.settingDrift.length > 0, 'the edit also trips settingDrift, which tampered must outrank');
+
+  const materialization = inspect(fx);
+  const reviewer = row(materialization, 'reviewer');
+  assert.equal(reviewer.status, 'tampered');
+  assert.equal(reviewer.scope, 'user');
+  assert.equal(reviewer.path, path);
+  assert.equal(materialization.fresh, false);
+  assert.equal(materialization.restartRequired, true);
+
+  // Every renderer says something true, and none of them says "outdated".
+  assert.equal(codexStandingReason(reviewer), 'no longer hashes to the `digest=` its own managed header stamps');
+  const detail = describeCodexAgentIdentityRow(reviewer);
+  assert.match(detail, /no longer hashes to the `digest=`/);
+  assert.match(detail, /cannot vouch for what it does/);
+  assert.equal(/where this build renders/.test(detail), false, detail);
+
+  // The fix warns BEFORE it commands, because the apply that repairs the file
+  // is the apply that discards the edit.
+  const remediation = materialization.remediation!;
+  assert.ok(remediation.startsWith(CODEX_TAMPERED_IDENTITY_REMEDIATION), remediation);
+  assert.ok(remediation.includes(CODEX_IDENTITY_REMEDIATION), remediation);
+  assert.equal(remediation.includes(CODEX_PROJECT_IDENTITY_REMEDIATION), false, remediation);
+});
+
+/**
+ * And the scope rule still holds for the new verdict, from the one mapping
+ * that owns it: a `--scope user` apply cannot reach a project-scope file.
+ */
+test('a tampered PROJECT file gets the project remediation, still warned first', (t) => {
+  const fx = fixture(t);
+  materialize(fx);
+  materializeProject(fx);
+  const path = projectPath(fx, 'worker');
+  writeFileSync(path, `${readFileSync(path, 'utf8')}\n# hand-added line\n`, 'utf8');
+
+  const materialization = inspect(fx);
+  assert.equal(row(materialization, 'worker').status, 'tampered');
+  assert.equal(row(materialization, 'worker').scope, 'project');
+  const remediation = materialization.remediation!;
+  assert.ok(remediation.startsWith(CODEX_TAMPERED_IDENTITY_REMEDIATION), remediation);
+  assert.ok(remediation.includes(CODEX_PROJECT_IDENTITY_REMEDIATION), remediation);
+});
+
+/**
+ * "Not stamped" is not "tampered", and the difference is not pedantry: they
+ * have different causes (an older or hand-written build vs. an edit outside
+ * `steering apply`) and different costs (re-cutting an unstamped file destroys
+ * nothing; re-cutting a tampered one destroys the edit). Collapsing them would
+ * accuse an upgrading user of tampering — the same class of confidently-wrong
+ * sentence this ladder keeps having to unlearn.
+ */
+test('a managed header carrying no digest= is reported unstamped, not tampered', (t) => {
+  const fx = fixture(t);
+  writeUserDials(fx.user, { reviewer: { model: 'terra' } });
+  materialize(fx);
+  const path = join(fx.agentDir, 'fadeno-reviewer.toml');
+  const text = readFileSync(path, 'utf8');
+  // A header shaped the way a build older than 02bdc54 would have left it.
+  writeFileSync(path, `# fadeno:managed version=0.5.0\n${codexManagedBody(text)}`, 'utf8');
+
+  const state = readCodexAgentFile(path)!;
+  assert.equal(state.managed, true);
+  assert.equal(state.digest, null);
+  assert.equal(state.digestValid, null, 'nothing to compare against is not a failed comparison');
+
+  const materialization = inspect(fx);
+  const reviewer = row(materialization, 'reviewer');
+  assert.equal(reviewer.status, 'outdated', 'a lossless re-cut, not an accusation');
+  assert.notEqual(reviewer.status, 'tampered');
+
+  for (const sentence of [codexStandingReason(reviewer)!, describeCodexAgentIdentityRow(reviewer)]) {
+    assert.match(sentence, /no `digest=` in its managed header where this build always stamps one/);
+    assert.equal(/no longer hashes/.test(sentence), false, sentence);
+  }
+  assert.equal(materialization.remediation, CODEX_IDENTITY_REMEDIATION);
+  assert.equal(materialization.remediation!.includes(CODEX_TAMPERED_IDENTITY_REMEDIATION), false);
 });

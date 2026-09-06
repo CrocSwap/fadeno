@@ -32959,12 +32959,28 @@ function inspectOmpMaterialization(repoRoot, expected) {
 }
 
 // src/lib/codex-agent-file.ts
+var import_node_crypto13 = require("node:crypto");
 var import_node_fs29 = require("node:fs");
 var import_node_path30 = require("node:path");
 var CODEX_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
 var CODEX_MANAGED_MARK = "# fadeno:managed";
 var CODEX_MANAGED_VERSION_RE = /^# fadeno:managed\b[^\n]*?\bversion=(\S+)/;
+var CODEX_MANAGED_DIGEST_RE = /^# fadeno:managed\b[^\n]*?\bdigest=(\S+)/;
+function codexManagedBody(text2) {
+  const headerEnd = text2.indexOf("\n");
+  return headerEnd < 0 ? "" : text2.slice(headerEnd + 1);
+}
+function codexManagedDigest(body) {
+  return (0, import_node_crypto13.createHash)("sha256").update(body).digest("hex");
+}
+function stampCodexManagedAgent(body, version) {
+  return `${CODEX_MANAGED_MARK} version=${version} digest=${codexManagedDigest(body)}
+${body}`;
+}
 var CODEX_RESOLVE_FLAGS = ["--prompt-file", "--host-executor"];
+function codexMissingResolveFlags(text2, hostExecutor) {
+  return CODEX_RESOLVE_FLAGS.filter((flag) => !text2.includes(flag) && !(flag === "--host-executor" && hostExecutor == null));
+}
 var CODEX_MANAGED_SETTINGS = [
   { key: "sandbox_mode", value: "danger-full-access" },
   { key: "approval_policy", value: "never" }
@@ -33007,22 +33023,29 @@ function readCodexAgentFile(path) {
   } catch {
     return null;
   }
-  const missingFlags = CODEX_RESOLVE_FLAGS.filter((flag) => !text2.includes(flag));
   const managed = text2.startsWith(CODEX_MANAGED_MARK);
   const versionMatch = managed ? CODEX_MANAGED_VERSION_RE.exec(text2) : null;
+  const digestMatch = managed ? CODEX_MANAGED_DIGEST_RE.exec(text2) : null;
+  const digest4 = digestMatch ? digestMatch[1] : null;
   const nameMatch = NAME_RE.exec(text2);
   const modelMatch = MODEL_RE.exec(text2);
   const effortMatch = EFFORT_RE.exec(text2);
   const hostExecutorMatch = HOST_EXECUTOR_RE.exec(text2);
+  const hostExecutor = hostExecutorMatch ? hostExecutorMatch[3] != null ? `${hostExecutorMatch[1]} on ${hostExecutorMatch[2] === "via" ? legacyDriverHarness(hostExecutorMatch[3]) : hostExecutorMatch[3]}` : hostExecutorMatch[1] : null;
   return {
     managed,
     version: versionMatch ? versionMatch[1] : null,
-    missingFlags,
+    digest: digest4,
+    // Hashed against `codexManagedBody`, never against a re-render: the point
+    // is "are these the bytes Fadeno wrote", which is answerable with no dial
+    // and no catalog, and so can be a STANDING verdict.
+    digestValid: digest4 == null ? null : codexManagedDigest(codexManagedBody(text2)) === digest4,
+    missingFlags: codexMissingResolveFlags(text2, hostExecutor),
     settingDrift: codexAgentSettingDrift(text2),
     name: nameMatch ? unquoteToml(nameMatch[1]) : null,
     model: modelMatch ? unquoteToml(modelMatch[1]) : null,
     reasoningEffort: effortMatch ? unquoteToml(effortMatch[1]) : null,
-    hostExecutor: hostExecutorMatch ? hostExecutorMatch[3] != null ? `${hostExecutorMatch[1]} on ${hostExecutorMatch[2] === "via" ? legacyDriverHarness(hostExecutorMatch[3]) : hostExecutorMatch[3]}` : hostExecutorMatch[1] : null
+    hostExecutor
   };
 }
 function codexAgentFilePath(scope, repoRoot, archetype, userPathOptions) {
@@ -33051,6 +33074,7 @@ function findSpawnableCodexAgent(candidates, archetype, hostExecutor, identity) 
 var CODEX_IDENTITY_REMEDIATION = "run `fadeno steering apply --codex --scope user`, then start a fresh Codex session";
 var CODEX_PROJECT_IDENTITY_REMEDIATION = "run `fadeno steering apply --codex --scope project` to re-cut the project-scope file(s) Codex loads instead, or delete them so the managed user-scope agents load again, then start a fresh Codex session";
 var CODEX_UNMANAGED_IDENTITY_REMEDIATION = "move or delete the unmanaged file(s) so Fadeno's managed agent loads again \u2014 `fadeno steering apply` never overwrites a file it did not write, and only at project scope does `--force` take one over deliberately \u2014 then start a fresh Codex session";
+var CODEX_TAMPERED_IDENTITY_REMEDIATION = "copy any deliberate edit out of the managed agent file first, to an agent name Fadeno does not own \u2014 `fadeno steering apply` refreshes any file carrying the managed header whose content differs, so re-cutting overwrites the edit without asking";
 function codexIdentityRemediation(rows) {
   const needed = [];
   const add = (text2) => {
@@ -33063,6 +33087,10 @@ function codexIdentityRemediation(rows) {
         continue;
       case "unmanaged":
         add(CODEX_UNMANAGED_IDENTITY_REMEDIATION);
+        continue;
+      case "tampered":
+        add(CODEX_TAMPERED_IDENTITY_REMEDIATION);
+        add(row.scope === "project" ? CODEX_PROJECT_IDENTITY_REMEDIATION : CODEX_IDENTITY_REMEDIATION);
         continue;
       default:
         add(row.scope === "project" ? CODEX_PROJECT_IDENTITY_REMEDIATION : CODEX_IDENTITY_REMEDIATION);
@@ -33085,6 +33113,9 @@ function codexAgentIdentityRow(archetype, candidate, dial) {
       dial,
       version: null,
       settingDrift: [],
+      missingFlags: [],
+      digest: null,
+      digestValid: null,
       status: "missing"
     };
   }
@@ -33096,14 +33127,28 @@ function codexAgentIdentityRow(archetype, candidate, dial) {
     file,
     dial,
     version: candidate.state.version,
-    settingDrift: candidate.state.settingDrift
+    settingDrift: candidate.state.settingDrift,
+    missingFlags: candidate.state.missingFlags,
+    digest: candidate.state.digest,
+    digestValid: candidate.state.digestValid
   };
   if (!candidate.state.managed) return { ...base, status: "unmanaged" };
-  if (candidate.state.settingDrift.length > 0) return { ...base, status: "outdated" };
+  if (candidate.state.digestValid === false) return { ...base, status: "tampered" };
+  if (candidate.state.settingDrift.length > 0 || candidate.state.missingFlags.length > 0 || candidate.state.digest == null) {
+    return { ...base, status: "outdated" };
+  }
   if (candidate.scope === "project" && candidate.state.hostExecutor == null && dial?.lane === "host") {
     return { ...base, status: "shadowed" };
   }
   return { ...base, status: codexAgentIdentityStatus(file, dial) };
+}
+function codexOutdatedClauses(row) {
+  const clauses = [...row.settingDrift];
+  for (const flag of row.missingFlags) {
+    clauses.push(`no \`${flag}\` in its \`steering resolve\` invocation where this build's renderers pass it`);
+  }
+  if (row.digest == null) clauses.push("no `digest=` in its managed header where this build always stamps one");
+  return clauses;
 }
 function codexStandingReason(row) {
   switch (row.status) {
@@ -33111,8 +33156,10 @@ function codexStandingReason(row) {
       return null;
     case "unmanaged":
       return "carries no managed header";
+    case "tampered":
+      return "no longer hashes to the `digest=` its own managed header stamps";
     case "outdated":
-      return `carries ${row.settingDrift.join(", and ")}`;
+      return `carries ${codexOutdatedClauses(row).join(", and ")}`;
     default:
       return `is not one Fadeno can vouch for (${row.status})`;
   }
@@ -33127,8 +33174,11 @@ function describeCodexAgentIdentityRow(row) {
   if (row.status === "unmanaged") {
     return `${row.archetype} loads ${row.path}, which carries no managed header \u2014 Fadeno did not write it and cannot vouch for what it does`;
   }
+  if (row.status === "tampered") {
+    return `${row.archetype} loads ${row.path}, which carries Fadeno's managed header but whose body no longer hashes to the \`digest=\` that header stamps \u2014 something other than \`fadeno steering apply\` changed it, so nothing read off its text (its model, its instructions, its resolve line) is Fadeno's any more and Fadeno cannot vouch for what it does`;
+  }
   if (row.status === "outdated") {
-    return `${row.archetype} loads ${row.path}, cut by ${row.version == null ? "an unstamped build" : `fadeno ${row.version}`} and carrying ${row.settingDrift.join(", and ")} \u2014 re-cutting it is what applies this build's lane permissions`;
+    return `${row.archetype} loads ${row.path}, cut by ${row.version == null ? "an unstamped build" : `fadeno ${row.version}`} and carrying ${codexOutdatedClauses(row).join(", and ")} \u2014 re-cutting it is what brings its text up to what this build's renderers write`;
   }
   if (row.status === "shadowed") {
     return `${row.archetype} loads the project-scope command broker ${row.path}, which shadows the managed user-scope agent \u2014 dial ${identityText(row.dial)} resolves to the host lane, which a broker can never deliver`;
@@ -33768,8 +33818,7 @@ function codexAgentDir(scope, repoRoot, userPathOptions) {
   return codexUserAgentDir(userPathOptions);
 }
 function stampManagedAgent(body) {
-  return `${CODEX_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(body)}
-${body}`;
+  return stampCodexManagedAgent(body, packageVersion());
 }
 function managedAgentEmit(path, body, force, scope) {
   const existed = (0, import_node_fs30.existsSync)(path);
@@ -34809,7 +34858,7 @@ var import_node_path34 = require("node:path");
 var import_yaml12 = __toESM(require_dist(), 1);
 
 // src/lib/installations.ts
-var import_node_crypto13 = require("node:crypto");
+var import_node_crypto14 = require("node:crypto");
 var import_node_fs32 = require("node:fs");
 var import_node_path33 = require("node:path");
 var InstallationError = class extends Error {
@@ -34854,7 +34903,7 @@ function writeInstallationManifest(paths, manifest) {
   (0, import_node_fs32.renameSync)(tmp, paths.installationsFile);
 }
 function fileDigest(path) {
-  return (0, import_node_crypto13.createHash)("sha256").update((0, import_node_fs32.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs32.readFileSync)(path)).digest("hex");
 }
 var VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/;
 function compareFadenoVersions(a, b) {
@@ -41122,7 +41171,7 @@ function runShadowApply(opts) {
 
 // src/commands/bakeoff.ts
 var import_node_child_process14 = require("node:child_process");
-var import_node_crypto14 = require("node:crypto");
+var import_node_crypto15 = require("node:crypto");
 var import_node_fs44 = require("node:fs");
 var import_node_path44 = require("node:path");
 var import_ajv2 = __toESM(require_ajv(), 1);
@@ -41903,7 +41952,7 @@ function adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts) {
   const evidenceMode = opts.evidence ?? "inlined";
   const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
   const pairId8 = measurement.pairId.slice(0, 8);
-  const judgeRun = (0, import_node_crypto14.randomUUID)().slice(0, 8);
+  const judgeRun = (0, import_node_crypto15.randomUUID)().slice(0, 8);
   const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeHarness: opts.judgeHarness ?? null, now: opts.now };
   const comparisonResult = dispatchJudge(prepared.comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}-${judgeRun}` });
   const comparisonParsed = extractJsonObject(comparisonResult.stdout);
@@ -42254,7 +42303,7 @@ function runDispatchWithdraw(opts) {
 // src/commands/tool-complete.ts
 var import_node_fs46 = require("node:fs");
 var import_node_path47 = require("node:path");
-var import_node_crypto15 = require("node:crypto");
+var import_node_crypto16 = require("node:crypto");
 var ToolCompleteError = class extends Error {
 };
 function runToolComplete(opts) {
@@ -42338,7 +42387,7 @@ function runToolComplete(opts) {
   {
     const nowIso = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
     const claim = { pid: process.pid, supervisor_pid: process.pid, executor_pid: null, process_group_id: null, started_at: nowIso, heartbeat_at: nowIso, last_output_at: null, stdout_bytes: 0, stderr_bytes: 0 };
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto15.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto16.randomUUID)()}`;
     try {
       (0, import_node_fs46.writeFileSync)(tmp, JSON.stringify(claim), { flag: "wx" });
       (0, import_node_fs46.linkSync)(tmp, claimAbs);
@@ -42417,7 +42466,7 @@ function runToolComplete(opts) {
 // src/commands/tool-run.ts
 var import_node_fs47 = require("node:fs");
 var import_node_path48 = require("node:path");
-var import_node_crypto16 = require("node:crypto");
+var import_node_crypto17 = require("node:crypto");
 var import_yaml21 = __toESM(require_dist(), 1);
 var ToolRunError = class extends Error {
 };
@@ -42471,7 +42520,7 @@ function ensureProfileSnapshot2(repoRoot, runDir, _runId, now, userPathOptions, 
   }
   const extraRefs = [...Object.values(liveLayers.session), ...Object.values(liveLayers.repo), ...Object.values(liveLayers.user), ...Object.values(liveProfile.bindings), ...bindRefs];
   const text2 = serializeSnapshot(liveProfile, extraRefs, roleArchetypes);
-  const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto16.randomUUID)()}`;
+  const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto17.randomUUID)()}`;
   (0, import_node_fs47.writeFileSync)(tmp, text2, "utf8");
   try {
     (0, import_node_fs47.renameSync)(tmp, snapshotPath);
@@ -43695,14 +43744,14 @@ var import_node_fs51 = require("node:fs");
 var import_node_path52 = require("node:path");
 
 // src/lib/opencode-steering.ts
-var import_node_crypto17 = require("node:crypto");
+var import_node_crypto18 = require("node:crypto");
 var import_node_fs50 = require("node:fs");
 var import_node_path51 = require("node:path");
 var OPENCODE_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
 var AGENT_MARK2 = /<!-- fadeno:managed version=([^\s]+) digest=([0-9a-f]{64}) -->/;
 var PLUGIN_MARK = /^\/\/ fadeno:managed version=([^\s]+)(?: digest=([0-9a-f]{64}))?$/m;
 function digest2(text2) {
-  return (0, import_node_crypto17.createHash)("sha256").update(text2).digest("hex");
+  return (0, import_node_crypto18.createHash)("sha256").update(text2).digest("hex");
 }
 function missing2(path) {
   return {
@@ -44660,7 +44709,7 @@ function runDoctor(opts = {}) {
 }
 
 // src/commands/vendor.ts
-var import_node_crypto18 = require("node:crypto");
+var import_node_crypto19 = require("node:crypto");
 var import_node_fs53 = require("node:fs");
 var import_node_path54 = require("node:path");
 function makeVendoredCodexAgentsTrackable(repoRoot) {
@@ -44680,7 +44729,7 @@ function digestTree(root) {
     for (const entry of (0, import_node_fs53.readdirSync)(dir, { withFileTypes: true })) {
       const full = (0, import_node_path54.join)(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.isFile()) files[(0, import_node_path54.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto18.createHash)("sha256").update((0, import_node_fs53.readFileSync)(full)).digest("hex");
+      else if (entry.isFile()) files[(0, import_node_path54.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto19.createHash)("sha256").update((0, import_node_fs53.readFileSync)(full)).digest("hex");
     }
   }
   walk(root);
@@ -44693,7 +44742,7 @@ function ownedVendoredFiles(repoRoot, init) {
     if (result.status !== "created" && result.status !== "overwritten") continue;
     const rel = (0, import_node_path54.relative)(repoRoot, result.path).split("\\").join("/");
     if (shared.has(rel) || rel.startsWith("../") || !(0, import_node_fs53.existsSync)(result.path)) continue;
-    owned[rel] = (0, import_node_crypto18.createHash)("sha256").update((0, import_node_fs53.readFileSync)(result.path)).digest("hex");
+    owned[rel] = (0, import_node_crypto19.createHash)("sha256").update((0, import_node_fs53.readFileSync)(result.path)).digest("hex");
   }
   return owned;
 }
@@ -44723,13 +44772,13 @@ function runVendor(opts) {
 }
 
 // src/commands/evidence.ts
-var import_node_crypto19 = require("node:crypto");
+var import_node_crypto20 = require("node:crypto");
 var import_node_fs54 = require("node:fs");
 var import_node_path55 = require("node:path");
 var EvidenceError = class extends Error {
 };
 function sha256(path) {
-  return (0, import_node_crypto19.createHash)("sha256").update((0, import_node_fs54.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto20.createHash)("sha256").update((0, import_node_fs54.readFileSync)(path)).digest("hex");
 }
 function copyOne(source, destination, rel, files) {
   if ((0, import_node_fs54.existsSync)(destination)) {
@@ -44953,13 +45002,13 @@ function runClean(opts = {}) {
 }
 
 // src/commands/unvendor.ts
-var import_node_crypto20 = require("node:crypto");
+var import_node_crypto21 = require("node:crypto");
 var import_node_fs57 = require("node:fs");
 var import_node_path58 = require("node:path");
 var UnvendorError = class extends Error {
 };
 function digest3(path) {
-  return (0, import_node_crypto20.createHash)("sha256").update((0, import_node_fs57.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto21.createHash)("sha256").update((0, import_node_fs57.readFileSync)(path)).digest("hex");
 }
 function runUnvendor(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());

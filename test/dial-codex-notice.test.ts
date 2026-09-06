@@ -8,6 +8,8 @@ import {
   CODEX_IDENTITY_REMEDIATION,
   CODEX_PROJECT_IDENTITY_REMEDIATION,
   CODEX_UNMANAGED_IDENTITY_REMEDIATION,
+  codexManagedBody,
+  stampCodexManagedAgent,
 } from '../src/lib/codex-agent-file.ts';
 import { userPaths, writeUserDials, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
@@ -197,11 +199,19 @@ test('a stale project file shadowing a CORRECT user file gets a notice', (t) => 
   seed(fx, { reviewer: { model: 'terra' } });
   runSteeringApply({ repoRoot: fx.root, target: 'codex', scope: 'project', userPathOptions: fx.user });
   const projectFile = join(fx.root, '.codex', 'agents', 'reviewer.toml');
+  // Re-stamped, because the state being staged is "an apply at an earlier dial
+  // wrote this", not "someone edited it". Since 2026-09-06 a managed file whose
+  // body no longer hashes to its own header's `digest=` is `tampered`, and that
+  // verdict masks `stale` — leaving the stamp behind would quietly turn this
+  // into a test of a different check.
   writeFileSync(
     projectFile,
-    readFileSync(projectFile, 'utf8')
-      .replace(/^model = ".*"$/m, 'model = "gpt-5.6-luna"')
-      .replace(/^model_reasoning_effort = ".*"$/m, 'model_reasoning_effort = "high"'),
+    stampCodexManagedAgent(
+      codexManagedBody(readFileSync(projectFile, 'utf8'))
+        .replace(/^model = ".*"$/m, 'model = "gpt-5.6-luna"')
+        .replace(/^model_reasoning_effort = ".*"$/m, 'model_reasoning_effort = "high"'),
+      '0.6.1',
+    ),
     'utf8',
   );
 

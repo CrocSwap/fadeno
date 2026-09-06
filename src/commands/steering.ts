@@ -51,6 +51,7 @@ import {
   describeCodexAgentFileIdentity,
   effectiveCodexAgentCandidates,
   findSpawnableCodexAgent,
+  stampCodexManagedAgent,
 } from '../lib/codex-agent-file.ts';
 
 export class SteeringError extends Error {}
@@ -1306,9 +1307,17 @@ function codexAgentDir(scope: 'project' | 'user', repoRoot: string, userPathOpti
  * cannot cover itself, and hashing the same bytes at both scopes means two
  * files rendered from the same resolution carry the same digest and can be
  * compared directly.
+ *
+ * The stamping itself lives in `src/lib/codex-agent-file.ts`, next to the
+ * reader that now VERIFIES it (`CodexAgentFileState.digestValid`, the
+ * `tampered` verdict). Which bytes get hashed is a fact with two consumers as
+ * of 2026-09-06, and a writer that hashes the body while a reader hashes the
+ * body-plus-a-newline would report every managed Codex file on every machine
+ * as tampered — so the two halves are one function's inverse, in one module,
+ * rather than two spellings that agree today.
  */
 function stampManagedAgent(body: string): string {
-  return `${CODEX_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(body)}\n${body}`;
+  return stampCodexManagedAgent(body, packageVersion());
 }
 
 /**

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { runDoctor } from '../src/commands/doctor.ts';
 import { runStatus } from '../src/commands/status.ts';
+import { stampCodexManagedAgent } from '../src/lib/codex-agent-file.ts';
 import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -232,9 +233,18 @@ function brokerBody(archetype: string, resolveFlags: string): string {
   ].join('\n');
 }
 
-/** How `steering apply --codex --scope user` stamps a body it writes. */
+/**
+ * How `steering apply --codex --scope user` stamps a body it writes — through
+ * the emitter's own stamper, not a hand-built header.
+ *
+ * It used to write `digest=deadbeefcafe`, which was harmless while nothing
+ * read the digest back. Since 2026-09-06 a managed file whose body does not
+ * hash to its stamp earns `tampered`, and `tampered` masks every text-derived
+ * verdict below it — so a placeholder digest would silently turn every fixture
+ * in this file into a test of tampering wearing another check's assertions.
+ */
 function managedBroker(version: string, body: string): string {
-  return `# fadeno:managed version=${version} digest=deadbeefcafe\n${body}`;
+  return stampCodexManagedAgent(body, version);
 }
 
 /**
@@ -347,6 +357,12 @@ test('doctor and the identity row agree about an unmanaged project file with no 
  * Fadeno wrote, so the qualifying clause must not fire. Without this, the
  * assertions above would pass on a check that simply appends the caveat to
  * every sole-project report.
+ *
+ * The body must be a CURRENT one, and `--prompt-file` is now part of what that
+ * means: a managed file whose `steering resolve` invocation omits it is
+ * `outdated` as of 2026-09-06, which is a standing verdict and does qualify
+ * the sentence. A broker owes no `--host-executor` and never has, so this is
+ * the whole of the resolver contract at this lane.
  */
 test('doctor leaves the sole-project sentence unqualified for a managed project file', (t) => {
   const root = tempRepo(t);
@@ -354,7 +370,7 @@ test('doctor leaves the sole-project sentence unqualified for a managed project 
   maintainCodex(user);
   const projectDir = codexProjectAgents(root);
   codexUserAgents(root);
-  writeFileSync(join(projectDir, 'reviewer.toml'), managedBroker('0.6.1', brokerBody('reviewer', '')));
+  writeFileSync(join(projectDir, 'reviewer.toml'), managedBroker('0.6.1', brokerBody('reviewer', ' --prompt-file <path>')));
 
   const result = runDoctor({ repoRoot: root, target: 'codex', userPathOptions: user });
   const sole = result.findings.find((f) => f.check === 'codex-agents-project')!;

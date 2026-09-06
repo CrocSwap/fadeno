@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { legacyDriverHarness } from './executors.ts';
@@ -18,17 +19,96 @@ export const CODEX_MANAGED_MARK = '# fadeno:managed';
 const CODEX_MANAGED_VERSION_RE = /^# fadeno:managed\b[^\n]*?\bversion=(\S+)/;
 
 /**
- * Flags a current role agent or command broker passes to `steering resolve`.
- * Their absence is the concrete damage a frozen file does, so it is read off
- * the text rather than inferred from the file being old:
+ * `digest=` off the managed header.
+ *
+ * Deliberately `(\S+)` rather than the 64-hex shape `stampCodexManagedAgent`
+ * writes. A token that is not a sha256 is still a stamp this file's body can
+ * never hash to — the `tampered` answer — whereas reading it as "carries no
+ * digest" would print the one sentence that is definitely false about a header
+ * whose text says `digest=`. The two states are told apart by whether the
+ * header states the key at all, not by whether the value looks well-formed.
+ */
+const CODEX_MANAGED_DIGEST_RE = /^# fadeno:managed\b[^\n]*?\bdigest=(\S+)/;
+
+/**
+ * The bytes the managed header's `digest=` covers: everything after the header
+ * line.
+ *
+ * A digest cannot cover itself, so the whole header is excluded rather than
+ * just the `digest=` token — which is also what lets two files rendered from
+ * one resolution at two scopes carry the same digest and be compared directly.
+ *
+ * This is the READER's half of `stampCodexManagedAgent`, and the two live in
+ * one module on purpose: "what the writer hashed" and "what the reader thinks
+ * it should hash to" disagreeing by a single newline would report every
+ * managed Codex file on every machine as tampered, which is strictly worse
+ * than not checking at all. `test/status-codex-identity.test.ts` pins the
+ * round trip so the pair cannot come apart.
+ */
+export function codexManagedBody(text: string): string {
+  const headerEnd = text.indexOf('\n');
+  return headerEnd < 0 ? '' : text.slice(headerEnd + 1);
+}
+
+/** The digest `stampCodexManagedAgent` records for a body. */
+export function codexManagedDigest(body: string): string {
+  return createHash('sha256').update(body).digest('hex');
+}
+
+/**
+ * Prepend the managed header to a rendered agent body — the ONE writer of a
+ * `# fadeno:managed` Codex header, which `steering apply` and `init` both call
+ * through `src/commands/steering.ts`.
+ *
+ * It sits here rather than in the emitter because the digest it stamps is now
+ * VERIFIED (`CodexAgentFileState.digestValid`), so the hashed bytes are a fact
+ * with two readers; the writer living next to the reader is the same reason
+ * `codexManagedSettingsBlock` sits beside `codexAgentSettingDrift`.
+ */
+export function stampCodexManagedAgent(body: string, version: string): string {
+  return `${CODEX_MANAGED_MARK} version=${version} digest=${codexManagedDigest(body)}\n${body}`;
+}
+
+/**
+ * Flags `steering resolve` is invoked with by a current agent file. Their
+ * absence is the concrete damage a frozen file does, so it is read off the
+ * text rather than inferred from the file being old:
  *
  * `--prompt-file` is how the resolver sees the prompt bytes it hashes to
  * decide whether a spawn is paired with a shadow challenger; without it that
  * repo silently stops participating in shadow pairing. `--host-executor` is
  * how a materialized host agent proves the executor (and so the model and
  * effort) it was cut for.
+ *
+ * NOT a flat list of flags every file must carry — only `renderCodexHostAgent`
+ * bakes `--host-executor`, and `renderCodexCommandBroker` omits it BY
+ * CONSTRUCTION because a broker's identity travels in the dispatch argv. So
+ * the list is filtered per lane by `codexMissingResolveFlags`; measured on a
+ * freshly emitted broker, the unfiltered list reports `--host-executor`
+ * missing on every managed command broker Fadeno has ever written.
  */
 export const CODEX_RESOLVE_FLAGS = ['--prompt-file', '--host-executor'] as const;
+
+/**
+ * Which of `CODEX_RESOLVE_FLAGS` this file's OWN LANE should pass and its text
+ * never mentions.
+ *
+ * The lane is read the same way every other consumer reads it — off the baked
+ * `--host-executor`, the discriminator `findSpawnableCodexAgent` and
+ * `codexAgentIdentityRow` already use. A file with none is a command broker,
+ * and a broker that does not pass `--host-executor` is exactly right, not
+ * drifted: `renderCodexCommandBroker` has never written the flag.
+ *
+ * Stated as a filter rather than as two lists because the alternative is the
+ * one-list-two-consumers shape this module keeps paying for — `doctor`'s
+ * contract-drift sentence and the identity row's `outdated` verdict read this
+ * one function, so they cannot come to disagree about whether a broker owes a
+ * flag.
+ */
+function codexMissingResolveFlags(text: string, hostExecutor: string | null): string[] {
+  return CODEX_RESOLVE_FLAGS.filter((flag) =>
+    !text.includes(flag) && !(flag === '--host-executor' && hostExecutor == null));
+}
 
 /**
  * The Codex settings every managed agent file this build renders carries, at
@@ -142,8 +222,33 @@ export interface CodexAgentFileState {
   /** `version=` off that header, when it carries one. */
   version: string | null;
   /**
-   * Which of `CODEX_RESOLVE_FLAGS` this file's text never mentions. Empty
-   * means it is current on the resolver contract, whatever stamped it.
+   * `digest=` off that header, when it carries one.
+   *
+   * Null on an unmanaged file (there is no header) AND on a managed header
+   * that states no `digest=` at all — a shape no build since 02bdc54 has ever
+   * written, so in practice a hand-authored header. Those two are not the same
+   * as a digest that disagrees with the body, which is why the recorded value
+   * and the comparison are two fields.
+   */
+  digest: string | null;
+  /**
+   * Whether the body under the header hashes to the digest that header stamps.
+   *
+   * `null` means the question does not arise — no managed header, or a managed
+   * header that stamps nothing to compare against. "Not stamped" is reported
+   * as its own thing and never as tampering: an unstamped file is one an older
+   * or hand-written build produced, and re-cutting it costs nobody anything,
+   * while a MISMATCH means some edit outside `steering apply` landed in a file
+   * Fadeno claims to own.
+   */
+  digestValid: boolean | null;
+  /**
+   * Which of `CODEX_RESOLVE_FLAGS` this file's own lane should pass and its
+   * text never mentions (`codexMissingResolveFlags`). Empty means it is
+   * current on the resolver contract, whatever stamped it.
+   *
+   * Lane-aware, so a command broker is not accused of omitting the
+   * `--host-executor` no broker has ever carried.
    */
   missingFlags: string[];
   /**
@@ -186,29 +291,36 @@ export function readCodexAgentFile(path: string): CodexAgentFileState | null {
   } catch {
     return null;
   }
-  const missingFlags = CODEX_RESOLVE_FLAGS.filter((flag) => !text.includes(flag));
   const managed = text.startsWith(CODEX_MANAGED_MARK);
   const versionMatch = managed ? CODEX_MANAGED_VERSION_RE.exec(text) : null;
+  const digestMatch = managed ? CODEX_MANAGED_DIGEST_RE.exec(text) : null;
+  const digest = digestMatch ? digestMatch[1]! : null;
   const nameMatch = NAME_RE.exec(text);
   const modelMatch = MODEL_RE.exec(text);
   const effortMatch = EFFORT_RE.exec(text);
   const hostExecutorMatch = HOST_EXECUTOR_RE.exec(text);
+  const hostExecutor = hostExecutorMatch
+    ? (hostExecutorMatch[3] != null
+        // A legacy ` via <driver>` is normalized to the v4 spelling, through
+        // the same map `parseDialRef` uses, so a ref-string comparison
+        // against `formatDialRef(ref)` still matches.
+        ? `${hostExecutorMatch[1]} on ${hostExecutorMatch[2] === 'via' ? legacyDriverHarness(hostExecutorMatch[3]!) : hostExecutorMatch[3]}`
+        : hostExecutorMatch[1]!)
+    : null;
   return {
     managed,
     version: versionMatch ? versionMatch[1]! : null,
-    missingFlags,
+    digest,
+    // Hashed against `codexManagedBody`, never against a re-render: the point
+    // is "are these the bytes Fadeno wrote", which is answerable with no dial
+    // and no catalog, and so can be a STANDING verdict.
+    digestValid: digest == null ? null : codexManagedDigest(codexManagedBody(text)) === digest,
+    missingFlags: codexMissingResolveFlags(text, hostExecutor),
     settingDrift: codexAgentSettingDrift(text),
     name: nameMatch ? unquoteToml(nameMatch[1]!) : null,
     model: modelMatch ? unquoteToml(modelMatch[1]!) : null,
     reasoningEffort: effortMatch ? unquoteToml(effortMatch[1]!) : null,
-    hostExecutor: hostExecutorMatch
-      ? (hostExecutorMatch[3] != null
-          // A legacy ` via <driver>` is normalized to the v4 spelling, through
-          // the same map `parseDialRef` uses, so a ref-string comparison
-          // against `formatDialRef(ref)` still matches.
-          ? `${hostExecutorMatch[1]} on ${hostExecutorMatch[2] === 'via' ? legacyDriverHarness(hostExecutorMatch[3]!) : hostExecutorMatch[3]}`
-          : hostExecutorMatch[1]!)
-      : null,
+    hostExecutor,
   };
 }
 
@@ -380,7 +492,22 @@ export interface CodexAgentIdentityRow {
   version: string | null;
   /** `CodexAgentFileState.settingDrift` for the judged file; empty otherwise. */
   settingDrift: string[];
-  status: 'current' | 'stale' | 'missing' | 'not_applicable' | 'unmanaged' | 'shadowed' | 'outdated';
+  /** `CodexAgentFileState.missingFlags` for the judged file; empty otherwise. */
+  missingFlags: string[];
+  /**
+   * `CodexAgentFileState.digest` for the judged file — the stamp its managed
+   * header records, or null when there is no file, no header, or no `digest=`.
+   *
+   * Carried beside the verdict for the same reason `version` is: it is what
+   * distinguishes "this build stamps a digest and this header states none"
+   * from "the stamp is there and disagrees".
+   */
+  digest: string | null;
+  /** `CodexAgentFileState.digestValid` for the judged file; null otherwise. */
+  digestValid: boolean | null;
+  status:
+    | 'current' | 'stale' | 'missing' | 'not_applicable'
+    | 'unmanaged' | 'shadowed' | 'outdated' | 'tampered';
 }
 
 /**
@@ -449,6 +576,27 @@ export const CODEX_UNMANAGED_IDENTITY_REMEDIATION =
   'one over deliberately — then start a fresh Codex session';
 
 /**
+ * The half of the fix that is only true for a `tampered` file, printed BEFORE
+ * the apply spelling because it has to be acted on first.
+ *
+ * Every other verdict's remediation is lossless: `steering apply` re-renders
+ * bytes Fadeno wrote from a resolution Fadeno owns, and nothing a reader
+ * cares about is destroyed. A tampered file is the one case where it is not —
+ * `managedAgentEmit` refreshes ANY file carrying the managed header whose
+ * content differs, so the very command that fixes the file is the command that
+ * silently discards whatever the edit was.
+ *
+ * That is also why this is a separate constant rather than a third apply
+ * spelling: WHICH apply reaches the file is still the scope question the two
+ * constants above already answer, and duplicating them into tampered variants
+ * is how the four spellings would start to drift.
+ */
+export const CODEX_TAMPERED_IDENTITY_REMEDIATION =
+  'copy any deliberate edit out of the managed agent file first, to an agent name Fadeno does not ' +
+  'own — `fadeno steering apply` refreshes any file carrying the managed header whose content ' +
+  'differs, so re-cutting overwrites the edit without asking';
+
+/**
  * The one fix line for a set of rows, chosen per row and de-duplicated.
  *
  * `status`, `dial` and `doctor` all print this rather than picking a constant
@@ -470,6 +618,16 @@ export function codexIdentityRemediation(rows: CodexAgentIdentityRow[]): string 
         continue;
       case 'unmanaged':
         add(CODEX_UNMANAGED_IDENTITY_REMEDIATION);
+        continue;
+      case 'tampered':
+        // Two sentences in the order they must be acted on: the apply that
+        // fixes the file is also the apply that destroys the edit, so the
+        // warning cannot come second. The scope question is answered by the
+        // same mapping as every other refreshable verdict — a tampered file is
+        // still a managed one, and which apply reaches it still depends only
+        // on where it lives.
+        add(CODEX_TAMPERED_IDENTITY_REMEDIATION);
+        add(row.scope === 'project' ? CODEX_PROJECT_IDENTITY_REMEDIATION : CODEX_IDENTITY_REMEDIATION);
         continue;
       default:
         // `missing` has no file at either scope, so the managed set is what is
@@ -538,29 +696,69 @@ export function codexAgentIdentityStatus(
  *    project scope on purpose — at USER scope a broker under a host dial IS
  *    ordinary drift that `--scope user` re-cuts, which is the `stale` verdict
  *    this surface has always given it.
- *  - `outdated`: Fadeno wrote it, and its settings are not the ones this build
- *    renders (`CODEX_MANAGED_SETTINGS`). Two verdicts about two different
- *    disagreements, and the names are worth keeping straight: `stale` is the
- *    file's IDENTITY disagreeing with the dial, `outdated` is the file's TEXT
- *    disagreeing with this build's renderer. It is checked BEFORE any dial is
- *    consulted, for three reasons — it holds when the dial is unresolvable
- *    (`null`), it holds for a command BROKER, whose identity is deliberately
- *    never judged and which is otherwise the one file shape that could never
- *    be reported outdated at all, and it is what makes the answer a standing
- *    one that `codexStandingReason` can ask for. It masks `stale` on a file
- *    that is both, which costs nothing: the remediation for a given scope is
- *    one command and it clears both.
+ *  - `outdated`: Fadeno wrote it, and its TEXT is not what this build's
+ *    renderers produce. Three ways to be that, each contributing its own
+ *    clause to one sentence (`codexOutdatedClauses`) under one verdict and one
+ *    remediation, because one apply clears all three: settings that are not
+ *    `CODEX_MANAGED_SETTINGS`; a `steering resolve` invocation missing a flag
+ *    its own lane should pass (`missingFlags`); and a managed header that
+ *    stamps no `digest=` at all, which no build since 02bdc54 has written.
  *
- *    The gap this closes: 3c785e0 moved every command lane to maximal
- *    permissions and changed what these files bake — `sandbox_mode =
- *    "danger-full-access"` and `approval_policy = "never"` in place of
- *    `sandbox_mode = "workspace-write"` — and nothing on any surface could see
- *    it. `readCodexAgentFile` parsed neither key, the identity comparison is
- *    model and effort only, and the managed header's digest covers the file's
- *    OWN body, so it is self-consistent by construction and agrees with a file
- *    no renderer in this build would produce. A BREAKING change was therefore
- *    inert for every existing install, under a `doctor` line reading "managed
- *    host-agent state is current".
+ *    They are ONE verdict rather than three because the alternative is three
+ *    verdicts that must then be ordered against each other, three remediations
+ *    that are the same command, and a file carrying two of them reporting only
+ *    the one that happens to sort first — which is the same shape of silent
+ *    half-answer this whole ladder exists to remove. `stale` is the file's
+ *    IDENTITY disagreeing with the dial; `outdated` is its TEXT disagreeing
+ *    with this build. Checked BEFORE any dial is consulted, for three reasons
+ *    — it holds when the dial is unresolvable (`null`), it holds for a command
+ *    BROKER, whose identity is deliberately never judged and which is
+ *    otherwise the one file shape that could never be reported outdated at
+ *    all, and it is what makes the answer a standing one that
+ *    `codexStandingReason` can ask for. It masks `stale` on a file that is
+ *    both, which costs nothing: the remediation for a given scope is one
+ *    command and it clears both.
+ *
+ *    The gaps this closes, in the order they were found. 3c785e0 moved every
+ *    command lane to maximal permissions and changed what these files bake —
+ *    `sandbox_mode = "danger-full-access"` and `approval_policy = "never"` in
+ *    place of `sandbox_mode = "workspace-write"` — and nothing on any surface
+ *    could see it. And a file cut before the resolver grew `--prompt-file`
+ *    calls `steering resolve` without the prompt bytes it hashes to pair a
+ *    spawn, so that repo drops out of shadow pairing entirely; `missingFlags`
+ *    had been computed since the parser existed and no verdict ever read it,
+ *    so the only surface that mentioned it was `doctor`'s project-shadow
+ *    branch, and only for UNMANAGED files. A managed user-scope file missing
+ *    the flag was measured (2026-09-06) reporting `status: current`,
+ *    `fresh: true`, `remediation: null`, under a `doctor` line reading
+ *    "managed host-agent state is current".
+ *
+ *  - `tampered`: Fadeno wrote it, its header stamps a digest, and the body
+ *    under that header does not hash to it. Ranked ABOVE `outdated` and
+ *    everything else except `unmanaged`, for a reason that is not severity:
+ *    every other text-derived verdict is a claim about bytes Fadeno wrote, and
+ *    on a tampered file that premise is gone. Reporting "carries
+ *    `sandbox_mode = "workspace-write"`, re-cut it" names a SYMPTOM of the
+ *    hand edit while the edit itself — which may equally have moved `model`,
+ *    the developer instructions, or the resolve line, none of which any
+ *    enumerated check looks at — goes unmentioned. Its remediation also
+ *    differs from every other verdict's in kind rather than in wording: the
+ *    apply that fixes it is the apply that discards the edit
+ *    (`CODEX_TAMPERED_IDENTITY_REMEDIATION`).
+ *
+ *    A header stamping NO digest is deliberately not this verdict. "Not
+ *    stamped" and "stamped and wrong" are different facts with different
+ *    causes — an older build versus an edit outside `steering apply` — and
+ *    collapsing them would accuse an upgrading user of tampering. The
+ *    unstamped case is an `outdated` clause, whose remediation is lossless.
+ *
+ *    Until 2026-09-06 the digest was written and never read: `steering apply`
+ *    has stamped `digest=<sha256 of the body>` since 02bdc54, and
+ *    `readCodexAgentFile` parsed `version=` beside it and stopped. So a
+ *    hand-edited managed file was undetectable — the header survives the edit,
+ *    the digest goes stale, and nothing compared them. Both sibling emitters
+ *    (`src/lib/opencode-steering.ts`, `src/lib/omp-steering.ts`) had verified
+ *    theirs from the start.
  *
  * A host agent is told from a broker by its baked `--host-executor`, the same
  * discriminator `findSpawnableCodexAgent` uses: only `renderCodexHostAgent`
@@ -576,18 +774,31 @@ export function codexAgentIdentityRow(
   if (candidate == null) {
     return {
       archetype, scope: null, path: null, file: null, dial,
-      version: null, settingDrift: [], status: 'missing',
+      version: null, settingDrift: [], missingFlags: [],
+      digest: null, digestValid: null, status: 'missing',
     };
   }
   const file = { model: candidate.state.model, effort: candidate.state.reasoningEffort };
   const base = {
     archetype, scope: candidate.scope, path: candidate.path, file, dial,
     version: candidate.state.version, settingDrift: candidate.state.settingDrift,
+    missingFlags: candidate.state.missingFlags,
+    digest: candidate.state.digest, digestValid: candidate.state.digestValid,
   };
   if (!candidate.state.managed) return { ...base, status: 'unmanaged' };
-  // Before the dial, and before the shadowing question: this one is about the
-  // file's own text and is the only verdict a broker can earn.
-  if (candidate.state.settingDrift.length > 0) return { ...base, status: 'outdated' };
+  // Ahead of every other text-derived verdict, because they all assume the
+  // text is what Fadeno wrote. `false` and not `!== true`: an unstamped header
+  // (`null`) is an `outdated` clause below, never an accusation.
+  if (candidate.state.digestValid === false) return { ...base, status: 'tampered' };
+  // Before the dial, and before the shadowing question: these are about the
+  // file's own text and are the only verdicts a broker can earn.
+  if (
+    candidate.state.settingDrift.length > 0 ||
+    candidate.state.missingFlags.length > 0 ||
+    candidate.state.digest == null
+  ) {
+    return { ...base, status: 'outdated' };
+  }
   if (candidate.scope === 'project' && candidate.state.hostExecutor == null && dial?.lane === 'host') {
     return { ...base, status: 'shadowed' };
   }
@@ -637,14 +848,44 @@ export function codexAgentIdentityRow(
  * clause for one file and must not build the row twice to get them — two
  * readings of one file is how they start disagreeing.
  */
+/**
+ * Everything an `outdated` row's file states that this build's renderers would
+ * not have written, as the clauses an advisory prints after "carries".
+ *
+ * ONE builder, read by both renderers. `outdated` can now be earned three ways
+ * and a file can hold all three at once; two renderers each picking the fields
+ * they happen to know about is precisely how a reader gets told to fix half a
+ * problem, runs the command, and sees the same warning again. Each clause is
+ * "what the file says (or that it says nothing) where this build renders
+ * something else", so they compose in one sentence in any combination.
+ *
+ * Order is fixed and not by severity — there is no severity here, one apply
+ * clears all of them — but so that a given file's sentence is stable across
+ * runs and across the three surfaces that print it.
+ */
+function codexOutdatedClauses(row: CodexAgentIdentityRow): string[] {
+  const clauses = [...row.settingDrift];
+  for (const flag of row.missingFlags) {
+    clauses.push(`no \`${flag}\` in its \`steering resolve\` invocation where this build's renderers pass it`);
+  }
+  // Only reachable on a managed header, so this says "the header states no
+  // digest", never "the digest is wrong" — that is `tampered`, above.
+  if (row.digest == null) clauses.push('no `digest=` in its managed header where this build always stamps one');
+  return clauses;
+}
+
 export function codexStandingReason(row: CodexAgentIdentityRow): string | null {
   switch (row.status) {
     case 'not_applicable':
       return null;
     case 'unmanaged':
       return 'carries no managed header';
+    case 'tampered':
+      // States the comparison, not a motive. What is known is that the bytes
+      // are not the bytes Fadeno wrote; who changed them and why is not.
+      return 'no longer hashes to the `digest=` its own managed header stamps';
     case 'outdated':
-      return `carries ${row.settingDrift.join(', and ')}`;
+      return `carries ${codexOutdatedClauses(row).join(', and ')}`;
     default:
       return `is not one Fadeno can vouch for (${row.status})`;
   }
@@ -679,13 +920,27 @@ export function describeCodexAgentIdentityRow(row: CodexAgentIdentityRow): strin
     return `${row.archetype} loads ${row.path}, which carries no managed header — Fadeno did not ` +
       'write it and cannot vouch for what it does';
   }
+  if (row.status === 'tampered') {
+    return `${row.archetype} loads ${row.path}, which carries Fadeno's managed header but whose body no ` +
+      'longer hashes to the `digest=` that header stamps — something other than `fadeno steering apply` ' +
+      'changed it, so nothing read off its text (its model, its instructions, its resolve line) is ' +
+      'Fadeno\'s any more and Fadeno cannot vouch for what it does';
+  }
   if (row.status === 'outdated') {
     // The stamped version is the reader's only way to see WHICH build wrote
     // the file they are being told to re-cut, and a file stamped by this very
-    // build says something else again: the settings were edited after it was
+    // build says something else again: the text was edited after it was
     // written. Both are worth printing; neither is the verdict.
+    //
+    // The tail names the general fix rather than the permissions one. It used
+    // to end "what applies this build's lane permissions", which was true
+    // while `settingDrift` was the only way in and became a wrong answer the
+    // moment a file could be outdated for omitting `--prompt-file` — the same
+    // confidently-wrong-sentence failure this verdict's own arrival caused in
+    // `codexStandingReason`.
     return `${row.archetype} loads ${row.path}, cut by ${row.version == null ? 'an unstamped build' : `fadeno ${row.version}`} ` +
-      `and carrying ${row.settingDrift.join(', and ')} — re-cutting it is what applies this build's lane permissions`;
+      `and carrying ${codexOutdatedClauses(row).join(', and ')} — re-cutting it is what brings its text ` +
+      "up to what this build's renderers write";
   }
   if (row.status === 'shadowed') {
     return `${row.archetype} loads the project-scope command broker ${row.path}, which shadows the ` +
