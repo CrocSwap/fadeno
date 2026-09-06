@@ -2,7 +2,10 @@ import { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync
 import { basename, delimiter, dirname, isAbsolute, join, sep } from 'node:path';
 import { runStatus, type StatusOptions } from './status.ts';
 import { listRetiredClaudeGridCells } from './steering.ts';
-import { ARCHETYPE_DISPLAY_ORDER, detectAmbientHarness } from '../lib/executors.ts';
+import { ARCHETYPE_DISPLAY_ORDER, detectAmbientHarness, resolveRole } from '../lib/executors.ts';
+import { catalogRepairFindings, verificationFindings } from '../lib/catalog-rot.ts';
+import { isListable, listHarnessModels, listingFindings } from '../lib/model-listing.ts';
+import { auditPersistedState } from '../lib/persisted-state.ts';
 import { loadLayeredProfile } from '../lib/config-layers.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
@@ -15,7 +18,7 @@ import {
 import { describeWorkspaceLeaseLiveness } from '../lib/supervisor.ts';
 import { catalogLayerVersions, explainSuppressedBuiltin } from '../lib/config-layers.ts';
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
-import { codexUserAgentDir, userPaths } from '../lib/user-paths.ts';
+import { codexUserAgentDir, readVerifiedModels, userPaths } from '../lib/user-paths.ts';
 import {
   effectiveCodexAgentCandidates,
   findSpawnableCodexAgent,
@@ -74,6 +77,12 @@ export interface DoctorOptions extends StatusOptions {
   target?: 'codex' | 'claude' | 'opencode' | 'omp' | null;
   /** Injectable for tests; defaults to the real process environment. */
   processEnv?: NodeJS.ProcessEnv;
+  /**
+   * Spawn each dialed harness's `models_command` and report a dialed model the
+   * backend no longer lists (`fadeno doctor --probe-models`). Off by default:
+   * every other check in doctor reads files, and this one runs vendor CLIs.
+   */
+  probeModels?: boolean;
 }
 
 export interface DoctorResult {
@@ -146,6 +155,27 @@ function describeHeld(ms: number): string {
 export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const findings: DoctorFinding[] = [];
+  // The writability loop below asks only whether the state locations can be
+  // written; whether what is already IN them is a shape this build can read is
+  // the adjacent question. One closure, called from exactly one of two places
+  // — here on the ordinary path, or from the status `catch` before it returns
+  // — so the inventory is reported on EVERY invocation and never twice.
+  //
+  // Always on and read-only: the audit parses, it never rewrites. `fadeno
+  // setup` is the only thing that migrates, and the `warning` text says so.
+  const persistedStateFindings = (): DoctorFinding[] => {
+    try {
+      return auditPersistedState({ repoRoot, paths: userPaths(opts.userPathOptions ?? {}) });
+    } catch (err) {
+      // The audit is a diagnostic; it must not be the thing that fails doctor.
+      return [finding(
+        'persisted-state',
+        'warning',
+        `the persisted-state inventory could not be audited: ${(err as Error).message}`,
+        'Report this — every surface in the inventory is read defensively, so reaching here is a bug in the audit itself.',
+      )];
+    }
+  };
   let status;
   try {
     status = runStatus(opts);
@@ -200,7 +230,16 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     // Session definitions - always state that current-session skills require fresh session
     findings.push(finding('session-definitions', 'ok', `Skills and subagents are loaded at host session start; a fresh session is required to refresh them — no setup or refresh will update the current session. Compare the [fadeno ...] stamp in your skill/agent listing against ${invokingV}.`));
   } catch (err) {
+    // The status path throws for exactly the reasons the persisted-state
+    // inventory exists to explain — a dials file or a repo pin stamped with a
+    // version this build refuses is one of them — and returning here reported
+    // a bare `configuration` error while suppressing the finding that names
+    // the surface, the backup directory, and what to do about it. So the
+    // audit runs on the failure path too, BEFORE the early return. The
+    // generic error is kept beside it: the status failure is real, and the
+    // audit is a diagnostic, not a replacement diagnosis.
     findings.push(finding('configuration', 'error', (err as Error).message, 'Fix the malformed YAML or missing catalog before running a playbook.'));
+    findings.push(...persistedStateFindings());
     return { repoRoot, findings, ok: false };
   }
   const paths = [join(repoRoot, '.fadeno'), join(repoRoot, '.fadeno', 'runs'), join(repoRoot, '.fadeno', 'progress')];
@@ -212,6 +251,9 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       findings.push(finding(`path:${path}`, 'error', 'not writable', 'Choose a writable repository or state location.'));
     }
   }
+  // The inventory belongs beside the writability loop above: can these
+  // locations be written, and is what is already in them readable.
+  findings.push(...persistedStateFindings());
   const dials = (status as any).dials as { session: Record<string, unknown>; repo: Record<string, unknown>; user: Record<string, unknown> } | undefined;
   const legacyNote = (status as any).legacy_pin_note as string | null | undefined;
   if (dials) {
@@ -315,6 +357,143 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
         '`unregistered_model_driver`, a model `delivery:`, a ` via ` in a dial). Bump it to ' +
         '`schema_version: 4` when you next edit it — see docs/experimental/harness-neutral-dials.md.',
     ));
+  }
+
+  // --- Catalog rot ---
+  //
+  // Two silent decays, both of which leave every command reporting success.
+  //
+  // The USER catalog is machine state (`fadeno model add` wrote it, possibly
+  // under a fadeno two versions old), so `config-layers.ts` reads that one
+  // layer tolerantly rather than failing the load — `repairUserLayer`
+  // translates what it can before the merge, `dropUndeliverableUserModels`
+  // discards what it must after it. That is right, and it is silent: only
+  // `fadeno dial` on a SELF-CONTAINED catalog ever printed the note (via
+  // `formatModelFallbackNote`), so on the ordinary layering path an alias
+  // simply vanishes and the first symptom is a dial that fails naming a model
+  // the user is sure they added.
+  //
+  // The verification cache never expires. `isModelVerified` is an existence
+  // check with no notion of age, so a row written a year ago short-circuits
+  // the probe forever while the provider quietly retires the id.
+  //
+  // Read-only and best-effort throughout: a catalog that will not load is
+  // already reported by `configuration`, and neither check may be the thing
+  // that fails doctor.
+  {
+    let layered: ReturnType<typeof loadLayeredProfile> | null = null;
+    try {
+      layered = loadLayeredProfile(repoRoot, opts.userPathOptions ?? {});
+    } catch {
+      layered = null;
+    }
+    if (layered != null) {
+      const fallback = layered.modelFallback;
+      findings.push(...catalogRepairFindings({
+        repairs: fallback.repairs,
+        // `dropped` is structured (`{ alias, harness }`); phrase it the way
+        // `formatModelFallbackNote` does so the two surfaces cannot drift into
+        // describing the same event differently.
+        drops: fallback.dropped.map((drop) =>
+          `user-catalog model "${drop.alias}" dropped — nothing in this catalog can deliver ` +
+          `harness/provider "${drop.harness}"`),
+      }));
+
+      // EVERY resolved dial, through the same `resolveRole` cascade `status`
+      // uses for its role table — the dial layers are exactly `status.dials`.
+      //
+      // The archetype set is the union of four sources, not three: the canon
+      // display order, the three stored dial layers, AND the CATALOG's own
+      // `dials:` mapping. That last one is easy to miss and is the whole
+      // reason a custom archetype can rot invisibly — a project catalog that
+      // declares `dials: {integrator: sol}` names an archetype no stored layer
+      // mentions, so a set built from `status.dials` alone never resolves it
+      // and never audits it. An archetype declared only in `archetypes:`
+      // policy and dialed by nothing is a different finding
+      // (`archetype-policy-unreferenced`, above).
+      const layers = status.dials;
+      const archetypeNames = new Set<string>([
+        ...ARCHETYPE_DISPLAY_ORDER,
+        ...Object.keys(layers.session), ...Object.keys(layers.repo), ...Object.keys(layers.user),
+        ...Object.keys(layered.profile.dials),
+      ]);
+      // `listable` travels with each dial: the staleness audit covers the
+      // whole set and only WORDS itself differently for a harness nothing can
+      // probe, while the listing probe below is the part that is genuinely
+      // restricted to listable harnesses (it spawns; there is nothing to
+      // spawn). Two different questions, one dial set.
+      const dialed: Array<{ archetype: string; harness: string; modelId: string; listable: boolean }> = [];
+      for (const archetype of [...archetypeNames].sort()) {
+        let harness: string | null;
+        let modelId: string;
+        try {
+          const resolved = resolveRole(archetype, archetype, layered.profile, layers);
+          harness = resolved.delivery.harness;
+          modelId = resolved.delivery.modelId;
+        } catch {
+          continue; // an undeclared harness is a different finding's problem
+        }
+        // `current-host` names whatever session is running: it has no
+        // provider-facing id, appears in no backend listing, and is never
+        // cached, so both checks skip it exactly as `probeModel` does. A
+        // host-native dial is not an unverified model, it is a model-free dial.
+        if (harness == null || modelId === 'current-host') continue;
+        dialed.push({ archetype, harness, modelId, listable: isListable(layered.profile.harnesses?.[harness]) });
+      }
+      findings.push(...verificationFindings({
+        dialed,
+        verifications: readVerifiedModels(opts.userPathOptions ?? {}),
+        now: new Date(),
+        // `fadeno models verify` re-probes every dialed pair with the cache
+        // ignored (`force: true`), refreshing a row that still lists and
+        // deleting one that does not — so it is the remediation for BOTH the
+        // missing and the stale case. `fadeno dial`'s own probe only fires on
+        // a cache miss, which is why it is not named here. For an unlistable
+        // harness the library says so instead of naming it.
+        verifyCommand: '`fadeno models verify`',
+        verificationsPath: userPaths(opts.userPathOptions ?? {}).modelVerificationsFile,
+      }));
+      // The listing check answers the other half of the same question — not
+      // "when was this last confirmed" but "is it in the listing right now" —
+      // so it runs against the same `dialed` set, restricted to the harnesses
+      // that can actually be listed, behind its flag.
+      //
+      // Behind a flag because it is the only part of doctor that SPAWNS: one
+      // vendor CLI per dialed harness, each up to `LISTING_TIMEOUT_MS`. A
+      // read-only diagnostic that shells out by default is not read-only in
+      // the sense users mean, so the default reports the flag instead.
+      const probeable = dialed.filter((dial) => dial.listable);
+      if (opts.probeModels === true) {
+        const probeHarnesses = [...new Set(probeable.map((dial) => dial.harness))].sort();
+        const listings = probeHarnesses
+          .map((harness) => ({ harness, entry: layered.profile.harnesses?.[harness] ?? null }))
+          .filter((item) => isListable(item.entry))
+          .map((item) => ({ harness: item.harness, result: listHarnessModels(item.harness, item.entry!) }));
+        findings.push(...listingFindings({ dialed: probeable, listings }));
+      } else if (probeable.length === 0) {
+        // Two facts, and the finding owes the reader both: nothing here is
+        // probeable, AND the flag that would probe it is `--probe-models`.
+        // Saying only the first leaves someone who dials a listable harness
+        // tomorrow with no way to learn the check exists — and the contract
+        // makes naming the flag unconditional for exactly that reason. So the
+        // honest sentence stays in `detail` and the flag moves into
+        // `remediation`, worded as what it would do here rather than as a
+        // suggestion to run something that would find nothing today.
+        findings.push(finding(
+          'model-listing-skipped',
+          'ok',
+          'no dialed model resolves onto a harness that declares a models_command, so there is no backend listing to check it against.',
+          '`fadeno doctor --probe-models` runs this check; it has nothing to spawn until a dialed model resolves onto a harness that declares a models_command.',
+        ));
+      } else {
+        findings.push(finding(
+          'model-listing-skipped',
+          'ok',
+          `${probeable.length} dialed model(s) were not checked against their harness listings; that check spawns each harness's models_command.`,
+          'Run `fadeno doctor --probe-models` to list every dialed harness and report a model its backend no longer names.',
+        ));
+      }
+    }
   }
 
   for (const role of status.roles) {

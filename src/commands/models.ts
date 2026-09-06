@@ -12,7 +12,6 @@ import {
   resolveDelivery,
   detectAmbientHarness,
   ExecutorProfileError,
-  qualifyListedModelId,
   shadowAttachmentRef,
   type CommandExecutorSpec,
   type DialRef,
@@ -22,6 +21,12 @@ import {
   type ModelEntry,
   type RoleResolutionSource,
 } from '../lib/executors.ts';
+import {
+  listingContains,
+  listingPrefixOf,
+  parseListedIds,
+  type ModelListing,
+} from '../lib/model-listing.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { readVerifiedModels, removeVerifiedModels, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
@@ -175,27 +180,22 @@ function defaultSpawn(command: string[], opts: { timeout: number }): ReturnType<
   return { status: run.status, stdout: run.stdout ?? '', stderr: run.stderr ?? '', ...(run.error != null ? { error: run.error } : {}) };
 }
 
-/** One listed id per non-prose line; exact identity matching happens above it. */
-function listedIds(stdout: string): string[] {
-  const seen = new Set<string>();
-  const ids: string[] = [];
-  for (const id of stdout
-    .split(/\r?\n/)
-    .map((line) => line.split('\t')[0]!.trim())
-    .filter((candidate) => candidate.length > 0 && !/\s/.test(candidate))) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      ids.push(id);
-    }
-  }
-  return ids;
-}
-
+/**
+ * Run one harness's `models_command`.
+ *
+ * The parse and the membership rule are NOT spelled here: `parseListedIds` and
+ * `listingContains` come from `src/lib/model-listing.ts`, which is also what
+ * `fadeno doctor --probe-models` calls. Two copies of "which tokens are model
+ * ids" and "does this dial name one of them" is exactly how the doctor would
+ * come to disagree with this command about a stale dial — one function each,
+ * and the parity test in `test/doctor-model-listing.test.ts` fails loudly if
+ * anyone reintroduces a local copy.
+ */
 function runListingCommand(
   profile: ExecutorProfile,
   harness: string,
   spawn: ListingSpawn | undefined,
-): { entry: HarnessRaw; modelsCommand: string[]; ids: string[] } {
+): { entry: HarnessRaw; modelsCommand: string[]; ids: string[]; listing: ModelListing } {
   const entry = harnessTable(profile)[harness];
   if (entry == null) {
     throw new ModelsError(`unknown harness "${harness}" — declared harnesses: ${Object.keys(harnessTable(profile)).sort().join(', ') || '(none)'}`);
@@ -214,7 +214,8 @@ function runListingCommand(
   if (result.error != null) throw new ModelsError(`models_command failed for ${harness}: ${result.error.message}`);
   if (result.status !== 0) throw new ModelsError(`models_command for ${harness} exited ${result.status}.`);
   const stdout = typeof result.stdout === 'string' ? result.stdout : result.stdout.toString('utf8');
-  return { entry, modelsCommand, ids: listedIds(stdout) };
+  const listing: ModelListing = { harness, ids: parseListedIds(stdout), prefix: listingPrefixOf(entry) };
+  return { entry, modelsCommand, ids: listing.ids, listing };
 }
 
 /**
@@ -373,26 +374,35 @@ export function runModelsHarness(opts: HarnessListingOptions): HarnessListingRes
   const profile = layered.profile;
   const host = profile.host ?? 'standalone';
   const harness = opts.harness.trim();
-  const { entry, modelsCommand, ids: tokens } = runListingCommand(profile, harness, opts.spawn);
+  const { modelsCommand, ids: tokens, listing } = runListingCommand(profile, harness, opts.spawn);
 
-  // Which registry names deliver a given id on this harness: the home rule
-  // (delivered id = entry.id), or an explicit per-harness spelling.
-  const registeredBy = new Map<string, string[]>();
+  // The argv-facing ids each registry name would ask this harness for: the
+  // home rule (delivered id = entry.id), or an explicit per-harness spelling.
+  // Deliberately UNQUALIFIED — `listingContains` applies `models_prefix`, so
+  // this command and `fadeno doctor --probe-models` decide membership with the
+  // same call rather than with two spellings of the same idea.
+  const deliveredBy: Array<{ name: string; ids: string[] }> = [];
   for (const [name, model] of Object.entries(profile.models)) {
     if (name === 'current-host') continue;
     const ids: string[] = [];
-    if (homeHarness(profile, model) === harness) ids.push(qualifyListedModelId(entry, model.id));
-    if (model.spellings[harness] != null) ids.push(qualifyListedModelId(entry, model.spellings[harness]!));
-    for (const id of ids) {
-      const list = registeredBy.get(id) ?? [];
-      if (!list.includes(name)) list.push(name);
-      registeredBy.set(id, list);
-    }
+    if (homeHarness(profile, model) === harness) ids.push(model.id);
+    if (model.spellings[harness] != null) ids.push(model.spellings[harness]!);
+    if (ids.length > 0) deliveredBy.push({ name, ids });
   }
 
   const models: HarnessListingResult['models'] = [];
   for (const token of tokens) {
-    models.push({ id: token, registered_as: (registeredBy.get(token) ?? []).sort() });
+    // One token at a time: "is this registry name delivered by this listed
+    // id" is the same membership question the doctor asks, restricted to a
+    // single-token listing.
+    const single: ModelListing = { harness, ids: [token], prefix: listing.prefix };
+    const registered_as: string[] = [];
+    for (const candidate of deliveredBy) {
+      if (candidate.ids.some((id) => listingContains(single, id)) && !registered_as.includes(candidate.name)) {
+        registered_as.push(candidate.name);
+      }
+    }
+    models.push({ id: token, registered_as: registered_as.sort() });
   }
   return { harness, host, models_command: modelsCommand, models };
 }

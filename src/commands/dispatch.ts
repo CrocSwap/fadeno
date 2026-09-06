@@ -45,6 +45,7 @@ import {
   shadowSampleRoll,
 } from '../lib/executors.ts';
 import { decideLane, readSessionEffort } from '../lib/lane.ts';
+import { spawnMarkerIsFresh, spawnMarkerLines, spawnMarkerRow } from '../lib/spawn-markers.ts';
 import { readUserDials } from '../lib/user-paths.ts';
 import {
   completeHostDispatch,
@@ -339,25 +340,15 @@ function attestationDigests(prompt: string): Set<string> {
 function consumeSpawnSideRelay(repoRoot: string, prompt: string, now: Date): boolean | null {
   const path = join(repoRoot, PENDING_RELAYS_FILE);
   if (!existsSync(path)) return null;
-  let rows: Array<{ timestamp?: unknown; prompt_sha256?: unknown }>;
+  let rows: unknown[];
   try {
-    rows = readFileSync(path, 'utf8')
-      .split('\n')
-      .filter((line) => line.trim() !== '')
-      .map((line) => JSON.parse(line) as { timestamp?: unknown; prompt_sha256?: unknown });
+    rows = spawnMarkerLines(readFileSync(path, 'utf8'));
   } catch {
     return null; // malformed stash — attest nothing rather than guess
   }
-  const fresh = rows.filter((row) => {
-    const ts = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : NaN;
-    return (
-      Number.isFinite(ts) &&
-      now.getTime() - ts <= PENDING_RELAY_MAX_AGE_MS &&
-      typeof row.prompt_sha256 === 'string'
-    );
-  });
+  const fresh = rows.filter((row) => spawnMarkerIsFresh(row, now, PENDING_RELAY_MAX_AGE_MS));
   const digests = attestationDigests(prompt);
-  const hit = fresh.findIndex((row) => digests.has(row.prompt_sha256 as string));
+  const hit = fresh.findIndex((row) => digests.has(spawnMarkerRow(row)!.prompt_sha256));
   const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
   try {
     if (remaining.length === 0) rmSync(path, { force: true });
@@ -381,25 +372,15 @@ function consumeSpawnSideRelay(repoRoot: string, prompt: string, now: Date): boo
 function consumeProxyDispatchMarker(repoRoot: string, prompt: string, now: Date): boolean {
   const path = join(repoRoot, PROXY_DISPATCHES_FILE);
   if (!existsSync(path)) return false;
-  let rows: Array<{ timestamp?: unknown; prompt_sha256?: unknown }>;
+  let rows: unknown[];
   try {
-    rows = readFileSync(path, 'utf8')
-      .split('\n')
-      .filter((line) => line.trim() !== '')
-      .map((line) => JSON.parse(line) as { timestamp?: unknown; prompt_sha256?: unknown });
+    rows = spawnMarkerLines(readFileSync(path, 'utf8'));
   } catch {
     return false; // malformed marker file — claim nothing rather than guess
   }
-  const fresh = rows.filter((row) => {
-    const ts = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : NaN;
-    return (
-      Number.isFinite(ts) &&
-      now.getTime() - ts <= PENDING_RELAY_MAX_AGE_MS &&
-      typeof row.prompt_sha256 === 'string'
-    );
-  });
+  const fresh = rows.filter((row) => spawnMarkerIsFresh(row, now, PENDING_RELAY_MAX_AGE_MS));
   const digests = attestationDigests(prompt);
-  const hit = fresh.findIndex((row) => digests.has(row.prompt_sha256 as string));
+  const hit = fresh.findIndex((row) => digests.has(spawnMarkerRow(row)!.prompt_sha256));
   const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
   try {
     if (remaining.length === 0) rmSync(path, { force: true });

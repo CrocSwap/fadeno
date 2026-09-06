@@ -96,6 +96,106 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Added
 
+- **Four catalog-rot checks in `fadeno doctor`.** All four answer the same
+  question — what in a setup that still *works* has quietly stopped being
+  true?
+  - `user-catalog-repairs`: one warning per note the layered loader produced
+    for the USER catalog. `config-layers.ts` reads that one layer tolerantly
+    (`repairUserLayer` translates what it can, `dropUndeliverableUserModels`
+    discards what it must) so a single stale entry cannot brick every
+    unrelated command — right, and until now silent: a dropped alias simply
+    vanished and the first symptom was a dial failing on a model the user was
+    sure they had added. The remediation names `fadeno models add` and
+    `fadeno models remove`.
+  - `model-verification-stale`: one warning per dialed `(harness, model_id)`
+    whose verification row is missing or older than `VERIFICATION_MAX_AGE_DAYS`
+    (30). Dial-time verification is existence-only, so a row written once
+    vouches forever; `fadeno models verify` is the remediation, because it
+    ignores the cache. It audits **every resolved dial** — including archetypes
+    the catalog's own `dials:` mapping names and no stored layer does, and
+    harnesses that declare no `models_command`. Nothing can re-probe an
+    unlistable harness, so that finding's *remediation* says so (delete the row
+    or re-dial) instead of naming a command that would report the pair
+    `skipped`; dropping the finding would have been the doctor silently
+    declining to run a check it reports on. `current-host` is skipped by both
+    checks: it names the session, not a model.
+  - `model-listing-missing` / `model-listing-unavailable`, behind
+    **`fadeno doctor --probe-models`**: spawns each dialed *listable* harness's
+    `models_command` and reports a dialed model the backend no longer names. It
+    is the only part of doctor that spawns anything, so it is opt-in; without
+    the flag doctor reports `model-listing-skipped` as `ok` and **always names
+    the flag** — including when no dial resolves onto a listable harness, where
+    the detail still says plainly that there is nothing to probe. The finding is
+    the only place the check announces itself, so a skip that hid the flag hid
+    the check.
+    An unreadable listing is one `warning` per harness, never an error — a
+    vendor CLI that is absent or slow says nothing about the dial. Membership is
+    decided by `listingContains` in `src/lib/model-listing.ts`, which
+    `src/commands/models.ts` now calls too: the dialed id is qualified with
+    `models_prefix` and compared against the raw listing (`qualifyListedModelId`,
+    the same call `fadeno dial`'s probe and `fadeno models verify` make). One
+    rule, so the doctor cannot call a dial healthy that `fadeno dial` would
+    refuse.
+  - `persisted-state:<surface-id>`: one finding per surface in the new
+    inventory (below). `fadeno doctor --json` now emits the findings as JSON,
+    and the text renderer collapses a fully-`ok` inventory into one counted
+    line — eighteen identical rows is how a diagnostic teaches people to stop
+    reading it.
+- **A persisted-state inventory, `schema_version` stamps, and a `fadeno setup`
+  migration.** `src/lib/persisted-state.ts` declares `PERSISTED_SURFACES`: every
+  file Fadeno writes, with its scope, format, version field, current version,
+  and the reader and writer that own it. Three surfaces that were unstamped are
+  now v1 — `dials.json` (`{schema_version, dials}`), `model-verifications.json`
+  (`{schema_version, verifications}`) and `.fadeno/local/dials` (the stamp
+  beside today's keys). **An unstamped document is version 0 and stays readable
+  forever**; a stamp from the FUTURE is refused rather than half-read, because
+  these files decide which model runs. `fadeno setup` migrates the three
+  in-place, **backing each up first** — `<stateDir>/backups/<timestamp>/` for
+  user files, `.fadeno/local/backups/<timestamp>/` for repo-local ones — and a
+  migration that cannot back up does not rewrite. `fadeno doctor` reports and
+  never migrates. **A stamp is not a schema:** the audit validates every stamped
+  document through its own reader's rules (`validateUserDialsDocument`,
+  `validateVerificationDocument`, `validateLocalDialDocument`,
+  `validateInstallationManifestDocument` — each exported from the module that
+  owns the reader, so the two cannot drift) before it says `ok`.
+  `{"schema_version": 1, "dials": []}` carries the current version and yields
+  no dials, and it is reported as an `error` naming the file and its backup
+  directory; a document the reader gets *most* of is a `warning`. **Every**
+  `error` names that backup directory, unreadable bytes and unknown versions
+  included, so the advice to keep a copy points at the same place a migration
+  would have written. `run-ledger` is one surface with **two** files: the
+  `events.jsonl` beside `run.yaml` is audited row by row through `readEvents`
+  itself, so a truncated append is an `error` naming the run and the line while
+  a row in an older shape stays `ok` — events carry no stamp and history keeps
+  the format it was written in.
+  **The audit runs on every `fadeno doctor` invocation, including the one where
+  `runStatus` throws** — which is very often a persisted surface refusing a
+  future `schema_version`, so reporting only `configuration: error` withheld the
+  `persisted-state:<id>` finding that names the file and its backup directory;
+  both now appear together. **And being unstamped is not a reason to skip the
+  read:** every unversioned surface goes through its real reader
+  (`readWorkspaceLease`, `readInflightClaim`/`readSupervisorStatus`,
+  `spawnMarkerRow`, `parseBakeoffFile` — moved to `src/lib/bakeoff.ts` so the
+  audit shares it rather than copying it), and `host-workspace-state` is read
+  member by member through `readHostWorkspaceState` instead of being reported
+  from its directory name. A document any of those readers refuses is an `error`
+  naming that file and the backup directory; `UNVERSIONED_READERS` is exhaustive
+  with an explicit `null` for the three surfaces nothing reads, and
+  `unversionedReaderFor` throws for an unlisted one just as `shapeValidatorFor`
+  does. Directory scans are bounded by `MEMBER_AUDIT_SCAN_LIMIT` and say so when
+  the bound is hit.
+  `test/persisted-state-inventory.test.ts` is the drift tripwire: every path
+  constant in `user-paths.ts` and every repo-local state path must appear in the
+  inventory, and each declared `currentVersion` must equal what its writer
+  actually stamps; `test/fixtures/persisted-state/` keeps a v0 sample captured
+  from the pre-change writer so tolerance is asserted against the real legacy
+  bytes rather than a remembered shape, plus a `malformed-v<current>` sample for
+  every surface with a shape validator — a second tripwire requires one.
+  Recorded and not fixed: `.fadeno/executors.yaml` shadows the user catalog
+  with no `init`-time notice (`project-executors` `notes`), and
+  `EXECUTORS_FILE` in `src/lib/executors.ts` is exported with zero consumers
+  while `config-layers.ts` re-spells the same path five times.
+
 - **`fadeno model remove <alias>`** (also `fadeno models remove`) — the other
   half of `model add`. Removes the alias from the USER catalog only, editing
   through the YAML document so comments and sibling keys survive; a builtin or

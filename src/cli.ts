@@ -67,7 +67,7 @@ import { runToolComplete } from './commands/tool-complete.ts';
 import { runToolRun } from './commands/tool-run.ts';
 import { runSetup } from './commands/setup.ts';
 import { runStatus } from './commands/status.ts';
-import { runDoctor } from './commands/doctor.ts';
+import { runDoctor, type DoctorFinding } from './commands/doctor.ts';
 import { runVendor } from './commands/vendor.ts';
 import { runEvidencePromote } from './commands/evidence.ts';
 import { runUninstall } from './commands/uninstall.ts';
@@ -1034,6 +1034,41 @@ function optionalTarget(values: TargetFlags): Target | undefined {
   return selected[0];
 }
 
+/**
+ * Doctor's text lines, with a clean persisted-state inventory collapsed.
+ *
+ * The inventory is one finding per surface — eighteen of them — and on a
+ * healthy machine every one says the same thing. Eighteen identical `ok` lines
+ * push the findings that matter off the top of a terminal, which is how a
+ * diagnostic teaches people to stop reading it. So: all-ok collapses to a
+ * single counted line, and the moment ANY surface is not ok the whole table is
+ * printed, because then the surrounding rows are the context for the bad one.
+ * `--json` is unaffected — it always carries every finding.
+ */
+export function renderDoctorFindings(findings: readonly DoctorFinding[]): string[] {
+  const line = (item: DoctorFinding) =>
+    `${item.severity.padEnd(7)} ${item.check}: ${item.detail}${item.remediation ? ` — ${item.remediation}` : ''}`;
+  const inventory = findings.filter((item) => item.check.startsWith('persisted-state:'));
+  if (inventory.length === 0 || inventory.some((item) => item.severity !== 'ok')) {
+    return findings.map(line);
+  }
+  const out: string[] = [];
+  let collapsed = false;
+  for (const item of findings) {
+    if (item.check.startsWith('persisted-state:')) {
+      if (collapsed) continue;
+      collapsed = true;
+      out.push(
+        `${'ok'.padEnd(7)} persisted-state: ${inventory.length} persisted surfaces are at the schema_version this build writes ` +
+          '(run `fadeno doctor --json` to see each one).',
+      );
+      continue;
+    }
+    out.push(line(item));
+  }
+  return out;
+}
+
 function main(argv: string[]): number {
   // The generated completer places the complete COMP_WORDS vector after an
   // explicit `--` boundary. Parse this tiny protocol before node:util.parseArgs
@@ -1145,6 +1180,7 @@ function main(argv: string[]): number {
         adversarial: { type: 'string' },
         judge: { type: 'string' },
         json: { type: 'boolean' },
+        'probe-models': { type: 'boolean' },
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
         branch: { type: 'string' },
@@ -1293,8 +1329,12 @@ function main(argv: string[]): number {
     case 'doctor': {
       const target = optionalTarget(values);
       if (target === 'grok') throw new Error('Use `fadeno doctor` without --grok; steering for that host is intentionally unsupported.');
-      const result = runDoctor({ target: target ?? null });
-      for (const item of result.findings) console.log(`${item.severity.padEnd(7)} ${item.check}: ${item.detail}${item.remediation ? ` — ${item.remediation}` : ''}`);
+      const result = runDoctor({ target: target ?? null, probeModels: Boolean(values['probe-models']) });
+      if (values.json) {
+        console.log(JSON.stringify({ repoRoot: result.repoRoot, ok: result.ok, findings: result.findings }, null, 2));
+        return result.ok ? 0 : 1;
+      }
+      for (const item of renderDoctorFindings(result.findings)) console.log(item);
       return result.ok ? 0 : 1;
     }
     case 'vendor': {

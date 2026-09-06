@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, lstatSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { packageVersion } from './paths.ts';
-import { userPaths, type FadenoHarness, type FadenoUserPaths, type UserPathOptions } from './user-paths.ts';
+import { userPaths, type DocumentDefect, type FadenoHarness, type FadenoUserPaths, type UserPathOptions } from './user-paths.ts';
 
 export interface ManagedFile {
   path: string;
@@ -31,13 +31,38 @@ export function emptyInstallationManifest(): InstallationManifest {
   return { schema_version: 1, runtime: null, harnesses: {} };
 }
 
+/**
+ * What `readInstallationManifest` requires of a parsed document beyond its
+ * stamp, or null when the document is one it can use.
+ *
+ * Exported so `auditPersistedState` can ask THIS function rather than
+ * re-deciding what a valid manifest looks like. A stamp is not a schema: a
+ * `{"schema_version": 1}` with no `harnesses` carries the current version and
+ * is still unusable, and an audit that reads only the stamp would call it
+ * healthy while every read of it throws.
+ */
+export function validateInstallationManifestDocument(doc: unknown): DocumentDefect | null {
+  // Every defect here is fatal: `readInstallationManifest` THROWS on each of
+  // them, so `fadeno setup`, `uninstall` and `status` all fail against the
+  // file rather than reading part of it.
+  const error = (detail: string): DocumentDefect => ({ severity: 'error', detail });
+  if (doc == null || typeof doc !== 'object' || Array.isArray(doc)) return error('is not a JSON object');
+  const manifest = doc as Partial<InstallationManifest>;
+  if (manifest.schema_version !== 1) return error(`has schema_version ${JSON.stringify(manifest.schema_version)}, and only 1 is supported`);
+  if (manifest.harnesses == null || typeof manifest.harnesses !== 'object' || Array.isArray(manifest.harnesses)) {
+    return error('has no `harnesses` mapping, so it records no installation at all');
+  }
+  return null;
+}
+
 export function readInstallationManifest(options: UserPathOptions = {}): InstallationManifest {
   const path = userPaths(options).installationsFile;
   if (!existsSync(path)) return emptyInstallationManifest();
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as InstallationManifest;
-    if (parsed.schema_version !== 1 || parsed.harnesses == null || typeof parsed.harnesses !== 'object') {
-      throw new InstallationError(`unsupported or malformed installation manifest at ${path}`);
+    const defect = validateInstallationManifestDocument(parsed);
+    if (defect != null) {
+      throw new InstallationError(`unsupported or malformed installation manifest at ${path}: it ${defect.detail}`);
     }
     return parsed;
   } catch (err) {

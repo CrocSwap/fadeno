@@ -1,17 +1,25 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { parse as parseYaml } from 'yaml';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
-  checkGraftCoherence,
   formatBakeoffDuration,
   isBakeoffVerdict,
-  BAKEOFF_REQUIRED_SECTIONS,
+  parseBakeoffFile,
   VERDICT_BUCKET,
-  type GraftStep,
+  type BakeoffArtifact,
   type BakeoffVerdict,
 } from '../lib/bakeoff.ts';
+
+/**
+ * `parseBakeoffFile` and `BakeoffArtifact` moved to `src/lib/bakeoff.ts` so
+ * the persisted-state audit — which lives in `src/lib/` and may not import
+ * `src/commands/` — reads `.fadeno/bakeoffs/` through the SAME reader this
+ * scorecard uses, instead of a second copy that could disagree about which
+ * records are usable. Re-exported here because this module is where every
+ * existing importer looks for them.
+ */
+export { parseBakeoffFile, type BakeoffArtifact };
 import {
   DISPATCHES_FILE,
   DISPATCHES_FORMAT,
@@ -2214,29 +2222,6 @@ export interface DispatchBakeoffPair {
   orphan: boolean;
 }
 
-export interface BakeoffArtifact {
-  /** Model-level dispositions this comparison observed, for cross-pair accumulation. */
-  traits?: Array<{ dimension: string; more: string }>;
-  file: string;
-  baseline: string | null;
-  challenger: string | null;
-  verdict: string | null;
-  date: string | null;
-  dispatchIds: string[] | null;
-  /**
-   * How the verdict reached this artifact (`command` | `host`), verbatim from
-   * the writer — see `JudgeDelivery` in `model-comparison.ts`. A plain string,
-   * not narrowed to the known union, for the same reason `DispatchPrimaryMerge
-   * .status` isn't: the vocabulary belongs to the writer and a narrower reader
-   * type would silently drop a value a newer fadeno introduces. `null` means
-   * the artifact predates the field, not that delivery is unknown to be
-   * either kind — the ordinary case for every artifact written before this
-   * command shipped `--record`.
-   */
-  judgeDelivery: string | null;
-  valid: boolean;
-  error?: string;
-}
 
 export interface DispatchBakeoffGroup {
   challenger: string;
@@ -2515,87 +2500,6 @@ export function resolveDispatchPair(
     );
   }
   return pairFor([...matchedPairIds][0]!);
-}
-
-/**
- * Exported so the WRITER can verify its own output through the reader that
- * will consume it, instead of assuming they agree. A rendered artifact the
- * scorecard rejects is not an error anywhere — the file simply sits in
- * `.fadeno/bakeoffs/` and is counted as skipped, so a judged pair costing
- * two dispatches disappears from the accumulation the scorecard exists for.
- */
-export function parseBakeoffFile(repoRoot: string, relPath: string): BakeoffArtifact {
-  const abs = join(repoRoot, relPath);
-  let content: string;
-  try {
-    content = readFileSync(abs, 'utf8');
-  } catch {
-    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, judgeDelivery: null, valid: false, error: 'unreadable' };
-  }
-  const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
-  if (!match) {
-    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, judgeDelivery: null, valid: false, error: 'missing frontmatter' };
-  }
-  const frontmatterText = match[1]!;
-  let data: Record<string, unknown>;
-  try {
-    const parsed = parseYaml(frontmatterText) as unknown;
-    if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
-    data = parsed as Record<string, unknown>;
-  } catch {
-    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, judgeDelivery: null, valid: false, error: 'invalid yaml' };
-  }
-  const kind = str(data.kind);
-  const baseline = str(data.baseline);
-  const challenger = str(data.challenger);
-  const verdict = str(data.verdict);
-  const date = str(data.date);
-  const judgeDelivery = str(data.judge_delivery);
-  const dispatchIdsRaw = data.dispatch_ids;
-  let dispatchIds: string[] | null = null;
-  if (Array.isArray(dispatchIdsRaw)) dispatchIds = dispatchIdsRaw.filter((v): v is string => typeof v === 'string' && v !== '');
-  const valid = kind === 'Bakeoff' && baseline != null && challenger != null && verdict != null && date != null;
-  const body = content.slice(match[0].length);
-  const missingSection = BAKEOFF_REQUIRED_SECTIONS.find(
-    (section) => !new RegExp(`^##\\s+${section}`, 'm').test(body),
-  );
-  if (missingSection != null) {
-    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: 'missing required sections' };
-  }
-  if (!valid) return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: 'invalid frontmatter' };
-  if (!isBakeoffVerdict(verdict)) {
-    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: 'invalid verdict' };
-  }
-  // Traits accumulate; verdicts alone do not tell you what the two models are
-  // LIKE. Parsed back out of the rendered section because the artifact is the
-  // record — re-reading it is what lets a scorecard built weeks later still
-  // compose a picture of a challenger across every pair it ran.
-  const traits = parseTraitSection(body);
-  const planRaw = data.graft_plan;
-  const plan = Array.isArray(planRaw) ? (planRaw as GraftStep[]) : undefined;
-  const incoherent = checkGraftCoherence(verdict, plan);
-  if (incoherent != null) {
-    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: incoherent };
-  }
-  return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, traits, valid: true };
-}
-
-/**
- * Read the `## Model traits` section back into tokens.
- *
- * The rendered line is `- **<dimension>** (more: <arm>): <note>`; only the two
- * tokens are recovered, never the prose. Prose cannot be tallied, which is the
- * entire reason the dimension is a closed vocabulary.
- */
-function parseTraitSection(body: string): Array<{ dimension: string; more: string }> {
-  const section = /^##\s+Model traits\s*$([\s\S]*?)(?=^##\s|\Z)/m.exec(body);
-  if (section == null) return [];
-  const out: Array<{ dimension: string; more: string }> = [];
-  for (const line of section[1]!.split('\n')) {
-    const m = /^-\s+\*\*([a-z_]+)\*\*\s+\(more:\s*([a-z]+)\)/.exec(line.trim());
-    if (m != null) out.push({ dimension: m[1]!, more: m[2]! });
-  }
-  return out;
 }
 
 function scanBakeoffs(repoRoot: string, dirRel: string): { artifacts: BakeoffArtifact[]; skipped: number } {

@@ -237,6 +237,28 @@ back to ordinary file completion when no specialized candidates apply.
   `CLAUDE.md`). Everything `init`/`plugin` writes goes through these, so they all
   share the same skip/overwrite/append semantics and report an `EmitStatus`.
 - **`playbook-validate.ts`** — the validator (below).
+- **`persisted-state.ts`** — `PERSISTED_SURFACES`, the inventory of every file
+  Fadeno persists, plus `stampSchemaVersion` / `readVersioned` /
+  `auditPersistedState` / `migratePersistedState` (see *Persisted state and
+  schema evolution*).
+- **`catalog-rot.ts`** — pure predicates behind doctor's `user-catalog-repairs`
+  and `model-verification-stale` findings: `VERIFICATION_MAX_AGE_DAYS`,
+  `isVerificationStale`, `catalogRepairFindings`, `verificationFindings`. No
+  filesystem, no clock, no spawn — `doctor.ts` feeds it the loader outcome, the
+  cache rows and the time. Every resolved dial is audited; a dial onto a harness
+  with no `models_command` is reported with a remediation that says nothing can
+  re-probe it, rather than filtered out.
+- **`model-listing.ts`** — `parseListedIds` / `listingContains` /
+  `listHarnessModels` / `listingFindings` / `isListable`. The first two are the
+  ONE parser and the ONE membership rule: `src/commands/models.ts` imports them
+  rather than keeping copies, so `fadeno models` and
+  `fadeno doctor --probe-models` cannot disagree about what a backend listed.
+  Membership qualifies the dialed id with `models_prefix` via
+  `qualifyListedModelId` and compares it to the raw listing — the listing is
+  never de-prefixed to meet a bare dial halfway, because `fadeno dial` would
+  refuse that dial. `listHarnessModels` spawns a harness's `models_command`
+  (10s timeout) and never throws; every failure is `{ ok: false, reason }`,
+  worded the way `fadeno models <harness>` would have raised it.
 - **`diagram.ts`** — the renderer (below).
 - **`flow-cursor.ts`** — pure `computeNext(playbook, events)` for `fadeno next`.
 - **`prompt-resolve.ts` / `prompt.ts`** — pure step-prompt plan + render for `fadeno prompt`.
@@ -300,6 +322,144 @@ back to ordinary file completion when no specialized candidates apply.
   cached in config emitted elsewhere — integrations (plugin agents, hooks) stay
   dumb and call `fadeno`, so a dial switch takes effect on the next dispatch
   with no config churn.
+
+## Persisted state and schema evolution
+
+`src/lib/persisted-state.ts` holds **`PERSISTED_SURFACES`** — one row for every
+file Fadeno writes, carrying its `id`, `scope` (`user-config` / `user-state` /
+`repo-local` / `run` / `ledger` / `ephemeral`), `relPath`, `format`,
+`versionField`, `currentVersion`, and the `reader`/`writer` that own it. The
+table exists because the failure it prevents is invisible: state files
+accumulated one at a time, each with its own reader, and a shape change in any
+one of them showed up as a command quietly doing the wrong thing rather than as
+an error. One list means one place to ask "what do we write, and what version is
+it at."
+
+**The versioning rule.** The stamp key is `schema_version`, an integer at the
+top level of a JSON or YAML document.
+
+- **An unstamped document is version 0** — the legacy shape today's writers
+  produce — and stays readable **forever**. v0 tolerance is not a migration
+  window; it is the contract.
+- **A stamp from the future is refused, not degraded.** `readUserDials` and
+  `readLocalDialState` throw rather than half-read a document a newer Fadeno
+  wrote, because these files decide which model runs. `recordVerifiedModel` and
+  `removeVerifiedModels` no-op on a document they could not parse rather than
+  clobbering it — doctor is what makes the condition loud.
+- Writers emit the current version. A surface whose `currentVersion` and
+  writer disagree is a test failure, not a runtime surprise (below).
+
+**What is stamped.** `dials.json` v1 is `{schema_version, dials}` (v0 was the
+flat archetype map); `model-verifications.json` v1 is
+`{schema_version, verifications}` (v0 was the bare array);
+`.fadeno/local/dials` v1 is the stamp beside today's keys. `executors.yaml`
+(catalog v4), the installation manifest, the dispatch ledger's per-row `format`,
+and run snapshots were already versioned and keep their own field names —
+`versionField` records which.
+
+**Auditing.** `auditPersistedState({ repoRoot, paths })` reports one
+`persisted-state:<surface-id>` finding per row: `ok` at the current version,
+`warning` when readable but behind (naming both versions and pointing at
+`fadeno setup`), `error` when unreadable or at an unknown version. An `error`
+names the surface's backup directory — `<stateDir>/backups` for user files,
+`<repoRoot>/.fadeno/local/backups` for repo-local ones, the same place a
+migration would have written — so "keep a copy, then delete it" points
+somewhere concrete rather than leaving the user to invent a location. It
+**never writes**.
+
+**A stamp is not a schema.** Reaching the current version is not enough for an
+`ok`: the audit then asks the surface's own reader whether the BODY is one it
+can use. `{"schema_version": 1, "dials": []}` is at version 1 and
+`readUserDials` yields nothing from it — a check that compared the stamp and
+stopped would report that file healthy, which is the exact confident-wrong-answer
+this inventory exists to catch. Each validator is exported from the module that
+owns the reader — `validateUserDialsDocument` and `validateVerificationDocument`
+(`user-paths.ts`), `validateLocalDialDocument` (`executors.ts`),
+`validateInstallationManifestDocument` (`installations.ts`) — and each is built
+from the reader's own code path, so a rule cannot be changed in one place only.
+A document the reader gets NOTHING from is an `error` naming the file and the
+scope's `backups/` directory (`fadeno setup` cannot help: migration runs only
+0 → current); one it gets most of is a `warning`. `SHAPE_VALIDATORS` in
+`persisted-state.ts` is exhaustive over stamped surfaces, with an explicit
+`null` meaning "decided: nothing beyond the envelope" — `shapeValidatorFor`
+throws for a stamped surface the table does not mention, so adding one forces
+the decision. The two catalog surfaces are deliberate `null`s: a catalog *layer*
+need only be a YAML mapping, and parsing the merged profile is doctor's
+`configuration` check (a user layer is legitimately a `models:`-only fragment
+that no full-profile parse would accept).
+
+Per-run surfaces roll up to one finding over the 50 most recent runs
+(`RUN_AUDIT_SCAN_LIMIT`), and an *older* run ledger is `ok`, not a warning: a
+run ledger is immutable evidence that nothing will ever rewrite, so warning
+about it forever would only teach people to skip the section. Damage is still
+an `error`. **`run-ledger` is one surface with two files**: `run.yaml` and the
+`events.jsonl` beside it, named machine-readably in `RUN_COMPANION_ROWS` and
+audited row by row through `readEvents` — the ledger's own reader, so the audit
+and the reader cannot disagree about what "corrupt" means. A row the reader
+cannot use at all (a truncated append, a scalar where an object belongs) is an
+`error` naming the run id and the line number; a row in an older shape is not,
+because events carry no stamp, unknown fields survive in `extra`, and history
+is supposed to keep the format it was written in. `fadeno doctor` collapses a fully-`ok` inventory into one counted
+line; `fadeno doctor --json` always carries every finding.
+
+**The audit runs on EVERY doctor invocation, including when status fails.**
+`runDoctor` wraps the status/catalog work in a `try` whose `catch` returns
+early — and the failure it catches is very often a persisted surface: a
+`dials.json` or a `.fadeno/local/dials` stamped with a version this build
+refuses makes `runStatus` throw. Reporting only `configuration: error` there
+withheld the `persisted-state:<id>` finding that names the surface, its backup
+directory, and what to do — the diagnostic went silent at exactly the moment it
+was the diagnosis. The audit now runs from a closure called on both paths, so
+both findings appear together; the generic `configuration` error is kept beside
+it, because the status failure is real.
+
+**Unstamped is not a reason to skip the read.** Every unversioned surface is
+read through its REAL reader — `readWorkspaceLease` (`workspace-lease.ts`),
+`readInflightClaim`/`readSupervisorStatus` (`supervisor.ts`),
+`spawnMarkerRow` (`spawn-markers.ts`, shared with
+`consumeSpawnSideRelay`/`consumeProxyDispatchMarker`), and `parseBakeoffFile`
+(`bakeoff.ts`, which is where it now lives so `src/lib/` need not import
+`src/commands/`) — and a document the reader refuses is an `error` naming that
+file and the backup directory. `UNVERSIONED_READERS` is exhaustive over
+unversioned surfaces with an explicit `null` meaning "decided: nothing reads
+it"; `unversionedReaderFor` throws for one the table does not mention, exactly
+as `shapeValidatorFor` does. The failure it closes is the mirror of the stamp
+one: six surfaces holding live machine-local state were reported `ok` —
+"unversioned by design" — by a check that had never opened them, and a
+`workspace-lease.json` nothing can read reads as a free workspace everywhere
+else, so mutual exclusion silently stops excluding.
+
+**Directory surfaces are read member by member.** `host-workspace-state` is a
+directory of per-dispatch documents, so the directory itself carries no stamp
+to compare; each member is read through `readHostWorkspaceState` — the same
+reader `dispatch-complete` uses to decide whether an isolated worktree's diff
+can be collected. Directory scans are bounded by `MEMBER_AUDIT_SCAN_LIMIT` and
+the finding says so whenever the bound is hit, because a bounded scan that does
+not announce the bound is the same confident wrong answer in a new place.
+
+**Migrating.** `migratePersistedState` is called by `fadeno setup` only, never
+by `doctor`, and it rewrites only the three newly-stamped surfaces. Each file is
+**backed up before it is touched** — `<stateDir>/backups/<ISO-8601 basic
+timestamp>/<basename>` for user files, `.fadeno/local/backups/<timestamp>/` for
+repo-local ones — and a migration that cannot back up does not rewrite: leaving
+a file at v0 costs nothing (v0 stays readable), losing it costs the dial. Errors
+are collected into the `MigrationReport`, not thrown, so one unreadable dials
+file cannot stop setup from installing a runtime.
+
+**Two tests hold the table honest.**
+`test/persisted-state-inventory.test.ts` is the drift tripwire: every path
+constant in `src/lib/user-paths.ts` (mapped by `USER_PATH_SURFACE_IDS`) and
+every repo-local state path must appear in `PERSISTED_SURFACES`, and each
+declared `currentVersion` must equal what its writer actually stamps — checked
+by writing to a temp directory and reading the bytes back.
+`test/persisted-state-fixtures.test.ts` runs the fixture zoo at
+`test/fixtures/persisted-state/<surface-id>/v<N>.<ext>` through the real
+readers; the v0 samples were captured from the pre-change writers, so tolerance
+is asserted against the legacy bytes rather than against a remembered shape.
+Beside them sits `malformed-v<current>.<ext>` — a document at the current
+version whose body the reader cannot use — and a tripwire requires one for
+every surface with a shape validator, so a validator can never sit untested
+while the audit drifts back to trusting the stamp.
 
 ## The validator (`src/lib/playbook-validate.ts`)
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 // One-directional at runtime: `executors.ts` imports only TYPES from this
@@ -6,6 +6,26 @@ import { join } from 'node:path';
 // a second copy here is exactly how a user dial would start reading
 // differently from a catalog dial.
 import { formatDialRef, legacyDriverHarness, parseDialRef, type DialRef } from './executors.ts';
+
+/**
+ * What a reader could not use in a document that already carries the current
+ * `schema_version`.
+ *
+ * `error` means the document yields NOTHING through its reader — the stamp
+ * says current and every read comes back empty, which is the failure the
+ * persisted-state inventory exists to make loud. `warning` means the reader
+ * got most of it and silently dropped a part, which is worth saying but is not
+ * a broken file.
+ *
+ * Declared here rather than in `persisted-state.ts` because that module
+ * imports this one (and `executors.ts` and `installations.ts`) and not the
+ * other way round; this is the lowest module all three validators share.
+ */
+export interface DocumentDefect {
+  severity: 'warning' | 'error';
+  /** A sentence completing "it …" — no leading capital, no trailing period. */
+  detail: string;
+}
 
 /** Inputs used to resolve Fadeno's user-level configuration locations. */
 export interface UserPathOptions {
@@ -90,13 +110,180 @@ export function retiredStateFiles(paths: FadenoUserPaths): string[] {
   return [join(paths.stateDir, 'harness'), join(paths.stateDir, 'loadout')];
 }
 
+// --- atomic writes ---
+
+/**
+ * Write `text` to `path` by rename, the way `writeInstallationManifest`
+ * already does.
+ *
+ * Every file under here is read by a concurrent process — a steering hook
+ * resolving dials while `fadeno dial` writes them is the normal case, not the
+ * exception. A plain `writeFileSync` truncates in place, so a reader can
+ * observe an empty prefix and conclude "no dials", which is a wrong answer
+ * that looks exactly like a right one.
+ */
+function writeUserFileAtomic(path: string, text: string): void {
+  mkdirSync(join(path, '..'), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, text, 'utf8');
+  try {
+    renameSync(tmp, path);
+  } catch (err) {
+    try { rmSync(tmp, { force: true }); } catch {}
+    throw err;
+  }
+}
+
 // --- dials file ---
+
+/**
+ * Schema version `writeUserDials` stamps. v1 is `{schema_version, dials}`;
+ * v0 — the unstamped flat `{archetype: ref}` map every Fadeno up to 0.6.1
+ * wrote — stays readable forever. `PERSISTED_SURFACES` in
+ * `src/lib/persisted-state.ts` reads this constant rather than restating it.
+ */
+export const DIALS_SCHEMA_VERSION = 1;
 
 /** Thrown when a user dial file carries a key the dial vocabulary no longer
  * has. Its own class so a caller can tell a stale personal config from an
  * unreadable one — an unreadable dials file degrades to `{}` on purpose, and a
  * removed-key file must NOT. */
 export class UserDialsError extends Error {}
+
+/**
+ * The dial map inside a dials document, whichever version wrote it.
+ *
+ * Version 0 IS the document: the flat map. Version 1 nests it under `dials`.
+ * A stamp is only believed when it is a number, so a v0 file that happens to
+ * hold an archetype literally named `schema_version` (a legal bare identifier,
+ * whose value would be a dial-ref STRING) still reads as v0.
+ */
+function unwrapUserDials(doc: Record<string, unknown>, path: string): { map: Record<string, unknown>; problem: string | null } {
+  const stamp = doc.schema_version;
+  if (typeof stamp !== 'number') return { map: doc, problem: null };
+  if (stamp > DIALS_SCHEMA_VERSION) {
+    // Knowable and actionable, so it is said out loud. Degrading to `{}` here
+    // would silently drop every dial the user set with a newer Fadeno.
+    throw new UserDialsError(
+      `user dials at ${path} are schema_version ${stamp}; this fadeno reads ${DIALS_SCHEMA_VERSION}. ` +
+        'Upgrade fadeno, or move the file aside and re-set your dials with `fadeno dial`.',
+    );
+  }
+  const nested = doc.dials;
+  if (nested == null || typeof nested !== 'object' || Array.isArray(nested)) {
+    return {
+      map: {},
+      problem: `carries schema_version ${stamp} but no \`dials\` mapping, so it yields no dials at all`,
+    };
+  }
+  return { map: nested as Record<string, unknown>, problem: null };
+}
+
+/**
+ * Everything one dials document says, INCLUDING what the reader had to
+ * discard.
+ *
+ * `readUserDials` returns only `dials` — degrading a malformed entry to
+ * "absent" is the right runtime behaviour, because a personal config must not
+ * be able to take out every command. But "the reader silently discarded this"
+ * is exactly what `fadeno doctor` has to be able to say, so the two live in
+ * ONE function and differ only in which half of its result they use. A second
+ * copy of the shape rules, written for the audit, would drift the same day
+ * someone changed the reader.
+ */
+interface UserDialsReading {
+  dials: Record<string, { model: string; effort?: string; harness?: string }>;
+  /** What the reader could not use, in document order. */
+  problems: string[];
+  /** The first problem the reader must THROW on rather than skip past. */
+  fatal: string | null;
+}
+
+function interpretUserDials(doc: Record<string, unknown>, path: string): UserDialsReading {
+  const unwrapped = unwrapUserDials(doc, path);
+  const problems: string[] = unwrapped.problem != null ? [unwrapped.problem] : [];
+  let fatal: string | null = null;
+  const out: Record<string, { model: string; effort?: string; harness?: string }> = {};
+  for (const [k, v] of Object.entries(unwrapped.map)) {
+    if (typeof v === 'string') {
+      const trimmed = v.trim();
+      if (trimmed.length === 0) {
+        problems.push(`dial "${k}" is an empty string`);
+        continue;
+      }
+      // One parser for the grammar, so a user dial and a catalog dial cannot
+      // read differently — including the legacy ` via <driver>` form, which
+      // `parseDialRef` translates to a harness on read and never writes back.
+      let ref: DialRef;
+      try { ref = parseDialRef(trimmed, `user dial "${k}"`); } catch (err) {
+        problems.push(`dial "${k}" is not a dial ref (${(err as Error).message})`);
+        continue;
+      }
+      out[k] = ref;
+    } else if (v != null && typeof v === 'object' && !Array.isArray(v)) {
+      const map = v as Record<string, unknown>;
+      const model = typeof map.model === 'string' ? map.model.trim() : '';
+      if (model.length === 0) {
+        problems.push(`dial "${k}" is a mapping with no \`model\``);
+        continue;
+      }
+      // Refused, not dropped, and refused HERE rather than left to the profile
+      // parser. `parseExecutorProfile` rejects this key with the same pointer,
+      // but a user dial never reaches it: `drive` casts this map straight to
+      // `DialRef`, so the flag used to ride along invisibly and mean nothing.
+      // Silently ignoring a key someone wrote in order to override a guard is
+      // the failure the permissions cut exists to end — and the guard it named
+      // does not exist any more, so the file is stating something untrue.
+      if (map.force_write_posture !== undefined) {
+        const message =
+          `user dial "${k}" in ${path} carries "force_write_posture", which is no longer supported — there ` +
+          'is no write-posture guard left to override. Remove the key (the dial\'s model/effort/harness are ' +
+          'still valid) or re-set the dial with `fadeno dial`. ' +
+          'See docs/experimental/permissions-and-isolation.md.';
+        problems.push(message);
+        fatal ??= message;
+        continue;
+      }
+      const entry: { model: string; effort?: string; harness?: string } = { model };
+      if (typeof map.effort === 'string' && map.effort.trim().length > 0) entry.effort = map.effort.trim();
+      if (typeof map.harness === 'string' && map.harness.trim().length > 0) entry.harness = map.harness.trim();
+      // Legacy mapping form, read only.
+      else if (typeof map.via === 'string' && map.via.trim().length > 0) entry.harness = legacyDriverHarness(map.via.trim());
+      out[k] = entry;
+    } else {
+      problems.push(`dial "${k}" is ${v === null ? 'null' : Array.isArray(v) ? 'an array' : `a ${typeof v}`}, not a dial ref`);
+    }
+  }
+  return { dials: out, problems, fatal };
+}
+
+/**
+ * What `readUserDials` could not use in an already-parsed dials document, or
+ * null when it reads the whole thing.
+ *
+ * The audit's question, answered by the reader's own code. A stamp is not a
+ * schema: `{"schema_version": 1, "dials": []}` carries the CURRENT version and
+ * still yields no dials, so an audit that reads only the stamp reports a
+ * healthy file whose every read comes back empty.
+ */
+export function validateUserDialsDocument(doc: unknown, path = 'dials.json'): DocumentDefect | null {
+  if (doc == null || typeof doc !== 'object' || Array.isArray(doc)) {
+    return { severity: 'error', detail: 'is not a JSON object' };
+  }
+  let reading: UserDialsReading;
+  try {
+    reading = interpretUserDials(doc as Record<string, unknown>, path);
+  } catch (err) {
+    return { severity: 'error', detail: (err as Error).message };
+  }
+  // A read that THROWS, or a document that yields no dials at all while
+  // holding entries, is the whole file gone; anything else is one dropped key.
+  if (reading.fatal != null) return { severity: 'error', detail: reading.fatal };
+  const first = reading.problems[0];
+  if (first == null) return null;
+  const yieldsNothing = Object.keys(reading.dials).length === 0;
+  return { severity: yieldsNothing ? 'error' : 'warning', detail: first };
+}
 
 export function readUserDials(options: UserPathOptions = {}): Record<string, { model: string; effort?: string; harness?: string }> {
   const path = userPaths(options).dialsFile;
@@ -106,45 +293,9 @@ export function readUserDials(options: UserPathOptions = {}): Record<string, { m
   let doc: unknown;
   try { doc = JSON.parse(text); } catch { return {}; }
   if (doc == null || typeof doc !== 'object' || Array.isArray(doc)) return {};
-  const out: Record<string, { model: string; effort?: string; harness?: string }> = {};
-  for (const [k, v] of Object.entries(doc as Record<string, unknown>)) {
-    if (typeof v === 'string') {
-      const trimmed = v.trim();
-      if (trimmed.length === 0) continue;
-      // One parser for the grammar, so a user dial and a catalog dial cannot
-      // read differently — including the legacy ` via <driver>` form, which
-      // `parseDialRef` translates to a harness on read and never writes back.
-      let ref: DialRef;
-      try { ref = parseDialRef(trimmed, `user dial "${k}"`); } catch { continue; }
-      out[k] = ref;
-    } else if (v != null && typeof v === 'object' && !Array.isArray(v)) {
-      const map = v as Record<string, unknown>;
-      const model = typeof map.model === 'string' ? map.model.trim() : '';
-      if (model.length === 0) continue;
-      // Refused, not dropped, and refused HERE rather than left to the profile
-      // parser. `parseExecutorProfile` rejects this key with the same pointer,
-      // but a user dial never reaches it: `drive` casts this map straight to
-      // `DialRef`, so the flag used to ride along invisibly and mean nothing.
-      // Silently ignoring a key someone wrote in order to override a guard is
-      // the failure the permissions cut exists to end — and the guard it named
-      // does not exist any more, so the file is stating something untrue.
-      if (map.force_write_posture !== undefined) {
-        throw new UserDialsError(
-          `user dial "${k}" in ${path} carries "force_write_posture", which is no longer supported — there ` +
-            'is no write-posture guard left to override. Remove the key (the dial\'s model/effort/harness are ' +
-            'still valid) or re-set the dial with `fadeno dial`. ' +
-            'See docs/experimental/permissions-and-isolation.md.',
-        );
-      }
-      const entry: { model: string; effort?: string; harness?: string } = { model };
-      if (typeof map.effort === 'string' && map.effort.trim().length > 0) entry.effort = map.effort.trim();
-      if (typeof map.harness === 'string' && map.harness.trim().length > 0) entry.harness = map.harness.trim();
-      // Legacy mapping form, read only.
-      else if (typeof map.via === 'string' && map.via.trim().length > 0) entry.harness = legacyDriverHarness(map.via.trim());
-      out[k] = entry;
-    }
-  }
-  return out;
+  const reading = interpretUserDials(doc as Record<string, unknown>, path);
+  if (reading.fatal != null) throw new UserDialsError(reading.fatal);
+  return reading.dials;
 }
 
 export function writeUserDials(options: UserPathOptions, dials: Record<string, { model: string; effort?: string; harness?: string }>): string {
@@ -154,7 +305,6 @@ export function writeUserDials(options: UserPathOptions, dials: Record<string, {
     if (existsSync(path)) unlinkSync(path);
     return path;
   }
-  mkdirSync(join(path, '..'), { recursive: true });
   const sorted: Record<string, unknown> = {};
   for (const k of keys) {
     // One shape now. The object form existed only to carry
@@ -164,7 +314,10 @@ export function writeUserDials(options: UserPathOptions, dials: Record<string, {
   }
   const ordered: Record<string, unknown> = {};
   for (const k of Object.keys(sorted).sort()) ordered[k] = sorted[k];
-  writeFileSync(path, `${JSON.stringify(ordered)}\n`, 'utf8');
+  // Stamped literally rather than through `stampSchemaVersion`: that helper
+  // lives in `persisted-state.ts`, which imports THIS module, and a cycle to
+  // save one object literal is a bad trade.
+  writeUserFileAtomic(path, `${JSON.stringify({ schema_version: DIALS_SCHEMA_VERSION, dials: ordered })}\n`);
   return path;
 }
 
@@ -177,34 +330,102 @@ export interface ModelVerification {
   verified_at: string;
 }
 
+/**
+ * Schema version `recordVerifiedModel` stamps. v1 is
+ * `{schema_version, verifications}`; v0 — the bare array — stays readable
+ * forever. `PERSISTED_SURFACES` reads this constant rather than restating it.
+ */
+export const MODEL_VERIFICATIONS_SCHEMA_VERSION = 1;
+
+/**
+ * The verification rows, plus whether the document was understood at all.
+ *
+ * `understood: false` is what stops `recordVerifiedModel` from overwriting a
+ * file it could not parse — including one written by a NEWER Fadeno. Losing a
+ * cache entry costs one re-probe; clobbering the file costs every entry in it.
+ * The condition is not swallowed: `auditPersistedState` reports the same file
+ * as a `persisted-state:model-verifications` error.
+ */
+/** The document half of the reader, split out so the audit can ask it too. */
+function interpretVerificationDocument(parsed: unknown): { rows: unknown[]; understood: boolean; problem: string | null } {
+  // v0 IS the bare array, and stays readable forever.
+  if (Array.isArray(parsed)) return { rows: parsed, understood: true, problem: null };
+  if (parsed == null || typeof parsed !== 'object') {
+    return { rows: [], understood: false, problem: 'is not a JSON array or object' };
+  }
+  const doc = parsed as Record<string, unknown>;
+  const stamp = doc.schema_version;
+  if (typeof stamp !== 'number') {
+    return { rows: [], understood: false, problem: `is an object with schema_version ${JSON.stringify(stamp)}, which is not a number` };
+  }
+  if (stamp > MODEL_VERIFICATIONS_SCHEMA_VERSION) {
+    return { rows: [], understood: false, problem: `has schema_version ${stamp}; this fadeno reads ${MODEL_VERIFICATIONS_SCHEMA_VERSION}` };
+  }
+  const rows = doc.verifications;
+  if (!Array.isArray(rows)) {
+    return { rows: [], understood: false, problem: `carries schema_version ${stamp} but no \`verifications\` array, so it yields no cached rows at all` };
+  }
+  return { rows, understood: true, problem: null };
+}
+
+/** One cache row, or null when it is not one the reader can use. */
+function verificationRow(entry: unknown): ModelVerification | null {
+  if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const map = entry as Record<string, unknown>;
+  // A cache written before catalog v4 keys on `driver`; the value was
+  // always a harness wearing a driver's name, so it reads back as one.
+  const harness = typeof map.harness === 'string'
+    ? map.harness
+    : typeof map.driver === 'string' ? legacyDriverHarness(map.driver) : null;
+  if (harness == null || typeof map.model !== 'string' || typeof map.verified_at !== 'string') return null;
+  return { harness, model: map.model, verified_at: map.verified_at };
+}
+
+/**
+ * What `readVerifiedModels` could not use in an already-parsed cache document,
+ * or null when it reads the whole thing.
+ *
+ * Rows are checked too, not just the envelope: a stamped document holding
+ * three rows the reader skips is a cache that reports zero entries while the
+ * file says three — the same silent emptiness as a missing `verifications`
+ * key, just further in.
+ */
+export function validateVerificationDocument(doc: unknown): DocumentDefect | null {
+  const read = interpretVerificationDocument(doc);
+  // `understood: false` is what makes `recordVerifiedModel` refuse to write:
+  // the whole cache is unreadable, not one row of it.
+  if (read.problem != null) return { severity: 'error', detail: read.problem };
+  const unusable = read.rows.filter((row) => verificationRow(row) == null).length;
+  if (unusable === 0) return null;
+  return {
+    severity: unusable === read.rows.length ? 'error' : 'warning',
+    detail: `has ${unusable} of ${read.rows.length} row(s) that are not {harness, model, verified_at}, which the reader drops`,
+  };
+}
+
+function readVerificationDocument(path: string): { rows: unknown[]; understood: boolean } {
+  if (!existsSync(path)) return { rows: [], understood: true };
+  const text = readFileSync(path, 'utf8').trim();
+  if (text.length === 0) return { rows: [], understood: true };
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { return { rows: [], understood: false }; }
+  const read = interpretVerificationDocument(parsed);
+  return { rows: read.rows, understood: read.understood };
+}
+
 export function readVerifiedModels(options: UserPathOptions = {}): ModelVerification[] {
   const path = userPaths(options).modelVerificationsFile;
-  if (!existsSync(path)) return [];
-  const text = readFileSync(path, 'utf8').trim();
-  if (text.length === 0) return [];
-  try {
-    const parsed = JSON.parse(text);
-    if (!Array.isArray(parsed)) return [];
-    const out: ModelVerification[] = [];
-    for (const entry of parsed) {
-      if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) continue;
-      const map = entry as Record<string, unknown>;
-      // A cache written before catalog v4 keys on `driver`; the value was
-      // always a harness wearing a driver's name, so it reads back as one.
-      const harness = typeof map.harness === 'string'
-        ? map.harness
-        : typeof map.driver === 'string' ? legacyDriverHarness(map.driver) : null;
-      if (harness == null || typeof map.model !== 'string' || typeof map.verified_at !== 'string') continue;
-      out.push({ harness, model: map.model, verified_at: map.verified_at });
-    }
-    out.sort((a, b) => {
-      if (a.harness !== b.harness) return a.harness.localeCompare(b.harness);
-      return a.model.localeCompare(b.model);
-    });
-    return out;
-  } catch {
-    return [];
+  const out: ModelVerification[] = [];
+  for (const entry of readVerificationDocument(path).rows) {
+    const row = verificationRow(entry);
+    if (row == null) continue;
+    out.push(row);
   }
+  out.sort((a, b) => {
+    if (a.harness !== b.harness) return a.harness.localeCompare(b.harness);
+    return a.model.localeCompare(b.model);
+  });
+  return out;
 }
 
 export function isModelVerified(options: UserPathOptions, harness: string, model: string): boolean {
@@ -214,6 +435,9 @@ export function isModelVerified(options: UserPathOptions, harness: string, model
 
 export function recordVerifiedModel(options: UserPathOptions, entry: ModelVerification): void {
   const path = userPaths(options).modelVerificationsFile;
+  // Refuse to rewrite a document this Fadeno did not understand — see
+  // `readVerificationDocument`. Doctor is what tells the user about it.
+  if (!readVerificationDocument(path).understood) return;
   const existing = readVerifiedModels(options);
   if (existing.some((e) => e.harness === entry.harness && e.model === entry.model)) return;
   const next = [...existing, entry];
@@ -221,8 +445,10 @@ export function recordVerifiedModel(options: UserPathOptions, entry: ModelVerifi
     if (a.harness !== b.harness) return a.harness.localeCompare(b.harness);
     return a.model.localeCompare(b.model);
   });
-  mkdirSync(join(path, '..'), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(next)}\n`, 'utf8');
+  writeUserFileAtomic(
+    path,
+    `${JSON.stringify({ schema_version: MODEL_VERIFICATIONS_SCHEMA_VERSION, verifications: next })}\n`,
+  );
 }
 
 /**
@@ -234,7 +460,12 @@ export function recordVerifiedModel(options: UserPathOptions, entry: ModelVerifi
  * a pair's rows when the listing definitively does not name it, and `model
  * remove` deletes them for an alias that is going away.
  *
- * Same shape the writer above emits: a sorted flat array, one JSON line.
+ * Writes through the same stamped, atomic path `recordVerifiedModel` uses, so
+ * a cache that is only ever *pruned* still ends up at the current
+ * `schema_version` instead of silently reverting the file to the v0 bare
+ * array. A document this build could not understand yields no rows, so
+ * `removed` is 0 and nothing is rewritten — the same refusal
+ * `recordVerifiedModel` makes explicitly.
  */
 export function removeVerifiedModels(
   options: UserPathOptions,
@@ -245,8 +476,10 @@ export function removeVerifiedModels(
   const kept = existing.filter((entry) => !predicate(entry));
   const removed = existing.length - kept.length;
   if (removed === 0) return 0;
-  mkdirSync(join(path, '..'), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(kept)}\n`, 'utf8');
+  writeUserFileAtomic(
+    path,
+    `${JSON.stringify({ schema_version: MODEL_VERIFICATIONS_SCHEMA_VERSION, verifications: kept })}\n`,
+  );
   return removed;
 }
 

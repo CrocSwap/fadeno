@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unli
 import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { loadLayeredProfile, type ModelFallbackOutcome, type ProfileProvenance } from './config-layers.ts';
-import { type FadenoHarness, type UserPathOptions } from './user-paths.ts';
+import { type DocumentDefect, type FadenoHarness, type UserPathOptions } from './user-paths.ts';
 
 export class ExecutorProfileError extends Error {}
 
@@ -645,8 +645,16 @@ export interface HarnessRaw {
  * id. This is deliberately separate from command substitution: OpenCode's
  * OpenRouter listing includes `openrouter/`, while its `-m` argument must not
  * receive that prefix twice.
+ *
+ * The parameter is the prefix-bearing SLICE of a harness entry rather than
+ * `HarnessRaw` itself, so `src/lib/model-listing.ts` can hand it a listing's
+ * recorded prefix and get literally this function's answer. There is exactly
+ * one qualify rule in the codebase and every membership test goes through it —
+ * `fadeno dial`'s probe, `fadeno models`, `fadeno models verify` and
+ * `fadeno doctor --probe-models` must agree about what "listed" means, or the
+ * doctor stays silent about a dial the dial command would refuse.
  */
-export function qualifyListedModelId(harness: HarnessRaw | null | undefined, modelId: string): string {
+export function qualifyListedModelId(harness: { modelsPrefix?: string } | null | undefined, modelId: string): string {
   const prefix = harness?.modelsPrefix;
   if (prefix == null || modelId.startsWith(prefix)) return modelId;
   return `${prefix}${modelId}`;
@@ -1794,6 +1802,14 @@ export function loadExecutorProfile(repoRoot: string, options: UserPathOptions =
 /** Repo-relative sticky dial file, written by `fadeno dial`. */
 export const DIALS_LOCAL_FILE = join('.fadeno', 'local', 'dials');
 
+/**
+ * Schema version `writeLocalDialState` stamps. v1 is the stamp beside the
+ * existing `dials`/`shadows` keys; v0 — the unstamped pair every Fadeno up to
+ * 0.6.1 wrote — stays readable forever. `PERSISTED_SURFACES` in
+ * `src/lib/persisted-state.ts` reads this constant rather than restating it.
+ */
+export const LOCAL_DIALS_SCHEMA_VERSION = 1;
+
 // --- New pin file v3 ---
 
 export interface ShadowAttachment {
@@ -2007,12 +2023,36 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
   if (!isMapping(doc)) {
     throw localDialPinError('is JSON, but not an object (`{dials, shadows}`).');
   }
+  return interpretLocalDialDocument(doc);
+}
+
+/**
+ * Everything `readLocalDialState` decides once the bytes are parsed.
+ *
+ * Split from the file read so `validateLocalDialDocument` can ask the SAME
+ * function whether a document is usable. A second, audit-only copy of these
+ * rules would drift from the reader the first time a key was added.
+ */
+function interpretLocalDialDocument(doc: Record<string, unknown>): LocalDialState {
   if (doc.loadout !== undefined || doc.overrides !== undefined) {
     return {
       dials: {},
       shadows: {},
       legacyNote: 'pre-0.6 loadout pin ignored (named loadouts retired) — re-dial with `fadeno dial <archetype> <model>`',
     };
+  }
+  // An absent stamp is version 0 — the shape every Fadeno up to 0.6.1 wrote —
+  // and reads exactly as it always did. A stamp from the future is refused
+  // rather than half-read: this file decides which model runs.
+  if (doc.schema_version !== undefined) {
+    if (typeof doc.schema_version !== 'number' || !Number.isSafeInteger(doc.schema_version) || doc.schema_version < 0) {
+      throw localDialPinError(`has schema_version ${JSON.stringify(doc.schema_version)}, which is not a non-negative integer.`);
+    }
+    if (doc.schema_version > LOCAL_DIALS_SCHEMA_VERSION) {
+      throw localDialPinError(
+        `is schema_version ${doc.schema_version}; this fadeno reads ${LOCAL_DIALS_SCHEMA_VERSION}.`,
+      );
+    }
   }
   const dials: Record<string, DialRef> = {};
   const legacyShadowVia: string[] = [];
@@ -2087,11 +2127,34 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
       shadows[arch] = att;
     }
   }
-  const unknownTop = Object.keys(doc).filter((k) => k !== 'dials' && k !== 'shadows');
+  const unknownTop = Object.keys(doc).filter((k) => k !== 'dials' && k !== 'shadows' && k !== 'schema_version');
   if (unknownTop.length > 0) {
-    throw localDialPinError(`has unknown key(s) ${unknownTop.join(', ')}; only \`dials\` and \`shadows\` are allowed.`);
+    throw localDialPinError(`has unknown key(s) ${unknownTop.join(', ')}; only \`schema_version\`, \`dials\` and \`shadows\` are allowed.`);
   }
   return { dials, shadows, legacyNote: null, legacyViaNote: formatLegacyViaNote(legacyDialVia, legacyShadowVia) };
+}
+
+/**
+ * What `readLocalDialState` could not use in an already-parsed pin document,
+ * or null when it reads the whole thing.
+ *
+ * The audit's question, answered by the reader itself. A `legacyNote` counts
+ * as a problem here even though the reader returns rather than throws: on a
+ * document that carries the CURRENT stamp, "pre-0.6 loadout pin ignored" means
+ * the file has a stamp saying v1 and a body that yields zero dials, which is
+ * precisely the state a version check alone would call healthy.
+ */
+export function validateLocalDialDocument(doc: unknown): DocumentDefect | null {
+  // Every defect is fatal here: `readLocalDialState` either throws — in which
+  // case `fadeno dial` and the steering hook both fail on the file — or
+  // returns the legacy note with zero dials and zero shadows.
+  if (!isMapping(doc)) return { severity: 'error', detail: 'is JSON, but not an object (`{dials, shadows}`)' };
+  try {
+    const note = interpretLocalDialDocument(doc).legacyNote;
+    return note != null ? { severity: 'error', detail: note } : null;
+  } catch (err) {
+    return { severity: 'error', detail: (err as Error).message };
+  }
 }
 
 /**
@@ -2156,7 +2219,9 @@ export function writeLocalDialState(repoRoot: string, state: LocalDialState): st
     }
     out.shadows = sortedShadows;
   }
-  const ordered: Record<string, unknown> = {};
+  // Stamp first, then the sorted body: a version buried after the payload is
+  // a version nobody reads when they open the file to debug a dial.
+  const ordered: Record<string, unknown> = { schema_version: LOCAL_DIALS_SCHEMA_VERSION };
   for (const k of Object.keys(out).sort()) ordered[k] = out[k];
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   writeFileSync(tmp, `${JSON.stringify(ordered)}\n`, 'utf8');

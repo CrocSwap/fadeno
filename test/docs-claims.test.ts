@@ -462,6 +462,84 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // The inventory is only a guarantee while the docs and the table agree on
+    // the exported names; a recipe that names a helper the module dropped
+    // sends the next contributor to a function that is not there.
+    id: 'persisted-state-inventory',
+    doc: {
+      files: ['docs/architecture.md', EXTENDING],
+      patterns: [/PERSISTED_SURFACES/, /USER_PATH_SURFACE_IDS/, /RUN_COMPANION_ROWS/, /UNVERSIONED_READERS/, /unversionedReaderFor/, /MEMBER_AUDIT_SCAN_LIMIT/, /stampSchemaVersion/, /migratePersistedState/, /auditPersistedState/, /schema_version/],
+    },
+    src: {
+      files: ['src/lib/persisted-state.ts', 'src/commands/setup.ts', 'src/commands/doctor.ts'],
+      patterns: [/PERSISTED_SURFACES/, /USER_PATH_SURFACE_IDS/, /RUN_COMPANION_ROWS/, /UNVERSIONED_READERS/, /unversionedReaderFor/, /MEMBER_AUDIT_SCAN_LIMIT/, /stampSchemaVersion/, /migratePersistedState/, /auditPersistedState/, /schema_version/],
+    },
+  },
+  {
+    // "A stamp is not a schema" is a claim about named functions, and the
+    // whole point is that the validators live beside the readers rather than
+    // in the audit. A doc that keeps naming a validator the module dropped —
+    // or an audit that quietly goes back to trusting the stamp — is the same
+    // silent-wrong-answer this check was added to close.
+    id: 'persisted-state-shape-validation',
+    doc: {
+      files: ['docs/architecture.md', EXTENDING],
+      patterns: [
+        /SHAPE_VALIDATORS/,
+        /shapeValidatorFor/,
+        /validateUserDialsDocument/,
+        /validateVerificationDocument/,
+        /validateLocalDialDocument/,
+        /validateInstallationManifestDocument/,
+      ],
+    },
+    src: {
+      files: [
+        'src/lib/persisted-state.ts',
+        'src/lib/user-paths.ts',
+        'src/lib/executors.ts',
+        'src/lib/installations.ts',
+      ],
+      patterns: [
+        /SHAPE_VALIDATORS/,
+        /shapeValidatorFor/,
+        /validateUserDialsDocument/,
+        /validateVerificationDocument/,
+        /validateLocalDialDocument/,
+        /validateInstallationManifestDocument/,
+      ],
+    },
+  },
+  {
+    // One membership rule, two consumers. The doctor and `fadeno models` have
+    // to decide "is this dial still listed" with the same function, or the
+    // doctor can report a dial healthy that `fadeno dial` would refuse.
+    id: 'model-listing-membership',
+    doc: {
+      files: ['docs/architecture.md', 'CHANGELOG.md'],
+      patterns: [/listingContains/, /qualifyListedModelId/, /models_prefix/],
+    },
+    src: {
+      files: ['src/lib/model-listing.ts', 'src/commands/models.ts', 'src/lib/executors.ts'],
+      patterns: [/listingContains/, /qualifyListedModelId/, /models_prefix/],
+    },
+  },
+  {
+    // The four catalog-rot check ids ARE the user-facing surface of this
+    // feature — a doc that keeps promising a check id doctor stopped emitting
+    // is worse than one that never named it. `--probe-models` rides along
+    // because it is the only reason three of them ever run.
+    id: 'catalog-rot-doctor-checks',
+    doc: {
+      files: ['CHANGELOG.md', 'docs/architecture.md'],
+      patterns: [/user-catalog-repairs/, /model-verification-stale/, /model-listing-missing/, /persisted-state:/, /--probe-models/, /VERIFICATION_MAX_AGE_DAYS/],
+    },
+    src: {
+      files: ['src/lib/catalog-rot.ts', 'src/lib/model-listing.ts', 'src/lib/persisted-state.ts', 'src/commands/doctor.ts', 'src/cli.ts', 'src/lib/cli-help.ts'],
+      patterns: [/user-catalog-repairs/, /model-verification-stale/, /model-listing-missing/, /persisted-state:/, /--probe-models/, /VERIFICATION_MAX_AGE_DAYS/],
+    },
+  },
+  {
     id: 'engine-cancel-command',
     doc: { files: [EXTENDING, 'README.md'], patterns: [/fadeno cancel/] },
     src: { files: ['src/commands/cancel.ts', 'src/cli.ts'], patterns: [/runCancel/] },

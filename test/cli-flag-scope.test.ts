@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { KNOWN_CLI_COMMANDS } from '../src/cli.ts';
+import { KNOWN_CLI_COMMANDS, renderDoctorFindings } from '../src/cli.ts';
 import { knownFlagsFor, suggestFlag, unknownFlagsFor } from '../src/commands/completion.ts';
 
 /**
@@ -24,6 +24,36 @@ test('a flag from another command is rejected, not ignored', () => {
   assert.deepEqual(unknownFlagsFor('doctor', undefined, ['repo']), ['--repo']);
   // And the ones doctor really takes are untouched.
   assert.deepEqual(unknownFlagsFor('doctor', undefined, ['codex', 'claude', 'help']), []);
+});
+
+test('doctor accepts its own probe and json flags', () => {
+  // `--probe-models` is the only flag that makes doctor spawn anything, so a
+  // registry that forgot it would turn the opt-in into an "unknown flag" and
+  // leave the check unreachable.
+  assert.deepEqual(unknownFlagsFor('doctor', undefined, ['probe-models', 'json']), []);
+});
+
+test('a clean persisted-state inventory collapses to one line, and any trouble prints the table', () => {
+  const inventory = (severity: 'ok' | 'warning') => [
+    { check: 'runtime', severity: 'ok' as const, detail: 'up' },
+    { check: 'persisted-state:dials', severity, detail: 'dials.json' },
+    { check: 'persisted-state:installations', severity: 'ok' as const, detail: 'installations.json' },
+    { check: 'dials', severity: 'ok' as const, detail: '2 user dial(s)' },
+  ];
+
+  // Eighteen identical `ok` rows push the findings that matter off the top of
+  // a terminal, which is how a diagnostic teaches people to skip it.
+  const clean = renderDoctorFindings(inventory('ok'));
+  assert.equal(clean.length, 3, 'one line per non-inventory finding, plus one summary');
+  assert.match(clean[1]!, /^ok\s+persisted-state: 2 persisted surfaces/);
+  assert.equal(clean.filter((line) => line.includes('persisted-state:')).length, 1);
+
+  // The moment one surface is not ok, the surrounding rows are the context for
+  // it, so the whole table comes back.
+  const trouble = renderDoctorFindings(inventory('warning'));
+  assert.equal(trouble.length, 4);
+  assert.ok(trouble.some((line) => line.startsWith('warning persisted-state:dials')));
+  assert.ok(trouble.some((line) => line.startsWith('ok      persisted-state:installations')));
 });
 
 test('a subcommand contributes its own flags without losing the parent\'s', () => {

@@ -9,6 +9,7 @@ import {
   deliveryIsHost,
   DIALS_LOCAL_FILE,
   eligibilityFor,
+  LOCAL_DIALS_SCHEMA_VERSION,
   ExecutorProfileError,
   formatDialRef,
   parseDialRef,
@@ -398,7 +399,13 @@ test('pin v4: write and read round-trip (dial keys sorted)', (t) => {
   const path = writeLocalDialState(root, state);
   assert.equal(path, join(root, DIALS_LOCAL_FILE));
   const text = read(root, DIALS_LOCAL_FILE);
-  assert.equal(text, '{"dials":{"generator":"gem","reviewer":"opus","worker":"sol@high"},"shadows":{"worker":{"model":"kimi-k3","rate":0.25}}}\n');
+  // The stamp leads, so a person opening the file to debug a dial sees which
+  // shape they are looking at before the payload. Spelled from the constant:
+  // a version bump must not need this literal edited twice.
+  assert.equal(
+    text,
+    `{"schema_version":${LOCAL_DIALS_SCHEMA_VERSION},"dials":{"generator":"gem","reviewer":"opus","worker":"sol@high"},"shadows":{"worker":{"model":"kimi-k3","rate":0.25}}}\n`,
+  );
   assert.deepEqual(readLocalDialState(root), { dials: { generator: { model: 'gem' }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } }, shadows: { worker: { model: 'kimi-k3', rate: 0.25 } }, legacyNote: null, legacyViaNote: null });
   writeLocalDialState(root, { dials: {}, shadows: {}, legacyNote: null });
   assert.equal(exists(root, DIALS_LOCAL_FILE), false);

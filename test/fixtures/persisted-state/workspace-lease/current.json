@@ -1,0 +1,32 @@
+{
+  "workspace_mode": "shared",
+  "holder": {
+    "id": "hd-ac-implement-g1-implementer-a1",
+    "kind": "host-dispatch",
+    "runId": "2026-09-05-2036-close-the-two-findings-left-open-by-run",
+    "dispatchId": "hd-ac-implement-g1-implementer-a1"
+  },
+  "holders": [
+    {
+      "id": "hd-ac-implement-g1-implementer-a1",
+      "kind": "host-dispatch",
+      "runId": "2026-09-05-2036-close-the-two-findings-left-open-by-run",
+      "dispatchId": "hd-ac-implement-g1-implementer-a1"
+    }
+  ],
+  "holder_started_at": {
+    "[\"host-dispatch\",\"hd-ac-implement-g1-implementer-a1\",\"2026-09-05-2036-close-the-two-findings-left-open-by-run\",\"hd-ac-implement-g1-implementer-a1\"]": "2026-09-06T00:38:05.371Z"
+  },
+  "holder_heartbeat_at": {
+    "[\"host-dispatch\",\"hd-ac-implement-g1-implementer-a1\",\"2026-09-05-2036-close-the-two-findings-left-open-by-run\",\"hd-ac-implement-g1-implementer-a1\"]": "2026-09-06T00:38:05.372Z"
+  },
+  "liveness_claim": null,
+  "supervisor_pid": null,
+  "executor_pid": null,
+  "process_group_id": null,
+  "started_at": "2026-09-06T00:38:05.371Z",
+  "heartbeat_at": "2026-09-06T00:38:05.372Z",
+  "last_output_at": null,
+  "stdout_bytes": 0,
+  "stderr_bytes": 0
+}

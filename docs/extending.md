@@ -99,6 +99,64 @@ be able to evaluate the condition from the artifact **without re-asking a model*
 
 ---
 
+## Add a persisted surface (a file Fadeno writes)
+
+Any new file Fadeno persists joins `PERSISTED_SURFACES` in the same change that
+introduces it. The tripwire test fails otherwise — that is the point: a state
+file nobody inventoried is a state file whose shape can change without anyone
+noticing.
+
+1. **`src/lib/persisted-state.ts`** — add a `PersistedSurface` row: a stable
+   `id`, its `scope`, `relPath`, `format`, `versionField` (`schema_version`
+   unless the file already had its own), `currentVersion`, and the `reader` /
+   `writer` that own it. Read `currentVersion` from the writer's own exported
+   constant where one exists rather than restating the number. If the surface
+   is really *two* files governed by one version — as `run.yaml` governs the
+   `events.jsonl` beside it — name the second in `RUN_COMPANION_ROWS` and in
+   the surface's `notes`; the audit reads the companion row by row through the
+   surface's own reader, and a tripwire holds the two spellings together.
+   Auditing only the file `relPath` names is how a shredded companion reads
+   back as a healthy surface.
+2. **Stamp the writer.** Emit `stampSchemaVersion(doc, VERSION)` — the stamp is
+   a top-level `schema_version` integer — and write atomically (tmp + rename).
+   Make the reader tolerant of the unstamped legacy shape as **version 0**, and
+   make it *refuse* a stamp above what this build reads rather than half-read
+   it.
+3. **Export a shape validator from the module that owns the reader**, and add
+   the surface to `SHAPE_VALIDATORS` in `persisted-state.ts` — `null` only when
+   the reader asks nothing beyond "it parses as an object", and say why in the
+   comment. `shapeValidatorFor` throws for a stamped surface the table does not
+   mention, so this step is not optional. Build the validator out of the
+   reader's own code (split the reader into "interpret this document" and "read
+   that file" if you have to) rather than restating its rules: a stamp is not a
+   schema, and `{"schema_version": 1, "dials": []}` is at the current version
+   and yields nothing. Return `error` when the reader gets NOTHING out of the
+   document, `warning` when it silently drops a part.
+4. **Capture a v0 fixture BEFORE the change.** Run the *current* writer into a
+   temp directory and save its literal output as
+   `test/fixtures/persisted-state/<surface-id>/v0.<ext>`; save the new writer's
+   output as `v1.<ext>`. A hand-written fixture only proves what you remember
+   the old shape was. Add `malformed-v<current>.<ext>` too — a document at the
+   current version the reader cannot use; a tripwire requires one for every
+   surface with a validator.
+5. **`test/persisted-state-fixtures.test.ts`** — load each fixture through the
+   real reader and assert the tolerant outcome, and that the malformed sample
+   really does come back empty (or throw).
+6. **`test/persisted-state-inventory.test.ts`** — the drift tripwire. A new
+   path constant in `src/lib/user-paths.ts` also needs an entry in
+   `USER_PATH_SURFACE_IDS` (`null` for a directory that holds no parsed
+   document).
+7. **`migratePersistedState`** — add the id to `MIGRATABLE` only if `fadeno
+   setup` should rewrite the file. Migration backs the file up first and does
+   not rewrite when it cannot; `fadeno doctor` reports and never migrates.
+8. **`test/docs-claims.test.ts`** — if a doc names the surface or its constant,
+   add the tripwire.
+
+See *Persisted state and schema evolution* in `architecture.md` for the rules
+these steps implement.
+
+---
+
 ## Bind roles to executors (models, harnesses, dials)
 
 `fadeno drive` and `fadeno dispatch` resolve every actor through
