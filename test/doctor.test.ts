@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { runDoctor } from '../src/commands/doctor.ts';
-import type { UserPathOptions } from '../src/lib/user-paths.ts';
+import { runStatus } from '../src/commands/status.ts';
+import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 
 // `fadeno steering apply --claude` no longer writes anything: effort decides
@@ -235,6 +236,22 @@ function managedBroker(version: string, body: string): string {
   return `# fadeno:managed version=${version} digest=deadbeefcafe\n${body}`;
 }
 
+/**
+ * Make Codex a maintained harness for this user scope, which is what gates the
+ * `codex-agents` identity row (`runStatus`'s `codexMaterialization`). The
+ * project-shadow findings below fire without it; the row does not, and the
+ * whole point of the cross-surface test is to have BOTH in one report.
+ */
+function maintainCodex(user: UserPathOptions): void {
+  const paths = userPaths(user);
+  mkdirSync(paths.stateDir, { recursive: true });
+  writeFileSync(
+    paths.installationsFile,
+    `${JSON.stringify({ schema_version: 1, runtime: null, harnesses: { codex: { version: '0.6.1', files: [] } } })}\n`,
+    'utf8',
+  );
+}
+
 const CODEX_SHADOW_CHECKS = ['codex-agents-project', 'codex-agents-shadow', 'codex-agents-shadow-stale'];
 
 function codexShadowFindings(findings: ReadonlyArray<{ check: string }>): string[] {
@@ -259,6 +276,93 @@ test('doctor calls a project-scope Codex broker with no user-scope counterpart i
   assert.match(sole.detail, /nothing is being shadowed/);
   // A warning-free report: an unshadowed project broker is not a defect.
   assert.equal(result.ok, true);
+});
+
+/**
+ * The regression 6efe290 left behind, and the reason this whole family now
+ * shares its inputs with the identity row.
+ *
+ * `codex-agents` learned to judge the file Codex would ACTUALLY load, and
+ * added `unmanaged` for one Codex loads but Fadeno never wrote. `doctor`'s own
+ * `soleProject` branch never looked at the managed header, so the same
+ * `.codex/agents/reviewer.toml` got `unmanaged` (a warning) from the row and
+ * `ok` from a sentence calling it a "project-scope Codex broker" — one file,
+ * two verdicts, in two commands a user runs side by side. That is the same
+ * one-list-two-consumers bug the row was itself the fix for.
+ *
+ * Both surfaces are kept, because they answer different questions: the row is
+ * about the file Codex loads, this finding is about the shadowing relation,
+ * and "nothing is being shadowed" is genuinely true here. What the finding may
+ * not do is imply more than it read.
+ */
+test('doctor and the identity row agree about an unmanaged project file with no user counterpart', (t) => {
+  const root = tempRepo(t);
+  const user = isolatedUser(t, root);
+  maintainCodex(user);
+  const projectDir = codexProjectAgents(root);
+  codexUserAgents(root); // present but empty: nothing to shadow
+  // A file Fadeno never wrote, at the path Codex resolves FIRST.
+  writeFileSync(join(projectDir, 'reviewer.toml'), brokerBody('reviewer', ''));
+
+  // What the shared builder says about the same file, via the surface `status`
+  // and `dial` print. Fails on the pre-fix tree only in the doctor half below;
+  // this half is the fact that half has to agree with.
+  const materialization = runStatus({ repoRoot: root, userPathOptions: user }).codexMaterialization;
+  assert.ok(materialization != null, 'codex is maintained, so the identity row must be reported');
+  const row = materialization.agents.find((agent) => agent.archetype === 'reviewer')!;
+  assert.equal(row.status, 'unmanaged');
+  assert.equal(row.path, join(projectDir, 'reviewer.toml'));
+
+  const result = runDoctor({ repoRoot: root, target: 'codex', userPathOptions: user });
+  const sole = result.findings.find((f) => f.check === 'codex-agents-project')!;
+
+  // The relational answer is unchanged and still `ok` — the file overrides
+  // nothing, and a second warning about the same path would read as a second
+  // problem.
+  assert.equal(sole.severity, 'ok');
+  assert.match(sole.detail, /nothing is being shadowed/);
+  // But it no longer asserts a provenance it never checked. "broker" is a
+  // Fadeno artifact noun; this file is not one.
+  assert.equal(/broker\(s\) reviewer\.toml/.test(sole.detail), false, sole.detail);
+  // And the `ok` is scoped, so a reader does not take it for a clean bill of
+  // health on the file the row two lines up refuses to vouch for.
+  assert.match(sole.detail, /carries no managed header/);
+  assert.match(sole.detail, /not a clean bill of health/);
+  assert.match(sole.detail, /`codex-agents`/);
+  // The remediation stops promising that this file would simply "win": it
+  // would win and never be refreshable, and the fix is the frozen one.
+  assert.match(sole.remediation!, /never refresh the unmanaged one\b/);
+  assert.match(sole.remediation!, /only at project scope does `--force` take one over deliberately/);
+
+  // Exactly one finding treats this file as a problem: the identity row.
+  const warnings = result.findings.filter((f) => f.severity !== 'ok' && f.detail.includes('reviewer.toml'));
+  assert.deepEqual(warnings.map((f) => f.check), ['codex-agents']);
+  assert.match(warnings[0]!.detail, /carries no managed header/);
+  assert.equal(result.ok, true);
+});
+
+/**
+ * The other half of the same partition: a MANAGED sole project file is one
+ * Fadeno wrote, so the qualifying clause must not fire. Without this, the
+ * assertions above would pass on a check that simply appends the caveat to
+ * every sole-project report.
+ */
+test('doctor leaves the sole-project sentence unqualified for a managed project file', (t) => {
+  const root = tempRepo(t);
+  const user = isolatedUser(t, root);
+  maintainCodex(user);
+  const projectDir = codexProjectAgents(root);
+  codexUserAgents(root);
+  writeFileSync(join(projectDir, 'reviewer.toml'), managedBroker('0.6.1', brokerBody('reviewer', '')));
+
+  const result = runDoctor({ repoRoot: root, target: 'codex', userPathOptions: user });
+  const sole = result.findings.find((f) => f.check === 'codex-agents-project')!;
+
+  assert.equal(sole.severity, 'ok');
+  assert.match(sole.detail, /nothing is being shadowed/);
+  assert.equal(/managed header/.test(sole.detail), false, sole.detail);
+  assert.equal(/clean bill of health/.test(sole.detail), false, sole.detail);
+  assert.equal(sole.remediation, 'Codex prefers project scope: once `fadeno setup --codex` materializes managed user-scope brokers, these files would win over them.');
 });
 
 test('doctor reports an unmanaged project-scope Codex broker shadowing a managed user-scope one, and names the file to delete', (t) => {

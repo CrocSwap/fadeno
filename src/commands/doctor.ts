@@ -15,11 +15,12 @@ import { compareFadenoVersions, readInstallationManifest } from '../lib/installa
 import { codexUserAgentDir, readVerifiedModels, userPaths } from '../lib/user-paths.ts';
 import {
   CODEX_IDENTITY_REMEDIATION,
+  CODEX_UNMANAGED_IDENTITY_REMEDIATION,
+  codexAgentFileVouched,
   describeCodexAgentIdentityRow,
   effectiveCodexAgentCandidates,
   findSpawnableCodexAgent,
   readCodexAgentFile,
-  CODEX_STEERING_ARCHETYPES,
 } from '../lib/codex-agent-file.ts';
 import { listRuns, readEvents } from '../lib/run-ledger.ts';
 import { normalizeDeliveryTransport } from '../lib/host-dispatch.ts';
@@ -614,19 +615,35 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   // managed one stamped older than user scope is a stale copy. Same
   // generation — or a project copy NEWER than user scope, which shadows
   // nothing current — says nothing at all.
+  //
+  // This family and the `codex-agents` row above are about DIFFERENT
+  // questions, and both are worth asking: this one is relational (does a
+  // project file override the managed user-scope set?), that one is about the
+  // file Codex would actually load (can Fadeno vouch for it, and does its
+  // identity match the dial?). They are kept from contradicting each other by
+  // sharing their inputs rather than by re-deciding the same facts: the file
+  // set comes from `effectiveCodexAgentCandidates` — the one encoding of
+  // Codex's project-over-user precedence — and the standing verdict from
+  // `codexAgentFileVouched`, which is `codexAgentIdentityRow` itself. A second
+  // hand-rolled `!managed` test here is exactly how the two surfaces came to
+  // print `ok` and `unmanaged` about the same path.
   {
     const projectDir = join(repoRoot, '.codex', 'agents');
     const userDir = codexUserAgentDir(opts.userPathOptions);
-    const soleProject: string[] = [];
+    const soleProject: Array<{ name: string; vouched: boolean }> = [];
     const unmanagedShadow: Array<{ name: string; missingFlags: string[] }> = [];
     const staleShadow: Array<{ name: string; label: string }> = [];
-    for (const archetype of CODEX_STEERING_ARCHETYPES) {
-      const name = `${archetype}.toml`;
-      const project = readCodexAgentFile(join(projectDir, name));
-      if (project == null) continue;
-      const user = readCodexAgentFile(join(userDir, `fadeno-${archetype}.toml`));
+    // A candidate at project scope IS "a project file exists for this
+    // archetype" — the entry condition this block used to re-derive with its
+    // own directory sweep. The user file still has to be read separately,
+    // because precedence means the effective set never looks at it.
+    for (const candidate of effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions)) {
+      if (candidate.scope !== 'project') continue;
+      const name = `${candidate.archetype}.toml`;
+      const project = candidate.state;
+      const user = readCodexAgentFile(join(userDir, `fadeno-${candidate.archetype}.toml`));
       if (user == null) {
-        soleProject.push(name);
+        soleProject.push({ name, vouched: codexAgentFileVouched(candidate) });
       } else if (!project.managed) {
         unmanagedShadow.push({ name, missingFlags: project.missingFlags });
       } else if (
@@ -638,11 +655,30 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     }
     const absolute = (names: string[]): string => names.map((name) => join(projectDir, name)).join(', ');
     if (soleProject.length > 0) {
+      // The relational answer — nothing is being shadowed — is `ok` however the
+      // file got there, and it stays `ok` so that one file cannot produce two
+      // warnings a reader takes for two problems. What it must NOT do is imply
+      // more than it read: calling an unmanaged file a "broker" claims a
+      // provenance this check never checked, and an unqualified `ok` next to a
+      // `codex-agents` warning about the same path is the contradiction. So the
+      // sentence names its own limits and hands the file itself to the row that
+      // judges it.
+      const unvouched = soleProject.filter((item) => !item.vouched).map((item) => item.name);
+      const one = unvouched.length === 1;
       findings.push(finding(
         'codex-agents-project',
         'ok',
-        `project-scope Codex broker(s) ${soleProject.join(', ')} in ${projectDir} have no user-scope counterpart in ${userDir}, so nothing is being shadowed`,
-        'Codex prefers project scope: once `fadeno setup --codex` materializes managed user-scope brokers, these files would win over them.',
+        `project-scope Codex agent file(s) ${soleProject.map((item) => item.name).join(', ')} in ${projectDir} have no user-scope counterpart in ${userDir}, so nothing is being shadowed` +
+        (unvouched.length === 0
+          ? ''
+          : ` — which is all this check reads. ${unvouched.join(', ')} carr${one ? 'ies' : 'y'} no managed header, so this \`ok\` is not a clean bill of health for ${one ? 'that file' : 'those files'}; whether Codex would load something Fadeno can vouch for is the \`codex-agents\` check's question, answered there whenever Codex is a maintained harness`),
+        unvouched.length === 0
+          ? 'Codex prefers project scope: once `fadeno setup --codex` materializes managed user-scope brokers, these files would win over them.'
+          // The forward-looking half is still true, but on its own it implies
+          // the unmanaged file is an ordinary managed one that would simply
+          // win. It would win and never be refreshable, so the fix for that is
+          // printed from where it is defined rather than re-spelled here.
+          : `Codex prefers project scope: once \`fadeno setup --codex\` materializes managed user-scope brokers, these files would win over them — and \`fadeno steering apply\` would never refresh the unmanaged one${one ? '' : 's'}. To hand ${one ? 'that slot' : 'those slots'} back, ${CODEX_UNMANAGED_IDENTITY_REMEDIATION}.`,
       ));
     }
     if (unmanagedShadow.length > 0) {

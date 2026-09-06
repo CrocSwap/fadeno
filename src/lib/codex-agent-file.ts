@@ -454,6 +454,38 @@ export function codexAgentIdentityRow(
   return { ...base, status: codexAgentIdentityStatus(file, dial) };
 }
 
+/**
+ * The half of a row's verdict that needs no dial: can Fadeno vouch for the
+ * file Codex would load at all?
+ *
+ * `doctor`'s project-shadow findings ask a RELATIONAL question — does this
+ * project-scope file override the managed user-scope set? — and answer it
+ * without ever resolving a dial. That is a different question from the one
+ * `codexAgentIdentityRow` answers, and it is legitimately `ok` for a project
+ * file with no user counterpart: nothing is being overridden. But the two
+ * answers print in the same report, so the relational check still has to know
+ * whether the file it is calling unshadowed is one Fadeno wrote — otherwise
+ * its `ok` reads as a clean bill of health for the exact file the identity row
+ * refuses to vouch for. Until 2026-09-06 it did: the `soleProject` branch
+ * called every project file a "broker" and never looked at the managed header,
+ * so one file got `ok` from `doctor` and `unmanaged` from `status`/`dial` —
+ * the same one-list-two-consumers drift that 6efe290 was itself the fix for.
+ *
+ * So the standing question has exactly one implementation, and it is
+ * `codexAgentIdentityRow`, asked with a null dial. That is not a trick: `null`
+ * is the builder's own "unresolvable dial" input, and under it only the
+ * standing verdicts and `not_applicable` are reachable — no identity
+ * comparison happens, because there is nothing to compare against.
+ *
+ * Asking for `not_applicable` rather than asking NOT-`unmanaged` is deliberate
+ * and fails safe: a standing verdict added to the builder later stops `doctor`
+ * vouching automatically, instead of slipping past a predicate that only knew
+ * one verdict's name.
+ */
+export function codexAgentFileVouched(candidate: CodexAgentCandidate): boolean {
+  return codexAgentIdentityRow(candidate.archetype, candidate, null).status === 'not_applicable';
+}
+
 function identityText(identity: { model: string | null; effort: string | null } | null): string {
   if (identity == null) return 'missing';
   if (identity.model == null) return 'the session baseline';
