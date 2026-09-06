@@ -11,6 +11,12 @@ work as the named artifact so the coordinator can save it under the run's
 `artifacts/`.
 
 Rules:
+- Never run `git checkout`, `switch`, `restore`, `reset`, `stash`, or `clean` in
+  the workspace. You are usually not alone in this tree: the host and other
+  agents may have uncommitted work in it, and these commands throw work away
+  with no way back. If your own edit was wrong, edit the file to what it should
+  be. If the tree is in a state you cannot work from, stop and report it —
+  naming the files and what looks wrong — and let the host decide.
 - Do not run destructive commands, add dependencies, deploy, or send anything
   externally without explicit user approval.
 - Keep fan-out depth-1: do not spawn further subagents.

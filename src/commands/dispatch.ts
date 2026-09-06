@@ -122,6 +122,43 @@ export const DISPATCHES_FILE = join('.fadeno', 'dispatches.jsonl');
  */
 export const DISPATCHES_FORMAT = '1.1';
 
+/** Every state a command dispatch can be observed in, most terminal first. */
+export type CommandDispatchState = 'requested' | 'completed' | 'withdrawn';
+
+/**
+ * The ONE list of TERMINAL evidence events for a command dispatch, most
+ * terminal first — the command-lane twin of `TERMINAL_RECEIPTS` in
+ * `lib/host-dispatch.ts`, and here for the same reason.
+ *
+ * Every consumer that asks "is this dispatch over?" reads it through
+ * `commandDispatchTerminalState`: the tag-availability check below, the
+ * output-record loader, `last` resolution, `--cancel`, `--merge`, and the
+ * listing. A private copy of the list in any one of them is how a new receipt
+ * ends up terminal in most of the codebase and invisible in the caller that
+ * spelled the list out for itself — the failure this repo keeps re-committing.
+ *
+ * `dispatch_withdrawn` is ADDITIVE under format 1.1 rather than a bump of its
+ * own, on the same rule the steering hook applies to its own added rows: every
+ * reader tiers on the format MAJOR, so a minor bump would change no reader's
+ * behavior while forcing four standalone hook literals to move in lockstep.
+ * What makes the row legible is the reader change that ships beside it.
+ */
+const COMMAND_TERMINAL_RECEIPTS: ReadonlyArray<{ event: string; state: CommandDispatchState }> = [
+  { event: 'dispatch_completed', state: 'completed' },
+  { event: 'dispatch_withdrawn', state: 'withdrawn' },
+];
+
+/**
+ * The terminal state an evidence event records, or `null` when the event is
+ * not a terminal receipt at all (a request, a refusal, a merge, a cancel
+ * REQUEST — which is deliberately not terminal, since the kernel still owns
+ * the completion row that follows it).
+ */
+export function commandDispatchTerminalState(event: string | null | undefined): CommandDispatchState | null {
+  if (event == null) return null;
+  return COMMAND_TERMINAL_RECEIPTS.find((receipt) => receipt.event === event)?.state ?? null;
+}
+
 /**
  * What a finished command dispatch actually produced.
  *
@@ -629,8 +666,15 @@ function assertNestingAllowed(env: NodeJS.ProcessEnv = process.env): void {
 /** A prior dispatch already carrying the tag a launch just asked for. */
 interface TagOccupant {
   dispatchId: string;
-  /** A completion row exists for it. */
-  completed: boolean;
+  /**
+   * The terminal receipt this dispatch reached, or `null` while it is still
+   * open. Read through `commandDispatchTerminalState`, so a withdrawn
+   * dispatch counts as finished here the moment it counts as finished
+   * anywhere else — the alternative is a private "is it completed?" that
+   * keeps calling a retired dispatch live and telling the caller to wait for
+   * output that will never arrive.
+   */
+  terminal: CommandDispatchState | null;
   /** Request-row timestamp, when readable. */
   requestedAt: string | null;
 }
@@ -645,7 +689,7 @@ function findTagOccupant(repoRoot: string, tag: string): TagOccupant | null {
   const path = join(repoRoot, DISPATCHES_FILE);
   if (!existsSync(path)) return null;
   const tagged = new Map<string, string | null>();
-  const completed = new Set<string>();
+  const terminal = new Map<string, CommandDispatchState>();
   try {
     for (const line of readFileSync(path, 'utf8').split('\n')) {
       if (line.trim() === '') continue;
@@ -661,9 +705,10 @@ function findTagOccupant(repoRoot: string, tag: string): TagOccupant | null {
       if (id == null) continue;
       if (row.event === 'dispatch_requested' && row.tag === tag) {
         tagged.set(id, typeof row.timestamp === 'string' ? row.timestamp : null);
-      } else if (row.event === 'dispatch_completed') {
-        completed.add(id);
+        continue;
       }
+      const state = commandDispatchTerminalState(typeof row.event === 'string' ? row.event : null);
+      if (state != null) terminal.set(id, state);
     }
   } catch {
     return null;
@@ -672,9 +717,9 @@ function findTagOccupant(repoRoot: string, tag: string): TagOccupant | null {
   const occupants = [...tagged].map(([dispatchId, requestedAt]) => ({
     dispatchId,
     requestedAt,
-    completed: completed.has(dispatchId),
+    terminal: terminal.get(dispatchId) ?? null,
   }));
-  return occupants.find((occupant) => !occupant.completed) ?? occupants[occupants.length - 1]!;
+  return occupants.find((occupant) => occupant.terminal == null) ?? occupants[occupants.length - 1]!;
 }
 
 /**
@@ -691,7 +736,7 @@ function assertTagAvailable(repoRoot: string, tag: string): void {
   const occupant = findTagOccupant(repoRoot, tag);
   if (occupant == null) return;
   const id8 = occupant.dispatchId.slice(0, 8);
-  if (occupant.completed) {
+  if (occupant.terminal === 'completed') {
     throw new DispatchCommandError(
       `tag "${tag}" already names dispatch ${id8}` +
         `${occupant.requestedAt != null ? ` (started ${occupant.requestedAt})` : ''}, which has completed. ` +
@@ -699,12 +744,26 @@ function assertTagAvailable(repoRoot: string, tag: string): void {
         'pick a distinct tag for this dispatch.',
     );
   }
+  if (occupant.terminal === 'withdrawn') {
+    // A withdrawn dispatch is over, so nothing here says "wait for it" — but
+    // its request row and snapshot stay on the ledger, so the tag is still a
+    // handle that would resolve to two dispatches. Retiring a dispatch frees
+    // the operator, never the name.
+    throw new DispatchCommandError(
+      `tag "${tag}" already names dispatch ${id8}` +
+        `${occupant.requestedAt != null ? ` (started ${occupant.requestedAt})` : ''}, which was withdrawn. ` +
+        `Its rows stay on the ledger, so reusing the tag would make \`fadeno dispatches --output tag:${tag}\` ` +
+        'ambiguous for both — pick a distinct tag for this dispatch.',
+    );
+  }
   throw new DispatchCommandError(
     `tag "${tag}" is already held by dispatch ${id8}` +
       `${occupant.requestedAt != null ? `, started ${occupant.requestedAt}` : ''}, which has not completed. ` +
       `Read it with \`fadeno dispatches --output tag:${tag} --wait 120\`, or stop it with ` +
-      `\`fadeno dispatches --cancel tag:${tag}\`. Launching a second dispatch under this tag makes ` +
-      'both unrecoverable — pick a distinct tag for separate work.',
+      `\`fadeno dispatches --cancel tag:${tag}\` — and if that reports no executor to signal, the ` +
+      `dispatch is already dead: check the workspace, then retire it with ` +
+      `\`fadeno dispatches --withdraw tag:${tag} --reason <text>\`. Launching a second dispatch under ` +
+      'this tag makes both unrecoverable — pick a distinct tag for separate work.',
   );
 }
 

@@ -296,3 +296,86 @@ test('guard writes no marker when the event declares no cwd', () => {
   runGuard(bashEvent('dispatch-worker', command), root);
   assert.ok(!existsSync(join(root, '.fadeno', 'local', 'proxy-dispatches.jsonl')));
 });
+
+// ---------------------------------------------------------------------------
+// The role-agent git guard (the hook's second job).
+// ---------------------------------------------------------------------------
+//
+// Reported 2026-09-05: a worker ran `git checkout -- <file>` in a shared tree
+// against the dispatch's explicit instruction, lost its own edits and redid
+// them. It was lucky the file was its own. These cover what the guard refuses,
+// what it deliberately lets through, and — the part that matters most — the
+// coverage it does NOT have, so nobody reads it as a sandbox.
+
+function denialOf(decision: HookDecision | null): string | null {
+  const out = decision?.hookSpecificOutput;
+  return out?.permissionDecision === 'deny' ? (out.permissionDecisionReason ?? '') : null;
+}
+
+test('role agents: the destructive git subcommands are refused with the harm named', () => {
+  const cases: Array<[string, RegExp]> = [
+    ['git checkout -- src/a.ts', /git checkout/],
+    ['git checkout main', /git checkout/],
+    ['git switch other-branch', /git switch/],
+    ['git restore src/a.ts', /git restore/],
+    ['git reset --hard origin/main', /git reset/],
+    ['git stash', /git stash/],
+    ['git clean -fd', /git clean/],
+    // Not the first statement, and wrapped: a guard that only reads token one
+    // is a guard anyone steps over by accident.
+    ['npm test && git reset --hard', /git reset/],
+    ['cd /tmp; FOO=1 git stash push -m wip', /git stash/],
+    ['git -C . restore src/a.ts', /git restore/],
+    ['echo start | git clean -f', /git clean/],
+  ];
+  for (const [command, expected] of cases) {
+    const reason = denialOf(runGuard(bashEvent('fadeno:worker', command)));
+    assert.ok(reason != null, `${command} must be denied`);
+    assert.match(reason, expected);
+    // Every refusal says what to do instead: the point is to stop a reflex,
+    // not to leave the agent stuck.
+    assert.match(reason, /report/i);
+  }
+});
+
+test('role agents: reading git state is untouched', () => {
+  for (const command of [
+    'git status --short',
+    'git log --oneline -5',
+    'git diff HEAD',
+    'git stash list',
+    'git stash show',
+    'git clean -n',
+    'git clean --dry-run',
+    'npm test',
+    // The word appearing in ARGUMENTS is not an invocation of it.
+    "echo 'do not git checkout here' >> notes.md",
+    'grep -rn "git reset" docs/',
+  ]) {
+    assert.equal(denialOf(runGuard(bashEvent('fadeno:worker', command))), null, `${command} must pass`);
+  }
+});
+
+test('role agents: reviewer and judge are guarded, the main session is not', () => {
+  for (const agent of ['fadeno:reviewer', 'fadeno:judge', 'worker']) {
+    assert.ok(denialOf(runGuard(bashEvent(agent, 'git checkout -- x'))) != null, `${agent} must be guarded`);
+  }
+  // No agent_type at all is the main loop: the host legitimately runs every
+  // one of these, and guarding it would break the coordinator's own hands.
+  assert.equal(runGuard(bashEvent(undefined, 'git checkout -- x')), null);
+  // An agent that is neither a proxy nor a role agent stays unguarded too:
+  // coverage follows the agent TYPE, which is exactly the documented limit —
+  // a role brief handed to a plain `claude` subagent is invisible here.
+  assert.equal(runGuard(bashEvent('claude', 'git checkout -- x')), null);
+  assert.equal(runGuard(bashEvent('Explore', 'git reset --hard')), null);
+});
+
+test('role agents keep every other Bash call, and get no proxy relay contract', () => {
+  // The proxy guard's allowlist must not leak onto role agents: they run
+  // arbitrary commands as their job. Only the six git subcommands are refused.
+  const decision = runGuard(bashEvent('fadeno:worker', 'cargo build --release && ./scripts/verify.sh'));
+  assert.equal(decision, null);
+  // And a role agent's long-running command does not get the proxy's forced
+  // 600s tool timeout, which exists for the dispatch leg alone.
+  assert.equal(runGuard(bashEvent('fadeno:worker', 'npm test', 1000)), null);
+});

@@ -123,6 +123,56 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Added
 
+- **`fadeno dispatches --withdraw <id|tag:<tag>> --reason <text>` — the second
+  move for a dead COMMAND dispatch.** `--cancel` refuses when there is no
+  in-flight claim to signal — correctly; it will not claim to have cancelled
+  work it never touched — and that refusal is unchanged. What was missing was
+  anything else: two dispatches reported 2026-09-05 had absent executor pids
+  and no completion row, so they read as open forever and "missing terminal
+  receipts made dead workers look potentially live." A `dispatch_withdrawn`
+  row is now the command lane's second terminal receipt. It signals nothing,
+  is refused while any process behind the claim is still alive (cancel first),
+  refused after a completion row, and idempotent for the same `--reason`.
+
+  Unlike the host lane's `dispatch-withdraw` it removes **no workspace**: a
+  host request is withdrawn before it starts, so its prepared worktree is
+  empty, while a command dispatch is withdrawn after it died and a killed
+  executor's uncommitted edits are the thing worth keeping. `--work-left
+  <path>` records where they are, so `fadeno dispatches` shows an owner for a
+  dirty tree without anyone reading a transcript.
+
+  `commandDispatchTerminalState` (`commands/dispatch.ts`) is the ONE list of
+  terminal receipts, read by the tag allocator, the output-record loader,
+  `last` resolution, `--cancel`, `--merge` and the listing — so a withdrawn
+  dispatch stops looking live everywhere at once instead of in whichever
+  reader remembered. `foldEvidenceRow` collapses the tail-view and whole-log
+  readers of `.fadeno/dispatches.jsonl`, which were byte-identical copies, into
+  one: the receipt could otherwise have rendered in `fadeno dispatches` while
+  staying invisible to `fadeno clean` and shadow-pair resolution.
+
+- **Role agents are refused the git subcommands that destroy a shared tree.**
+  A worker ran `git checkout -- <file>` in a shared tree on 2026-09-05 against
+  its dispatch's explicit instruction; it lost and redid its own edits, and a
+  shared file would have destroyed another agent's work. The Bash `PreToolUse`
+  hook (`dispatch-proxy-guard.mjs`) now denies `checkout`, `switch`, `restore`,
+  `reset`, `stash` and `clean` when `agent_type` names a managed `worker`,
+  `reviewer` or `judge`, naming the harm and what to do instead; `git stash
+  list|show` and `git clean -n` pass, and the main session is never guarded.
+  The worker briefs carry the same rule at tier 1.
+
+  The coverage is **partial and is documented as partial**: role agents are
+  identified by `agent_type`, so a role brief handed to a plain `claude`-type
+  subagent is invisible to it; Codex has no Bash `PreToolUse` hook at all; and
+  the statement splitter reads shell text without being a shell. Isolation
+  (`--isolate`) remains the protection for two concurrent implementers — the
+  hook only catches the reflex.
+
+- **The host skill documents resume-by-id as the standard recovery** after a
+  session limit or harness kill: resume each stopped agent by its id rather
+  than re-dispatching (a resumed agent returns to its own transcript; a fresh
+  dispatch puts a second implementer on the same tree), and report which files
+  are dirty and which agent owns them before doing so.
+
 - **`fadeno dispatch-withdraw <run> <dispatch-id> --reason <text>` — retire a
   host request that was never started.** A minted request had exactly two exits,
   both of which claim work happened: `dispatch-complete` and `dispatch-fail`. A

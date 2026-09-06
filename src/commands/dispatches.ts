@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
@@ -24,6 +24,7 @@ import {
   DISPATCHES_FILE,
   DISPATCHES_FORMAT,
   appendEvidenceRow,
+  commandDispatchTerminalState,
   normalizeDispatchOutcome,
   type DispatchOutcome,
 } from './dispatch.ts';
@@ -356,6 +357,21 @@ export interface DispatchEntry {
    */
   completed: boolean;
   /**
+   * A `dispatch_withdrawn` row landed: an operator retired this dispatch by
+   * hand after finding nothing left to signal. The OTHER terminal receipt —
+   * `completed` stays false, because no executor ever reported, and
+   * conflating the two would let a retired dispatch read as one that ran.
+   */
+  withdrawn: boolean;
+  /** Why it was retired, as the operator stated it. Null unless withdrawn. */
+  withdrawnReason: string | null;
+  /**
+   * A tree the withdrawing operator named as still holding this dispatch's
+   * uncommitted work, repo-relative. Null when they named none — which is a
+   * silence, never a claim that the workspace is clean.
+   */
+  withdrawnWorkLeft: string | null;
+  /**
    * What the completion row says the dispatch produced. Stated by the writer,
    * derived from `exit_code`/`output_bytes` on rows written before the field,
    * and null when the row carries too little to say either way.
@@ -588,6 +604,16 @@ export interface DispatchesOutputResult {
    * killed-mid-flight case this reader exists for.
    */
   attested: DispatchOutputAttestation;
+  /**
+   * An operator retired this dispatch: these bytes are everything it ever
+   * produced, and no completion row is coming. `attested` still reads
+   * `incomplete` — there is nothing to attest against — but `incomplete`
+   * alone reads as "still running", which for a withdrawn dispatch is the
+   * exact wrong thing to tell a caller waiting on it.
+   */
+  withdrawn: boolean;
+  /** Why it was retired, as the operator stated it. Null unless withdrawn. */
+  withdrawnReason: string | null;
   /**
    * The completion row's verdict and the facts behind it; all null while the
    * dispatch is still open. `attested` says the bytes are the ones the row
@@ -870,6 +896,9 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     refusal: refusalOf(row.refusal),
     gateEligible: row.gate_eligible === false ? false : null,
     completed: false,
+    withdrawn: false,
+    withdrawnReason: null,
+    withdrawnWorkLeft: null,
     outcome: null,
     exitCode: null,
     signal: null,
@@ -960,6 +989,12 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     refusal: null,
     gateEligible: null,
     completed: false,
+    // Host deliveries have their own lifecycle (`host_dispatch_withdrawn`,
+    // read through `hostRequestTerminalState`); this pair is the COMMAND
+    // lane's receipt and stays null on a host row rather than borrowing it.
+    withdrawn: false,
+    withdrawnReason: null,
+    withdrawnWorkLeft: null,
     outcome: null,
     exitCode: null,
     signal: null,
@@ -1206,6 +1241,26 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
 }
 
 /**
+ * Fold a `dispatch_withdrawn` row onto the dispatch it retires.
+ *
+ * Deliberately NOT `applyCompletion`: nothing here touches `completed`,
+ * `outcome`, `exitCode` or `outputSha256`, because no executor reported any of
+ * them. A withdraw says the OPERATOR ended the dispatch's life, and the entry
+ * has to keep saying that the work itself never reported — a retired dispatch
+ * that renders as `exit ?` would be indistinguishable from one still running,
+ * which is the confusion the receipt exists to end.
+ */
+function applyWithdrawal(entry: DispatchEntry, row: Record<string, unknown>): void {
+  entry.withdrawn = true;
+  entry.withdrawnReason = str(row.reason);
+  entry.withdrawnWorkLeft = str(row.work_left);
+  // Identity fallbacks, on the same rule as `applyCompletion`: a log truncated
+  // at the head can leave this row as the only one carrying them.
+  entry.archetype = entry.archetype ?? str(row.archetype);
+  entry.executor = entry.executor ?? str(row.executor);
+}
+
+/**
  * A pre-`dispatch_id` row read as one complete dispatch. The old writer put a
  * single row on disk after the spawn, so the row is both request and outcome:
  * build the identity the same way a request row is built (every field it
@@ -1379,8 +1434,27 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       if (entry.outcome === 'failed' && entry.exitCode === 0) {
         parts.push('[claimed failed despite exit 0]');
       }
+    } else if (entry.withdrawn) {
+      // The whole point of the receipt: this line used to read "no completion
+      // recorded (killed or in flight)" forever, which is the sentence that
+      // made dead workers look potentially live. It now says who ended it and
+      // why, and still refuses to invent an exit code nobody measured.
+      parts.push('WITHDRAWN');
+      parts.push(
+        `retired by the operator, no completion row${entry.withdrawnReason != null ? `: ${excerpt(entry.withdrawnReason, ERROR_EXCERPT)}` : ''}`,
+      );
     } else {
       parts.push('no completion recorded (killed or in flight)');
+    }
+    // Rendered outside the chain on purpose. A ledger carrying BOTH receipts
+    // is corrupt — the withdraw preconditions refuse a completed dispatch —
+    // and the honest render of a corrupt pair shows both facts rather than
+    // letting the branch order silently pick one.
+    if (entry.withdrawn && entry.completed) parts.push('[ALSO withdrawn — corrupt: two terminal receipts]');
+    // Where the operator says this dispatch's uncommitted work is. The one
+    // thing a host could previously only get by reading a transcript.
+    if (entry.withdrawnWorkLeft != null) {
+      parts.push(`[work left at ${excerpt(flatPath(entry.withdrawnWorkLeft), PATH_EXCERPT)}]`);
     }
   } else if (entry.kind === 'host') {
     if (entry.refusal != null) {
@@ -1581,6 +1655,114 @@ function summarize(
  * versioning policy: a projection may read old evidence best-effort, where a
  * ledger *writer* must refuse it outright.
  */
+/** What one evidence row was to the reader that folded it. */
+type RowFold = 'read' | 'skipped' | 'newer-format';
+
+/**
+ * Fold ONE evidence row into an entry list — the single row reader shared by
+ * `runDispatches` (the tail view) and `loadAllEntries` (the whole-log view).
+ *
+ * These two were byte-for-byte duplicates of each other, which is the defect
+ * this repo keeps re-committing in a new place: adding `dispatch_withdrawn` to
+ * the view a host reads would have left the whole-log reader — the one behind
+ * `fadeno clean` and shadow-pair resolution — silently unable to see it, and
+ * counting every withdraw as an unreadable row. One reader, so a new receipt
+ * cannot land in one view and not the other.
+ *
+ * The caller owns the JSON parse and the tallies; this owns what a row MEANS.
+ */
+function foldEvidenceRow(
+  row: Record<string, unknown>,
+  entries: DispatchEntry[],
+  byDispatchId: Map<string, DispatchEntry>,
+): RowFold {
+  const tier = formatTier(row.format);
+  if (tier === 'newer') {
+    // Written by a fadeno that knows a format this one does not. Guessing at
+    // the fields would fabricate provenance, so say so and move on.
+    return 'newer-format';
+  }
+  const event = str(row.event);
+  // Pre-`dispatch_id` evidence: no `event`, no correlation, one row per
+  // dispatch. Recognized on shape, since shape is all that writer left.
+  if (tier === 'unversioned' && event == null && isLegacyCompletion(row)) {
+    entries.push(legacyEntry(row));
+    return 'read';
+  }
+  // `native_delivery` is the pre-0.6 name for the same row; a log written
+  // by an older hook still renders.
+  if (event === 'host_delivery' || event === 'native_delivery') {
+    entries.push(hostEntry(row));
+    return 'read';
+  }
+  // A spawn the steering hook DENIED. Its own entry, not a skipped row: a
+  // repo whose every worker spawn is being refused must not read like a
+  // repo where nobody spawned anything.
+  if (event === 'host_refused') {
+    entries.push(hostRefusedEntry(row));
+    return 'read';
+  }
+  // A spawn the steering hook REROUTED off the host lane. Its own entry for
+  // the same reason as a denial: the host spawn a director asked for did not
+  // happen, and until this row existed the only trace was a kernel dispatch
+  // that named the relay rather than the spawn that caused it.
+  if (event === 'host_rewritten') {
+    entries.push(hostRewrittenEntry(row));
+    return 'read';
+  }
+  // A GENERIC subagent the Codex spawn guard let through (host mode off).
+  // Not a Fadeno dispatch, and rendered as its own kind so it never reads
+  // like one — but recorded, because an unsteered spawn that leaves no trace
+  // is the failure this row exists to end.
+  if (event === 'native_spawn') {
+    entries.push(nativeSpawnEntry(row));
+    return 'read';
+  }
+  if (event === 'host_attestation') {
+    // Not its own entry: this row measures a PRECEDING host_delivery, so
+    // it folds onto that entry rather than rendering as a dispatch of its
+    // own — see `correlateAttestation`'s doc comment for what "nearest
+    // preceding" means and its precision limits.
+    correlateAttestation(entries, row);
+    return 'read';
+  }
+  if (event === 'dispatch_refused') {
+    entries.push(requestedEntry(row));
+    return 'read';
+  }
+  const dispatchId = str(row.dispatch_id);
+  // The terminal receipts come from the ONE list (`dispatch.ts`), never from
+  // event names spelled out here: a reader carrying its own copy is how a new
+  // receipt renders everywhere except the view people actually read.
+  const terminal = commandDispatchTerminalState(event);
+  if ((event === 'dispatch_requested' || terminal != null) && dispatchId == null) {
+    return 'skipped'; // uncorrelatable: the writer always pairs on dispatch_id
+  }
+  if (event === 'dispatch_requested') {
+    const entry = requestedEntry(row);
+    entries.push(entry);
+    byDispatchId.set(dispatchId!, entry);
+    return 'read';
+  }
+  if (terminal != null) {
+    // Both terminal receipts fold the same way, and a truncated head is why
+    // the fallback exists: a receipt whose request row is gone is still
+    // evidence of a dispatch, so surface it rather than drop it.
+    const apply = terminal === 'completed' ? applyCompletion : applyWithdrawal;
+    const open = byDispatchId.get(dispatchId!);
+    if (open != null) {
+      apply(open, row);
+    } else {
+      const entry = requestedEntry(row);
+      apply(entry, row);
+      entries.push(entry);
+      byDispatchId.set(dispatchId!, entry);
+    }
+    return 'read';
+  }
+  return 'skipped'; // some other row kind: not renderable as a dispatch
+}
+
 export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -1622,87 +1804,9 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
       skipped += 1; // a torn or hand-edited line never stops the report
       continue;
     }
-    const tier = formatTier(row.format);
-    if (tier === 'newer') {
-      // Written by a fadeno that knows a format this one does not. Guessing at
-      // the fields would fabricate provenance, so say so and move on.
-      skippedNewerFormat += 1;
-      continue;
-    }
-    const event = str(row.event);
-    // Pre-`dispatch_id` evidence: no `event`, no correlation, one row per
-    // dispatch. Recognized on shape, since shape is all that writer left.
-    if (tier === 'unversioned' && event == null && isLegacyCompletion(row)) {
-      entries.push(legacyEntry(row));
-      continue;
-    }
-    // `native_delivery` is the pre-0.6 name for the same row; a log written
-    // by an older hook still renders.
-    if (event === 'host_delivery' || event === 'native_delivery') {
-      entries.push(hostEntry(row));
-      continue;
-    }
-    // A spawn the steering hook DENIED. Its own entry, not a skipped row: a
-    // repo whose every worker spawn is being refused must not read like a
-    // repo where nobody spawned anything.
-    if (event === 'host_refused') {
-      entries.push(hostRefusedEntry(row));
-      continue;
-    }
-    // A spawn the steering hook REROUTED off the host lane. Its own entry for
-    // the same reason as a denial: the host spawn a director asked for did not
-    // happen, and until this row existed the only trace was a kernel dispatch
-    // that named the relay rather than the spawn that caused it.
-    if (event === 'host_rewritten') {
-      entries.push(hostRewrittenEntry(row));
-      continue;
-    }
-    // A GENERIC subagent the Codex spawn guard let through (host mode off).
-    // Not a Fadeno dispatch, and rendered as its own kind so it never reads
-    // like one — but recorded, because an unsteered spawn that leaves no trace
-    // is the failure this row exists to end.
-    if (event === 'native_spawn') {
-      entries.push(nativeSpawnEntry(row));
-      continue;
-    }
-    if (event === 'host_attestation') {
-      // Not its own entry: this row measures a PRECEDING host_delivery, so
-      // it folds onto that entry rather than rendering as a dispatch of its
-      // own — see `correlateAttestation`'s doc comment for what "nearest
-      // preceding" means and its precision limits.
-      correlateAttestation(entries, row);
-      continue;
-    }
-    if (event === 'dispatch_refused') {
-      entries.push(requestedEntry(row));
-      continue;
-    }
-    const dispatchId = str(row.dispatch_id);
-    if ((event === 'dispatch_requested' || event === 'dispatch_completed') && dispatchId == null) {
-      skipped += 1; // uncorrelatable: the writer always pairs on dispatch_id
-      continue;
-    }
-    if (event === 'dispatch_requested') {
-      const entry = requestedEntry(row);
-      entries.push(entry);
-      byDispatchId.set(dispatchId!, entry);
-      continue;
-    }
-    if (event === 'dispatch_completed') {
-      const open = byDispatchId.get(dispatchId!);
-      if (open != null) {
-        applyCompletion(open, row);
-      } else {
-        // Completion without a request row (a log truncated at the head):
-        // still evidence of a dispatch, so surface it rather than drop it.
-        const entry = requestedEntry(row);
-        applyCompletion(entry, row);
-        entries.push(entry);
-        byDispatchId.set(dispatchId!, entry);
-      }
-      continue;
-    }
-    skipped += 1; // some other row kind: not renderable as a dispatch
+    const fold = foldEvidenceRow(row, entries, byDispatchId);
+    if (fold === 'skipped') skipped += 1;
+    else if (fold === 'newer-format') skippedNewerFormat += 1;
   }
 
   const shown = entries.slice(-tail);
@@ -1725,6 +1829,17 @@ interface OutputRecord {
   snapshot: string | null;
   outputSha256: string | null;
   completed: boolean;
+  /**
+   * A `dispatch_withdrawn` row landed — the OTHER terminal receipt, and the
+   * only one for a dispatch that never reported. Separate from `completed`
+   * because they answer different questions: `completed` is "did an executor
+   * finish and hash its bytes", `withdrawn` is "did an operator retire it".
+   * Every "is it still open?" reader must consult both, which is what
+   * `isOpenRecord` below exists to make impossible to forget.
+   */
+  withdrawn: boolean;
+  /** Why it was retired, as the operator stated it. Null unless withdrawn. */
+  withdrawnReason: string | null;
   /**
    * What the completion row says happened, and the facts behind it. A
    * snapshot whose bytes hash to the row is *attested*, not *successful*: a
@@ -1778,6 +1893,20 @@ interface OutputRecord {
   completedAt: number | null;
 }
 
+/**
+ * Whether this dispatch is still open — no terminal receipt of ANY kind.
+ *
+ * The one place that answers it. Before the withdraw receipt existed the
+ * question was spelled `!rec.completed` at three call sites, and each of them
+ * would have gone on calling a retired dispatch live: `last` would keep
+ * offering it as the in-flight candidate, `--wait` would poll for a completion
+ * row that is never coming, and `--cancel` would send the caller looking for a
+ * process. One reading, so a fourth receipt lands in all of them at once.
+ */
+function isOpenRecord(rec: OutputRecord): boolean {
+  return !rec.completed && !rec.withdrawn;
+}
+
 /** Whether two dispatches were ever in flight at the same moment. */
 function overlaps(a: OutputRecord, b: OutputRecord): boolean {
   const start = (rec: OutputRecord): number => rec.requestedAt ?? Number.NEGATIVE_INFINITY;
@@ -1817,6 +1946,7 @@ function loadOutputRecords(absolute: string): {
       continue;
     }
     const event = str(row.event);
+    const terminal = commandDispatchTerminalState(event);
     const dispatchId = str(row.dispatch_id);
     if (dispatchId == null) continue;
     if (event === 'dispatch_merged') {
@@ -1835,7 +1965,7 @@ function loadOutputRecords(absolute: string): {
       }
       continue;
     }
-    if (event !== 'dispatch_requested' && event !== 'dispatch_completed') continue;
+    if (event !== 'dispatch_requested' && terminal == null) continue;
 
     let rec = byId.get(dispatchId);
     if (rec == null) {
@@ -1844,6 +1974,8 @@ function loadOutputRecords(absolute: string): {
         snapshot: null,
         outputSha256: null,
         completed: false,
+        withdrawn: false,
+        withdrawnReason: null,
         outcome: null,
         exitCode: null,
         signal: null,
@@ -1882,7 +2014,18 @@ function loadOutputRecords(absolute: string): {
       }
       if (!Number.isNaN(at)) rec.requestedAt = at;
     }
-    if (event === 'dispatch_completed') {
+    if (terminal === 'withdrawn') {
+      rec.withdrawn = true;
+      rec.withdrawnReason = str(row.reason);
+      // A withdrawn dispatch has an END, and it is the moment the operator
+      // retired it. Without this the record's lifetime stays open-ended and
+      // `overlaps` keeps reporting it as concurrent with everything launched
+      // after it — which would make `last` refuse forever on a repo that had
+      // ever retired one.
+      if (!Number.isNaN(at)) rec.completedAt = at;
+      continue;
+    }
+    if (terminal === 'completed') {
       rec.completed = true;
       rec.outputSha256 = str(row.output_sha256);
       rec.exitCode = typeof row.exit_code === 'number' ? row.exit_code : null;
@@ -1986,7 +2129,10 @@ function resolveOutputRecord(
     // a 2026-08-13 dogfood had one proxy recover another proxy's report and
     // very nearly relay it as its own — so when more than one is still open,
     // refuse and make the caller name the id the kernel echoed at spawn.
-    const open = requestOrder.filter((id) => byId.get(id)?.completed === false);
+    const open = requestOrder.filter((id) => {
+      const rec = byId.get(id);
+      return rec != null && isOpenRecord(rec);
+    });
     if (open.length === 1) return { record: byId.get(open[0]!)!, resolvedBy: 'in-flight' };
     if (open.length > 1) {
       const candidates = open.map((id) => id.slice(0, 8)).join(', ');
@@ -2106,7 +2252,7 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
   // executor exits, which is routinely *after* the caller's own timeout: the
   // answer is not missing, it has not been written yet.
   const waitMs = opts.waitMs ?? 0;
-  if (waitMs > 0 && !rec.completed) {
+  if (waitMs > 0 && isOpenRecord(rec)) {
     const pollMs = opts.pollMs ?? 1_000;
     const heartbeatMs = opts.heartbeatMs ?? 30_000;
     let lastBeat = Date.now();
@@ -2114,13 +2260,13 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
     const deadline = startedAt + waitMs;
     // How the caller reached this dispatch is settled; only its state is not.
     const settledId = rec.dispatchId;
-    while (!rec.completed && Date.now() < deadline) {
+    while (isOpenRecord(rec) && Date.now() < deadline) {
       sleepSync(Math.min(pollMs, Math.max(0, deadline - Date.now())));
       ({ byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger));
       // Re-resolve by the id already settled on: `last` must not drift onto a
       // different dispatch that started while this one was being waited for.
       rec = resolveOutputRecord(settledId, byId, lastWithSnapshot, requestOrder).record;
-      if (!rec.completed && opts.onHeartbeat != null && Date.now() - lastBeat >= heartbeatMs) {
+      if (isOpenRecord(rec) && opts.onHeartbeat != null && Date.now() - lastBeat >= heartbeatMs) {
         lastBeat = Date.now();
         opts.onHeartbeat(
           `fadeno dispatches: ${settledId.slice(0, 8)} still running (elapsed ${formatElapsed(lastBeat - startedAt)})`,
@@ -2155,6 +2301,8 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
     relayMismatchAllowed: rec.relayMismatchAllowed,
     snapshotBytes,
     attested,
+    withdrawn: rec.withdrawn,
+    withdrawnReason: rec.withdrawnReason,
     outcome: rec.completed ? rec.outcome : null,
     exitCode: rec.completed ? rec.exitCode : null,
     signal: rec.completed ? rec.signal : null,
@@ -2225,6 +2373,13 @@ export function runDispatchesMerge(opts: DispatchesMergeOptions = {}): Dispatche
     ? resolveByTag(tag, byId, requestOrder)
     : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
   const id8 = record.dispatchId.slice(0, 8);
+  if (record.withdrawn) {
+    throw new DispatchesCommandError(
+      `dispatch ${id8} was withdrawn` +
+        `${record.withdrawnReason != null ? ` (${record.withdrawnReason})` : ''}; it recorded no merge-back to finish. ` +
+        'Any work it left is in the tree the withdrawal named, and merging it is a hand edit rather than a fadeno step.',
+    );
+  }
   if (!record.completed) throw new DispatchesCommandError(`dispatch ${id8} has not completed; there is nothing to merge yet.`);
   if (record.merged) throw new DispatchesCommandError(`dispatch ${id8} was already merged.`);
   // Before anything is read from the worktree, let alone applied. Merging is
@@ -2410,70 +2565,12 @@ function loadAllEntries(absolute: string): {
       if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
       row = parsed as Record<string, unknown>;
     } catch {
-      skipped += 1;
+      skipped += 1; // a torn or hand-edited line never stops the report
       continue;
     }
-    const tier = formatTier(row.format);
-    if (tier === 'newer') {
-      skippedNewerFormat += 1;
-      continue;
-    }
-    const event = str(row.event);
-    if (tier === 'unversioned' && event == null && isLegacyCompletion(row)) {
-      entries.push(legacyEntry(row));
-      continue;
-    }
-    if (event === 'host_delivery' || event === 'native_delivery') {
-      entries.push(hostEntry(row));
-      continue;
-    }
-    if (event === 'host_refused') {
-      entries.push(hostRefusedEntry(row));
-      continue;
-    }
-    if (event === 'host_rewritten') {
-      entries.push(hostRewrittenEntry(row));
-      continue;
-    }
-    if (event === 'native_spawn') {
-      entries.push(nativeSpawnEntry(row));
-      continue;
-    }
-    if (event === 'host_attestation') {
-      // Same fold-onto-the-preceding-entry rule as the main reader above —
-      // never its own entry, never counted as unreadable (see
-      // `correlateAttestation`).
-      correlateAttestation(entries, row);
-      continue;
-    }
-    if (event === 'dispatch_refused') {
-      entries.push(requestedEntry(row));
-      continue;
-    }
-    const dispatchId = str(row.dispatch_id);
-    if ((event === 'dispatch_requested' || event === 'dispatch_completed') && dispatchId == null) {
-      skipped += 1;
-      continue;
-    }
-    if (event === 'dispatch_requested') {
-      const entry = requestedEntry(row);
-      entries.push(entry);
-      byDispatchId.set(dispatchId!, entry);
-      continue;
-    }
-    if (event === 'dispatch_completed') {
-      const open = byDispatchId.get(dispatchId!);
-      if (open != null) {
-        applyCompletion(open, row);
-      } else {
-        const entry = requestedEntry(row);
-        applyCompletion(entry, row);
-        entries.push(entry);
-        byDispatchId.set(dispatchId!, entry);
-      }
-      continue;
-    }
-    skipped += 1;
+    const fold = foldEvidenceRow(row, entries, byDispatchId);
+    if (fold === 'skipped') skipped += 1;
+    else if (fold === 'newer-format') skippedNewerFormat += 1;
   }
   return { entries, skipped, skippedNewerFormat };
 }
@@ -2960,6 +3057,14 @@ export function runDispatchesCancel(opts: DispatchesCancelOptions = {}): Dispatc
       ? resolveByTag(tag, byId, requestOrder)
       : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
 
+  if (record.withdrawn) {
+    // The second move already happened. Signalling now would either hit
+    // nothing or hit a process this ledger says nobody owns any more.
+    throw new DispatchesCommandError(
+      `dispatch ${record.dispatchId.slice(0, 8)} was withdrawn` +
+        `${record.withdrawnReason != null ? ` (${record.withdrawnReason})` : ''} — nothing to cancel.`,
+    );
+  }
   const claimPath = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${record.dispatchId}.json`);
   const claim = readInflightClaim(claimPath, (path) => readFileSync(path, 'utf8'));
   // A normal terminal dispatch has no claim and is not cancellable. A
@@ -2983,7 +3088,10 @@ export function runDispatchesCancel(opts: DispatchesCancelOptions = {}): Dispatc
       `dispatch ${record.dispatchId.slice(0, 8)} has no running executor on this machine ` +
         '(no in-flight claim), yet its evidence shows no completion. Nothing was signalled. ' +
         'Check the workspace before re-dispatching — an executor killed with its kernel can ' +
-        'have left work behind.',
+        'have left work behind. Once you have, retire it with ' +
+        `\`fadeno dispatches --withdraw ${record.dispatchId.slice(0, 8)} --reason <text>\` ` +
+        '(add `--work-left <path>` when the tree still holds its edits) so it stops reading as ' +
+        'potentially live.',
     );
   }
 
@@ -3031,4 +3139,192 @@ export function runDispatchesCancel(opts: DispatchesCancelOptions = {}): Dispatc
   }, opts.now ?? new Date());
 
   return { dispatchId: record.dispatchId, tag: record.tag, pid: targetPid, resolvedBy };
+}
+
+// ---------------------------------------------------------------------------
+// --withdraw: the second move, for a command dispatch nothing can signal
+// ---------------------------------------------------------------------------
+
+/**
+ * The list of terminal receipts a command dispatch can carry lives in
+ * `dispatch.ts` (`commandDispatchTerminalState`); this is the writer for the
+ * one of them that no executor produces.
+ *
+ * The gap this closes, reported 2026-09-05: `fadeno dispatches --cancel` on
+ * two dead dispatches refused both — *"no running executor on this machine
+ * (no in-flight claim), yet its evidence shows no completion. Nothing was
+ * signalled."* That refusal is CORRECT and stays exactly as it is: cancel
+ * signals a process, and it will not report having cancelled work it never
+ * touched. The defect was that there was no SECOND move. With no terminal
+ * receipt reachable, the two dispatches read as open forever, and the
+ * reporter's summary was that "missing terminal receipts made dead workers
+ * look potentially live."
+ *
+ * So a withdraw answers a different question from a cancel. Cancel asks *stop
+ * this process*; withdraw asks *record that this dispatch is over*. Withdraw
+ * signals nothing, kills nothing, and is refused outright while any process
+ * behind the claim is still alive — the operator is told to cancel first,
+ * because a receipt written over a live executor would be the same lie in the
+ * other direction.
+ *
+ * Two deliberate differences from the host-lane `withdrawHostDispatch`:
+ *
+ *   - It does NOT remove a workspace. A host request is withdrawn *before it
+ *     starts*, so its prepared worktree is empty by construction. A command
+ *     dispatch is withdrawn *after it died*, and the whole reason the field
+ *     report matters is that a killed executor leaves edits behind. Deleting
+ *     that tree is the destructive act, not the cleanup.
+ *   - It carries `--work-left`, which the host lane has no use for: the
+ *     operator has just been told by `--cancel` to check the workspace, and
+ *     this is where what they found gets recorded, so the next reader of
+ *     `fadeno dispatches` learns it without a transcript.
+ */
+export interface DispatchesWithdrawOptions {
+  /** Full id, an 8+ character prefix, or `last`; ignored when `tag` is given. */
+  dispatchId?: string;
+  tag?: string | null;
+  /** Required, non-empty: why this dispatch is being retired. */
+  reason?: string;
+  /** A tree that still holds this dispatch's uncommitted work, if the operator found one. */
+  workLeft?: string | null;
+  repoRoot?: string;
+  cwd?: string;
+  /** Test seam for supervisor/executor process liveness. */
+  probe?: (pid: number, signal: 0) => void;
+  now?: Date;
+}
+
+export interface DispatchesWithdrawResult {
+  dispatchId: string;
+  tag: string | null;
+  reason: string;
+  /** A prior identical withdrawal already stood; nothing new was appended. */
+  idempotent: boolean;
+  /** Repo-relative path the receipt records as still holding work, when given. */
+  workLeft: string | null;
+  /** What the in-flight claim looked like at the moment of the receipt. */
+  claim: 'none' | 'stale';
+  resolvedBy: OutputResolution;
+}
+
+export function runDispatchesWithdraw(opts: DispatchesWithdrawOptions = {}): DispatchesWithdrawResult {
+  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
+  const query = (opts.dispatchId ?? '').trim();
+  if (tag == null && query === '') {
+    throw new DispatchesCommandError(
+      'name what to withdraw: a dispatch id, an 8+ character prefix, or tag:<handle>.',
+    );
+  }
+  const reason = (opts.reason ?? '').trim();
+  if (reason === '') {
+    throw new DispatchesCommandError(
+      '--reason is required and must not be empty: a terminal receipt with no stated reason is a ' +
+        'dispatch that stops looking live without anyone being able to say why it stopped.',
+    );
+  }
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(join(repoRoot, DISPATCHES_FILE));
+  const { record, resolvedBy } =
+    tag != null
+      ? resolveByTag(tag, byId, requestOrder)
+      : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+  const id8 = record.dispatchId.slice(0, 8);
+
+  if (record.completed) {
+    throw new DispatchesCommandError(
+      `dispatch ${id8} already has a completion row; it cannot be withdrawn. ` +
+        `Read what it produced with \`fadeno dispatches --output ${
+          record.tag != null ? `tag:${record.tag}` : id8
+        }\`.`,
+    );
+  }
+  if (record.withdrawn) {
+    // Replay the receipt that already stands rather than appending a second
+    // one — the same rule the host lane applies, for the same reason: a
+    // repeat is answering for the withdrawal that already happened.
+    if (record.withdrawnReason === reason) {
+      return {
+        dispatchId: record.dispatchId,
+        tag: record.tag,
+        reason,
+        idempotent: true,
+        workLeft: null,
+        claim: 'none',
+        resolvedBy,
+      };
+    }
+    throw new DispatchesCommandError(
+      `dispatch ${id8} was already withdrawn for a different reason ` +
+        `(${record.withdrawnReason ?? 'unstated'}). The ledger is append-only; a second reason would ` +
+        'not replace the first.',
+    );
+  }
+
+  // A live executor is cancel's business, not this command's. Probing before
+  // writing is the whole difference between a receipt and a guess: the field
+  // report's two dispatches had absent pids, and it is exactly that absence
+  // this receipt is allowed to record.
+  const claimPath = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${record.dispatchId}.json`);
+  const claim = readInflightClaim(claimPath, (path) => readFileSync(path, 'utf8'));
+  let claimState: 'none' | 'stale' = 'none';
+  if (claim != null) {
+    const probe = opts.probe ?? ((pid: number, signal: 0) => { process.kill(pid, signal); });
+    const alive = (pid: number): boolean => {
+      try { probe(pid, 0); return true; }
+      catch (err) { return (err as NodeJS.ErrnoException).code !== 'ESRCH'; }
+    };
+    const supervisorPid = claim.supervisorPid ?? claim.pid;
+    const livePid = alive(supervisorPid)
+      ? supervisorPid
+      : claim.processGroupId != null && alive(-claim.processGroupId)
+        ? -claim.processGroupId
+        : claim.executorPid != null && alive(claim.executorPid)
+          ? claim.executorPid
+          : null;
+    if (livePid != null) {
+      throw new DispatchesCommandError(
+        `dispatch ${id8} still has a live executor (pid ${livePid}); refusing to record it as ` +
+          `withdrawn. Stop it first with \`fadeno dispatches --cancel ${
+            record.tag != null ? `tag:${record.tag}` : id8
+          }\` and let the kernel write the completion row.`,
+      );
+    }
+    claimState = 'stale';
+  }
+
+  // The path is recorded, never touched: this receipt's entire purpose is to
+  // point at work that survived, and a command that deleted what it pointed
+  // at would be the failure it was written to prevent.
+  let workLeft: string | null = null;
+  const given = opts.workLeft?.trim();
+  if (given != null && given !== '') {
+    const abs = isAbsolute(given) ? given : resolve(repoRoot, given);
+    const rel = relative(repoRoot, abs).split('\\').join('/');
+    if (rel === '' || rel.startsWith('../')) {
+      throw new DispatchesCommandError(`--work-left ${given} is outside the repository; name a path inside it.`);
+    }
+    if (!existsSync(abs)) {
+      throw new DispatchesCommandError(
+        `--work-left ${rel} does not exist. A marker pointing at nothing is worse than no marker; ` +
+          'name the tree that actually holds the work, or omit the flag.',
+      );
+    }
+    workLeft = rel;
+  }
+
+  appendEvidenceRow(repoRoot, {
+    format: DISPATCHES_FORMAT,
+    timestamp: (opts.now ?? new Date()).toISOString(),
+    event: 'dispatch_withdrawn',
+    dispatch_id: record.dispatchId,
+    ...(record.tag != null ? { tag: record.tag } : {}),
+    reason,
+    withdrawn_by: 'operator',
+    // What was actually observed, not what was assumed: `none` means no claim
+    // file at all, `stale` means one whose processes are all gone.
+    claim: claimState,
+    ...(workLeft != null ? { work_left: workLeft } : {}),
+  });
+
+  return { dispatchId: record.dispatchId, tag: record.tag, reason, idempotent: false, workLeft, claim: claimState, resolvedBy };
 }

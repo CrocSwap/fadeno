@@ -10309,7 +10309,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve24.call(this, root, ref);
+      let _sch = resolve25.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -10336,7 +10336,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve24(root, ref) {
+    function resolve25(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -10967,55 +10967,55 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve24(baseURI, relativeURI, options) {
+    function resolve25(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse(baseURI, schemelessOptions), parse(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative15, options, skipNormalization) {
+    function resolveComponent(base, relative16, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse(serialize(base, options), options);
-        relative15 = parse(serialize(relative15, options), options);
+        relative16 = parse(serialize(relative16, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative15.scheme) {
-        target.scheme = relative15.scheme;
-        target.userinfo = relative15.userinfo;
-        target.host = relative15.host;
-        target.port = relative15.port;
-        target.path = removeDotSegments(relative15.path || "");
-        target.query = relative15.query;
+      if (!options.tolerant && relative16.scheme) {
+        target.scheme = relative16.scheme;
+        target.userinfo = relative16.userinfo;
+        target.host = relative16.host;
+        target.port = relative16.port;
+        target.path = removeDotSegments(relative16.path || "");
+        target.query = relative16.query;
       } else {
-        if (relative15.userinfo !== void 0 || relative15.host !== void 0 || relative15.port !== void 0) {
-          target.userinfo = relative15.userinfo;
-          target.host = relative15.host;
-          target.port = relative15.port;
-          target.path = removeDotSegments(relative15.path || "");
-          target.query = relative15.query;
+        if (relative16.userinfo !== void 0 || relative16.host !== void 0 || relative16.port !== void 0) {
+          target.userinfo = relative16.userinfo;
+          target.host = relative16.host;
+          target.port = relative16.port;
+          target.path = removeDotSegments(relative16.path || "");
+          target.query = relative16.query;
         } else {
-          if (!relative15.path) {
+          if (!relative16.path) {
             target.path = base.path;
-            if (relative15.query !== void 0) {
-              target.query = relative15.query;
+            if (relative16.query !== void 0) {
+              target.query = relative16.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative15.path[0] === "/") {
-              target.path = removeDotSegments(relative15.path);
+            if (relative16.path[0] === "/") {
+              target.path = removeDotSegments(relative16.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative15.path;
+                target.path = "/" + relative16.path;
               } else if (!base.path) {
-                target.path = relative15.path;
+                target.path = relative16.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative15.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative16.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative15.query;
+            target.query = relative16.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -11023,7 +11023,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative15.fragment;
+      target.fragment = relative16.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -11225,7 +11225,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve24,
+      resolve: resolve25,
       resolveComponent,
       equal,
       serialize,
@@ -22170,6 +22170,14 @@ var DispatchCommandError = class extends Error {
 };
 var DISPATCHES_FILE = (0, import_node_path16.join)(".fadeno", "dispatches.jsonl");
 var DISPATCHES_FORMAT = "1.1";
+var COMMAND_TERMINAL_RECEIPTS = [
+  { event: "dispatch_completed", state: "completed" },
+  { event: "dispatch_withdrawn", state: "withdrawn" }
+];
+function commandDispatchTerminalState(event) {
+  if (event == null) return null;
+  return COMMAND_TERMINAL_RECEIPTS.find((receipt) => receipt.event === event)?.state ?? null;
+}
 var DISPATCH_TAG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 function normalizeDispatchTag(tag) {
   if (tag == null) return null;
@@ -22341,7 +22349,7 @@ function findTagOccupant(repoRoot, tag) {
   const path = (0, import_node_path16.join)(repoRoot, DISPATCHES_FILE);
   if (!(0, import_node_fs16.existsSync)(path)) return null;
   const tagged = /* @__PURE__ */ new Map();
-  const completed = /* @__PURE__ */ new Set();
+  const terminal2 = /* @__PURE__ */ new Map();
   try {
     for (const line of (0, import_node_fs16.readFileSync)(path, "utf8").split("\n")) {
       if (line.trim() === "") continue;
@@ -22357,9 +22365,10 @@ function findTagOccupant(repoRoot, tag) {
       if (id == null) continue;
       if (row.event === "dispatch_requested" && row.tag === tag) {
         tagged.set(id, typeof row.timestamp === "string" ? row.timestamp : null);
-      } else if (row.event === "dispatch_completed") {
-        completed.add(id);
+        continue;
       }
+      const state = commandDispatchTerminalState(typeof row.event === "string" ? row.event : null);
+      if (state != null) terminal2.set(id, state);
     }
   } catch {
     return null;
@@ -22368,21 +22377,26 @@ function findTagOccupant(repoRoot, tag) {
   const occupants = [...tagged].map(([dispatchId, requestedAt]) => ({
     dispatchId,
     requestedAt,
-    completed: completed.has(dispatchId)
+    terminal: terminal2.get(dispatchId) ?? null
   }));
-  return occupants.find((occupant) => !occupant.completed) ?? occupants[occupants.length - 1];
+  return occupants.find((occupant) => occupant.terminal == null) ?? occupants[occupants.length - 1];
 }
 function assertTagAvailable(repoRoot, tag) {
   const occupant = findTagOccupant(repoRoot, tag);
   if (occupant == null) return;
   const id8 = occupant.dispatchId.slice(0, 8);
-  if (occupant.completed) {
+  if (occupant.terminal === "completed") {
     throw new DispatchCommandError(
       `tag "${tag}" already names dispatch ${id8}${occupant.requestedAt != null ? ` (started ${occupant.requestedAt})` : ""}, which has completed. Reusing it would make \`fadeno dispatches --output tag:${tag}\` ambiguous for both \u2014 pick a distinct tag for this dispatch.`
     );
   }
+  if (occupant.terminal === "withdrawn") {
+    throw new DispatchCommandError(
+      `tag "${tag}" already names dispatch ${id8}${occupant.requestedAt != null ? ` (started ${occupant.requestedAt})` : ""}, which was withdrawn. Its rows stay on the ledger, so reusing the tag would make \`fadeno dispatches --output tag:${tag}\` ambiguous for both \u2014 pick a distinct tag for this dispatch.`
+    );
+  }
   throw new DispatchCommandError(
-    `tag "${tag}" is already held by dispatch ${id8}${occupant.requestedAt != null ? `, started ${occupant.requestedAt}` : ""}, which has not completed. Read it with \`fadeno dispatches --output tag:${tag} --wait 120\`, or stop it with \`fadeno dispatches --cancel tag:${tag}\`. Launching a second dispatch under this tag makes both unrecoverable \u2014 pick a distinct tag for separate work.`
+    `tag "${tag}" is already held by dispatch ${id8}${occupant.requestedAt != null ? `, started ${occupant.requestedAt}` : ""}, which has not completed. Read it with \`fadeno dispatches --output tag:${tag} --wait 120\`, or stop it with \`fadeno dispatches --cancel tag:${tag}\` \u2014 and if that reports no executor to signal, the dispatch is already dead: check the workspace, then retire it with \`fadeno dispatches --withdraw tag:${tag} --reason <text>\`. Launching a second dispatch under this tag makes both unrecoverable \u2014 pick a distinct tag for separate work.`
   );
 }
 function appendEvidenceRow(repoRoot, row) {
@@ -24487,6 +24501,9 @@ function requestedEntry(row) {
     refusal: refusalOf(row.refusal),
     gateEligible: row.gate_eligible === false ? false : null,
     completed: false,
+    withdrawn: false,
+    withdrawnReason: null,
+    withdrawnWorkLeft: null,
     outcome: null,
     exitCode: null,
     signal: null,
@@ -24577,6 +24594,12 @@ function hostEntry(row) {
     refusal: null,
     gateEligible: null,
     completed: false,
+    // Host deliveries have their own lifecycle (`host_dispatch_withdrawn`,
+    // read through `hostRequestTerminalState`); this pair is the COMMAND
+    // lane's receipt and stays null on a host row rather than borrowing it.
+    withdrawn: false,
+    withdrawnReason: null,
+    withdrawnWorkLeft: null,
     outcome: null,
     exitCode: null,
     signal: null,
@@ -24713,6 +24736,13 @@ function applyCompletion(entry, row) {
   if (diagb != null) entry.diagnosticsBytes = diagb;
   entry.outcome = normalizeDispatchOutcome(row.outcome, entry);
 }
+function applyWithdrawal(entry, row) {
+  entry.withdrawn = true;
+  entry.withdrawnReason = str(row.reason);
+  entry.withdrawnWorkLeft = str(row.work_left);
+  entry.archetype = entry.archetype ?? str(row.archetype);
+  entry.executor = entry.executor ?? str(row.executor);
+}
 function legacyEntry(row) {
   const entry = requestedEntry(row);
   entry.legacy = true;
@@ -24788,8 +24818,17 @@ function renderDispatchLine(entry) {
       if (entry.outcome === "failed" && entry.exitCode === 0) {
         parts.push("[claimed failed despite exit 0]");
       }
+    } else if (entry.withdrawn) {
+      parts.push("WITHDRAWN");
+      parts.push(
+        `retired by the operator, no completion row${entry.withdrawnReason != null ? `: ${excerpt(entry.withdrawnReason, ERROR_EXCERPT)}` : ""}`
+      );
     } else {
       parts.push("no completion recorded (killed or in flight)");
+    }
+    if (entry.withdrawn && entry.completed) parts.push("[ALSO withdrawn \u2014 corrupt: two terminal receipts]");
+    if (entry.withdrawnWorkLeft != null) {
+      parts.push(`[work left at ${excerpt(flatPath(entry.withdrawnWorkLeft), PATH_EXCERPT)}]`);
     }
   } else if (entry.kind === "host") {
     if (entry.refusal != null) {
@@ -24866,6 +24905,66 @@ function summarize(shown, total, skipped, newerFormat, exists, path) {
   }
   return `${shown} of ${total} dispatch${total === 1 ? "" : "es"} shown${notes}`;
 }
+function foldEvidenceRow(row, entries, byDispatchId) {
+  const tier = formatTier(row.format);
+  if (tier === "newer") {
+    return "newer-format";
+  }
+  const event = str(row.event);
+  if (tier === "unversioned" && event == null && isLegacyCompletion(row)) {
+    entries.push(legacyEntry(row));
+    return "read";
+  }
+  if (event === "host_delivery" || event === "native_delivery") {
+    entries.push(hostEntry(row));
+    return "read";
+  }
+  if (event === "host_refused") {
+    entries.push(hostRefusedEntry(row));
+    return "read";
+  }
+  if (event === "host_rewritten") {
+    entries.push(hostRewrittenEntry(row));
+    return "read";
+  }
+  if (event === "native_spawn") {
+    entries.push(nativeSpawnEntry(row));
+    return "read";
+  }
+  if (event === "host_attestation") {
+    correlateAttestation(entries, row);
+    return "read";
+  }
+  if (event === "dispatch_refused") {
+    entries.push(requestedEntry(row));
+    return "read";
+  }
+  const dispatchId = str(row.dispatch_id);
+  const terminal2 = commandDispatchTerminalState(event);
+  if ((event === "dispatch_requested" || terminal2 != null) && dispatchId == null) {
+    return "skipped";
+  }
+  if (event === "dispatch_requested") {
+    const entry = requestedEntry(row);
+    entries.push(entry);
+    byDispatchId.set(dispatchId, entry);
+    return "read";
+  }
+  if (terminal2 != null) {
+    const apply = terminal2 === "completed" ? applyCompletion : applyWithdrawal;
+    const open = byDispatchId.get(dispatchId);
+    if (open != null) {
+      apply(open, row);
+    } else {
+      const entry = requestedEntry(row);
+      apply(entry, row);
+      entries.push(entry);
+      byDispatchId.set(dispatchId, entry);
+    }
+    return "read";
+  }
+  return "skipped";
+}
 function runDispatches(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -24904,64 +25003,9 @@ function runDispatches(opts = {}) {
       skipped += 1;
       continue;
     }
-    const tier = formatTier(row.format);
-    if (tier === "newer") {
-      skippedNewerFormat += 1;
-      continue;
-    }
-    const event = str(row.event);
-    if (tier === "unversioned" && event == null && isLegacyCompletion(row)) {
-      entries.push(legacyEntry(row));
-      continue;
-    }
-    if (event === "host_delivery" || event === "native_delivery") {
-      entries.push(hostEntry(row));
-      continue;
-    }
-    if (event === "host_refused") {
-      entries.push(hostRefusedEntry(row));
-      continue;
-    }
-    if (event === "host_rewritten") {
-      entries.push(hostRewrittenEntry(row));
-      continue;
-    }
-    if (event === "native_spawn") {
-      entries.push(nativeSpawnEntry(row));
-      continue;
-    }
-    if (event === "host_attestation") {
-      correlateAttestation(entries, row);
-      continue;
-    }
-    if (event === "dispatch_refused") {
-      entries.push(requestedEntry(row));
-      continue;
-    }
-    const dispatchId = str(row.dispatch_id);
-    if ((event === "dispatch_requested" || event === "dispatch_completed") && dispatchId == null) {
-      skipped += 1;
-      continue;
-    }
-    if (event === "dispatch_requested") {
-      const entry = requestedEntry(row);
-      entries.push(entry);
-      byDispatchId.set(dispatchId, entry);
-      continue;
-    }
-    if (event === "dispatch_completed") {
-      const open = byDispatchId.get(dispatchId);
-      if (open != null) {
-        applyCompletion(open, row);
-      } else {
-        const entry = requestedEntry(row);
-        applyCompletion(entry, row);
-        entries.push(entry);
-        byDispatchId.set(dispatchId, entry);
-      }
-      continue;
-    }
-    skipped += 1;
+    const fold = foldEvidenceRow(row, entries, byDispatchId);
+    if (fold === "skipped") skipped += 1;
+    else if (fold === "newer-format") skippedNewerFormat += 1;
   }
   const shown = entries.slice(-tail);
   return {
@@ -24976,6 +25020,9 @@ function runDispatches(opts = {}) {
     lines: shown.map(renderDispatchLine),
     summary: summarize(shown.length, entries.length, skipped, skippedNewerFormat, true, path)
   };
+}
+function isOpenRecord(rec) {
+  return !rec.completed && !rec.withdrawn;
 }
 function overlaps(a, b) {
   const start = (rec) => rec.requestedAt ?? Number.NEGATIVE_INFINITY;
@@ -24998,6 +25045,7 @@ function loadOutputRecords(absolute) {
       continue;
     }
     const event = str(row.event);
+    const terminal2 = commandDispatchTerminalState(event);
     const dispatchId = str(row.dispatch_id);
     if (dispatchId == null) continue;
     if (event === "dispatch_merged") {
@@ -25014,7 +25062,7 @@ function loadOutputRecords(absolute) {
       }
       continue;
     }
-    if (event !== "dispatch_requested" && event !== "dispatch_completed") continue;
+    if (event !== "dispatch_requested" && terminal2 == null) continue;
     let rec = byId.get(dispatchId);
     if (rec == null) {
       rec = {
@@ -25022,6 +25070,8 @@ function loadOutputRecords(absolute) {
         snapshot: null,
         outputSha256: null,
         completed: false,
+        withdrawn: false,
+        withdrawnReason: null,
         outcome: null,
         exitCode: null,
         signal: null,
@@ -25055,7 +25105,13 @@ function loadOutputRecords(absolute) {
       }
       if (!Number.isNaN(at)) rec.requestedAt = at;
     }
-    if (event === "dispatch_completed") {
+    if (terminal2 === "withdrawn") {
+      rec.withdrawn = true;
+      rec.withdrawnReason = str(row.reason);
+      if (!Number.isNaN(at)) rec.completedAt = at;
+      continue;
+    }
+    if (terminal2 === "completed") {
       rec.completed = true;
       rec.outputSha256 = str(row.output_sha256);
       rec.exitCode = typeof row.exit_code === "number" ? row.exit_code : null;
@@ -25113,7 +25169,10 @@ function resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder) {
         'unknown dispatch "last": no output_snapshot has been recorded.'
       );
     }
-    const open = requestOrder.filter((id) => byId.get(id)?.completed === false);
+    const open = requestOrder.filter((id) => {
+      const rec = byId.get(id);
+      return rec != null && isOpenRecord(rec);
+    });
     if (open.length === 1) return { record: byId.get(open[0]), resolvedBy: "in-flight" };
     if (open.length > 1) {
       const candidates = open.map((id) => id.slice(0, 8)).join(", ");
@@ -25169,18 +25228,18 @@ function runDispatchesOutput(opts) {
     ({ record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder));
   }
   const waitMs = opts.waitMs ?? 0;
-  if (waitMs > 0 && !rec.completed) {
+  if (waitMs > 0 && isOpenRecord(rec)) {
     const pollMs = opts.pollMs ?? 1e3;
     const heartbeatMs = opts.heartbeatMs ?? 3e4;
     let lastBeat = Date.now();
     const startedAt = lastBeat;
     const deadline = startedAt + waitMs;
     const settledId = rec.dispatchId;
-    while (!rec.completed && Date.now() < deadline) {
+    while (isOpenRecord(rec) && Date.now() < deadline) {
       sleepSync2(Math.min(pollMs, Math.max(0, deadline - Date.now())));
       ({ byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger));
       rec = resolveOutputRecord(settledId, byId, lastWithSnapshot, requestOrder).record;
-      if (!rec.completed && opts.onHeartbeat != null && Date.now() - lastBeat >= heartbeatMs) {
+      if (isOpenRecord(rec) && opts.onHeartbeat != null && Date.now() - lastBeat >= heartbeatMs) {
         lastBeat = Date.now();
         opts.onHeartbeat(
           `fadeno dispatches: ${settledId.slice(0, 8)} still running (elapsed ${formatElapsed(lastBeat - startedAt)})`
@@ -25210,6 +25269,8 @@ ${snapshotBytes}`,
     relayMismatchAllowed: rec.relayMismatchAllowed,
     snapshotBytes,
     attested,
+    withdrawn: rec.withdrawn,
+    withdrawnReason: rec.withdrawnReason,
     outcome: rec.completed ? rec.outcome : null,
     exitCode: rec.completed ? rec.exitCode : null,
     signal: rec.completed ? rec.signal : null,
@@ -25232,6 +25293,11 @@ function runDispatchesMerge(opts = {}) {
   const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger);
   const { record: record2, resolvedBy } = tag != null ? resolveByTag(tag, byId, requestOrder) : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
   const id8 = record2.dispatchId.slice(0, 8);
+  if (record2.withdrawn) {
+    throw new DispatchesCommandError(
+      `dispatch ${id8} was withdrawn${record2.withdrawnReason != null ? ` (${record2.withdrawnReason})` : ""}; it recorded no merge-back to finish. Any work it left is in the tree the withdrawal named, and merging it is a hand edit rather than a fadeno step.`
+    );
+  }
   if (!record2.completed) throw new DispatchesCommandError(`dispatch ${id8} has not completed; there is nothing to merge yet.`);
   if (record2.merged) throw new DispatchesCommandError(`dispatch ${id8} was already merged.`);
   if (record2.relayAttested === false && opts.allowRelayMismatch !== true) {
@@ -25312,64 +25378,9 @@ function loadAllEntries(absolute) {
       skipped += 1;
       continue;
     }
-    const tier = formatTier(row.format);
-    if (tier === "newer") {
-      skippedNewerFormat += 1;
-      continue;
-    }
-    const event = str(row.event);
-    if (tier === "unversioned" && event == null && isLegacyCompletion(row)) {
-      entries.push(legacyEntry(row));
-      continue;
-    }
-    if (event === "host_delivery" || event === "native_delivery") {
-      entries.push(hostEntry(row));
-      continue;
-    }
-    if (event === "host_refused") {
-      entries.push(hostRefusedEntry(row));
-      continue;
-    }
-    if (event === "host_rewritten") {
-      entries.push(hostRewrittenEntry(row));
-      continue;
-    }
-    if (event === "native_spawn") {
-      entries.push(nativeSpawnEntry(row));
-      continue;
-    }
-    if (event === "host_attestation") {
-      correlateAttestation(entries, row);
-      continue;
-    }
-    if (event === "dispatch_refused") {
-      entries.push(requestedEntry(row));
-      continue;
-    }
-    const dispatchId = str(row.dispatch_id);
-    if ((event === "dispatch_requested" || event === "dispatch_completed") && dispatchId == null) {
-      skipped += 1;
-      continue;
-    }
-    if (event === "dispatch_requested") {
-      const entry = requestedEntry(row);
-      entries.push(entry);
-      byDispatchId.set(dispatchId, entry);
-      continue;
-    }
-    if (event === "dispatch_completed") {
-      const open = byDispatchId.get(dispatchId);
-      if (open != null) {
-        applyCompletion(open, row);
-      } else {
-        const entry = requestedEntry(row);
-        applyCompletion(entry, row);
-        entries.push(entry);
-        byDispatchId.set(dispatchId, entry);
-      }
-      continue;
-    }
-    skipped += 1;
+    const fold = foldEvidenceRow(row, entries, byDispatchId);
+    if (fold === "skipped") skipped += 1;
+    else if (fold === "newer-format") skippedNewerFormat += 1;
   }
   return { entries, skipped, skippedNewerFormat };
 }
@@ -25664,6 +25675,11 @@ function runDispatchesCancel(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords((0, import_node_path18.join)(repoRoot, DISPATCHES_FILE));
   const { record: record2, resolvedBy } = tag != null ? resolveByTag(tag, byId, requestOrder) : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+  if (record2.withdrawn) {
+    throw new DispatchesCommandError(
+      `dispatch ${record2.dispatchId.slice(0, 8)} was withdrawn${record2.withdrawnReason != null ? ` (${record2.withdrawnReason})` : ""} \u2014 nothing to cancel.`
+    );
+  }
   const claimPath = (0, import_node_path18.join)(repoRoot, ...INFLIGHT_DIR.split("/"), `${record2.dispatchId}.json`);
   const claim = readInflightClaim(claimPath, (path) => (0, import_node_fs18.readFileSync)(path, "utf8"));
   if (record2.completed && claim == null) {
@@ -25673,7 +25689,7 @@ function runDispatchesCancel(opts = {}) {
   }
   if (claim == null) {
     throw new DispatchesCommandError(
-      `dispatch ${record2.dispatchId.slice(0, 8)} has no running executor on this machine (no in-flight claim), yet its evidence shows no completion. Nothing was signalled. Check the workspace before re-dispatching \u2014 an executor killed with its kernel can have left work behind.`
+      `dispatch ${record2.dispatchId.slice(0, 8)} has no running executor on this machine (no in-flight claim), yet its evidence shows no completion. Nothing was signalled. Check the workspace before re-dispatching \u2014 an executor killed with its kernel can have left work behind. Once you have, retire it with \`fadeno dispatches --withdraw ${record2.dispatchId.slice(0, 8)} --reason <text>\` (add \`--work-left <path>\` when the tree still holds its edits) so it stops reading as potentially live.`
     );
   }
   const kill = opts.kill ?? ((pid, signal) => {
@@ -25712,6 +25728,99 @@ function runDispatchesCancel(opts = {}) {
     ...claim.startedAt != null ? { executor_started_at: claim.startedAt } : {}
   }, opts.now ?? /* @__PURE__ */ new Date());
   return { dispatchId: record2.dispatchId, tag: record2.tag, pid: targetPid, resolvedBy };
+}
+function runDispatchesWithdraw(opts = {}) {
+  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
+  const query = (opts.dispatchId ?? "").trim();
+  if (tag == null && query === "") {
+    throw new DispatchesCommandError(
+      "name what to withdraw: a dispatch id, an 8+ character prefix, or tag:<handle>."
+    );
+  }
+  const reason = (opts.reason ?? "").trim();
+  if (reason === "") {
+    throw new DispatchesCommandError(
+      "--reason is required and must not be empty: a terminal receipt with no stated reason is a dispatch that stops looking live without anyone being able to say why it stopped."
+    );
+  }
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords((0, import_node_path18.join)(repoRoot, DISPATCHES_FILE));
+  const { record: record2, resolvedBy } = tag != null ? resolveByTag(tag, byId, requestOrder) : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+  const id8 = record2.dispatchId.slice(0, 8);
+  if (record2.completed) {
+    throw new DispatchesCommandError(
+      `dispatch ${id8} already has a completion row; it cannot be withdrawn. Read what it produced with \`fadeno dispatches --output ${record2.tag != null ? `tag:${record2.tag}` : id8}\`.`
+    );
+  }
+  if (record2.withdrawn) {
+    if (record2.withdrawnReason === reason) {
+      return {
+        dispatchId: record2.dispatchId,
+        tag: record2.tag,
+        reason,
+        idempotent: true,
+        workLeft: null,
+        claim: "none",
+        resolvedBy
+      };
+    }
+    throw new DispatchesCommandError(
+      `dispatch ${id8} was already withdrawn for a different reason (${record2.withdrawnReason ?? "unstated"}). The ledger is append-only; a second reason would not replace the first.`
+    );
+  }
+  const claimPath = (0, import_node_path18.join)(repoRoot, ...INFLIGHT_DIR.split("/"), `${record2.dispatchId}.json`);
+  const claim = readInflightClaim(claimPath, (path) => (0, import_node_fs18.readFileSync)(path, "utf8"));
+  let claimState = "none";
+  if (claim != null) {
+    const probe2 = opts.probe ?? ((pid, signal) => {
+      process.kill(pid, signal);
+    });
+    const alive = (pid) => {
+      try {
+        probe2(pid, 0);
+        return true;
+      } catch (err) {
+        return err.code !== "ESRCH";
+      }
+    };
+    const supervisorPid = claim.supervisorPid ?? claim.pid;
+    const livePid = alive(supervisorPid) ? supervisorPid : claim.processGroupId != null && alive(-claim.processGroupId) ? -claim.processGroupId : claim.executorPid != null && alive(claim.executorPid) ? claim.executorPid : null;
+    if (livePid != null) {
+      throw new DispatchesCommandError(
+        `dispatch ${id8} still has a live executor (pid ${livePid}); refusing to record it as withdrawn. Stop it first with \`fadeno dispatches --cancel ${record2.tag != null ? `tag:${record2.tag}` : id8}\` and let the kernel write the completion row.`
+      );
+    }
+    claimState = "stale";
+  }
+  let workLeft = null;
+  const given = opts.workLeft?.trim();
+  if (given != null && given !== "") {
+    const abs = (0, import_node_path18.isAbsolute)(given) ? given : (0, import_node_path18.resolve)(repoRoot, given);
+    const rel = (0, import_node_path18.relative)(repoRoot, abs).split("\\").join("/");
+    if (rel === "" || rel.startsWith("../")) {
+      throw new DispatchesCommandError(`--work-left ${given} is outside the repository; name a path inside it.`);
+    }
+    if (!(0, import_node_fs18.existsSync)(abs)) {
+      throw new DispatchesCommandError(
+        `--work-left ${rel} does not exist. A marker pointing at nothing is worse than no marker; name the tree that actually holds the work, or omit the flag.`
+      );
+    }
+    workLeft = rel;
+  }
+  appendEvidenceRow(repoRoot, {
+    format: DISPATCHES_FORMAT,
+    timestamp: (opts.now ?? /* @__PURE__ */ new Date()).toISOString(),
+    event: "dispatch_withdrawn",
+    dispatch_id: record2.dispatchId,
+    ...record2.tag != null ? { tag: record2.tag } : {},
+    reason,
+    withdrawn_by: "operator",
+    // What was actually observed, not what was assumed: `none` means no claim
+    // file at all, `stale` means one whose processes are all gone.
+    claim: claimState,
+    ...workLeft != null ? { work_left: workLeft } : {}
+  });
+  return { dispatchId: record2.dispatchId, tag: record2.tag, reason, idempotent: false, workLeft, claim: claimState, resolvedBy };
 }
 
 // src/commands/diagram.ts
@@ -39659,6 +39768,9 @@ var COMMANDS = {
     "--wait": { kind: "free" },
     "--tag": { kind: "free" },
     "--cancel": { kind: "free" },
+    "--withdraw": { kind: "free" },
+    "--reason": { kind: "free" },
+    "--work-left": PATH,
     "--merge": { kind: "free" },
     "--allow-relay-mismatch": NONE
   }),
@@ -44420,7 +44532,7 @@ var TOP_LEVEL = {
   "attempt-accept": page("Accept a hand-resolved isolated attempt.", "fadeno attempt-accept <run> <actor-call>"),
   runs: page("List run ledgers under `.fadeno/runs`.", "fadeno runs"),
   attest: page("Record this subagent delivery as evidence.", "fadeno attest --archetype <name>"),
-  dispatches: page("Inspect or recover command dispatches.", ["fadeno dispatches [--tail <count>] [--json] [--bakeoffs]", "fadeno dispatches --output <id|last|tag:<tag>> [--wait <seconds>]", "fadeno dispatches --cancel <id|tag:<tag>> | --merge <id|tag:<tag>>"], ["`--output` writes the saved snapshot bytes to stdout; use `--wait` only for a completion row.", "A `relay_attested: false` dispatch is quarantined: `--output` prefixes the bytes with the failure, and `--merge` refuses without `--allow-relay-mismatch`."]),
+  dispatches: page("Inspect or recover command dispatches.", ["fadeno dispatches [--tail <count>] [--json] [--bakeoffs]", "fadeno dispatches --output <id|last|tag:<tag>> [--wait <seconds>]", "fadeno dispatches --cancel <id|tag:<tag>> | --merge <id|tag:<tag>>", "fadeno dispatches --withdraw <id|tag:<tag>> --reason <text> [--work-left <path>]"], ["`--output` writes the saved snapshot bytes verbatim to stdout; use `--wait` only for a completion row.", "`--cancel` signals a live executor. `--withdraw` is the second move for one nothing can signal: it records the terminal receipt, signals nothing, and removes no workspace. It is refused while any process behind the claim is alive.", "A `relay_attested: false` dispatch is quarantined: `--output` prefixes the bytes with the failure, and `--merge` refuses without `--allow-relay-mismatch`."]),
   "shadow-apply": page("Apply a selected shadow arm diff.", "fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]"),
   bakeoff: page("Measure or adjudicate a shadow pair.", ["fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--harness <id>] [--evidence inlined|explored]", "fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]", "fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file> [--evidence inlined|explored]"], ["`--measure-only` records no adjudication; `--prepare` writes blinded prompts; `--record` requires both host-delivered judgment files."]),
   show: page("Show a run step projection and artifacts.", "fadeno show <run> [--events] [--legacy]"),
@@ -44515,6 +44627,8 @@ var OPTION_HINTS = {
   "--purge-user-data": "Also remove shared user data",
   "--rate": "Shadow sampling rate",
   "--reason": "Failure or withdrawal reason",
+  "--withdraw": "Retire a dead dispatch by id or tag",
+  "--work-left": "Tree still holding a withdrawn dispatch\u2019s work",
   "--record": "Record supplied host judgments",
   "--repo": "Repository scope",
   "--report": "Legacy artifact-path spelling",
@@ -44640,7 +44754,7 @@ var PAGE_OPTIONS = {
   "attempt-accept": withGlobals(),
   runs: withGlobals(),
   attest: withGlobals("--archetype"),
-  dispatches: withGlobals("--tail", "--json", "--bakeoffs", "--output", "--wait", "--tag", "--cancel", "--merge", "--allow-relay-mismatch"),
+  dispatches: withGlobals("--tail", "--json", "--bakeoffs", "--output", "--wait", "--tag", "--cancel", "--withdraw", "--work-left", "--reason", "--merge", "--allow-relay-mismatch"),
   "shadow-apply": withGlobals("--arm", "--check"),
   bakeoff: withGlobals("--measure-only", "--evidence", "--prepare", "--record", "--comparison", "--adversarial", "--json", "--judge", "--harness"),
   show: withGlobals("--events", "--legacy"),
@@ -44675,6 +44789,8 @@ var PATH_OPTION_HINTS = {
   doctor: { "--probe-models": "Spawn each dialed harness\u2019s models_command and report a model it no longer lists" },
   dispatches: {
     "--output": "Print saved snapshot bytes for an id, last dispatch, or tag",
+    "--withdraw": "Retire a dead dispatch that has no executor to signal",
+    "--work-left": "Tree that still holds the withdrawn dispatch\u2019s work",
     "--allow-relay-mismatch": "Merge a relay_attested: false dispatch anyway"
   },
   dispatch: {
@@ -44688,6 +44804,8 @@ var PATH_OPTION_FORMS = {
   dispatches: {
     "--output": "--output <id|last|tag:<tag>>",
     "--cancel": "--cancel <id|tag:<tag>>",
+    "--withdraw": "--withdraw <id|tag:<tag>>",
+    "--work-left": "--work-left <path>",
     "--merge": "--merge <id|tag:<tag>>"
   },
   "dispatch-complete": { "--output": "--output <path|->" },
@@ -45700,6 +45818,8 @@ function main(argv) {
         source: { type: "string" },
         output: { type: "string" },
         cancel: { type: "string" },
+        withdraw: { type: "string" },
+        "work-left": { type: "string" },
         merge: { type: "string" },
         commit: { type: "string" },
         reason: { type: "string" },
@@ -46749,6 +46869,28 @@ Or advance manually with the playbook cursor:`);
         console.log("  check the workspace before re-dispatching \u2014 a cancelled executor may have written already.");
         return 0;
       }
+      if (values.withdraw != null) {
+        const inline = values.withdraw.startsWith("tag:") ? values.withdraw.slice(4) : null;
+        const result2 = runDispatchesWithdraw({
+          dispatchId: inline != null ? "" : values.withdraw,
+          tag: inline ?? values.tag,
+          reason: values.reason,
+          workLeft: values["work-left"] ?? null
+        });
+        const how = result2.resolvedBy === "tag" ? ` (tag: ${result2.tag})` : "";
+        console.log(
+          `withdrawn: ${result2.dispatchId.slice(0, 8)}${how}${result2.idempotent ? " (idempotent)" : ""} \u2014 ${result2.reason}`
+        );
+        console.log(
+          `  a dispatch_withdrawn row is the terminal receipt; nothing was signalled and no workspace was removed${result2.claim === "stale" ? " (a stale in-flight claim was found and left in place)" : ""}.`
+        );
+        if (result2.workLeft != null) {
+          console.log(`  recorded as still holding this dispatch's work: ${result2.workLeft}`);
+        } else {
+          console.log("  no tree was named as holding its work; add `--work-left <path>` if it left edits behind.");
+        }
+        return 0;
+      }
       if (values.merge != null) {
         const inline = values.merge.startsWith("tag:") ? values.merge.slice(4) : null;
         const result2 = runDispatchesMerge({
@@ -46802,7 +46944,7 @@ Or advance manually with the playbook cursor:`);
           }
         })();
         const merge = result2.primaryMerge == null ? null : result2.primaryMerge.status === "unresolved" ? `merge-back UNRESOLVED: the work conflicts with the workspace and did NOT land; the worktree is retained with conflict markers${result2.workspace != null ? ` at ${result2.workspace}` : ""}${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}. Resolve them there, then \`fadeno dispatches --merge ${result2.dispatchId.slice(0, 8)}\`` : result2.primaryMerge.status === "conflicted" ? `merge-back CONFLICTED: the tree MAY be partly applied \u2014 inspect \`git status\`${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}` : result2.primaryMerge.status === "blocked" ? `merge-back BLOCKED: nothing was applied, the workspace is untouched${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}` : result2.primaryMerge.detail != null ? `merge-back clean: ${result2.primaryMerge.detail}` : null;
-        const attestation = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : waitMs > 0 ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1e3)}s. The executor has not exited; this is its output so far. Not a failure \u2014 re-run this command to check again.` : "no completion row recorded YET: the executor may still be running, and the kernel writes that row only when it exits. This is its output so far, not a failure. Re-run with --wait <seconds> to wait for the real answer.";
+        const attestation = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : result2.withdrawn ? `WITHDRAWN: an operator retired this dispatch${result2.withdrawnReason != null ? ` (${result2.withdrawnReason})` : ""}; these are all the bytes it ever produced and no completion row is coming. Do not wait on it.` : waitMs > 0 ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1e3)}s. The executor has not exited; this is its output so far. Not a failure \u2014 re-run this command to check again.` : "no completion row recorded YET: the executor may still be running, and the kernel writes that row only when it exits. This is its output so far, not a failure. Re-run with --wait <seconds> to wait for the real answer.";
         const relay = result2.relayAttested === false ? `RELAY FIDELITY FAILED (relay_attested: false${result2.relayMismatchAllowed ? ", dispatched under --allow-relay-mismatch" : ""}) \u2014 the report above answers a prompt the caller never wrote; do not relay it as an answer` : null;
         const note = [relay, verdict, merge, attestation].filter((part) => part != null).join("; ");
         const how = result2.resolvedBy === "recency" ? " [resolved by recency: nothing was open and nothing overlapped it, so this is the only candidate \u2014 launch with `--tag <handle>` to name it outright]" : result2.resolvedBy === "tag" ? " [resolved by tag]" : "";

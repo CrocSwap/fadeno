@@ -825,6 +825,35 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // The command lane's own terminal receipt, and the one list every reader
+    // of "is this dispatch over?" consults. A doc that still describes one
+    // terminal receipt, or a source that stops minting the event, is the
+    // drift this catches.
+    id: 'command-dispatch-withdraw',
+    doc: {
+      files: ['docs/architecture.md', 'templates/common/skills/fadeno-host/SKILL.md'],
+      patterns: [/dispatch_withdrawn/, /commandDispatchTerminalState/, /--withdraw/, /--work-left/],
+    },
+    src: {
+      files: ['src/commands/dispatches.ts', 'src/commands/dispatch.ts', 'src/cli.ts'],
+      patterns: [/runDispatchesWithdraw/, /dispatch_withdrawn/, /commandDispatchTerminalState/, /work_left/],
+    },
+  },
+  {
+    // The role-agent git refusal, and the honest scope beside it. The scope
+    // note is the half that rots first: a guard whose limits stop being
+    // written down starts being trusted for coverage it does not have.
+    id: 'role-agent-git-guard',
+    doc: {
+      files: ['docs/architecture.md', 'templates/common/skills/fadeno-host/SKILL.md'],
+      patterns: [/DESTRUCTIVE_GIT/, /dispatch-proxy-guard\.mjs/, /agent_type/, /partial/],
+    },
+    src: {
+      files: ['templates/claude/hooks/dispatch-proxy-guard.mjs'],
+      patterns: [/DESTRUCTIVE_GIT/, /ROLE_RE/, /denyRole/],
+    },
+  },
+  {
     id: 'omp-host-adapter',
     doc: {
       files: ['README.md', 'docs/kickoff-memo.md'],

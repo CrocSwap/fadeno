@@ -1,19 +1,46 @@
 #!/usr/bin/env node
-// PreToolUse guard for the dispatch proxy agents (tier-2 enforcement of the
-// relay contract). The proxies' instructions already forbid doing the task
-// in-session, but instruction-only constraint is advisory — a 2026-08-12
-// dogfood A/B observed a proxy silently performing its task with no dispatch
-// and no evidence row. This hook makes the contract mechanical: inside a
-// dispatch proxy, the only Bash allowed is the contract call itself (and,
-// after a killed or timed-out dispatch, `fadeno dispatches --output last`
-// or a dispatch id — both CLI spellings — so the streamed snapshot can be
-// recovered), and the dispatch invocation gets the long tool timeout the
-// external executor needs.
+// PreToolUse Bash guard for Fadeno's managed agents. Two jobs, two audiences.
 //
-// Scope: fires on every Bash PreToolUse, no-ops unless the hook input's
-// `agent_type` is one of the dispatch proxies. The heredoc BODY is the user's
-// task prompt — arbitrary bytes, never inspected; only the surrounding shell
-// statements are validated.
+// 1. DISPATCH PROXIES (tier-2 enforcement of the relay contract). The proxies'
+//    instructions already forbid doing the task in-session, but
+//    instruction-only constraint is advisory — a 2026-08-12 dogfood A/B
+//    observed a proxy silently performing its task with no dispatch and no
+//    evidence row. This hook makes the contract mechanical: inside a dispatch
+//    proxy, the only Bash allowed is the contract call itself (and, after a
+//    killed or timed-out dispatch, `fadeno dispatches --output last` or a
+//    dispatch id — both CLI spellings — so the streamed snapshot can be
+//    recovered), and the dispatch invocation gets the long tool timeout the
+//    external executor needs.
+//
+// 2. ROLE AGENTS (`worker`, `reviewer`, `judge`) get one narrow refusal: the
+//    git subcommands that DESTROY uncommitted work in the tree they share
+//    with everyone else. Reported 2026-09-05 from a live campaign — a worker
+//    ran `git checkout -- <file>` in the shared tree despite the dispatch's
+//    explicit "do NOT commit, stash, checkout, or reset", lost its own edits
+//    and redid them. It was lucky: the file was its own. A shared one would
+//    have destroyed another agent's work with no record that it happened.
+//    Role agents are otherwise unrestricted — this is a guardrail, not an
+//    allowlist.
+//
+// Scope, stated honestly because it is PARTIAL:
+//   - Fires on every Bash PreToolUse and no-ops unless `agent_type` names a
+//     dispatch proxy or a role agent. The main session is never guarded: the
+//     host legitimately runs every one of these commands.
+//   - A role agent spawned as a PLAIN `claude`-type subagent rather than as
+//     `fadeno:worker`/`reviewer`/`judge` carries no identifying `agent_type`
+//     and is NOT covered. Nothing here can distinguish it from any other
+//     generic subagent, so coverage follows the agent TYPE, not the job.
+//   - Codex has no Bash PreToolUse hook at all (`templates/codex/hooks/` is a
+//     spawn guard), so Codex-hosted role agents are not covered either.
+//   - The statement splitter below is a tripwire, not a sandbox: it reads
+//     shell text without being a shell. An agent that means to get around it
+//     can (a script file, an alias, an odd quoting). It is here to stop the
+//     reflex — the destructive habit a model reaches for mid-task — which is
+//     what the field report actually was.
+//
+// The heredoc BODY of a proxy contract call is the user's task prompt —
+// arbitrary bytes, never inspected; only the surrounding shell statements are
+// validated.
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -36,9 +63,17 @@ if (event?.tool_name !== 'Bash' || event.tool_input == null || typeof event.tool
 
 const agent = typeof event.agent_type === 'string' ? event.agent_type.split(':').at(-1) : null;
 const PROXY_RE = /^dispatch-(worker|reviewer|judge)$/;
+// The managed role agents. Matched on the same stripped last segment as the
+// proxies, so `fadeno:worker` and a bare `worker` both land here — and, by the
+// same token, so would another plugin's agent named `worker`. Denying six git
+// subcommands to a stranger's `worker` is a cost worth paying for covering
+// ours; the reverse (missing ours) is the failure this exists to stop.
+const ROLE_RE = /^(worker|reviewer|judge)$/;
 const proxyMatch = agent == null ? null : agent.match(PROXY_RE);
-if (proxyMatch == null) finish(null); // every other agent (and the main loop) stays unguarded
-const archetype = proxyMatch[1];
+const roleMatch = agent == null ? null : agent.match(ROLE_RE);
+// The main loop and every unmanaged agent stay unguarded.
+if (proxyMatch == null && roleMatch == null) finish(null);
+const archetype = proxyMatch?.[1] ?? null;
 
 function deny(reason) {
   finish({
@@ -58,6 +93,126 @@ function deny(reason) {
 }
 
 const command = typeof event.tool_input.command === 'string' ? event.tool_input.command : null;
+
+// ---------------------------------------------------------------------------
+// Role agents: refuse the git subcommands that destroy a shared tree's work.
+// ---------------------------------------------------------------------------
+
+/**
+ * The refusal list, each with the reason a role agent must hear. Every one of
+ * these throws away uncommitted work or relocates the tree under whoever else
+ * is writing in it, and none of them is ever part of a role agent's job: a
+ * worker leaves its change in the tree, a reviewer and a judge only read.
+ *
+ * `switch` is here although the field report named `checkout`: it is the same
+ * operation under the newer spelling, and a list that refused one and allowed
+ * the other would be a hole anyone finds by accident. `commit` is NOT here —
+ * it does not destroy anyone's work, and denying it belongs to the role brief
+ * rather than to a guard about destruction. `worktree remove` is not here
+ * either; it is out of the reported class and untested, so it stays a stated
+ * gap rather than an untested rule.
+ */
+const DESTRUCTIVE_GIT = new Map([
+  ['checkout', 'discards uncommitted changes to the paths it names and moves HEAD for every agent sharing this tree'],
+  ['switch', 'moves HEAD for every agent sharing this tree'],
+  ['restore', 'discards uncommitted changes to the paths it names'],
+  ['reset', 'rewrites the index, and with --hard the working tree'],
+  ['stash', 'removes every uncommitted change in the tree, including changes this dispatch did not make'],
+  ['clean', 'deletes untracked files, including work no commit is holding'],
+]);
+
+/** Git global options that take a SEPARATE value, so the subcommand is 2 tokens on. */
+const GIT_GLOBAL_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path']);
+
+/**
+ * Split a Bash call into the fragments that could each START a command.
+ *
+ * Deliberately crude, and crude in the safe direction: over-splitting produces
+ * fragments that simply do not begin with `git` and are ignored, while the one
+ * thing it must not do is join a `git checkout` onto the tail of something
+ * else and miss it. It is not a shell and does not pretend to be one — see the
+ * scope note at the top of this file.
+ */
+function shellFragments(text) {
+  return text
+    .split(/\n|&&|\|\||;|\||\$\(|`|\(|\)|\{|\}/)
+    .map((fragment) => fragment.trim())
+    .filter((fragment) => fragment.length > 0);
+}
+
+/** The git subcommand a fragment invokes, plus its remaining tokens; null when it is not a git call. */
+function gitInvocation(fragment) {
+  const tokens = fragment.split(/\s+/).filter((token) => token.length > 0);
+  let i = 0;
+  // Leading environment assignments and the wrappers that pass a command
+  // through unchanged. `FOO=1 git reset` is a git reset.
+  while (
+    i < tokens.length &&
+    (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]) ||
+      tokens[i] === 'env' ||
+      tokens[i] === 'sudo' ||
+      tokens[i] === 'command' ||
+      tokens[i] === 'time' ||
+      tokens[i] === 'nohup')
+  ) {
+    i += 1;
+  }
+  const bin = (tokens[i] ?? '').replace(/^["']|["']$/g, '');
+  if (!/(^|\/)git$/.test(bin)) return null;
+  i += 1;
+  while (i < tokens.length) {
+    const token = tokens[i];
+    if (GIT_GLOBAL_WITH_VALUE.has(token)) { i += 2; continue; }
+    if (token.startsWith('-')) { i += 1; continue; }
+    return { sub: token, rest: tokens.slice(i + 1) };
+  }
+  return null;
+}
+
+/**
+ * Whether this particular invocation is one of the READ-ONLY spellings of an
+ * otherwise destructive subcommand. Narrow on purpose: an agent inspecting
+ * state should not have to argue with a guard about destruction.
+ */
+function isReadOnlyGit(sub, rest) {
+  if (sub === 'stash') return rest.length > 0 && (rest[0] === 'list' || rest[0] === 'show');
+  if (sub === 'clean') return rest.some((token) => token === '-n' || token === '--dry-run');
+  return false;
+}
+
+function denyRole(role, sub, harm) {
+  finish({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason:
+        `fadeno ${role}: \`git ${sub}\` is refused inside a Fadeno role agent because it ${harm}. ` +
+        'This tree is shared with the host and, often, with other agents working at the same time, ' +
+        'and their uncommitted work is not recoverable once it is gone. Leave the working tree as ' +
+        'it is: if your own edit was wrong, edit the file back to what it should be; if the tree ' +
+        'is in a state you cannot work from, stop and say so in your report — naming the files and ' +
+        'what you believe is wrong — and let the host decide. Do not route around this by other ' +
+        'means (a script, an alias, a different spelling): the refusal is the answer, not an ' +
+        'obstacle to the answer.',
+    },
+  });
+}
+
+if (proxyMatch == null) {
+  // A role agent. One question only, then out of the way.
+  if (command != null) {
+    for (const fragment of shellFragments(command)) {
+      const invocation = gitInvocation(fragment);
+      if (invocation == null) continue;
+      const harm = DESTRUCTIVE_GIT.get(invocation.sub);
+      if (harm == null) continue;
+      if (isReadOnlyGit(invocation.sub, invocation.rest)) continue;
+      denyRole(roleMatch[1], invocation.sub, harm);
+    }
+  }
+  finish(null);
+}
+
 if (command == null) deny('the Bash call carries no command string.');
 
 // Strip quoted-heredoc bodies before validating statements. Only the QUOTED

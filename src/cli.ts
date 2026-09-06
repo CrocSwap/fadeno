@@ -18,6 +18,7 @@ import {
   runDispatchesBakeoffs,
   runDispatchesOutput,
   relayQuarantineNotice,
+  runDispatchesWithdraw,
   type DispatchesResult,
   runDispatchesMerge,
 } from './commands/dispatches.ts';
@@ -1216,6 +1217,8 @@ function main(argv: string[]): number {
         source: { type: 'string' },
         output: { type: 'string' },
         cancel: { type: 'string' },
+        withdraw: { type: 'string' },
+        'work-left': { type: 'string' },
         merge: { type: 'string' },
         commit: { type: 'string' },
         reason: { type: 'string' },
@@ -2379,6 +2382,32 @@ function main(argv: string[]): number {
         console.log('  check the workspace before re-dispatching — a cancelled executor may have written already.');
         return 0;
       }
+      if (values.withdraw != null) {
+        const inline = values.withdraw.startsWith('tag:') ? values.withdraw.slice(4) : null;
+        const result = runDispatchesWithdraw({
+          dispatchId: inline != null ? '' : values.withdraw,
+          tag: inline ?? values.tag,
+          reason: values.reason,
+          workLeft: values['work-left'] ?? null,
+        });
+        const how = result.resolvedBy === 'tag' ? ` (tag: ${result.tag})` : '';
+        console.log(
+          `withdrawn: ${result.dispatchId.slice(0, 8)}${how}${result.idempotent ? ' (idempotent)' : ''} — ${result.reason}`,
+        );
+        // Say what was RECORDED and what was not touched. A withdraw signals
+        // nothing and deletes nothing; a reader who assumed otherwise would
+        // stop looking for the work this dispatch may have left behind.
+        console.log(
+          `  a dispatch_withdrawn row is the terminal receipt; nothing was signalled and no workspace was removed` +
+            `${result.claim === 'stale' ? ' (a stale in-flight claim was found and left in place)' : ''}.`,
+        );
+        if (result.workLeft != null) {
+          console.log(`  recorded as still holding this dispatch's work: ${result.workLeft}`);
+        } else {
+          console.log('  no tree was named as holding its work; add `--work-left <path>` if it left edits behind.');
+        }
+        return 0;
+      }
       if (values.merge != null) {
         const inline = values.merge.startsWith('tag:') ? values.merge.slice(4) : null;
         const result = runDispatchesMerge({
@@ -2482,6 +2511,10 @@ function main(argv: string[]): number {
             ? 'output attested: sha matches the completion row'
             : result.attested === 'mismatch'
               ? 'WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)'
+              : result.withdrawn
+                ? 'WITHDRAWN: an operator retired this dispatch' +
+                  `${result.withdrawnReason != null ? ` (${result.withdrawnReason})` : ''}; these are all the bytes ` +
+                  'it ever produced and no completion row is coming. Do not wait on it.'
               : waitMs > 0
                 ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1000)}s. ` +
                   'The executor has not exited; this is its output so far. Not a failure — ' +

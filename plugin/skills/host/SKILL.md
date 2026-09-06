@@ -61,6 +61,34 @@ Fadeno.
   about the task, the codebase, and where parallel work could collide. Delegate
   a coordinator step to another model only when producing the design itself is
   the work, and say so.
+- When a delegated agent stops without a terminal receipt — a session limit, a
+  429, a killed harness — the standard recovery is to **resume each stopped
+  agent by its id** rather than re-dispatching it. A resumed agent comes back
+  onto its own transcript and finishes what it started; a fresh dispatch starts
+  from nothing and puts a second implementer on the same tree. Before resuming,
+  run `fadeno dispatches` and `git status --short`, and say in your reply which
+  files are dirty and which agent you believe owns them — uncommitted edits with
+  no named owner are the actual cost of a mid-flight kill.
+- A command dispatch that cannot be reached is retired, not left open.
+  `fadeno dispatches --cancel <id|tag:<tag>>` signals a live executor and
+  refuses when there is none — correctly, since it will not claim to have
+  cancelled work it never touched. When it refuses that way, check the
+  workspace, then record the terminal receipt with
+  `fadeno dispatches --withdraw <id|tag:<tag>> --reason <text>`, adding
+  `--work-left <path>` when the tree still holds the dispatch's edits. Until
+  that receipt exists the dispatch reads as potentially live to you and to
+  everyone after you.
+- Two implementers must not share one tree. When a second implementation
+  dispatch would overlap a live one, isolate it (`fadeno dispatch --isolate`,
+  or `fadeno dispatch-prepare --isolate` on the host lane) rather than letting
+  both write the same working copy. A Bash `PreToolUse` hook refuses the
+  destructive git subcommands (`checkout`, `switch`, `restore`, `reset`,
+  `stash`, `clean`) inside the managed `worker`, `reviewer` and `judge` agents,
+  but that guard is **partial and must not be relied on**: it identifies role
+  agents by `agent_type`, so a role brief you hand to a plain `claude`-type
+  subagent is not covered, Codex-hosted agents are not covered at all, and it
+  reads shell text without being a shell. Isolation is the protection; the hook
+  only catches the reflex.
 - Fadeno is in beta. When concrete friction attributable to Fadeno occurs,
   append it to `./.fadeno/feedback.md` with the date, host, task, observed
   behavior, evidence, impact, and workaround when known. Do not invent

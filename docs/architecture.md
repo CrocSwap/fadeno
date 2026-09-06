@@ -640,6 +640,48 @@ Two evidence surfaces sit beside the step lifecycle:
   writing generation is identifiable after the fact. `fadeno dispatches` is the
   read-side projection of this file.
 
+A command dispatch has **two terminal receipts**, and they answer different
+questions. `dispatch_completed` is the kernel's: an executor ran and its bytes
+were hashed. `dispatch_withdrawn` is the operator's: nothing is going to run,
+and this dispatch is over. The second exists because the first was
+unreachable for a dispatch nobody could signal — reported 2026-09-05, when
+`fadeno dispatches --cancel` refused two dead dispatches with *"no running
+executor on this machine (no in-flight claim), yet its evidence shows no
+completion"*. That refusal is correct and unchanged: cancel signals a process
+and will not report having cancelled work it never touched. What was missing
+was a second move, so both dispatches read as open forever and "missing
+terminal receipts made dead workers look potentially live."
+
+`fadeno dispatches --withdraw <id|tag:<tag>> --reason <text>`
+(`runDispatchesWithdraw`) appends that receipt. It signals nothing, and unlike
+the host lane's `dispatch-withdraw` it removes **no workspace**: a host request
+is withdrawn before it starts, so its prepared worktree is empty, while a
+command dispatch is withdrawn after it died, and a killed executor's
+uncommitted edits are the thing worth keeping. `--work-left <path>` records
+where they are, so `fadeno dispatches` shows an owner for a dirty tree without
+anyone reading a transcript. The command is refused while any process behind
+the in-flight claim is still alive (cancel it first), refused after a
+completion row, and idempotent for the same reason. `commandDispatchTerminalState`
+(`commands/dispatch.ts`) is the single list of terminal receipts that the tag
+allocator, the output-record loader, `last` resolution, `--cancel`, `--merge`
+and the listing all read — the command-lane twin of `hostRequestTerminalState`,
+and there for the same reason. `foldEvidenceRow` is the single per-row reader
+behind both the tail view and the whole-log view, which were byte-identical
+copies before it.
+
+Role agents get one narrow Bash refusal at `PreToolUse`. The same
+`dispatch-proxy-guard.mjs` that enforces the proxy relay contract also refuses
+the `DESTRUCTIVE_GIT` subcommands — `checkout`, `switch`, `restore`, `reset`,
+`stash`, `clean` — when `agent_type` names a managed `worker`, `reviewer` or
+`judge`, after a 2026-09-05 report of a worker running `git checkout -- <file>`
+in a shared tree against its own explicit instructions. `git stash list|show`
+and `git clean -n` pass; the main session is never guarded. The coverage is
+**partial and documented as such**: identification is by `agent_type`, so a role
+brief handed to a plain `claude`-type subagent is invisible to it, Codex has no
+Bash `PreToolUse` hook at all, and the statement splitter reads shell text
+without being a shell. Isolation (`--isolate`) is the protection for two
+concurrent implementers; the hook only catches the reflex.
+
 `.fadeno/local/` is per-machine session state (sticky dials at `.fadeno/local/dials`, proxy
 prompt relays) and is never committed — `init` appends `.fadeno/local/` (along
 with `.fadeno/progress/` and `.fadeno/dispatches.jsonl`) to the repo's
