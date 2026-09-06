@@ -68,6 +68,7 @@ import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
 import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
 import { runDispatchClose, runDispatchOpen } from './commands/dispatch-adhoc.ts';
 import { mergeBackReapplyCommand } from './lib/workspace-baseline.ts';
+import { describeIgnoredOutput } from './lib/receipt-attestations.ts';
 import { runDispatchWithdraw } from './commands/dispatch-withdraw.ts';
 import { runToolComplete } from './commands/tool-complete.ts';
 import { runToolRun } from './commands/tool-run.ts';
@@ -2404,6 +2405,17 @@ function main(argv: string[]): number {
               ? ` — apply it with \`${mergeBackReapplyCommand(result.diffSnapshot)}\``
               : ''),
         );
+        // And WHY, when the reason is that a merged delivery's worktree is
+        // still the only copy of something. Without this the retention reads
+        // as a merge that did not finish.
+        if (result.ignoredOutput != null) {
+          console.log(
+            `  it holds gitignored output the diff could not carry: ` +
+              `${result.ignoredOutput.paths.slice(0, 6).join(', ') || 'content the listing could not enumerate'}` +
+              `${result.ignoredOutput.truncated ? ' (a FLOOR, not the set)' : ''}. ` +
+              'Copy what you need out before `fadeno clean --force` reclaims it.',
+          );
+        }
       } else if (result.workspaceRemoved) {
         console.log('  worktree removed; the work is in this workspace.');
       }
@@ -2538,9 +2550,17 @@ function main(argv: string[]): number {
         const how = result.resolvedBy === 'tag' ? ` (tag: ${result.tag})` : '';
         console.log(
           `merged ${result.dispatchId.slice(0, 8)}${how}: ${result.diffBytes} bytes applied to the workspace from ${result.workspace}` +
-            `${result.mergeBack.rebased_onto != null ? ` (rebased onto ${result.mergeBack.rebased_onto.slice(0, 12)} first)` : ''}; the worktree is removed.`,
+            `${result.mergeBack.rebased_onto != null ? ` (rebased onto ${result.mergeBack.rebased_onto.slice(0, 12)} first)` : ''}; ` +
+            `${result.ignoredOutputKept != null ? 'the worktree is KEPT.' : 'the worktree is removed.'}`,
         );
         console.log(`  diff kept at ${result.diffSnapshot}; a dispatch_merged row records the merge.`);
+        // The patch that just landed carried no gitignored path, so removing
+        // the worktree would have destroyed this. Said here rather than only
+        // on the row: `--merge` is the last moment anyone is looking.
+        if (result.ignoredOutputKept != null) {
+          console.log(`  ${describeIgnoredOutput(result.ignoredOutputKept)}`);
+          console.log('  Copy what you need out of it, then `fadeno clean --force` reclaims it.');
+        }
         return 0;
       }
       if (values.output != null) {
@@ -2655,11 +2675,13 @@ function main(argv: string[]): number {
           : null;
         // Repeated here for the human at the terminal; the banner in the bytes
         // is what survives a relay. Neither is a substitute for the other.
+        // Through the shared phrasing rather than a local slice-and-join.
+        // This line predates `receipt-attestations.ts` and had drifted into a
+        // third spelling that could not say a worktree still holds the
+        // content — the one thing a reader can act on.
         const discarded = result.ignoredOutputDiscarded == null
           ? null
-          : `GITIGNORED OUTPUT DISCARDED${result.ignoredOutputDiscarded.truncated ? ' (the listing is a FLOOR, not the set)' : ''} — ` +
-            `${result.ignoredOutputDiscarded.paths.slice(0, 5).join(', ') || '(paths unrecorded)'}: no diff carried ` +
-            'this out of the worktree, so it is not in your tree';
+          : `GITIGNORED OUTPUT DISCARDED — ${describeIgnoredOutput(result.ignoredOutputDiscarded)}`;
         // Not prefixed onto the bytes: an overlap does not make the report
         // false. It is still stated, because nothing prevents a concurrent
         // writer any more and this is one of the two places it can be read.

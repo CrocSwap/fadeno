@@ -66,6 +66,8 @@ import { fallbackClaimRelPath, INFLIGHT_DIR, readSupervisorStatus, sleepSync, su
 import {
   carryDeclaredPaths,
   carryMutationStamp,
+  ignoredOutputClean,
+  ignoredOutputStamp,
   scanIgnoredOutput,
   verifyCarriedPaths,
   withIsolatedWorktree,
@@ -1827,6 +1829,46 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // would destroy the very output the policy exists to protect.
   const ignoredOutputPolicy: 'kept' | 'discardable' = opts.ignoredOutput
     ?? (profile.archetypes[archetype ?? '']?.ignoredOutput ?? 'discardable');
+  /**
+   * Did the CALLER choose this policy, at this command?
+   *
+   * The default was the quiet half of the loss. `discardable` reads as "safe
+   * to lose", and until now the kernel acted on that reading by tearing the
+   * worktree down; an archetype whose entire deliverable is a gitignored
+   * `data/research/` directory got that verdict without anyone ever choosing
+   * it.
+   *
+   * Two things answer that, and only one of them is a message. The first is
+   * the retention below: `discardable` no longer means "destroy this". It
+   * decides the WORKSPACE MODE and nothing else — isolate, keep the
+   * comparison, and leave the ignored content where the executor put it. That
+   * is why the default itself is unchanged. Flipping it to `kept` would send
+   * every unconfigured dispatch back into the caller's tree and undo default
+   * isolation wholesale, and there is no longer a loss on the other side of
+   * that trade to justify it. Nor can this be a REFUSAL: the scan is
+   * post-hoc, so the only moment the fact is knowable is after the executor
+   * has run and its report exists. Refusing there would throw away the report
+   * on top of everything else. Refusing to DESTROY is the only refusal
+   * available, and that is what the retention is.
+   *
+   * The second is that a caller who never stated a policy should not have to
+   * reverse-engineer one from a receipt — so the retention echo names the
+   * lever, but only on runs where the policy actually cost something (a scan
+   * that found ignored content). A dispatch that produced none says nothing,
+   * which is what keeps this from becoming a line people learn to scroll
+   * past.
+   *
+   * `flag` is the only provenance this can honestly report. `parseExecutorProfile`
+   * normalizes an undeclared `archetypes.<name>.ignored_output` to
+   * `discardable` at load time, so by here a declared `discardable` and an
+   * absent one are the same bytes; distinguishing them would mean widening
+   * the parsed policy to carry its own absence, and asserting a provenance
+   * the profile cannot support is exactly the invention this codebase keeps
+   * paying for. So the echo tells a caller who did NOT just pass the flag
+   * what the resolved policy is and how to change it, and claims nothing
+   * about who set it.
+   */
+  const ignoredOutputChosenAtCall = opts.ignoredOutput != null;
 
   // WHO asked for the worktree. This is the axis that decides what happens to
   // the work inside it, and conflating it with "is there a pair?" is exactly
@@ -2710,23 +2752,18 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // runs now, beside the primary's, so both arms of a pair are measured the
     // same way at the same point in their lifecycle. A challenger's ignored
     // output is discarded too: nothing merges its worktree back at all.
-    const shadowIgnored = scanIgnoredOutput(pending.worktreeAbs, profile.worktreeCarry);
-    if (shadowIgnored.paths.length > 0 || shadowIgnored.truncated) {
-      sRow.ignored_output_discarded = {
-        paths: shadowIgnored.paths,
-        ...(shadowIgnored.truncated ? { truncated: true } : {}),
-        ...(shadowIgnored.note != null ? { note: shadowIgnored.note } : {}),
-        // "Discarded" means two different things on the two arms, and the row
-        // has to say which. The challenger's worktree is RETAINED until
-        // `fadeno clean`, so its output is still on disk right here — gone
-        // from the comparison, not gone from the machine. The primary's
-        // worktree is torn down after the merge-back, so its output really is
-        // unrecoverable and this field is absent there. A reader must never
-        // have to infer the difference from whether some other field happens
-        // to be set.
-        retained_at: pending.worktreeRel,
-      };
-    }
+    //
+    // "Discarded" is a claim about the COMPARISON, not about the machine, and
+    // `retained_at` is what says which: the challenger's worktree lives until
+    // `fadeno clean`, so its output is gone from the diff and still on disk
+    // right here. The primary's arm answers the same question with the same
+    // field, from the same `ignoredOutputStamp` — it used to be the arm where
+    // the answer was "nowhere".
+    const shadowIgnored = ignoredOutputStamp(
+      scanIgnoredOutput(pending.worktreeAbs, profile.worktreeCarry),
+      pending.worktreeRel,
+    );
+    if (shadowIgnored != null) sRow.ignored_output_discarded = shadowIgnored;
     if (spawnFailedMsg != null) sRow.error = spawnFailedMsg;
     // Shadow completions OMIT workspace_changed by construction
     appendEvidenceRow(repoRoot, sRow);
@@ -2887,6 +2924,47 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         diffRel,
         diffAbs: join(repoRoot, diffRel),
         onEcho: opts.onEcho,
+        // ---- Teardown veto: work the diff could not carry -----------------
+        //
+        // The other half of `ignored_output_discarded`. Detection made the
+        // loss visible on four surfaces; none of that put a byte back. This
+        // is what stops the bytes going in the first place: the worktree is
+        // the only copy of anything `git add -A` skipped, so it is not
+        // removed while it holds any.
+        //
+        // Runs on BOTH origins, unlike `settle`. A `--isolate` dispatch is
+        // held out of the caller's tree on purpose and its diff is the whole
+        // handoff — which is precisely why its ignored output had nowhere to
+        // go either. "Do not merge this" was never "destroy this".
+        retainIf: (_worktreeAbs, worktreeRel) => {
+          const scan = takeIsolatedIgnoredOutput();
+          if (ignoredOutputClean(scan) || scan == null) return null;
+          // A truncated scan lands here too, with an empty list and nothing
+          // to name. That is the case where retention matters MOST: the
+          // alternative is deleting a directory on a listing that just said
+          // it could not tell what was in it. See `ignoredOutputClean`.
+          const listed = scan.paths.length > 0
+            ? `${scan.truncated ? 'at least ' : ''}${scan.paths.slice(0, 6).join(', ')}` +
+              `${scan.paths.length > 6 ? ` (+${scan.paths.length - 6} more)` : ''}`
+            : 'content the listing could not enumerate';
+          // The policy stops being silent exactly here — where it cost
+          // something — and nowhere else. A dispatch that produced no ignored
+          // output never sees this line, and neither does a caller who just
+          // passed `--ignored-output` and does not need telling what they
+          // chose a second ago.
+          const why = ignoredOutputChosenAtCall
+            ? ''
+            : ' This dispatch resolved `ignored_output: discardable`, which now decides only the workspace ' +
+              'mode and no longer means the content may be destroyed; declare `ignored_output: kept` on the ' +
+              'archetype (or pass `--ignored-output kept`) to run in your tree instead and skip the worktree ' +
+              'entirely.';
+          opts.onEcho?.(
+            `gitignored output KEPT — ${listed} is gitignored, so \`git add -A\` staged none of it and no diff ` +
+              `carried it out. The worktree is RETAINED at ${worktreeRel} rather than removed: that directory is ` +
+              `the only copy. Copy what you need out of it, then \`fadeno clean --force\` reclaims it.${why}`,
+          );
+          return `gitignored output would not survive the teardown (${worktreeRel})`;
+        },
         // ---- Merge-back, inside the worktree's lifetime -------------------
         // Keyed on WHO asked for the worktree, not on whether a pair exists.
         // `--isolate` is an explicit request to keep the work out of the
@@ -3214,20 +3292,18 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     row.workspace_mode = effectiveWorkspaceMode;
     row.workspace_mode_degraded = isolationDegraded;
   }
-  // Absent when nothing was declared or nothing declared existed, matching
-  // the shadow row's same convention above.
-  // Gitignored output that will not survive. Recorded whenever the scan found
-  // something OR could not be sure it found everything: a truncated scan with
-  // a non-empty list is a floor, never a set, and "I could not tell" must not
-  // be spelled the same as "there was nothing".
-  const primaryIgnored = takeIsolatedIgnoredOutput();
-  if (primaryIgnored != null && (primaryIgnored.paths.length > 0 || primaryIgnored.truncated)) {
-    row.ignored_output_discarded = {
-      paths: primaryIgnored.paths,
-      ...(primaryIgnored.truncated ? { truncated: true } : {}),
-      ...(primaryIgnored.note != null ? { note: primaryIgnored.note } : {}),
-    };
-  }
+  // Gitignored output the diff could not carry. Written whenever the scan
+  // found something OR could not be sure it found everything — the same
+  // `ignoredOutputClean` the teardown asked, so the row and the directory can
+  // never disagree about whether there was anything there.
+  //
+  // `retained_at` is the field the teardown veto made answerable on this arm.
+  // It reads `isolatedWorktreeRetained` rather than a flag of its own because
+  // BOTH retention reasons keep the same directory: a merge-back that ended
+  // `unresolved` holds this content just as surely as the veto does, and a
+  // second field for the same fact is how two spellings start to drift.
+  const primaryIgnored = ignoredOutputStamp(takeIsolatedIgnoredOutput(), isolatedWorktreeRetained);
+  if (primaryIgnored != null) row.ignored_output_discarded = primaryIgnored;
   // Same shared-inode hazard on this arm, and it matters MORE here than on
   // the challenger: this is the arm whose work is kept, so a hardlinked file
   // it wrote in place has already reached the caller's tree by a channel the

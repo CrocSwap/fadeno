@@ -84,7 +84,9 @@ import {
   collectIsolatedDiff,
   createIsolatedWorktree,
   removeIsolatedWorktree,
+  ignoredOutputStamp,
   scanIgnoredOutput,
+  type IgnoredOutputStamp,
 } from '../lib/workspace-isolation.ts';
 import {
   changedBetween,
@@ -1792,23 +1794,20 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
    * exactly the way "nothing was destroyed" is spelled. Old array rows still
    * read (see `parseIgnoredOutputDiscarded`); nothing writes one now.
    */
-  let mergeIgnored: { paths: string[]; truncated?: true; note?: string } | null = null;
+  let mergeIgnored: IgnoredOutputStamp | null = null;
   const settleWorkspace = (): void => {
     if (workspaceSettled) return;
     workspaceSettled = true;
     const wt = pending.worktree;
     if (wt == null) return;
     try {
-      // Before the diff, because `git add -A` respects .gitignore and the
-      // teardown below is final: whatever this names is about to die.
-      const ignored = scanIgnoredOutput(wt.abs, ctx.worktreeCarry);
-      if (ignored.paths.length > 0 || ignored.truncated) {
-        mergeIgnored = {
-          paths: ignored.paths,
-          ...(ignored.truncated ? { truncated: true as const } : {}),
-          ...(ignored.note != null ? { note: ignored.note } : {}),
-        };
-      }
+      // Before the diff, because `git add -A` respects .gitignore: whatever
+      // this names cannot leave the worktree by patch. The teardown below is
+      // no longer final for it — the same `ignoredOutputStamp` that writes
+      // this field decides, a few lines down, whether the directory survives
+      // — so the stamp names where the content still is rather than only
+      // that it existed.
+      mergeIgnored = ignoredOutputStamp(scanIgnoredOutput(wt.abs, ctx.worktreeCarry), wt.rel);
       const diff = collectIsolatedDiff({ repoRoot: ctx.repoRoot, worktreeAbs: wt.abs, diffAbs: wt.diffAbs, diffRel: wt.diffRel });
       mergeDiff = { rel: diff.diffRel, bytes: diff.diffBytes };
       if (diff.diffBytes === 0) {
@@ -1840,10 +1839,19 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
       mergeStamp = { status: 'blocked', detail: err instanceof Error ? err.message : String(err) };
     } finally {
       // Retained on `unresolved`: the markers in it are the next attempt's
-      // input, or a human's. Torn down on everything else — the diff is the
-      // durable artifact there, not the worktree.
-      if (mergeStamp?.status !== 'unresolved') {
+      // input, or a human's. Retained ALSO when it holds gitignored content,
+      // because there the diff is NOT the durable artifact — `git add -A`
+      // staged none of that, so the directory is the only copy and tearing it
+      // down is the loss this whole field exists to report. Torn down on
+      // everything else, where the diff really is the artifact.
+      if (mergeStamp?.status !== 'unresolved' && mergeIgnored == null) {
         try { removeIsolatedWorktree(ctx.repoRoot, wt.abs); } catch {}
+      } else if (mergeIgnored != null && mergeStamp?.status !== 'unresolved') {
+        ctx.act(
+          `gitignored output KEPT — ${mergeIgnored.paths.slice(0, 6).join(', ') || 'content the listing could not enumerate'} ` +
+            `is gitignored, so no diff carried it out of ${wt.rel}. That worktree is RETAINED: it is the only copy. ` +
+            'Copy what you need out of it before `fadeno clean --force` reclaims it.',
+        );
       }
     }
   };
@@ -1910,7 +1918,18 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
     if (diff != null) { out.diff_snapshot = diff.rel; out.diff_bytes = diff.bytes; }
     const stamp = takeMergeStamp();
     if (stamp != null) out.merge_back = stamp;
-    if (mergeIgnored != null) out.ignored_output_discarded = mergeIgnored;
+    if (mergeIgnored != null) {
+      out.ignored_output_discarded = mergeIgnored;
+      // The worktree survived the settle because this stamp exists, so the
+      // receipt has to say the directory is still there. Without it a reader
+      // — `fadeno clean`, a human, the recovery sweep — has a `retained_at`
+      // pointing into a tree the row otherwise describes as torn down, which
+      // is the ledger and the disk disagreeing in the polite direction.
+      if (pending.worktree != null) {
+        out.workspace = pending.worktree.rel;
+        out.workspace_retained = true;
+      }
+    }
     // Deleting the writer lease without this would trade a loud wedge for
     // silent lost writes. Absent when nothing overlapped, exactly like
     // `carry_mutated`: an empty stamp on every receipt would bury the ones

@@ -289,3 +289,53 @@ test('dispatches --merge: refuses while markers remain, merges once they are res
   assert.doesNotMatch(cli.stderr, /UNRESOLVED/);
   assert.throws(() => runDispatchesMerge({ repoRoot: root, tag: 'worker-merge' }), /was already merged/);
 });
+
+test('dispatches --merge lands the patch and KEEPS a worktree that still holds gitignored output', (t) => {
+  // The second place a `git add -A` diff meets a `.gitignore` and the only
+  // copy of something loses. `--merge` applied the patch — which by
+  // construction carries no ignored path — and then removed the directory
+  // holding the rest, saying nothing at all about it. It refused a tainted
+  // relay loudly and was silent about this.
+  const root = seedDispatch(t, ['node', '-e',
+    "const fs=require('fs');" +
+    "fs.mkdirSync('data/research',{recursive:true});" +
+    "fs.writeFileSync('data/research/findings.md','the deliverable\\n');" +
+    "fs.writeFileSync('tracked.txt','line1\\nline2\\nline3 by the worker\\nline4\\nline5\\n');" +
+    "fs.writeFileSync(process.env.CALLER_ROOT+'/tracked.txt','line1\\nline2\\nline3 by the caller\\nline4\\nline5\\n');" +
+    "process.stdout.write('DONE')"]);
+  writeFileSync(join(root, '.gitignore'), 'data*/\n');
+  git(root, ['add', '-A']);
+  git(root, ['commit', '-m', 'ignore data']);
+  process.env.CALLER_ROOT = root;
+  t.after(() => { delete process.env.CALLER_ROOT; });
+  runDispatch({ archetype: 'worker', prompt: 'edit', tag: 'merge-ignored', repoRoot: root, userPathOptions: onHarness('standalone') });
+  const comp = rows(root).find((r) => r.event === 'dispatch_completed')!;
+  assert.equal((comp.primary_merge as { status: string }).status, 'unresolved');
+  const retained = comp.workspace as string;
+
+  writeFileSync(join(root, retained, 'tracked.txt'), edited({ 3: 'line3 resolved by hand' }));
+  const merged = runDispatchesMerge({ repoRoot: root, tag: 'merge-ignored' });
+  assert.equal(merged.mergeBack.status, 'clean');
+  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), edited({ 3: 'line3 resolved by hand' }));
+  // The tracked resolution landed; the deliverable could not, so the
+  // directory that holds it stays.
+  assert.equal(existsSync(join(root, 'data')), false, 'the ignored tree cannot reach the caller by patch');
+  assert.ok(merged.ignoredOutputKept != null, 'the result must say why the worktree survived');
+  assert.deepEqual(merged.ignoredOutputKept!.paths, ['data/']);
+  assert.equal(merged.ignoredOutputKept!.retainedAt, retained);
+  assert.equal(
+    readFileSync(join(root, retained, 'data', 'research', 'findings.md'), 'utf8'),
+    'the deliverable\n',
+    'the worktree is still on disk with the deliverable in it',
+  );
+  const row = rows(root).find((r) => r.event === 'dispatch_merged')!;
+  assert.equal(row.workspace_retained, true);
+  assert.equal((row.ignored_output_discarded as { retained_at?: string }).retained_at, retained);
+  assert.equal(row.workspace_removed, undefined);
+  // The reader carries the later fact both ways: merged, and still on disk.
+  const out = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'merge-ignored' });
+  assert.equal(out.primaryMerge?.status, 'clean');
+  assert.equal(out.workspace, retained);
+  const cli = spawnSync('node', [join(REPO, 'src', 'cli.ts'), 'dispatches', '--merge', 'tag:merge-ignored'], { cwd: root, encoding: 'utf8' });
+  assert.match(cli.stderr, /was already merged/);
+});

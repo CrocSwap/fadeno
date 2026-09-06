@@ -338,3 +338,89 @@ test('fadeno verify says something true when handed an ad-hoc host dispatch id',
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// Gitignored output on the host lane
+// ---------------------------------------------------------------------------
+//
+// The command lane at least RECORDED the loss (`ignored_output_discarded`);
+// this lane did not look at all, and an absent stamp from a lane that never
+// looked is byte for byte an absent stamp from a lane that looked and found
+// nothing. Fadeno steers work toward the host lane, so this is where a
+// gitignored deliverable was quietest.
+
+/** A seeded repo carrying the field report's own ignore rule, `data*` + slash. */
+function seedIgnoringRepo(t: import('node:test').TestContext): string {
+  const root = seedRepo(t);
+  writeFileSync(join(root, '.gitignore'), 'data*/\n');
+  git(root, ['add', '-A']);
+  git(root, ['commit', '-m', 'ignore data']);
+  return root;
+}
+
+test('dispatch-close keeps a merged worktree that still holds gitignored output, and says so', (t) => {
+  const root = seedIgnoringRepo(t);
+  const opened = runDispatchOpen({ repoRoot: root, tag: 'host-research' });
+  // The host agent writes a tracked file and a gitignored deliverable.
+  writeFileSync(join(opened.workspaceAbs, 'base.txt'), 'base\nedited\n');
+  spawnSync('mkdir', ['-p', join(opened.workspaceAbs, 'data', 'research')]);
+  writeFileSync(join(opened.workspaceAbs, 'data', 'research', 'findings.md'), 'the deliverable\n');
+
+  const echoes: string[] = [];
+  const closed = runDispatchClose({ repoRoot: root, tag: 'host-research', onEcho: (l) => echoes.push(l) });
+  assert.equal(closed.merge?.status, 'clean');
+  // The tracked edit landed; the ignored tree could not and never could.
+  assert.equal(readFileSync(join(root, 'base.txt'), 'utf8'), 'base\nedited\n');
+  assert.equal(existsSync(join(root, 'data')), false);
+
+  // Before this the worktree went here, with the deliverable in it and no
+  // field on the receipt naming it.
+  assert.equal(closed.workspaceRemoved, false, 'the teardown is refused while the directory is the only copy');
+  assert.equal(closed.workspaceRetained, opened.workspace);
+  assert.ok(closed.ignoredOutput != null, 'the close must report what kept the worktree alive');
+  assert.deepEqual(closed.ignoredOutput!.paths, ['data/']);
+  assert.equal(closed.ignoredOutput!.retained_at, opened.workspace);
+  assert.equal(
+    readFileSync(join(opened.workspaceAbs, 'data', 'research', 'findings.md'), 'utf8'),
+    'the deliverable\n',
+  );
+
+  const receipt = evidenceRows(root).at(-1)!;
+  assert.equal(receipt.workspace_removed, false);
+  assert.equal(receipt.workspace_retained, true);
+  assert.equal(receipt.workspace, opened.workspace);
+  // Same field name and same wire shape as the command lane's, so every
+  // reader picks it up without knowing which lane wrote it.
+  const stamp = receipt.ignored_output_discarded as { paths: string[]; retained_at?: string };
+  assert.deepEqual(stamp.paths, ['data/']);
+  assert.equal(stamp.retained_at, opened.workspace);
+  assert.ok(echoes.some((l) => l.startsWith('gitignored output KEPT')), echoes.join('\n'));
+});
+
+test('dispatch-close with nothing ignored still tears the worktree down and stamps nothing', (t) => {
+  const root = seedIgnoringRepo(t);
+  const opened = runDispatchOpen({ repoRoot: root, tag: 'host-plain' });
+  writeFileSync(join(opened.workspaceAbs, 'base.txt'), 'base\nedited\n');
+  const closed = runDispatchClose({ repoRoot: root, tag: 'host-plain' });
+  assert.equal(closed.workspaceRemoved, true);
+  assert.equal(closed.ignoredOutput, null);
+  assert.equal(existsSync(opened.workspaceAbs), false);
+  assert.equal(evidenceRows(root).at(-1)!.ignored_output_discarded, undefined);
+});
+
+test('a --no-merge close names the gitignored content in the tree it hands back', (t) => {
+  // Nothing is torn down here, so nothing is lost — but the operator holding
+  // the worktree still needs to know which of the things in it will never
+  // reach their tree by patch.
+  const root = seedIgnoringRepo(t);
+  const opened = runDispatchOpen({ repoRoot: root, tag: 'host-hold' });
+  writeFileSync(join(opened.workspaceAbs, 'base.txt'), 'base\nedited\n');
+  spawnSync('mkdir', ['-p', join(opened.workspaceAbs, 'data')]);
+  writeFileSync(join(opened.workspaceAbs, 'data', 'notes.md'), 'notes\n');
+
+  const closed = runDispatchClose({ repoRoot: root, tag: 'host-hold', noMerge: true });
+  assert.equal(closed.merge, null);
+  assert.equal(closed.workspaceRetained, opened.workspace);
+  assert.deepEqual(closed.ignoredOutput?.paths, ['data/']);
+  assert.equal((evidenceRows(root).at(-1)!.ignored_output_discarded as { paths: string[] }).paths[0], 'data/');
+});

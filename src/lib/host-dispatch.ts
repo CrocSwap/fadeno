@@ -18,8 +18,8 @@ import {
 import { readEventsStrict, resolveRun, RUN_LEDGER_SCHEMA_VERSION, RunLedgerError, type RunEvent } from './run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from './run-ledger-write.ts';
 import { parseSnapshotDocument, type SnapshotDocument } from './executors.ts';
-import { collectHostWorkspaceDiff, collectIsolatedRecoveryDiff, HostWorkspaceError, hostIsolatedDiffPath, hostWorktreePath, isHostPathSafe, readHostWorkspaceState, removeHostWorkspace, removeHostWorkspaceByPath, type HostWorkspaceState } from './host-workspace.ts';
-import { isRegisteredWorktree } from './workspace-isolation.ts';
+import { collectHostWorkspaceDiff, collectIsolatedRecoveryDiff, HostWorkspaceError, hostIsolatedDiffPath, hostWorkspaceIgnoredOutput, hostWorktreePath, isHostPathSafe, readHostWorkspaceState, removeHostWorkspace, removeHostWorkspaceByPath, type HostWorkspaceState } from './host-workspace.ts';
+import { isRegisteredWorktree, type IgnoredOutputStamp } from './workspace-isolation.ts';
 
 export const DUPLICATE_START = 'duplicate_start' as const;
 export type HostDispatchErrorCode = typeof DUPLICATE_START;
@@ -376,6 +376,41 @@ function append(runDir: string, event: Record<string, unknown>, now?: Date): voi
     if (err instanceof LedgerWriteError) throw new HostDispatchError(err.message);
     throw err;
   }
+}
+
+/**
+ * What a run-scoped host receipt must say about the worktree it is about to
+ * tear down.
+ *
+ * Every terminal receipt on this lane is followed by a `removeHostWorkspace`,
+ * and that call now refuses when the directory holds gitignored content the
+ * diff could not carry (see `removeHostWorkspaceByPath`). Without this, the
+ * refusal would be invisible: the row would name a `workspace` it believed
+ * gone, no field would say the content existed, and worktrees would pile up
+ * under `.fadeno/local/host/` with nothing anywhere explaining why. Silent
+ * retention is the same failure as silent deletion with the polarity flipped
+ * — in both, the ledger and the disk disagree.
+ *
+ * Read-only and taken BEFORE the append, deliberately. The receipt is written
+ * first and the teardown attempted after, exactly as before, so nothing about
+ * the crash window changes: a process that dies between them leaves a
+ * worktree and a row that describes it, which is the recoverable direction.
+ * The teardown re-scans for itself rather than trusting this verdict — what
+ * it deletes is decided by what it saw.
+ *
+ * Never throws: a receipt is a fact, and a scan that can fail the append
+ * would be the one thing on this path able to turn a completed delivery into
+ * an error.
+ */
+function hostTeardownFields(repoRoot: string, state: HostWorkspaceState): Record<string, unknown> {
+  let stamp: IgnoredOutputStamp | null;
+  try {
+    stamp = hostWorkspaceIgnoredOutput(repoRoot, state.workspace);
+  } catch {
+    return {};
+  }
+  if (stamp == null) return {};
+  return { ignored_output_discarded: stamp, workspace_retained: true };
 }
 
 function requestFromEvent(run: string, event: RunEvent): HostDispatchRequest {
@@ -1414,6 +1449,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
           ...deliveryFields(starts[0]!),
           workspace_mode: 'isolated',
           workspace: collected.state.workspace,
+          ...hostTeardownFields(repoRoot, collected.state),
           base_commit: collected.state.base_commit,
           diff_snapshot: collected.diffSnapshot,
           diff_bytes: collected.diffBytes,
@@ -1561,6 +1597,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
           ...deliveryFields(starts[0]!),
           workspace_mode: 'isolated',
           workspace: collected.state.workspace,
+          ...hostTeardownFields(repoRoot, collected.state),
           base_commit: collected.state.base_commit,
           diff_snapshot: collected.diffSnapshot,
           diff_bytes: collected.diffBytes,
@@ -1694,6 +1731,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
         ...deliveryFields(starts[0]!),
         workspace_mode: 'isolated',
         workspace: collected.state.workspace,
+        ...hostTeardownFields(repoRoot, collected.state),
         base_commit: collected.state.base_commit,
         diff_snapshot: collected.diffSnapshot,
         diff_bytes: collected.diffBytes,
@@ -1894,6 +1932,7 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
       ...failedBase,
       workspace_mode: 'isolated' as const,
       workspace: outcome.collected.state.workspace,
+      ...hostTeardownFields(repoRoot, outcome.collected.state),
       base_commit: outcome.collected.state.base_commit,
       diff_snapshot: outcome.collected.diffSnapshot,
       diff_bytes: outcome.collected.diffBytes,

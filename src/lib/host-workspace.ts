@@ -2,7 +2,15 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { collectIsolatedDiff, isRegisteredWorktree, removeIsolatedWorktree, WorkspaceIsolationError } from './workspace-isolation.ts';
+import {
+  collectIsolatedDiff,
+  ignoredOutputStamp,
+  isRegisteredWorktree,
+  removeIsolatedWorktree,
+  scanIgnoredOutput,
+  WorkspaceIsolationError,
+  type IgnoredOutputStamp,
+} from './workspace-isolation.ts';
 
 /**
  * How old this module's OWN mkdir lock may be before it is reclaimed.
@@ -462,21 +470,90 @@ export function collectIsolatedRecoveryDiff(opts: { repoRoot: string; run: strin
   });
 }
 
-export function removeHostWorkspaceByPath(opts: { repoRoot: string; run: string; dispatchId: string; workspaceRel: string }): void {
+/**
+ * Gitignored content sitting in a host worktree, as the receipt field, or
+ * null when the scan positively says there is none.
+ *
+ * ## Why the host lane needed its own entry point
+ *
+ * `scanIgnoredOutput` had exactly two callers — the ad-hoc kernel and the
+ * drive engine — and BOTH are command-lane. Every host delivery (the
+ * run-scoped `dispatch-prepare --isolate` path and the runless
+ * `dispatch-open`/`dispatch-close` pair) merged back through the same
+ * `git add -A` diff, which respects `.gitignore`, removed the same worktree,
+ * and wrote no `ignored_output_discarded` field at all — not a truncated one,
+ * not an empty one. An absent stamp from a lane that never looked is byte for
+ * byte the same as an absent stamp from a lane that looked and found nothing,
+ * and Fadeno is deliberately biased TOWARD the host lane. The loudest half of
+ * this feature was missing from the lane people are steered onto.
+ *
+ * ## `carriedPaths` is empty, and that is a fact rather than a shortcut
+ *
+ * `worktree_carry` is applied by `carryDeclaredPaths`, which the host lane
+ * never calls: `prepareHostWorkspace` cuts a worktree, replays the baseline,
+ * and stops. So nothing ignored was placed in a host worktree as INPUT, and
+ * everything this scan names was produced inside it. The command lane has to
+ * pass its carry list to avoid reporting a carried `node_modules/` as output;
+ * here there is nothing to subtract.
+ *
+ * Never throws: a path that is not a registered worktree, or is already gone,
+ * comes back as an unknown rather than an exception — teardown is best-effort
+ * everywhere in this file and a scan that can fail the caller would be the
+ * one thing here that can turn a receipt into a crash.
+ */
+export function hostWorkspaceIgnoredOutput(repoRoot: string, workspaceRel: string): IgnoredOutputStamp | null {
+  let worktreeAbs: string;
+  try {
+    worktreeAbs = assertHostPathSafe(repoRoot, workspaceRel);
+  } catch {
+    return null;
+  }
+  if (!existsSync(worktreeAbs)) return null;
+  return ignoredOutputStamp(scanIgnoredOutput(worktreeAbs, []), workspaceRel);
+}
+
+export interface HostWorkspaceTeardown {
+  /** False when the directory is still on disk — because it was already gone,
+   * was never a registered worktree, or holds output nothing else has. */
+  removed: boolean;
+  /** Why it was kept, when ignored content is why. Null otherwise. */
+  ignoredOutput: IgnoredOutputStamp | null;
+}
+
+/**
+ * Tear down a host worktree — unless it is the only copy of something.
+ *
+ * The guard lives HERE, below every host caller, rather than at the six-odd
+ * places that call it. That is the point: a completion, a failure, a cancel
+ * and a recovery all reach this function, they were written at different
+ * times by different hands, and any one of them that forgot the check would
+ * be the one that destroys a deliverable. A caller can forget to READ the
+ * verdict — it costs them a field on a receipt — but no caller can skip it.
+ *
+ * The scan is re-run here even when the caller already took one for its
+ * receipt. That is one extra `git ls-files` (~38ms) on a path that has just
+ * spawned an agent and collected a binary diff, and it buys an invariant
+ * worth more than the milliseconds: what this function deletes is decided by
+ * what this function saw, not by an argument it was handed.
+ */
+export function removeHostWorkspaceByPath(opts: { repoRoot: string; run: string; dispatchId: string; workspaceRel: string }): HostWorkspaceTeardown {
   validateRunAndDispatch(opts.run, opts.dispatchId);
   assertHostPathSafe(opts.repoRoot, opts.workspaceRel);
   return withHostWorkspaceLock(opts.repoRoot, () => {
     const worktreeAbs = assertHostPathSafe(opts.repoRoot, opts.workspaceRel);
-    if (!isRegisteredWorktree(opts.repoRoot, worktreeAbs)) return;
+    if (!isRegisteredWorktree(opts.repoRoot, worktreeAbs)) return { removed: false, ignoredOutput: null };
+    const ignoredOutput = hostWorkspaceIgnoredOutput(opts.repoRoot, opts.workspaceRel);
+    if (ignoredOutput != null) return { removed: false, ignoredOutput };
     try {
       removeIsolatedWorktree(opts.repoRoot, worktreeAbs);
     } catch {
       // best-effort
     }
+    return { removed: !existsSync(worktreeAbs), ignoredOutput: null };
   });
 }
 
-export function removeHostWorkspace(opts: { repoRoot: string; state: HostWorkspaceState }): void {
+export function removeHostWorkspace(opts: { repoRoot: string; state: HostWorkspaceState }): HostWorkspaceTeardown {
   // Retain finalized state file for idempotency — do not delete
   return removeHostWorkspaceByPath({ repoRoot: opts.repoRoot, run: opts.state.run, dispatchId: opts.state.dispatch_id, workspaceRel: opts.state.workspace });
 }

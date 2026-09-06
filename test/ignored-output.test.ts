@@ -13,10 +13,18 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import test from 'node:test';
-import { IGNORED_OUTPUT_MAX_ENTRIES, scanIgnoredOutput } from '../src/lib/workspace-isolation.ts';
+import test, { type TestContext } from 'node:test';
+import { stringify as stringifyYaml } from 'yaml';
+import { DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
+import {
+  IGNORED_OUTPUT_MAX_ENTRIES,
+  ignoredOutputClean,
+  ignoredOutputStamp,
+  scanIgnoredOutput,
+  withIsolatedWorktree,
+} from '../src/lib/workspace-isolation.ts';
 import { tempRepo } from './helpers.ts';
 
 const GIT_ENV = {
@@ -334,4 +342,200 @@ test('the scan never mutates the worktree it inspects', (t) => {
   scanIgnoredOutput(root, ['dist']);
   const after = git(root, ['status', '--porcelain', '--ignored']);
   assert.equal(after, before, 'detection must not stage, clean, or otherwise disturb the tree');
+});
+
+// ---------------------------------------------------------------------------
+// Retention — the half that puts bytes back
+// ---------------------------------------------------------------------------
+//
+// Detection made the loss visible on four surfaces and recovered nothing. The
+// tests below are about the teardown: a worktree holding content no diff can
+// carry is not removed, and the caller is told where it is. Two of them are
+// the exact shape of the failure that motivated this — a `data*/` rule in a
+// research repo, a deliverable written under `data/research/`, and a code file
+// beside it that came back fine and made the loss look like a success.
+
+/** `.fadeno/executors.yaml` naming a single-command executor, plus a commit. */
+function seedIgnoringRepo(t: TestContext, patterns: string[], cmd: string[]): string {
+  const root = tempRepo(t);
+  initRepo(root, patterns);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 4,
+    models: { w: { provider: 'openai', id: 'w' } },
+    harnesses: { codex: { provider: 'openai', command: cmd } },
+    archetypes: { worker: {} },
+    dials: { worker: 'w' },
+  }), 'utf8');
+  return root;
+}
+
+function completionRow(root: string): Record<string, unknown> {
+  const rows = readFileSync(join(root, DISPATCHES_FILE), 'utf8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+  const row = rows.find((r) => r.event === 'dispatch_completed');
+  assert.ok(row != null, 'no completion row was written');
+  return row;
+}
+
+/** Writes one tracked edit and one gitignored deliverable, then reports success. */
+const WRITES_IGNORED_DELIVERABLE = ['node', '-e',
+  "const fs=require('fs');" +
+  "fs.mkdirSync('data/research/2026',{recursive:true});" +
+  "fs.writeFileSync('data/research/2026/findings.md','the deliverable\\n');" +
+  "fs.writeFileSync('src/app.ts','export const a = 2;\\n');" +
+  "process.stdout.write('wrote the analysis to data/research/2026/')"];
+
+test('a dispatch whose deliverable is gitignored keeps its worktree, and the receipt says where', (t) => {
+  // `data*/` is the rule from the field report: it matches `data/`, so the
+  // whole research tree is invisible to `git add -A`.
+  const root = seedIgnoringRepo(t, ['data*/'], WRITES_IGNORED_DELIVERABLE);
+  const echoes: string[] = [];
+  const result = runDispatch({
+    archetype: 'worker', prompt: 'research', tag: 'research', repoRoot: root,
+    userPathOptions: { env: { FADENO_HARNESS: 'standalone' } },
+    onEcho: (l) => echoes.push(l),
+  });
+  assert.equal(result.outcome, 'ok');
+
+  const row = completionRow(root);
+  assert.equal(row.workspace_mode ?? 'isolated', 'isolated');
+  // The code file rode the diff home. This is what made the loss survivable
+  // the first two times, and what made it look like nothing had happened.
+  assert.deepEqual(row.primary_merge, { status: 'clean' });
+  assert.equal(readFileSync(join(root, 'src', 'app.ts'), 'utf8'), 'export const a = 2;\n');
+  // The deliverable did not, and never could: `git add -A` staged none of it.
+  assert.equal(existsSync(join(root, 'data')), false, 'the ignored tree cannot reach the caller by diff');
+
+  // Before this change the worktree was removed here and that was the end of
+  // the only copy. Now it is on disk, the ledger names it, and the two agree.
+  const retained = row.workspace as string;
+  assert.equal(row.workspace_retained, true);
+  assert.ok(typeof retained === 'string' && retained.length > 0, 'the row must name the worktree');
+  assert.equal(
+    readFileSync(join(root, retained, 'data', 'research', '2026', 'findings.md'), 'utf8'),
+    'the deliverable\n',
+    'the deliverable is still on disk in the retained worktree',
+  );
+  const stamp = row.ignored_output_discarded as { paths: string[]; retained_at?: string; truncated?: boolean };
+  assert.deepEqual(stamp.paths, ['data/']);
+  assert.equal(stamp.truncated, undefined);
+  assert.equal(stamp.retained_at, retained, 'the stamp points at the directory that actually holds it');
+
+  // A retained worktree nobody is told about is the same loss with extra steps.
+  const echo = echoes.find((l) => l.startsWith('gitignored output KEPT'));
+  assert.ok(echo, echoes.join('\n'));
+  assert.match(echo!, /data\//);
+  assert.match(echo!, new RegExp(`RETAINED at ${retained.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  // The policy that chose this stops being silent exactly here — on the run
+  // where it cost something, and only there.
+  assert.match(echo!, /resolved `ignored_output: discardable`/);
+  assert.match(echo!, /`ignored_output: kept`/);
+});
+
+test('a caller who just passed --ignored-output is not told what they chose a second ago', (t) => {
+  const root = seedIgnoringRepo(t, ['data*/'], WRITES_IGNORED_DELIVERABLE);
+  const echoes: string[] = [];
+  runDispatch({
+    archetype: 'worker', prompt: 'research', tag: 'chose', repoRoot: root, ignoredOutput: 'discardable',
+    userPathOptions: { env: { FADENO_HARNESS: 'standalone' } },
+    onEcho: (l) => echoes.push(l),
+  });
+  const echo = echoes.find((l) => l.startsWith('gitignored output KEPT'));
+  assert.ok(echo, echoes.join('\n'));
+  // The retention still happens and is still stated — only the advice is
+  // dropped, because it would be advice about a flag on the same command line.
+  assert.match(echo!, /RETAINED at /);
+  assert.doesNotMatch(echo!, /resolved `ignored_output: discardable`/);
+});
+
+test('--isolate holds the work out of the caller tree; it does not destroy it', (t) => {
+  // The gap `settle` could never close: a caller-requested isolation has no
+  // merge-back at all, so the hook that keeps a worktree alive was skipped
+  // entirely on the one path whose only handoff is a diff.
+  const root = seedIgnoringRepo(t, ['data*/'], WRITES_IGNORED_DELIVERABLE);
+  const echoes: string[] = [];
+  runDispatch({
+    archetype: 'worker', prompt: 'research', tag: 'held-out', repoRoot: root, isolate: true,
+    userPathOptions: { env: { FADENO_HARNESS: 'standalone' } },
+    onEcho: (l) => echoes.push(l),
+  });
+  const row = completionRow(root);
+  assert.equal(row.primary_merge, undefined, 'an explicit --isolate is never merged back');
+  assert.equal(existsSync(join(root, 'src', 'app.ts')) && readFileSync(join(root, 'src', 'app.ts'), 'utf8'), 'export const a = 1;\n');
+  const retained = row.workspace as string;
+  assert.equal(row.workspace_retained, true);
+  assert.equal(
+    readFileSync(join(root, retained, 'data', 'research', '2026', 'findings.md'), 'utf8'),
+    'the deliverable\n',
+  );
+  assert.ok(echoes.some((l) => l.startsWith('gitignored output KEPT')), echoes.join('\n'));
+});
+
+test('a dispatch that produced no ignored output still tears its worktree down, and says nothing', (t) => {
+  // The other half of the bargain: retention has to be rare enough that a
+  // reader believes it. Same repo, same ignore rule, a dispatch that only
+  // touches tracked files.
+  const root = seedIgnoringRepo(t, ['data*/'], ['node', '-e',
+    "require('fs').writeFileSync('src/app.ts','export const a = 3;\\n');process.stdout.write('ok')"]);
+  const echoes: string[] = [];
+  runDispatch({
+    archetype: 'worker', prompt: 'edit', tag: 'plain', repoRoot: root,
+    userPathOptions: { env: { FADENO_HARNESS: 'standalone' } },
+    onEcho: (l) => echoes.push(l),
+  });
+  const row = completionRow(root);
+  assert.equal(row.ignored_output_discarded, undefined, 'a clean scan writes no stamp');
+  assert.equal(row.workspace_retained, undefined);
+  assert.equal(row.workspace, undefined);
+  assert.equal(readFileSync(join(root, 'src', 'app.ts'), 'utf8'), 'export const a = 3;\n');
+  const isolatedDir = join(root, '.fadeno', 'local', 'isolated');
+  assert.equal(existsSync(isolatedDir) ? readdirSync(isolatedDir).length : 0, 0, 'the worktree was torn down');
+  assert.equal(echoes.filter((l) => l.startsWith('gitignored output KEPT')).length, 0, echoes.join('\n'));
+});
+
+test('ignoredOutputClean: only git saying "nothing" counts as nothing', () => {
+  assert.equal(ignoredOutputClean({ paths: [], truncated: false }), true);
+  assert.equal(ignoredOutputClean(null), true, 'a delivery that never isolated has no worktree to keep');
+  assert.equal(ignoredOutputClean({ paths: ['dist/'], truncated: false }), false);
+  assert.equal(ignoredOutputClean({ paths: ['dist/'], truncated: true }), false);
+  // The case the whole predicate exists to settle: the listing could not say
+  // what was in there, so the directory is not deleted on its word.
+  assert.equal(ignoredOutputClean({ paths: [], truncated: true, note: 'git failed' }), false);
+});
+
+test('ignoredOutputStamp: one predicate decides both the row and the teardown', () => {
+  assert.equal(ignoredOutputStamp({ paths: [], truncated: false }, null), null);
+  assert.equal(ignoredOutputStamp(null, '.fadeno/local/isolated/aa'), null, 'no scan is not a finding');
+  assert.deepEqual(ignoredOutputStamp({ paths: ['dist/'], truncated: false }, null), { paths: ['dist/'] });
+  assert.deepEqual(
+    ignoredOutputStamp({ paths: [], truncated: true, note: 'git failed' }, '.fadeno/local/isolated/aa'),
+    { paths: [], truncated: true, note: 'git failed', retained_at: '.fadeno/local/isolated/aa' },
+  );
+});
+
+test('withIsolatedWorktree: retainIf keeps the worktree and hands back its reason', (t) => {
+  const root = tempRepo(t);
+  initRepo(root, ['dist/']);
+  const base = join(root, '.fadeno', 'local', 'isolated');
+
+  // Removed when the hook declines — the ordinary path must stay ordinary.
+  const gone = withIsolatedWorktree(
+    { repoRoot: root, worktreePath: join(base, 'gone'), diffRel: '.fadeno/local/outputs/gone.diff', diffAbs: join(root, '.fadeno', 'local', 'outputs', 'gone.diff'), retainIf: () => null },
+    (wt) => { write(wt, 'dist/bundle.js', 'x\n'); return 'done'; },
+  );
+  assert.equal(gone.retained, false);
+  assert.equal(gone.retainedReason, null);
+  assert.equal(existsSync(join(base, 'gone')), false);
+
+  // Kept when it does not, with no `settle` in play at all — the `--isolate`
+  // shape, which had no retention hook before.
+  const kept = withIsolatedWorktree(
+    { repoRoot: root, worktreePath: join(base, 'kept'), diffRel: '.fadeno/local/outputs/kept.diff', diffAbs: join(root, '.fadeno', 'local', 'outputs', 'kept.diff'), retainIf: (_abs, rel) => `holds output (${rel})` },
+    (wt) => { write(wt, 'dist/bundle.js', 'x\n'); return 'done'; },
+  );
+  t.after(() => { try { git(root, ['worktree', 'remove', '--force', join(base, 'kept')]); } catch { /* best-effort */ } });
+  assert.equal(kept.retained, true);
+  assert.match(String(kept.retainedReason), /holds output/);
+  assert.equal(readFileSync(join(base, 'kept', 'dist', 'bundle.js'), 'utf8'), 'x\n');
 });

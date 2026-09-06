@@ -21,6 +21,7 @@ import {
 } from '../lib/bakeoff.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { SchemaSet, schemaErrorMessages } from '../lib/playbook-validate.ts';
+import { describeIgnoredOutput } from '../lib/receipt-attestations.ts';
 import { DispatchCommandError, runDispatch, type AdHocDispatchResult } from './dispatch.ts';
 import { BAKEOFFS_DIR, parseBakeoffFile, resolveDispatchPair, type DispatchEntry, type ResolvedDispatchPair } from './dispatches.ts';
 import { stringify as stringifyYaml } from 'yaml';
@@ -599,8 +600,15 @@ function confoundsOf(primary: DispatchEntry | null, shadow: DispatchEntry | null
       push('effort_disagrees_with_dial', arm, `dial asked ${entry.reasoningEffort}, the process measured ${entry.attestedEffort}.`);
     }
     if (entry.ignoredOutputDiscarded != null) {
-      const paths = entry.ignoredOutputDiscarded.paths ?? [];
-      push('ignored_output_discarded', arm, `gitignored output was not carried back: ${paths.join(', ') || '(paths unrecorded)'}`);
+      // Through the shared phrasing, not a local `paths.join(', ')`. The
+      // local version read `truncated` nowhere, so a listing the writer had
+      // already labelled a FLOOR was handed to a judge as the complete set —
+      // a confound stated as smaller than it is, which is worse than one
+      // stated as unknown. `describeIgnoredOutput` is the one place that
+      // decides how much a stamp gets to claim, and it also carries
+      // `retained_at`: whether the missing content is still on disk changes
+      // what a judge should do about the arm, not just what it should think.
+      push('ignored_output_discarded', arm, describeIgnoredOutput(entry.ignoredOutputDiscarded));
     }
     if (entry.workspaceModeDegraded != null) {
       push('workspace_mode_degraded', arm, String(entry.workspaceModeDegraded));

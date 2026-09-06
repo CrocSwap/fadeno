@@ -67,6 +67,57 @@ All notable changes to Fadeno are documented here. The format follows
   afterwards — a clean `concurrent-writes` finding is not evidence that no host
   delivery overlapped. `test/docs-claims.test.ts` pins every command, check
   name and receipt field the procedure sends a host to read.
+- **A worktree holding gitignored output is no longer torn down.** Detection
+  (`ignored_output_discarded`) made the loss visible on four surfaces and
+  recovered nothing; this is the half that puts the bytes back. Every isolated
+  delivery now scans before teardown and KEEPS the worktree when the scan is
+  not a positive claim that there was nothing in it, on all four lanes: the
+  ad-hoc kernel (`withIsolatedWorktree` gained a `retainIf` veto, consulted for
+  a caller's `--isolate` as well as the kernel's own isolation — "do not merge
+  this" was never "destroy this"), `fadeno drive`, `fadeno dispatches --merge`,
+  and the host lanes. The receipt names where the content is (`retained_at` on
+  the stamp, plus `workspace` / `workspace_retained`), the caller is told on
+  stderr at the moment it happens, and `fadeno clean --force` is what reclaims
+  it. A dispatch that produced no ignored output is unchanged and silent: its
+  worktree still goes.
+
+  A **truncated** scan retains too, and that is the deliberate call. One
+  predicate — `ignoredOutputClean`, true only for the `{ paths: [], truncated:
+  false }` git actually returned — decides both whether the receipt says
+  anything and whether the directory survives, so a row can never claim a loss
+  the worktree did not take, nor stay silent about one it did. Removal is
+  irreversible and is only ever justified by a positive claim that there is
+  nothing to lose; a capped or failed listing makes no such claim. Being wrong
+  in this direction costs a directory `fadeno clean` reaps. Being wrong in the
+  other is the failure this exists to end, with no listing to say what went
+  missing.
+
+- **The host lanes look at all.** `scanIgnoredOutput` had exactly two callers,
+  both command-lane. Every host delivery — the run-scoped `dispatch-prepare
+  --isolate` path and the runless `dispatch-open`/`dispatch-close` pair — merged
+  back through the same `git add -A` that skips `.gitignore`, removed the same
+  worktree, and wrote **no `ignored_output_discarded` field at all**: not a
+  truncated one, not an empty one. An absent stamp from a lane that never
+  looked is byte for byte an absent stamp from a lane that looked and found
+  nothing, and Fadeno steers work toward the host lane, so the loudest half of
+  this feature was missing from the lane people are pushed onto. Host
+  teardown now goes through one guarded function (`removeHostWorkspaceByPath`)
+  that scans, refuses, and reports — so a completion, a failure, a cancel and a
+  recovery are all covered by a check no caller can skip — and host receipts
+  carry the same field, in the same wire shape, that `verify`, `show`,
+  `dispatches` and the in-band `--output` banner already read.
+
+- **`ignored_output: discardable` stays the default, and stops being silent.**
+  Flipping it to `kept` would send every unconfigured dispatch back into the
+  caller's tree and undo default isolation wholesale; a refusal is not
+  available either, because the scan is post-hoc and refusing after the
+  executor ran would throw away its report on top of everything else. Refusing
+  to DESTROY is the only refusal there was, and that is the retention above.
+  What `discardable` means has changed with it: it now decides the workspace
+  mode and nothing else, rather than asserting the content is safe to lose. The
+  retention echo names the lever (`ignored_output: kept`, `--ignored-output
+  kept`) — but only on runs where the policy actually cost something, and not
+  at all to a caller who just passed the flag themselves.
 
 - **Overlap detection (`concurrent_write`), which is what replaced the lock.**
   Deleting the lease without this would trade a loud wedge for silent lost
@@ -313,6 +364,19 @@ All notable changes to Fadeno are documented here. The format follows
   one place, four surfaces) so an admission is never tallied as an accusation.
   `fadeno dispatches` and the kernel echoes say "overlapped this one" rather
   than "wrote while this ran" for the same reason.
+- **Two readers treated a floor as a set.** `fadeno bakeoff`'s
+  `ignored_output_discarded` confound joined the stamp's paths without
+  consulting `truncated`, so a listing the writer had already labelled
+  incomplete reached a judge as the whole story — a confound understated is
+  worse than one stated as unknown. It and the `dispatches --output` stderr
+  note now render through `describeIgnoredOutput`, the shared phrasing that
+  decides how much a stamp gets to claim and carries `retained_at` with it.
+  `dispatches --merge` said nothing about discarded output at all: it applied a
+  patch that by construction contains no ignored path and then deleted the
+  directory holding the rest. It now scans that worktree fresh — a human has
+  been editing in there resolving markers, so the completion row's stamp is not
+  what is in it now — keeps it when it is not clean, and says so on the
+  `dispatch_merged` row and at the terminal.
 
 - **The engine recorded "I could not tell what was destroyed" as `[]`.**
   `drive.ts` wrote `ignored_output_discarded` as a bare `string[]` while

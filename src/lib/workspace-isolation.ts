@@ -657,8 +657,13 @@ export function carryMutationStamp(verdicts: readonly CarryPathVerdict[]): Carry
 // silently, with no line anywhere saying it existed.
 //
 // This section is the detection half of removing that silence. It says what
-// ignored content was sitting in a worktree when its arm exited. It does not
-// rescue it, and deliberately so — see `scanIgnoredOutput`.
+// ignored content was sitting in a worktree when its arm exited. The scan
+// itself still does not rescue anything, and deliberately so — see
+// `scanIgnoredOutput`. What acts on it is the teardown: `withIsolatedWorktree`
+// consults `ignoredOutputClean` before it removes a worktree, and keeps the
+// directory when the scan is not a positive claim that there was nothing
+// there. Detection made the loss visible; retention is what stops it being a
+// loss at all.
 
 /**
  * How many entries one scan will name.
@@ -697,6 +702,78 @@ export interface IgnoredOutputScan {
    * which exists for the same reason — a degraded verdict that cannot say why
    * is barely better than no verdict. */
   note?: string;
+}
+
+/**
+ * Did the scan make a POSITIVE claim that the worktree held no ignored
+ * output?
+ *
+ * Only `{ paths: [], truncated: false }` says so, and `scanIgnoredOutput`
+ * only ever returns that shape when git itself said so. Everything else —
+ * named paths, a cap, a git failure, a null scan from a delivery that was
+ * never isolated — is "I could not tell", which this returns `false` for.
+ *
+ * ## Why a truncated scan is not clean, and why that is the direction to be
+ * ## wrong in
+ *
+ * This predicate has two consumers that must never disagree: the teardown in
+ * `withIsolatedWorktree`, which decides whether the directory survives, and
+ * `ignoredOutputStamp`, which decides whether a receipt says anything
+ * happened. A truncated scan with an empty listing is the one case where the
+ * two could plausibly be split — nothing was named, so nothing is *known* to
+ * be at risk — and splitting them is exactly the drift that costs work: a row
+ * saying output was discarded while the worktree was kept, or a worktree
+ * removed on a scan that admitted it could not enumerate what was in it.
+ *
+ * So one predicate answers both, and it falls toward keeping bytes. Removing
+ * a worktree is irreversible and is only ever justified by a positive claim
+ * that there is nothing to lose; a truncated scan makes no such claim. The
+ * cost of being wrong in this direction is a directory `fadeno clean` reaps.
+ * The cost of being wrong in the other is the failure this whole section
+ * exists to end, with no listing to even say what went missing.
+ */
+export function ignoredOutputClean(scan: IgnoredOutputScan | null | undefined): boolean {
+  if (scan == null) return true;
+  return !scan.truncated && scan.paths.length === 0;
+}
+
+/**
+ * One `ignored_output_discarded` receipt field, in the shape every writer
+ * uses.
+ *
+ * Three call sites write this — an ad-hoc dispatch's primary arm, its shadow
+ * challenger, and a `fadeno drive` attempt — and they had three copies of the
+ * same object literal, which is how the field acquired a bare-`string[]`
+ * spelling that dropped `truncated` on the floor (see
+ * `parseIgnoredOutputDiscarded` for the rows that still carry it). The
+ * READ side was consolidated in `receipt-attestations.ts`; this is the write
+ * side, and it is gated on the same `ignoredOutputClean` the teardown uses so
+ * a row can never claim a loss the worktree did not take, nor stay silent
+ * about one it did.
+ *
+ * `retainedAt` is the repo-relative worktree that still holds this content,
+ * or null when nothing does. Stated by the writer and never inferred: a
+ * reader that guesses "it is probably still there" sends someone looking for
+ * a directory that is gone.
+ */
+export interface IgnoredOutputStamp {
+  paths: string[];
+  truncated?: true;
+  note?: string;
+  retained_at?: string;
+}
+
+export function ignoredOutputStamp(
+  scan: IgnoredOutputScan | null | undefined,
+  retainedAt: string | null,
+): IgnoredOutputStamp | null {
+  if (ignoredOutputClean(scan) || scan == null) return null;
+  return {
+    paths: scan.paths,
+    ...(scan.truncated ? { truncated: true as const } : {}),
+    ...(scan.note != null ? { note: scan.note } : {}),
+    ...(retainedAt != null ? { retained_at: retainedAt } : {}),
+  };
 }
 
 /** Normalize one path for comparison: forward slashes, no `./` prefix, no
@@ -1100,7 +1177,8 @@ export function removeIsolatedWorktree(repoRoot: string, worktreeAbs: string): v
 /**
  * Convenience: run a full isolated delivery lifecycle — create worktree,
  * execute `action(worktreeAbs)` (which should spawn the executor with
- * `cwd: worktreeAbs`), collect the binary diff, and remove the worktree.
+ * `cwd: worktreeAbs`), collect the binary diff, and remove the worktree
+ * unless `settle` or `retainIf` says to keep it.
  * Structurally isolated: this function never writes anything in the caller's
  * tree except the diff artifact it is asked for.
  *
@@ -1122,9 +1200,34 @@ export function withIsolatedWorktree<T>(
      * threw: there is no work to settle, only a failure to report.
      */
     settle?: (worktreeAbs: string, diff: IsolatedDiffResult) => { retain: boolean; diff?: IsolatedDiffResult };
+    /**
+     * The last look before teardown. Returning a reason KEEPS the worktree
+     * and hands that reason back on `retainedReason`; returning null lets the
+     * removal proceed.
+     *
+     * This is the seam the gitignored-output loss needed and did not have.
+     * `settle` is keyed on the merge-back and is skipped entirely for a
+     * caller-requested `--isolate` — so the one hook that could have kept a
+     * worktree alive was absent on the very path whose contract is "this work
+     * never enters your tree", where a diff is the ONLY thing that leaves and
+     * `git add -A` puts no ignored path in it. This hook is consulted on both
+     * origins, for the same reason: holding work out of the caller's tree was
+     * never a licence to destroy it.
+     *
+     * Consulted only when `settle` did not already retain — the directory
+     * survives either way and one stated reason is enough — and not at all on
+     * the action-error path. That second exclusion is deliberate rather than
+     * an oversight: this function THROWS after an action error, so a worktree
+     * retained there could not be reported to anyone, and a retained worktree
+     * nobody is told about is the same loss with extra steps. The path is also
+     * empty in practice, since a caller only reaches an action error before
+     * its executor has run. A `collectIsolatedDiff` failure is the separate
+     * case above, which keeps the worktree without asking anybody.
+     */
+    retainIf?: (worktreeAbs: string, worktreeRel: string) => string | null;
   },
   action: (worktreeAbs: string) => T,
-): { result: T; diff: IsolatedDiffResult; worktreeRel: string; retained: boolean } {
+): { result: T; diff: IsolatedDiffResult; worktreeRel: string; retained: boolean; retainedReason: string | null } {
   const created = createIsolatedWorktree(opts);
   let result: T | undefined;
   let actionError: unknown;
@@ -1148,12 +1251,17 @@ export function withIsolatedWorktree<T>(
     throw diffError;
   }
   let retained = false;
+  let retainedReason: string | null = null;
   if (actionError == null && opts.settle != null) {
     const settled = opts.settle(created.worktreeAbs, diff);
     retained = settled.retain;
     if (settled.diff != null) diff = settled.diff;
   }
+  if (actionError == null && !retained && opts.retainIf != null) {
+    retainedReason = opts.retainIf(created.worktreeAbs, created.worktreeRel);
+    retained = retainedReason != null;
+  }
   if (!retained) removeIsolatedWorktree(opts.repoRoot, created.worktreeAbs);
   if (actionError != null) throw actionError;
-  return { result: result as T, diff, worktreeRel: created.worktreeRel, retained };
+  return { result: result as T, diff, worktreeRel: created.worktreeRel, retained, retainedReason };
 }

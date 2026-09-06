@@ -57,12 +57,13 @@ import {
   hostIsolatedDiffPath,
   hostWorktreePath,
   HostWorkspaceError,
+  hostWorkspaceIgnoredOutput,
   prepareHostWorkspace,
   readHostWorkspaceState,
   removeHostWorkspaceByPath,
 } from '../lib/host-workspace.ts';
 import { settleIsolatedWork, type MergeBackResult } from '../lib/workspace-baseline.ts';
-import { isRegisteredWorktree, type IsolatedDiffResult } from '../lib/workspace-isolation.ts';
+import { isRegisteredWorktree, type IgnoredOutputStamp, type IsolatedDiffResult } from '../lib/workspace-isolation.ts';
 import { UNREADABLE_WINDOW_LOG_ID } from '../lib/receipt-attestations.ts';
 import {
   closeDispatchWindow,
@@ -193,6 +194,12 @@ export interface DispatchCloseResult {
   /** Repo-relative path of the worktree, when it is still there. */
   workspaceRetained: string | null;
   workspaceRemoved: boolean;
+  /**
+   * Gitignored content in that worktree that no diff carried out, or null
+   * when the scan said there was none. Non-null with `workspaceRemoved:
+   * false` is the teardown being REFUSED: the directory is the only copy.
+   */
+  ignoredOutput: IgnoredOutputStamp | null;
   concurrentWrites: ConcurrentWriteStamp[] | null;
   /** A prior identical receipt already stood; nothing new was appended. */
   idempotent: boolean;
@@ -517,6 +524,11 @@ export function runDispatchClose(opts: DispatchCloseOptions = {}): DispatchClose
         diffBytes: null,
         workspaceRetained: record.workspace,
         workspaceRemoved: false,
+        // The replay answers for the close that already happened; the stamp
+        // it wrote is on that receipt. Re-scanning now would report the
+        // worktree's state at replay time as though it were the close's
+        // finding, which is a different claim wearing the same field.
+        ignoredOutput: null,
         concurrentWrites: null,
         idempotent: true,
         resolvedBy,
@@ -600,18 +612,42 @@ export function runDispatchClose(opts: DispatchCloseOptions = {}): DispatchClose
     }
   }
 
-  // Tear down only when the work is in the caller's tree.
+  // Tear down only when the work is in the caller's tree — and only when the
+  // worktree is not the last copy of something the diff could not carry.
+  //
+  // This lane had NO ignored-output detection at all before: a host agent
+  // that wrote a gitignored deliverable saw it merged back through the same
+  // `git add -A` that skips it, and then removed with the directory, with the
+  // receipt saying nothing whatsoever. That is the command lane's failure
+  // minus the record of it, on the lane Fadeno steers people toward.
+  // `removeHostWorkspaceByPath` now refuses the teardown and hands back what
+  // it found; this reads that verdict so the receipt can state it.
   const landed = merge != null && merge.status === 'clean';
   let workspaceRemoved = false;
+  let ignoredOutput: IgnoredOutputStamp | null = null;
   if (landed) {
     try {
-      removeHostWorkspaceByPath({ repoRoot, run: ADHOC_HOST_SCOPE, dispatchId: record.dispatchId, workspaceRel });
+      ignoredOutput = removeHostWorkspaceByPath({ repoRoot, run: ADHOC_HOST_SCOPE, dispatchId: record.dispatchId, workspaceRel }).ignoredOutput;
     } catch {
       // best-effort; the receipt is a fact and never waits on the disk
     }
     workspaceRemoved = !existsSync(worktreeAbs);
+  } else if (workspaceRel.length > 0) {
+    // Nothing was torn down, so nothing is lost — but the row still has to
+    // say the content is in there. A `--no-merge` close or a failed one hands
+    // the operator a worktree; which of the things in it will never reach
+    // their tree by patch is exactly what they need to know before deciding
+    // what to do with it.
+    ignoredOutput = hostWorkspaceIgnoredOutput(repoRoot, workspaceRel);
   }
   const workspaceRetained = workspaceRemoved ? null : workspaceRel;
+  if (ignoredOutput != null && workspaceRetained != null) {
+    opts.onEcho?.(
+      `gitignored output KEPT — ${ignoredOutput.paths.slice(0, 6).join(', ') || 'content the listing could not enumerate'} ` +
+        `is gitignored, so \`git add -A\` staged none of it and no diff carried it out. The worktree is RETAINED at ` +
+        `${workspaceRetained}: that directory is the only copy. Copy what you need out of it before \`fadeno clean --force\` reclaims it.`,
+    );
+  }
 
   // The overlap window closes with this delivery's own path set — from its
   // diff, so the paths are attributable to the delivery rather than to
@@ -669,6 +705,12 @@ export function runDispatchClose(opts: DispatchCloseOptions = {}): DispatchClose
     ...(collectError != null ? { error: `diff not collected: ${collectError}` } : {}),
     ...(merge != null ? { primary_merge: merge } : {}),
     ...(workspaceRetained != null ? { workspace: workspaceRetained, workspace_retained: true } : {}),
+    // Same field, same parser, same phrasing as the command lane's — so
+    // `verify`, `show`, `dispatches` and the in-band `--output` banner read a
+    // host delivery's destroyed-or-kept output without knowing which lane
+    // produced it. `retained_at` is set by `hostWorkspaceIgnoredOutput`,
+    // which only ever names a directory it just saw on disk.
+    ...(ignoredOutput != null ? { ignored_output_discarded: ignoredOutput } : {}),
     workspace_removed: workspaceRemoved,
     ...(concurrentWrites != null ? { concurrent_write: concurrentWrites } : {}),
   });
@@ -682,6 +724,7 @@ export function runDispatchClose(opts: DispatchCloseOptions = {}): DispatchClose
     diffBytes,
     workspaceRetained,
     workspaceRemoved,
+    ignoredOutput,
     concurrentWrites,
     idempotent: false,
     resolvedBy,

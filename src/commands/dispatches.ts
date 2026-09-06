@@ -35,7 +35,13 @@ import {
 } from './dispatch-adhoc.ts';
 import { legacyDriverHarness } from '../lib/executors.ts';
 import { INFLIGHT_DIR, readInflightClaim } from '../lib/supervisor.ts';
-import { collectIsolatedDiff, removeIsolatedWorktree, WorkspaceIsolationError } from '../lib/workspace-isolation.ts';
+import {
+  collectIsolatedDiff,
+  ignoredOutputStamp,
+  removeIsolatedWorktree,
+  scanIgnoredOutput,
+  WorkspaceIsolationError,
+} from '../lib/workspace-isolation.ts';
 import {
   concurrentWriteStrength,
   describeConcurrentWrite,
@@ -193,10 +199,12 @@ export interface DispatchIgnoredOutputDiscarded {
   /**
    * Repo-relative worktree still holding this output, when it survives on
    * disk. Present for a challenger, whose worktree is retained until
-   * `fadeno clean`; absent for a primary, whose worktree is torn down after
-   * the merge-back so the output is genuinely gone. Stated by the writer,
+   * `fadeno clean`, and now for a primary too: the kernel refuses to tear
+   * down a worktree that still holds ignored content, so the stamp names
+   * where it is instead of only saying it is gone. Stated by the writer,
    * never inferred here — a "still on disk" hint that turns out to be wrong
-   * is worse than silence.
+   * is worse than silence, which is also why rows written before the
+   * retention landed read `null` rather than a guessed path.
    */
   retainedAt: string | null;
 }
@@ -2148,6 +2156,19 @@ interface OutputRecord {
    * describe files which no longer exist.
    */
   ignoredOutputDiscarded: DispatchIgnoredOutputDiscarded | null;
+  /**
+   * Repo-relative paths `worktree_carry` copied INTO this dispatch's worktree
+   * before it ran, from the completion row. Empty when it declared none.
+   *
+   * Read for one job: `--merge` re-scans the worktree before removing it, and
+   * a carried `node_modules/` is ignored INPUT, not produced output. Without
+   * this list every merge in a repo that carries dependencies would find one
+   * and keep the worktree forever, which is the shape of false positive that
+   * teaches people to ignore the true ones. Taken from the row rather than
+   * from today's catalog because the catalog may have changed since — this is
+   * what was actually carried into this directory.
+   */
+  worktreeCarry: string[];
   /** Other deliveries that wrote the same paths while this one ran. */
   concurrentWrite: ConcurrentWriteRecord[] | null;
   /**
@@ -2234,11 +2255,19 @@ function loadOutputRecords(absolute: string): {
     if (dispatchId == null) continue;
     if (event === 'dispatch_merged') {
       // The later fact wins: a merge by hand supersedes the completion row's
-      // `unresolved` stamp, and the worktree it names is gone.
+      // `unresolved` stamp. The worktree it names is usually gone — but not
+      // when the merge found gitignored content the patch could not carry and
+      // kept the directory, which the row states with `workspace_retained`.
+      // Blanking `workspace` unconditionally would point a reader away from a
+      // directory that is still the only copy of something.
       const merged = byId.get(dispatchId);
       if (merged != null) {
         merged.merged = true;
-        merged.workspace = null;
+        merged.workspace = row.workspace_retained === true && typeof row.workspace === 'string'
+          ? row.workspace
+          : null;
+        const keptIgnored = parseIgnoredOutputDiscarded(row.ignored_output_discarded);
+        if (keptIgnored != null) merged.ignoredOutputDiscarded = keptIgnored;
         const stamp = row.merge;
         if (stamp != null && typeof stamp === 'object' && !Array.isArray(stamp)) {
           const s = stamp as Record<string, unknown>;
@@ -2270,6 +2299,7 @@ function loadOutputRecords(absolute: string): {
         relayAttested: null,
         relayMismatchAllowed: false,
         ignoredOutputDiscarded: null,
+        worktreeCarry: [],
         concurrentWrite: null,
         shadow: false,
         tag: null,
@@ -2327,6 +2357,14 @@ function loadOutputRecords(absolute: string): {
         timedOut: rec.timeoutMs != null ? true : null,
       });
       rec.ignoredOutputDiscarded = parseIgnoredOutputDiscarded(row.ignored_output_discarded);
+      // `[{ path, mechanism }]` as the kernel writes it. Anything that is not
+      // a usable path is dropped rather than defaulted: this list only ever
+      // SUPPRESSES findings, so an invented entry silences a real one.
+      rec.worktreeCarry = Array.isArray(row.worktree_carry)
+        ? row.worktree_carry
+            .map((c) => (c != null && typeof c === 'object' && !Array.isArray(c) ? str((c as Record<string, unknown>).path) : null))
+            .filter((p): p is string => p != null)
+        : [];
       rec.concurrentWrite = parseConcurrentWriteStamps(row.concurrent_write);
       const merge = row.primary_merge;
       if (merge != null && typeof merge === 'object' && !Array.isArray(merge)) {
@@ -2513,9 +2551,16 @@ export function relayQuarantineNotice(
  * contract discards stderr along with a timed-out call. The test for putting
  * a finding in-band is whether it changes what the bytes MEAN, and this one
  * does: a report that says "wrote the analysis to data/research/" is
- * describing files that no longer exist. Acting on it — relaying it, building
- * on it, closing the task — is acting on a statement about the filesystem
- * that is now false.
+ * describing files that are not where it says they are. Acting on it —
+ * relaying it, building on it, closing the task — is acting on a statement
+ * about the filesystem that is now false.
+ *
+ * Still in-band now that the kernel RETAINS the worktree rather than removing
+ * it, and for the same reason. Retention changes the remedy from "that work
+ * is gone" to "that work is at this path", which is a far better banner to
+ * read — but the report's own claim about where the files are is wrong
+ * either way, and the path they are actually at is exactly the fact a caller
+ * needs and cannot derive.
  *
  * A `concurrent_write` stamp deliberately does NOT get this treatment. An
  * overlap does not make the report false, and reserving the in-band channel
@@ -2525,21 +2570,30 @@ export function relayQuarantineNotice(
  * ## Not a quarantine
  *
  * The report itself is intact and worth reading; the work product beside it
- * is not there. So this says what is missing and where it went, and does not
- * tell the caller to discard the bytes.
+ * is not where the report says. So this says what is missing, where it went,
+ * and does not tell the caller to discard the bytes.
  */
 export function discardedOutputNotice(
   dispatchId: string,
   ignored: DispatchIgnoredOutputDiscarded | null,
 ): string | null {
   if (ignored == null) return null;
+  // The remedy splits on whether the content survived, because the two cases
+  // ask for entirely different next actions: one is "go and get it", the
+  // other is "it is gone, re-run differently". Collapsing them into a single
+  // paragraph that hedges would serve neither.
+  const remedy = ignored.retainedAt != null
+    ? 'The report below may describe files that are not in your tree — they are in that worktree instead. ' +
+      'Copy what you need out of it before `fadeno clean --force` reclaims it, or re-run with `--shared` ' +
+      '(or set `ignored_output: kept` on the archetype) so this output lands in your tree directly.'
+    : 'The report below may describe files that are not in your tree: check before acting on it, and ' +
+      're-run with `--shared` (or set `ignored_output: kept` on the archetype) if this output is a ' +
+      'deliverable rather than a build artifact.';
   return (
     `!! GITIGNORED OUTPUT DISCARDED for dispatch ${dispatchId.slice(0, 8)}. ` +
     `${describeIgnoredOutput(ignored)} ` +
     'An isolated dispatch reaches your tree as a patch from `git add -A`, which respects .gitignore, so ' +
-    'nothing at these paths was ever staged, diffed, or applied. The report below may describe files that ' +
-    'are not in your tree: check before acting on it, and re-run with `--shared` (or set `ignored_output: ' +
-    'kept` on the archetype) if this output is a deliverable rather than a build artifact. ' +
+    `nothing at these paths was ever staged, diffed, or applied. ${remedy} ` +
     '---- report follows ----'
   );
 }
@@ -2683,8 +2737,19 @@ export interface DispatchesMergeResult {
   mergeBack: MergeBackResult;
   diffSnapshot: string;
   diffBytes: number;
-  /** The worktree that was merged and removed. */
+  /** The worktree that was merged. Removed afterwards unless `ignoredOutputKept` says why not. */
   workspace: string;
+  /**
+   * Ignored content the merged worktree still holds, which is why it was NOT
+   * removed. Null when the worktree was clean and went as usual.
+   *
+   * This command is the second place a `git add -A` diff meets a `.gitignore`
+   * and the only copy of something loses. It merged the patch — which by
+   * construction contains no ignored path — and then removed the directory
+   * that held the rest. `--merge` refused a tainted relay loudly and said
+   * nothing at all about this.
+   */
+  ignoredOutputKept: DispatchIgnoredOutputDiscarded | null;
   resolvedBy: OutputResolution;
 }
 
@@ -2697,7 +2762,16 @@ export interface DispatchesMergeResult {
  * Same turn as the kernel's own merge-back, same window lease: apply, rebase
  * if the tree moved again, re-apply; refuse with the files named if markers
  * remain or the rebase conflicts, and leave the worktree where it is. On
- * success a `dispatch_merged` row carries the stamp, and the worktree goes.
+ * success a `dispatch_merged` row carries the stamp, and the worktree goes —
+ * unless it still holds gitignored content the merged patch could not carry,
+ * in which case it stays and the result says so, by the same rule and the
+ * same `ignoredOutputClean` predicate the kernel's own teardown obeys.
+ *
+ * The scan is taken FRESH rather than read off the completion row. The row
+ * describes the worktree as the executor left it; between then and now a
+ * human resolved conflict markers in that directory and may have built,
+ * deleted, or moved things while they were in there. What matters is what is
+ * in the directory at the moment it would be deleted.
  */
 export function runDispatchesMerge(opts: DispatchesMergeOptions = {}): DispatchesMergeResult {
   const tag = opts.tag?.trim() ? opts.tag.trim() : null;
@@ -2770,6 +2844,17 @@ export function runDispatchesMerge(opts: DispatchesMergeOptions = {}): Dispatche
     ...settled.stamp,
     detail: settled.stamp.detail ?? 'merged by hand after the conflict was resolved in the retained worktree',
   };
+  // Between the successful apply and the teardown, because both of those are
+  // now conditional on it: the row has to state the worktree's fate, and the
+  // teardown has to honour what the row said.
+  // Two shapes of one fact, and they are not interchangeable: `keptStamp` is
+  // the snake_case WIRE object the row carries, `ignoredOutputKept` the
+  // camelCase record a reader gets. Writing the parsed record onto the row
+  // would spell `retained_at` as `retainedAt` and every reader — including
+  // this file's own — would read it back as "not retained", which is the one
+  // answer that sends someone looking for a directory instead of into it.
+  const keptStamp = ignoredOutputStamp(scanIgnoredOutput(worktreeAbs, record.worktreeCarry), record.workspace);
+  const ignoredOutputKept = parseIgnoredOutputDiscarded(keptStamp);
   appendEvidenceRow(repoRoot, {
     format: DISPATCHES_FORMAT,
     timestamp: (opts.now ?? new Date()).toISOString(),
@@ -2781,8 +2866,15 @@ export function runDispatchesMerge(opts: DispatchesMergeOptions = {}): Dispatche
     diff_snapshot: settled.diff.diffRel,
     diff_bytes: settled.diff.diffBytes,
     workspace: record.workspace,
+    // The merged patch carried no ignored path, so the directory is still the
+    // only copy of whatever this names. Kept, and said so on the row rather
+    // than only in the return value: `--merge` is run by a human at a
+    // terminal and by a proxy that keeps nothing but the ledger.
+    ...(keptStamp != null
+      ? { ignored_output_discarded: keptStamp, workspace_retained: true }
+      : { workspace_removed: true }),
   });
-  removeIsolatedWorktree(repoRoot, worktreeAbs);
+  if (keptStamp == null) removeIsolatedWorktree(repoRoot, worktreeAbs);
   return {
     dispatchId: record.dispatchId,
     tag: record.tag,
@@ -2790,6 +2882,7 @@ export function runDispatchesMerge(opts: DispatchesMergeOptions = {}): Dispatche
     diffSnapshot: settled.diff.diffRel,
     diffBytes: settled.diff.diffBytes,
     workspace: record.workspace,
+    ignoredOutputKept,
     resolvedBy,
   };
 }
