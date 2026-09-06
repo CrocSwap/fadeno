@@ -404,12 +404,12 @@ Rules enforced identically at catalog and snapshot parse boundaries:
 - `command` is a non-empty array of non-empty, non-whitespace strings;
 - no interpolation/placeholders: rejects `{`, `}`, `$`, `` ` ``, newline, or null;
 - unknown keys rejected (`command`, `timeout`, `timeout_ms` only);
-- `timeout` / `timeout_ms` is a positive integer (`timeout` in seconds, `timeout_ms` in ms); `timeout: 0` is invalid there — use `--timeout 0` on the CLI to disable a registry deadline for one invocation;
+- `timeout` / `timeout_ms` is a positive integer (`timeout` in seconds, `timeout_ms` in ms) and is **read but never armed** — see the deadline note below; the shape is still validated so a typo is still an error, and the loader emits an ignored-key note;
 - exactly one of `timeout` / `timeout_ms` when present.
 
 Layering follows existing profile precedence: `builtin` → `user` → `project`; a self-contained project catalog (`models:` + `harnesses:`) suppresses builtin/user, with one carve-out: user-catalog models fall back per-key when the merged harness table can deliver them (`modelFallback` names promotions and drops; `dial show`/`dial resolve` surface both). Under normal layering the same integrity rule DROPS an undeliverable user model with a note rather than failing the load — a personal alias is machine state — while a project- or builtin-declared one is a load error. `tools:` merges by key like `bindings:`/`models:`.
 
-`fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]` then executes the ready `tool_call` only when its `tool` is registered and its artifact schema is `test-result`; `--tool` is a race guard. `Diff`/`PostResult` stay manual via `fadeno tool-complete <run> --output <path>` (which shares the same generation-scoped claim/lease discipline, so one attempt wins, and writes a `tool_recorded` receipt — `recorded_by: host` — after the manifest; `verify`'s `tool-artifact-receipts` requires every tool step's artifact to be claimed by `tool_completed` or `tool_recorded`). `fadeno drive` auto-executes registered `test-result` tools inline and otherwise returns `needs_decision`.
+`fadeno tool-run <run> [--tool <name>]` then executes the ready `tool_call` only when its `tool` is registered and its artifact schema is `test-result`; `--tool` is a race guard. `Diff`/`PostResult` stay manual via `fadeno tool-complete <run> --output <path>` (which shares the same generation-scoped claim/lease discipline, so one attempt wins, and writes a `tool_recorded` receipt — `recorded_by: host` — after the manifest; `verify`'s `tool-artifact-receipts` requires every tool step's artifact to be claimed by `tool_completed` or `tool_recorded`). `fadeno drive` auto-executes registered `test-result` tools inline and otherwise returns `needs_decision`.
 
 Every model name and dial ref must use bare lowercase identifiers
 (`[a-z][a-z0-9_-]*` for archetype/dial keys; model ids may contain slashes for
@@ -624,7 +624,53 @@ spelling — `attemptProgressRelPath` delegates to `prompt.ts`'s
 dispatches (`tool-exec.ts`, `dispatch.ts`) have no actor call and so no sidecar;
 they pass nothing.
 
-**Isolated host workspaces.** `fadeno dispatch-prepare <run> <dispatch-id> --isolate` is the opt-in isolated-host primitive: it validates `run` and `dispatch-id` against `HOST_WORKSPACE_SEGMENT_RE`, guards against traversal/symlink escape, serializes with `.fadeno/local/.host-workspace.lock`, creates an idempotent detached worktree at `.fadeno/local/host-worktrees/<run>/<dispatch-id>` from `HEAD`, replays the caller's tracked and untracked/unignored changes as a synthetic baseline commit under the short read-window lease, and atomically records `workspace_mode: isolated` state at `.fadeno/local/host-workspaces/<run>/<dispatch-id>.json` (`workspace`, `base_commit`, `prepared_at`, plus `diff_snapshot`/`diff_bytes`/`finalized_at` after collection). After preparation, `dispatch-prompt` includes `workspace_mode: isolated` and the absolute workspace path (prompt bytes and digest unchanged); `dispatch-start` stamps `workspace_mode: isolated`/`workspace`/`base_commit` on `actor_dispatched` and bypasses the shared writer lease; `dispatch-complete`/`dispatch-fail` collect a binary staged diff of only post-baseline host changes to `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff` before the terminal receipt (proving the worktree is the registered linked worktree before any `git add`/`diff` or removal), stamping `workspace_mode: isolated` plus `workspace`/`base_commit` and `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven worktree. `dispatch-fail` degrades to a terminal receipt without diff keys whenever evidence is absent, unverifiable, or unrecoverable — including a missing or malformed machine-local state file — while a collection failure with the state present still refuses, preserving the worktree for retry; `dispatch-complete` may recover and collect from a verified ledger-named worktree when the state vanished but still refuses success when evidence cannot be collected. The worktree is removed only after the receipt is durable and only when proven registered (failures and degraded paths preserve the worktree for manual recovery; idempotent terminals reuse the receipt and retry cleanup only when verified; nothing auto-merges). `fadeno show` projects `workspaceMode`/`workspace`/`baseCommit`/`diffSnapshot`/`diffBytes` on `HostRequestView` (ledger-first, prepared-but-not-started degrades to isolated via machine-local state, missing state → shared/null, never throws) and prints isolated facts as non-gating observability; `verify` checks only ledger consistency and never requires machine-local state. See `src/lib/host-workspace.ts`, `src/commands/dispatch-prepare.ts`, `src/lib/host-dispatch.ts`.
+**No writer lock; overlap is detected, not prevented.** Fadeno used to hold a
+machine-local, repo-wide single-writer lease: a live `shared` writer blocked
+every other shared write-capable command and host dispatch across every run.
+It is gone, and `--timeout`'s removal and this one are the same decision — both
+mechanisms needed Fadeno to answer *"is this still alive?"*, and it cannot. The
+deadline guessed with a clock; the lease guessed with a pid, and on the host
+lane no pid was ever published, so a pid-less lease was **immortal**: a
+429-killed agent wedged the repo permanently, refusing even the recovery of the
+very run that had taken the lease.
+
+What replaced it:
+
+- **Contention isolates instead of refusing.** A dispatch that finds another
+  delivery writing the shared tree is given its own worktree and the receipt
+  says so. "You must wait" became "you get your own tree", which is what turns
+  overlap into two diffs against a common base. An explicit `--shared` still
+  means shared.
+- **Windows.** Every delivery appends an open record to
+  `.fadeno/local/dispatch-windows.jsonl` before it can write and a close record
+  at its terminal receipt, with the repo-relative paths it changed. Append-only
+  and machine-local, never ledger evidence, never gating — the thing it
+  observes is concurrent writers, so it must not itself need a lock.
+- **`concurrent_write` receipts.** At the terminal receipt a delivery
+  intersects its own path set with every window that overlapped it in time. A
+  non-empty intersection lands on the receipt as `concurrent_write: [{
+  dispatch_id, kind, workspace_mode, attribution, paths_intersecting, paths,
+  note }]`, naming the other dispatch and the intersecting paths. Absent when
+  nothing overlapped. `attribution: delivery` means the other side's paths came
+  from its own worktree diff and are its work; `attribution: workspace` means
+  they are a shared tree's delta over the interval — an attestation that both
+  windows touched those paths, never proof of who wrote them. An overlapping
+  window that has not closed yet is recorded as `pending`: the later-closing
+  side sees the completed set and carries the concrete intersection, so between
+  the two receipts the pair is fully described and each names the other.
+  Path granularity, not hunk. This is deliberately non-optional: deleting the
+  lock without detection would convert a wedged repo into silent lost writes,
+  which is worse.
+- **Conflicts route to an integrator.** A merge-back that no longer applies
+  rebases in the worktree and, if that conflicts, retains it with markers for
+  the executor or a human to reconcile.
+
+`.fadeno/local/workspace-lease.json` is vestigial. Nothing writes it; `fadeno
+doctor` reports a leftover one as a `workspace-lease` warning and says to
+delete it — safe with work in flight, because nothing consults it, so there is
+no writer to verify first.
+
+**Isolated host workspaces.** `fadeno dispatch-prepare <run> <dispatch-id> --isolate` is the opt-in isolated-host primitive: it validates `run` and `dispatch-id` against `HOST_WORKSPACE_SEGMENT_RE`, guards against traversal/symlink escape, serializes with `.fadeno/local/.host-workspace.lock`, creates an idempotent detached worktree at `.fadeno/local/host-worktrees/<run>/<dispatch-id>` from `HEAD`, replays the caller's tracked and untracked/unignored changes as a synthetic baseline commit under the short read-window lease, and atomically records `workspace_mode: isolated` state at `.fadeno/local/host-workspaces/<run>/<dispatch-id>.json` (`workspace`, `base_commit`, `prepared_at`, plus `diff_snapshot`/`diff_bytes`/`finalized_at` after collection). After preparation, `dispatch-prompt` includes `workspace_mode: isolated` and the absolute workspace path (prompt bytes and digest unchanged); `dispatch-start` stamps `workspace_mode: isolated`/`workspace`/`base_commit` on `actor_dispatched` and records an overlap window (there is no shared writer lease to bypass any more — see `concurrent_write` below); `dispatch-complete`/`dispatch-fail` collect a binary staged diff of only post-baseline host changes to `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff` before the terminal receipt (proving the worktree is the registered linked worktree before any `git add`/`diff` or removal), stamping `workspace_mode: isolated` plus `workspace`/`base_commit` and `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven worktree. `dispatch-fail` degrades to a terminal receipt without diff keys whenever evidence is absent, unverifiable, or unrecoverable — including a missing or malformed machine-local state file — while a collection failure with the state present still refuses, preserving the worktree for retry; `dispatch-complete` may recover and collect from a verified ledger-named worktree when the state vanished but still refuses success when evidence cannot be collected. The worktree is removed only after the receipt is durable and only when proven registered (failures and degraded paths preserve the worktree for manual recovery; idempotent terminals reuse the receipt and retry cleanup only when verified; nothing auto-merges). `fadeno show` projects `workspaceMode`/`workspace`/`baseCommit`/`diffSnapshot`/`diffBytes` on `HostRequestView` (ledger-first, prepared-but-not-started degrades to isolated via machine-local state, missing state → shared/null, never throws) and prints isolated facts as non-gating observability; `verify` checks only ledger consistency and never requires machine-local state. See `src/lib/host-workspace.ts`, `src/commands/dispatch-prepare.ts`, `src/lib/host-dispatch.ts`.
 
 **Cancelling a running engine attempt.** `fadeno cancel <run>` (or a unique run
 prefix) targets the single live engine command claim for that run
@@ -637,24 +683,31 @@ than guessing, preserves the workspace lease and inflight claim until
 child-group termination is proven (`close`), and is safe against adversarial
 process-group races. See `src/commands/cancel.ts`.
 
-**Executor deadlines and idle observability.** No harness in the built-in
-catalog declares a deadline, and none is applied by default: an executor runs
-until it exits. Agent work has a long tail and a clock cannot tell slow from
-stuck, so ending a long attempt is a decision for whoever can look at it
-(`fadeno show`, then `fadeno cancel`). A deadline is opt-in — `timeout_ms` on a harness's
-`command:` lane (the `host:` block may not declare it) or `--timeout` per
-invocation.
-When one is set the supervisor owns it: it sends SIGTERM to the executor process group
-at `deadline_at = started_at + timeout_ms` and escalates to SIGKILL after the
-5-second grace. Lease and claim release still waits for `close`, so a timeout
-is not proven until the group is gone. CLI overrides: `--timeout <seconds>` on
-`fadeno drive` and `fadeno dispatch` overrides the snapshotted harness value;
-`0` disables the deadline. Internal name is `timeoutMs`. Engine timeout receipts
-are distinct: `actor_failed.reason = "executor_timeout"` with `timeout_ms` and
-`deadline_at`, and ad-hoc `dispatch_completed.outcome = "timeout"` with the same
-facts — process exit/signal facts remain present. Status-file timeout facts
-(`timed_out`, `timeout_ms`, `deadline_at`) outrank the supervisor's exit
-signal when classifying a receipt; wall-time is never inferred. Idle output
+**No executor deadlines; cancellation and idle observability.** Fadeno never
+runs an executor under a deadline. An executor runs until it exits, or until a
+human ends it. Agent work has a long tail and **a clock cannot tell slow from
+stuck**: on 2026-09-06 five dispatches were killed at their deadlines with
+empty or zero-byte reports while the work survived in the diffs every time,
+because these are print-at-exit executors and the deadline destroyed only the
+report. Ending a long attempt is therefore a decision for whoever can look at
+it (`fadeno show`, then `fadeno cancel` or `fadeno dispatches --cancel`).
+
+`--timeout` no longer exists on `fadeno dispatch`, `fadeno drive`, or `fadeno
+tool-run`; passing it is an unknown-option error. A `timeout_ms` still declared
+on a harness's `command:` lane or on a `tools:` entry is **accepted, parsed,
+and never armed** — catalogs written before the removal declare it, so
+refusing would break them over an inert key. The loader records a note
+(`… is ignored — Fadeno no longer runs executors under a deadline …`) and
+`fadeno doctor` raises it as an `ignored-deadline-key` warning telling you to
+delete it.
+
+Cancellation is unchanged, because stopping something on purpose is a decision
+rather than a guess: `fadeno cancel` sends SIGTERM to the executor's process
+group and the supervisor escalates to SIGKILL after the 5-second grace, and the
+claim is released only at `close`, so a cancellation is not proven until the
+group is gone. Ledgers written before the removal still read: a
+`dispatch_completed.outcome = "timeout"` row, or `actor_failed.reason =
+"executor_timeout"`, renders exactly as it always did. Idle output
 warnings are purely observational: `OUTPUT_IDLE_WARNING_MS = 300000` (5 minutes);
 `HarnessObservedProcessView.outputIdleWarning` becomes true when a process is
 alive and has emitted no output for five minutes (since start or since

@@ -148,6 +148,43 @@ export function catalogRepairFindings(
 }
 
 /**
+ * One finding per loader note about a `timeout_ms` / `timeout` declaration the
+ * catalog still carries.
+ *
+ * This is the third way a working setup goes quietly wrong, and it arrived
+ * with the removal of executor deadlines: the key is now inert, so a catalog
+ * that declares it neither errors nor does anything, and the only surface that
+ * would ever mention it is a loader note nobody reads. Left alone it is a
+ * standing invitation to believe Fadeno still enforces a wall it does not.
+ *
+ * Matched by the shared token rather than by re-deriving the sentence, so the
+ * loader and this filter cannot drift into disagreeing about which notes are
+ * about deadlines. `notes` carries every note the loader produced, deadline or
+ * not; everything else passes through untouched.
+ */
+export function ignoredDeadlineFindings(
+  notes: readonly string[],
+  token: string,
+): RotFinding[] {
+  const seen = new Set<string>();
+  const findings: RotFinding[] = [];
+  for (const note of notes) {
+    const detail = note.trim();
+    if (detail.length === 0 || !detail.includes(token) || seen.has(detail)) continue;
+    seen.add(detail);
+    findings.push({
+      check: 'ignored-deadline-key',
+      severity: 'warning',
+      detail,
+      remediation:
+        'Delete the key from the catalog. It has no effect: no executor runs under a deadline, ' +
+        'and ending a long attempt is `fadeno cancel` / `fadeno dispatches --cancel`.',
+    });
+  }
+  return findings;
+}
+
+/**
  * One finding per DIALED `(harness, model_id)` whose verification row is
  * missing or older than `VERIFICATION_MAX_AGE_DAYS`.
  *

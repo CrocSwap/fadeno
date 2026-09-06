@@ -200,7 +200,7 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends a correlated `dispatch_requested`/`dispatch_completed` row pair to `.fadeno/dispatches.jsonl`. Refuses before spawning on eligibility, a `constraints.command` refusal, or a delivery with no argv to invoke. Echo goes to stderr so stdout stays the executor's pure report. |
 | `runDispatches` | correlated dispatch rows | Read-only projection of `.fadeno/dispatches.jsonl`: pairs `dispatch_requested`/`dispatch_completed` by `dispatch_id`, keeps `host_delivery` rows inline, and marks a request with no completion as killed-or-in-flight rather than dropping it. Pre-format legacy rows render as `[legacy]`; newer-format rows get a separate count. `--tail <N>` (default 10) / `--json`. |
 | `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves host vs command vs restart-required vs write-conflict per invocation; materializes per-slot host agents or cheap command brokers, declining brokers for write-conflicted slots. |
-| `runToolRun` | `ToolRunResult` + `artifact` | Executes a registered `tool_call` (`test-result` only) deterministically: strict registry, supervisor/process-group, writer lease, bounded TestResult synthesis, exclusive placement, and `tool_dispatched`/`tool_completed`/`tool_failed` lifecycle. Thin adapter over `lib/tool-exec.ts`. |
+| `runToolRun` | `ToolRunResult` + `artifact` | Executes a registered `tool_call` (`test-result` only) deterministically: strict registry, supervisor/process-group, overlap window, bounded TestResult synthesis, exclusive placement, and `tool_dispatched`/`tool_completed`/`tool_failed` lifecycle. Thin adapter over `lib/tool-exec.ts`. |
 | `runToolComplete` | run update + artifact manifest + `tool_recorded` receipt | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. Shares claim/lease/concurrency discipline with `tool-run` (generation-scoped, one attempt wins). Writes the manifest, then a `tool_recorded` receipt (`recorded_by: host`) — never `tool_completed`, which means the kernel ran it. |
 | `runCancel` | `CancelResult` | SIGTERM to the live supervisor/process-group for `engine-*` or `tool-*` claims (run-scoped, `ESRCH`-checked before retry). |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
@@ -269,32 +269,53 @@ back to ordinary file completion when no specialized candidates apply.
   host work holds a PID-less, full-identity workspace lease until its terminal
   receipt; completion accepts either a file or binary stdin and places output
   with a same-directory atomic rename. Opt-in isolated host delivery uses `fadeno dispatch-prepare <run> <dispatch-id> --isolate` to create a detached worktree at `.fadeno/local/host-worktrees/<run>/<dispatch-id>` from `HEAD` plus a synthetic commit replaying the caller's tracked and untracked/unignored changes (workspace_mode: isolated, state at `.fadeno/local/host-workspaces/<run>/<dispatch-id>.json`), guarded against traversal/symlink escape and serialized by `.fadeno/local/.host-workspace.lock`; `dispatch-prompt` then includes `workspace_mode: isolated` and the absolute workspace path, and `dispatch-start` stamps `workspace_mode: isolated`/`workspace`/`base_commit` on `actor_dispatched`. `dispatch-complete`/`dispatch-fail` collect a binary staged diff of only the host's post-baseline changes at `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff` without auto-merge, stamping `workspace_mode: isolated` plus `workspace`/`base_commit` and `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven registered worktree; `dispatch-fail` degrades to a terminal receipt without diff keys whenever evidence is absent, unverifiable, or unrecoverable (including a missing or malformed machine-local state file) while a collection failure with the state present still refuses, preserving the worktree for retry; `dispatch-complete` may recover and collect from a verified ledger-named worktree when the state vanished but still refuses success when evidence cannot be collected. Neither command stages or removes a directory it has not proven to be this dispatch's registered worktree, and nothing is ever auto-merged. `fadeno show` surfaces workspace_mode as non-gating observability; `verify` never requires machine-local state.
-- **`host-workspace.ts`** — idempotent detached-worktree primitive for opt-in isolated host delivery: `HOST_WORKTREES_DIR` is `.fadeno/local/host-worktrees`, `HOST_WORKSPACES_DIR` is `.fadeno/local/host-workspaces`, `HOST_ISOLATED_DIFF_DIR` is `.fadeno/local/outputs`, lock `.fadeno/local/.host-workspace.lock`, state schema `1.0` with `workspace_mode: isolated`, dirty-workspace baseline replay under a short read-window lease, traversal/symlink-safe paths, atomic tmp+rename writes, and delegation to `workspace-lease` for binary diff collection.
-- **`workspace-lease.ts`** — the machine-local, repo-wide single-writer lease
-  plus detached-worktree isolation for `dispatch --isolate`. Command supervisors release a full-holder
-  lease only after the executor process group closes; host leases remain
-  conservative until complete/fail. Isolated host delivery via `fadeno dispatch-prepare --isolate` also returns a binary diff
-  and never merges automatically. A shared writer blocks with
-  ```
-  shared workspace is already held by <kind> "<id>" (supervisor_pid <pid>, started <iso>); holder "<requester>" must wait or retry. Inspect it with `fadeno show <run>`; recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove .fadeno/local/workspace-lease.json as a last resort.
-  ``` Multi-holder fan-out enumerates `holders: "<id1>", "<id2>"`. Doctor reports the same state as a `workspace-lease` finding (stale vs live, lock staleness at 120s) and never acquires or deletes. `--isolate` bypasses the lease; `--diagnostics` (or `FADENO_DIAGNOSTICS=1`) is opt-in only, bounded to 32 KiB / 500 lines per stream with head+tail sampling and a single truncation marker `…[fadeno diagnostics truncated: <stdout|stderr> exceeded 32 KiB / 500 lines]…`, stored machine-local under `.fadeno/local/outputs/diagnostics/` as `dispatch-<id>.log` (ad-hoc) or `<run>-<actorCallId>-a<attempt>.log` (engine), never ledger-committed, never gating.
+- **`host-workspace.ts`** — idempotent detached-worktree primitive for opt-in isolated host delivery: `HOST_WORKTREES_DIR` is `.fadeno/local/host-worktrees`, `HOST_WORKSPACES_DIR` is `.fadeno/local/host-workspaces`, `HOST_ISOLATED_DIFF_DIR` is `.fadeno/local/outputs`, lock `.fadeno/local/.host-workspace.lock`, state schema `1.0` with `workspace_mode: isolated`, dirty-workspace baseline replay (no lease: a plain `git apply` merge-back is atomic, so a racing capture reads one complete state or the other), traversal/symlink-safe paths, atomic tmp+rename writes, and delegation to `workspace-lease` for binary diff collection.
+- **`workspace-isolation.ts`** — detached-worktree isolation, declared
+  `worktree_carry`, carry-mutation fingerprinting, and the gitignored-output
+  scan. This is the half of the old `workspace-lease.ts` that survived; the
+  module's own header always said it was two modules.
+- **`workspace-overlap.ts`** — what replaced the writer lock. **There is no
+  repo-wide writer lease.** It required answering *"is this holder still
+  alive?"*, which Fadeno cannot: a host delivery publishes no pid, so its lease
+  was immortal and a killed agent wedged the repo against every later writer,
+  including the recovery of the run that took it. Contention is now inverted —
+  a delivery that is not the sole writer is **isolated automatically** and its
+  receipt says so, instead of being refused with `shared workspace is already
+  held by …`. Deleting the lock without detection would trade a loud wedge for
+  silent lost writes, so every delivery records a WINDOW (`.fadeno/local/
+  dispatch-windows.jsonl`, append-only, machine-local, never ledger) and, at
+  its terminal receipt, intersects its changed paths with every window that
+  overlapped it in time. A non-empty intersection lands as `concurrent_write`
+  on the receipt, naming the other dispatch and the paths, with `attribution:
+  delivery` (an isolated arm's own diff) or `workspace` (a shared window's tree
+  delta — an attestation, not blame). Conflicts route to an integrator through
+  the existing merge-back rebase.
+- **`workspace-lease.ts`** — vestigial. Only a READER of a leftover
+  `workspace-lease.json` remains, so `doctor` can report one and say it is safe
+  to delete (unconditionally: nothing consults it, so there is no writer to
+  verify first). `--diagnostics` (or `FADENO_DIAGNOSTICS=1`) is opt-in only, bounded to 32 KiB / 500 lines per stream with head+tail sampling and a single truncation marker `…[fadeno diagnostics truncated: <stdout|stderr> exceeded 32 KiB / 500 lines]…`, stored machine-local under `.fadeno/local/outputs/diagnostics/` as `dispatch-<id>.log` (ad-hoc) or `<run>-<actorCallId>-a<attempt>.log` (engine), never ledger-committed, never gating.
 - **Command dispatch supervision and recovery** — both ad-hoc dispatches and
   engine command attempts run below a supervisor that owns the executor's
   process group. The supervisor forwards exact output bytes while publishing
   independent heartbeat, output activity, PID/process-group, and terminal
   status facts (`supervisor_pid`, `executor_pid`, `process_group_id`,
   `started_at`, `heartbeat_at`, `last_output_at`, `stdout_bytes`,
-  `stderr_bytes`, plus `timed_out`/`timeout_ms`/`deadline_at` when a deadline
-  is in force). Before supervisor startup, the engine atomically publishes an
+  `stderr_bytes`; `timed_out`/`timeout_ms`/`deadline_at` are vestigial and
+  always `false`/`null`, since Fadeno no longer runs executors under a
+  deadline). Before supervisor startup, the engine atomically publishes an
   exclusive correlated claim; a machine-local in-flight claim then lets another
   `fadeno drive` distinguish any still-running attempt from a dead engine,
   independent of write posture. Recovery refuses to
   record `engine_interrupted` or retry while the supervisor is alive, then
-  closes the dangling start only after no live claim remains. A supervisor-owned
-  hard deadline sends SIGTERM to the executor group at `deadline_at` and
-  escalates to SIGKILL after 5s; lease and claim release still waits for
-  `close`, so cancellation and timeout are similarly proven only after the
-  group is gone. Idle output is never a termination signal — `show`
+  closes the dangling start only after no live claim remains. **No deadline is
+  ever armed**: a clock cannot tell slow from stuck, and a killed
+  print-at-exit executor loses its report while its work survives in the diff.
+  The only thing that ends an attempt early is a decision — `fadeno cancel` /
+  `dispatches --cancel` send SIGTERM to the executor group and escalate to
+  SIGKILL after 5s, and claim release still waits for `close`, so a
+  cancellation is proven only after the group is gone. A `timeout_ms` left in
+  a catalog is read, never armed, and reported by `doctor`. Idle output is
+  never a termination signal — `show`
   surfaces a warning after five minutes via `OUTPUT_IDLE_WARNING_MS` and
   `HarnessObservedProcessView.outputIdleWarning`, worded by
   `describeIdleOutput` (`lib/attempt-progress.ts`) for what is actually known:
@@ -329,7 +350,7 @@ back to ordinary file completion when no specialized candidates apply.
   `assembled_by: engine`); `verify` (`collective-provenance`) reduces the
   receipted parts again and refuses a collective that does not come out
   identical.
-- **`tool-exec.ts`** — deterministic `tool_call` execution core: strict `tools:` registry parsing (static argv, timeout), `tool_dispatched` → supervisor spawn (shared writer lease, `readdirSync` live-claim scan with `ESRCH` group reclaim) → bounded `TestResult` synthesis → exclusive `linkSync` placement (never clobbering) → `artifact_created` + `tool_completed`/`tool_failed` lifecycle (one attempt wins, `tool-generation` scoped, crash-safe attribution preserving already-attributed bytes). Used by both `fadeno tool-run` and `fadeno drive`; recovery via shared `recoverInterruptedToolDispatchesShared`.
+- **`tool-exec.ts`** — deterministic `tool_call` execution core: strict `tools:` registry parsing (static argv, timeout), `tool_dispatched` → supervisor spawn (overlap window, `readdirSync` live-claim scan with `ESRCH` group reclaim) → bounded `TestResult` synthesis → exclusive `linkSync` placement (never clobbering) → `artifact_created` + `tool_completed`/`tool_failed` lifecycle (one attempt wins, `tool-generation` scoped, crash-safe attribution preserving already-attributed bytes). Used by both `fadeno tool-run` and `fadeno drive`; recovery via shared `recoverInterruptedToolDispatchesShared`.
 - **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): v4 registry
   `models:` plus one `harnesses:` table (each entry an optional `provider:` home
   claim, an optional `host:` block with `effort_channel` / `identity` /
@@ -453,7 +474,9 @@ as `shapeValidatorFor` does. The failure it closes is the mirror of the stamp
 one: six surfaces holding live machine-local state were reported `ok` —
 "unversioned by design" — by a check that had never opened them, and a
 `workspace-lease.json` nothing can read reads as a free workspace everywhere
-else, so mutual exclusion silently stops excluding.
+else. (That last consequence is now historical — nothing excludes on that file
+any more — but the audit still opens it, because the inventory's job is to say
+whether every persisted surface reads back, including the ones nothing writes.)
 
 **Directory surfaces are read member by member.** `host-workspace-state` is a
 directory of per-dispatch documents, so the directory itself carries no stamp

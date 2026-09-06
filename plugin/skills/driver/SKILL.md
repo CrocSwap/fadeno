@@ -52,7 +52,7 @@ fadeno drive <run>
     for each host request, optionally prepare an isolated worktree first: `fadeno dispatch-prepare <run> <dispatch-id> --isolate` (creates `.fadeno/local/host-worktrees/<run>/<dispatch-id>` from HEAD plus a synthetic commit replaying the caller's tracked and untracked/unignored changes, workspace_mode: isolated, idempotent, traversal/symlink-safe, serialized by `.host-workspace.lock`; without it, delivery is workspace_mode: shared)
     when one drive result contains two or more independent evaluative host requests whose repository edits are not outputs (notably `artifact_type: review-report` or `judgment`), prepare ALL of them before spawning ANY agent, then spawn them concurrently up to the available host slots; this gives every evaluator the same pre-review dirty state, contains accidental writes, and bypasses the shared lease. Do not apply this rule to implementers or other actors whose intended output is a repository edit: isolated host diffs are retained as evidence and are not auto-merged
     emit each assignment with `fadeno dispatch-prompt <run> <dispatch-id>` — it writes the exact `# Fadeno engine step assignment` envelope (immutable `run` + `dispatch_id` plus the recorded prompt bytes) without manual reconstruction; when prepared, the envelope includes `workspace_mode: isolated` plus the absolute workspace path and `All repository reads and writes for this assignment must occur in the workspace above; do not read or modify the shared checkout.` (prompt bytes and digest unchanged)
-    start each host agent with `fadeno dispatch-start <run> <dispatch-id> --agent-id <id>` — when prepared it stamps `workspace_mode: isolated`/`workspace`/`base_commit` and bypasses the shared writer lease; otherwise `workspace_mode: shared` with existing exclusive leasing byte-for-byte unchanged; `--workspace` must match or be omitted, and `command-fallback` with a prepared isolated workspace is refused
+    start each host agent with `fadeno dispatch-start <run> <dispatch-id> --agent-id <id>` — when prepared it stamps `workspace_mode: isolated`/`workspace`/`base_commit`; otherwise `workspace_mode: shared`. Nothing is reserved either way — there is no writer lease, and two shared host dispatches both start, with any overlap recorded as `concurrent_write` on both receipts; `--workspace` must match or be omitted, and `command-fallback` with a prepared isolated workspace is refused
     poll the prompt-declared progress sidecar and record dispatch-progress
     submit dispatch-complete or dispatch-fail (for isolated, a binary staged diff is collected to `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff` before the terminal receipt, stamping `workspace_mode`/`workspace`/`base_commit`/`diff_snapshot`/`diff_bytes`; worktree removed only after durable receipt, failures preserve it for retry, idempotent terminals reuse receipt; nothing auto-merges), then re-run drive
 ```
@@ -61,7 +61,8 @@ Independent command-delivered `map` members need not serialize: `fadeno drive
 <run> --parallel <n>` (1-16, default 1) runs eligible members concurrently
 within one ready wave. In a git repo each member runs in its own detached
 worktree and merges back on success, so members overlap whatever they write;
-without git they share the tree and serialize on the repo-wide writer lease.
+without git there are no worktrees to isolate into, so they share the tree and
+run one at a time.
 Receipts keep canonical member order either way.
 
 For compositional maps, one drive result may contain ready leaves from different
@@ -111,7 +112,7 @@ loop:
             --artifact <N.gate.artifact>
       else:
         for tool_call (output is test-result and tool is registered in executors.yaml tools): run
-          fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]
+          fadeno tool-run <run> [--tool <name>]
           # synthesizes TestResult (passed/failed/error), validates, and attributes atomically via the shared execution core (same code as drive)
         for other tool_call (Diff/PostResult or unregistered): invoke the tool manually, write its output, then run
           fadeno tool-complete <run> --output <artifact-path>
@@ -185,13 +186,16 @@ planned artifact path.
   <duration> (non-gating)` line is a report, never a trigger) and end it with
   `fadeno cancel <run>` or `fadeno dispatches --cancel <id|tag>`. A `drive`
   wave waits for every member, so a hung member holds the run until you act.
-  A deadline is opt-in: `timeout_ms` on a route, or `--timeout <seconds>` on
-  `fadeno drive` / `fadeno dispatch` (`0` also means none). When one is set
-  the supervisor owns it — `SIGTERM` to the executor group at `deadline_at =
-  started_at + timeout_ms`, `SIGKILL` after 5 s, lease and claim released only
-  on `close` — and the attempt records `actor_failed.reason =
+  There is no deadline, and no way to ask for one: `--timeout` is gone from
+  `drive`, `dispatch` and `tool-run`, and a `timeout_ms` left in a catalog is
+  read, never armed, and reported by `fadeno doctor`. A clock cannot tell slow
+  from stuck, and killing a print-at-exit executor destroys its report while
+  its work survives in the diff. Cancelling is the same mechanism it always
+  was — `SIGTERM` to the executor group, `SIGKILL` after 5 s, claim released
+  only on `close` — it is now only ever reached by someone deciding. Ledgers
+  written before the removal still read: `actor_failed.reason =
   "executor_timeout"` (engine) or `dispatch_completed.outcome = "timeout"`
-  (ad-hoc), which outranks the exit signal. The recovery reader carries the
+  (ad-hoc) renders as it always did. The recovery reader carries the
   verdict with the bytes: `fadeno dispatches --output <id|tag:handle>` leads
   its stderr note with `ok`, `FAILED`, `NO OUTPUT`, or `TIMED OUT` (and any
   merge-back that did not land) *before* the attestation line. `output

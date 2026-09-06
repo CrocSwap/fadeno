@@ -97,7 +97,7 @@ const CLAIMS: Claim[] = [
     id: 'carry-mutation-stamp',
     doc: { files: [SLOTS], patterns: [/carry_mutated/, /nlink/, /ctime/] },
     src: {
-      files: ['src/lib/workspace-lease.ts'],
+      files: ['src/lib/workspace-isolation.ts'],
       patterns: [/carryMutationStamp/, /nlink/, /ctime/],
     },
   },
@@ -562,23 +562,26 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/commands/cancel.ts', 'src/cli.ts'], patterns: [/runCancel/] },
   },
   {
-    id: 'executor-timeout-route',
-    doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/timeout_ms/] },
-    src: { files: ['src/lib/executors.ts', 'src/lib/supervisor.ts'], patterns: [/timeout_ms/] },
+    // RETIRED and replaced: `executor-timeout-route` used to pair the docs'
+    // description of a route deadline with the code that ARMED one. Nothing
+    // arms one now. The key is still parsed — catalogs written before the
+    // removal declare it — and what the docs and the code must agree on is
+    // that it is ignored, which is what this token is for. One spelling, three
+    // consumers: the loader note, doctor's warning, and this claim.
+    id: 'ignored-deadline-key',
+    doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/no longer runs executors under a deadline/] },
+    src: {
+      files: ['src/lib/executors.ts', 'src/lib/catalog-rot.ts'],
+      patterns: [/IGNORED_DEADLINE_NOTE_TOKEN/, /ignoredDeadlineFindings/],
+    },
   },
   {
-    // Deadlines are opt-in. The doc surfaces an agent reads say "no deadline
-    // by default" in those words; the template catalog is checked for the
-    // absence separately (cancel-timeout-integration), since presence-pairing
+    // The absence itself is asserted separately (cancel-integration checks the
+    // template catalog declares no `timeout_ms`), since presence-pairing
     // cannot assert that something is NOT there.
-    id: 'no-default-deadline',
-    doc: { files: [EXTENDING, 'templates/common/skills/fadeno-driver/SKILL.md', 'src/cli.ts'], patterns: [/no deadline|none by default/i] },
-    src: { files: ['src/lib/supervisor.ts'], patterns: [/deadline_at/] },
-  },
-  {
-    id: 'executor-timeout-receipt',
-    doc: { files: [EXTENDING], patterns: [/executor_timeout/] },
-    src: { files: ['src/commands/drive.ts', 'src/commands/dispatch.ts'], patterns: [/executor_timeout/] },
+    id: 'no-executor-deadline',
+    doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/a clock cannot tell slow from stuck/] },
+    src: { files: ['src/lib/supervisor.ts'], patterns: [/a clock cannot tell slow from stuck/] },
   },
   {
     // The two artifact classes that carried no receipt before rc.61. The docs
@@ -594,9 +597,23 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/commands/tool-complete.ts', 'src/commands/verify.ts', 'scripts/tamper-matrix.mjs'], patterns: [/tool_recorded/, /recorded_by/] },
   },
   {
-    id: 'timeout-cli-override',
-    doc: { files: [EXTENDING, 'README.md'], patterns: [/--timeout <seconds>/] },
-    src: { files: ['src/cli.ts'], patterns: [/--timeout/] },
+    // RETIRED: `timeout-cli-override` paired the documented `--timeout
+    // <seconds>` with its parser. The flag is gone from both. What replaces it
+    // is the pairing for the mechanism that DOES end a long attempt.
+    id: 'cancel-ends-an-attempt',
+    doc: { files: [EXTENDING, 'README.md'], patterns: [/fadeno cancel/] },
+    src: { files: ['src/commands/cancel.ts'], patterns: [/SIGTERM/] },
+  },
+  {
+    // Overlap detection is what replaced the writer lock, and shipping the
+    // removal without it would have traded a loud wedge for silent lost
+    // writes. The docs and the kernel must name the same receipt field.
+    id: 'concurrent-write-receipt',
+    doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/concurrent_write/] },
+    src: {
+      files: ['src/lib/workspace-overlap.ts', 'src/commands/dispatch.ts', 'src/commands/drive.ts'],
+      patterns: [/concurrent_write/],
+    },
   },
   {
     id: 'idle-output-warning',

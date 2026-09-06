@@ -12,7 +12,6 @@ import { readEventsStrict } from '../lib/run-ledger.ts';
 import { INFLIGHT_DIR, inflightClaimIsAlive, readInflightClaim } from '../lib/supervisor.ts';
 import { toolAttemptIds, plannedGenerationAttributed } from '../lib/tool-exec.ts';
 import { parseGeneration } from '../lib/prompt-resolve.ts';
-import { isWorkspaceLeaseAlive, readEffectiveLease } from '../lib/workspace-lease.ts';
 
 export class ToolCompleteError extends Error {}
 
@@ -100,13 +99,12 @@ export function runToolComplete(opts: ToolCompleteOptions): ToolCompleteResult {
       }
     }
   }
-  // Also check workspace lease (tool execution holds lease)
-  const effectiveLease = (() => { try { return readEffectiveLease(repoRoot); } catch { return null; } })();
-  if (effectiveLease != null && isWorkspaceLeaseAlive(effectiveLease)) {
-    if (effectiveLease.holder.id.startsWith(`tool:${next.run}:${next.step.id}:g${generation}:`)) {
-      throw new ToolCompleteError(`shared workspace is already held by ${effectiveLease.holder.kind} "${effectiveLease.holder.id}" (supervisor_pid ${effectiveLease.supervisor_pid ?? 'unknown'}); manual completion for generation ${generation} must wait`);
-    }
-  }
+  // The repo-wide writer lease that used to be consulted here is gone. It
+  // added nothing this claim scan does not already do BETTER: the scan above
+  // probes a pid published by a process on this machine and asks a question
+  // with an answer, where the lease asked whether an unnamed holder was still
+  // alive and answered "yes" whenever it could not tell. What is guarded here
+  // is one attempt's artifact, not the repo.
   const claimRel = `${INFLIGHT_DIR}/tool-${next.run}-${ids.toolCallId}-a${attempt}.json`;
   const claimAbs = join(repoRoot, ...claimRel.split('/'));
   mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });

@@ -65,7 +65,7 @@ test('supervisor mirrors the attempt progress sidecar onto its claim within two 
 
   const child = spawn(
     process.execPath,
-    superviseArgv(executor, claimPath, statusPath, undefined, null, sidecar),
+    superviseArgv(executor, claimPath, statusPath, undefined, sidecar),
     { cwd: workspace, stdio: 'ignore', env: { ...process.env, FADENO_TEST_SIDECAR: sidecar } },
   );
 
@@ -96,7 +96,7 @@ test('supervisor given no sidecar path leaves the claim free of progress fields'
   const statusPath = join(root, 'status.json');
   const child = spawn(
     process.execPath,
-    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 2500)'], claimPath, statusPath, undefined, null),
+    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 2500)'], claimPath, statusPath, undefined),
     { stdio: 'ignore' },
   );
   await sleep(1_500);
@@ -124,7 +124,7 @@ test('the claim carries the executor argv, so a reader can name silence correctl
   writeFileSync(shim, '#!/bin/sh\nsleep 3\n', { mode: 0o755 });
   const child = spawn(
     process.execPath,
-    superviseArgv([shim, '-p', '--model', 'opus'], claimPath, statusPath, undefined, null),
+    superviseArgv([shim, '-p', '--model', 'opus'], claimPath, statusPath, undefined),
     { stdio: 'ignore' },
   );
   await sleep(1_200);
@@ -148,7 +148,7 @@ test('supervisor clears the mirrored self-report when the sidecar goes unparsabl
 
   const child = spawn(
     process.execPath,
-    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 4500)'], claimPath, statusPath, undefined, null, sidecar),
+    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 4500)'], claimPath, statusPath, undefined, sidecar),
     { cwd: workspace, stdio: 'ignore' },
   );
   await sleep(1_200);
@@ -182,7 +182,7 @@ test('supervisor clears the mirrored self-report when the sidecar disappears', a
 
   const child = spawn(
     process.execPath,
-    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 4500)'], claimPath, statusPath, undefined, null, sidecar),
+    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 4500)'], claimPath, statusPath, undefined, sidecar),
     { cwd: workspace, stdio: 'ignore' },
   );
   await sleep(1_200);
@@ -201,35 +201,32 @@ test('supervisor clears the mirrored self-report when the sidecar disappears', a
 
 // --- the argv wire form ---
 
-test('superviseArgv carries the sidecar path behind a sentinel and leaves the legacy forms byte-identical', () => {
-  const withProgress = superviseArgv(['echo', 'hi'], '/tmp/in.json', '/tmp/st.json', undefined, 1_200_000, '/ws/.fadeno/progress/r/se.json');
+test('superviseArgv carries the sidecar path behind a sentinel, with no deadline slots', () => {
+  // The two deadline slots this used to assert (a millisecond count and an
+  // ISO `deadline_at`) are gone from the emitter with executor deadlines
+  // themselves. The sentinel still disambiguates the sidecar form, and the
+  // supervisor source still SNIFFS the legacy 7-slot layout so a hand-built
+  // old argv lands its command correctly — see cancel-integration.
+  const withProgress = superviseArgv(['echo', 'hi'], '/tmp/in.json', '/tmp/st.json', undefined, '/ws/.fadeno/progress/r/se.json');
   const after = withProgress.slice(withProgress.indexOf('--') + 1);
   assert.equal(after[0], SUPERVISE_PROGRESS_SENTINEL);
   assert.equal(after[2], '/tmp/in.json');
   assert.equal(after[3], '/tmp/st.json');
-  assert.equal(after[5], '1200000');
-  assert.ok(after[6] != null && /^\d{4}-\d{2}-\d{2}T/.test(after[6]), `deadline_at should be ISO, got ${after[6]}`);
-  assert.equal(after[7], '/ws/.fadeno/progress/r/se.json');
-  assert.deepEqual(after.slice(8), ['echo', 'hi']);
+  assert.equal(after[4], '', 'the owner slot is empty when no owner is named');
+  assert.equal(after[5], '/ws/.fadeno/progress/r/se.json');
+  assert.deepEqual(after.slice(6), ['echo', 'hi']);
+  assert.ok(!after.some((slot) => /^\d{4}-\d{2}-\d{2}T/.test(slot)), 'no deadline timestamp is emitted');
+  // Slot 1 is the parent pid and is legitimately all digits; everything after
+  // it is a path, an owner blob, or the command.
+  assert.ok(!after.slice(2).some((slot) => /^\d+$/.test(slot)), 'no millisecond count is emitted');
 
-  // No timeout, but a sidecar: the timeout slots are present and empty rather
-  // than collapsed, so the layout has exactly one shape.
-  const noTimeout = superviseArgv(['echo', 'hi'], '/tmp/in.json', '/tmp/st.json', undefined, null, '/ws/p.json');
-  const afterNoTimeout = noTimeout.slice(noTimeout.indexOf('--') + 1);
-  assert.equal(afterNoTimeout[5], '');
-  assert.equal(afterNoTimeout[6], '');
-  assert.equal(afterNoTimeout[7], '/ws/p.json');
-  assert.deepEqual(afterNoTimeout.slice(8), ['echo', 'hi']);
-
-  // Omitting the sidecar must not change a single byte for existing callers.
-  const legacy = superviseArgv(['echo', 'hi'], '/tmp/in.json', '/tmp/st.json', undefined, null);
+  // Omitting the sidecar drops the sentinel and the slot with it.
+  const legacy = superviseArgv(['echo', 'hi'], '/tmp/in.json', '/tmp/st.json', undefined);
   const afterLegacy = legacy.slice(legacy.indexOf('--') + 1);
   assert.notEqual(afterLegacy[0], SUPERVISE_PROGRESS_SENTINEL);
   assert.deepEqual(afterLegacy.slice(4), ['echo', 'hi']);
-  assert.deepEqual(superviseArgv(['echo', 'hi'], '/tmp/in.json', '/tmp/st.json', undefined, null, ''), legacy);
+  assert.deepEqual(superviseArgv(['echo', 'hi'], '/tmp/in.json', '/tmp/st.json', undefined, ''), legacy);
 });
-
-// --- the pure readers ---
 
 test('parseProgressSidecar accepts a partial report and rejects everything without a timestamp', () => {
   const full = parseProgressSidecar(sidecarBody({ state: 'blocked', phase: 'waiting', current: 'on review' }))!;

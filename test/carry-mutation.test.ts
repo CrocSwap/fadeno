@@ -33,13 +33,7 @@ import {
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { tempRepo } from './helpers.ts';
-import {
-  CARRY_DRIFT_MAX_EXAMPLES,
-  carryDeclaredPaths,
-  carryMutationStamp,
-  fingerprintCarriedPaths,
-  verifyCarriedPaths,
-} from '../src/lib/workspace-lease.ts';
+import { CARRY_DRIFT_MAX_EXAMPLES, carryDeclaredPaths, carryMutationStamp, fingerprintCarriedPaths, verifyCarriedPaths } from '../src/lib/workspace-isolation.ts';
 
 /** A gitignored build tree of the shape `worktree_carry:` exists for. */
 function seedCarried(root: string): void {

@@ -12,7 +12,8 @@ import { runPrompt } from '../src/commands/prompt.ts';
 import { parseSnapshotDocument, serializeSnapshot } from '../src/lib/executors.ts';
 import { parse as parseYaml } from 'yaml';
 import { listHostDispatchRequests, requestHostDispatch } from '../src/lib/host-dispatch.ts';
-import { readWorkspaceLease, releaseWorkspaceLease, WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
+import { describeVestigialWorkspaceLease, readWorkspaceLease, WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
+import { readDispatchWindows } from '../src/lib/workspace-overlap.ts';
 import { readEvents } from '../src/lib/run-ledger.ts';
 import { runRun } from '../src/commands/run.ts';
 import { runVerify } from '../src/commands/verify.ts';
@@ -551,55 +552,61 @@ test('dispatch-complete CLI accepts typed artifact bytes on stdin without contam
   assert.deepEqual(readFileSync(join(fixture.runDir, fixture.request.outputPath)), report);
 });
 
-test('host writer lease is exclusive: second shared host dispatch in same run is refused', (t) => {
+test('two shared host dispatches in one run now BOTH start, and each closes its own window', (t) => {
+  // INVERTED, and this is the case the whole change is about. A host dispatch
+  // publishes no pid — it runs inside another agent's session — so its lease
+  // was pid-less and therefore immortal: `isWorkspaceLeaseAlive` returned true
+  // for it forever, and a 429-killed agent wedged the repo against every later
+  // writer, including the recovery of the run that took the lease. Refusing
+  // the peer here was that mechanism working as designed.
+  //
+  // Now the peer starts. Both windows are recorded, and if their edits meet,
+  // both receipts say so — see workspace-overlap.
   const { root, runId, request } = seedPendingHostRun(t);
   const peer = listHostDispatchRequests(join(root, '.fadeno', 'runs', runId)).find((item) => item.dispatchId !== request.dispatchId)!;
   runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'writer-1', now: new Date('2026-08-17T01:00:00Z') });
-  const acquired = readWorkspaceLease(root)!;
-  assert.equal(acquired.supervisor_pid, null);
-  assert.deepEqual(acquired.holder, { id: request.dispatchId, kind: 'host-dispatch', runId, dispatchId: request.dispatchId });
-  // Same-run peer must be refused (exclusive shared leasing)
-  assert.throws(
-    () => runDispatchStart({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, agentId: 'writer-2', now: new Date('2026-08-17T01:00:10Z') }),
-    /shared workspace is already held/,
-  );
-  assert.deepEqual(readWorkspaceLease(root)!.holders?.map((holder) => holder.id), [request.dispatchId]);
+  assert.equal(readWorkspaceLease(root), null, 'no writer lease is taken at all');
+
+  const peerStart = runDispatchStart({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, agentId: 'writer-2', now: new Date('2026-08-17T01:00:10Z') });
+  assert.equal(peerStart.state, 'started', 'the second shared host dispatch is admitted, not refused');
+
+  // Run-qualified: two runs of one playbook produce the same host dispatch id,
+  // so the window key carries the run or the log folds them into one record.
+  const wid = (id: string): string => `${runId}:${id}`;
+  const open = readDispatchWindows(root).windows.filter((w) => w.endedAt == null).map((w) => w.dispatchId).sort();
+  assert.deepEqual(open, [wid(request.dispatchId), wid(peer.dispatchId)].sort(), 'both windows are open');
+
+  // Progress no longer heartbeats anything — there is no reservation whose
+  // staleness a heartbeat was defending against.
   const progress = join(root, 'progress.json');
   writeFileSync(progress, JSON.stringify({ state: 'running', summary: 'working' }));
   runDispatchProgress({ repoRoot: root, run: runId, dispatchId: request.dispatchId, file: progress, now: new Date('2026-08-17T01:05:00Z') });
-  assert.equal(readWorkspaceLease(root)!.heartbeat_at, '2026-08-17T01:05:00.000Z');
-  // Sequential host starts after explicit terminal receipt
+  assert.equal(readWorkspaceLease(root), null);
+
+  // A terminal receipt closes that dispatch's window and only that one.
   runDispatchFail({ repoRoot: root, run: runId, dispatchId: request.dispatchId, reason: 'stopped' });
-  assert.equal(readWorkspaceLease(root), null);
-  const peerAfter = runDispatchStart({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, agentId: 'writer-2', now: new Date('2026-08-17T01:06:00Z') });
-  assert.equal(peerAfter.state, 'started');
-  assert.deepEqual(readWorkspaceLease(root)!.holders?.map((holder) => holder.id), [peer.dispatchId]);
-  writeFileSync(progress, JSON.stringify({ state: 'running', summary: 'working peer' }));
-  runDispatchProgress({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, file: progress, now: new Date('2026-08-17T01:07:00Z') });
-  assert.equal(readWorkspaceLease(root)!.heartbeat_at, '2026-08-17T01:07:00.000Z');
+  const afterFirst = readDispatchWindows(root).windows;
+  assert.ok(afterFirst.find((w) => w.dispatchId === wid(request.dispatchId))!.endedAt != null, 'the finished one is closed');
+  assert.equal(afterFirst.find((w) => w.dispatchId === wid(peer.dispatchId))!.endedAt, null, "the peer's is untouched");
+
   runDispatchFail({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, reason: 'stopped peer' });
-  assert.equal(readWorkspaceLease(root), null);
+  assert.ok(readDispatchWindows(root).windows.every((w) => w.endedAt != null), 'both windows close');
 });
 
-test('legacy multi-holder lease remains readable and supports arbitrary release order', (t) => {
+test('a legacy multi-holder lease record still parses, so doctor can report it', (t) => {
+  // The RELEASE half of this test is gone with `releaseWorkspaceLease`. What
+  // must survive is the READ: a repo upgraded mid-flight has one of these on
+  // disk, possibly with several holders, and `fadeno doctor` has to be able to
+  // describe it before telling the operator to delete it.
   const { root, runId, request } = seedPendingHostRun(t);
   const peer = listHostDispatchRequests(join(root, '.fadeno', 'runs', runId)).find((item) => item.dispatchId !== request.dispatchId)!;
-  // Manually craft a legacy multi-holder record (normal acquisition no longer creates it)
-  const now = new Date('2026-08-17T01:00:00Z').toISOString();
   const firstHolder = { id: request.dispatchId, kind: 'host-dispatch' as const, runId, dispatchId: request.dispatchId };
   const secondHolder = { id: peer.dispatchId, kind: 'host-dispatch' as const, runId, dispatchId: peer.dispatchId };
+  const now = '2026-08-17T01:00:00.000Z';
   const legacy = {
     workspace_mode: 'shared' as const,
     holder: firstHolder,
     holders: [firstHolder, secondHolder],
-    holder_started_at: {
-      [JSON.stringify(['host-dispatch', request.dispatchId, runId, request.dispatchId])]: now,
-      [JSON.stringify(['host-dispatch', peer.dispatchId, runId, peer.dispatchId])]: now,
-    },
-    holder_heartbeat_at: {
-      [JSON.stringify(['host-dispatch', request.dispatchId, runId, request.dispatchId])]: now,
-      [JSON.stringify(['host-dispatch', peer.dispatchId, runId, peer.dispatchId])]: now,
-    },
     supervisor_pid: null,
     executor_pid: null,
     process_group_id: null,
@@ -609,35 +616,36 @@ test('legacy multi-holder lease remains readable and supports arbitrary release 
     stdout_bytes: 0,
     stderr_bytes: 0,
   };
-  const abs = join(root, '.fadeno', 'local', 'workspace-lease.json');
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
-  writeFileSync(abs, JSON.stringify(legacy, null, 2));
+  writeFileSync(join(root, WORKSPACE_LEASE_FILE), JSON.stringify(legacy, null, 2));
   assert.deepEqual(readWorkspaceLease(root)!.holders?.map((h) => h.id).sort(), [request.dispatchId, peer.dispatchId].sort());
-  // Arbitrary release order: release second first
-  assert.equal(releaseWorkspaceLease({ repoRoot: root, holder: secondHolder }), true);
-  assert.deepEqual(readWorkspaceLease(root)!.holders?.map((h) => h.id), [request.dispatchId]);
-  assert.equal(releaseWorkspaceLease({ repoRoot: root, holder: firstHolder }), true);
-  assert.equal(readWorkspaceLease(root), null);
+
+  const described = describeVestigialWorkspaceLease(root)!;
+  assert.ok(described != null, 'a leftover multi-holder record is still describable');
+  assert.equal(described.holder!.id, request.dispatchId);
+  assert.match(described.remediation, /Delete/);
 });
 
-test('host writer lease blocks concurrent host dispatches across runs', (t) => {
+test('a host dispatch in one run no longer blocks one in another run', (t) => {
+  // INVERTED for the same reason as above. Cross-run exclusion was the
+  // widest blast radius the immortal lease had: one killed host agent made
+  // every OTHER run in the repo unstartable, with a message telling the
+  // operator to wait for a holder that would never return.
   const baseNow = new Date('2026-08-17T01:00:00Z');
   const { root, runId, request } = seedPendingHostRun(t);
   runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'writer-1', now: baseNow });
-  assert.ok(readWorkspaceLease(root));
-  // Create a second run in the same repo root (reuse fixtures)
+  assert.equal(readWorkspaceLease(root), null, 'nothing repo-wide is reserved');
+
   const otherRun = runNewRun({ repoRoot: root, playbook: 'host-dispatch-fixture', task: 'cross-run second task', inputs: ['Agent1Spec=agent-1.md', 'Agent3Spec=agent-3.md'] });
   const otherDriven = runDrive({ repoRoot: root, run: otherRun.runId });
   const otherRequest = otherDriven.requests.find((r) => r.run === otherRun.runId) ?? otherDriven.requests[0];
   assert.ok(otherRequest, 'other run must have a host dispatch request');
-  assert.throws(
-    () => runDispatchStart({ repoRoot: root, run: otherRun.runId, dispatchId: otherRequest.dispatchId, agentId: 'writer-other', now: new Date('2026-08-17T01:00:30Z') }),
-    /shared workspace is already held/,
-  );
+  const started = runDispatchStart({ repoRoot: root, run: otherRun.runId, dispatchId: otherRequest.dispatchId, agentId: 'writer-other', now: new Date('2026-08-17T01:00:30Z') });
+  assert.equal(started.state, 'started', 'a second run starts while the first is still in flight');
+
   runDispatchFail({ repoRoot: root, run: runId, dispatchId: request.dispatchId, reason: 'stopped' });
-  const after = runDispatchStart({ repoRoot: root, run: otherRun.runId, dispatchId: otherRequest.dispatchId, agentId: 'writer-other', now: new Date('2026-08-17T01:01:00Z') });
-  assert.equal(after.state, 'started');
   runDispatchFail({ repoRoot: root, run: otherRun.runId, dispatchId: otherRequest.dispatchId, reason: 'stopped other' });
+  assert.ok(readDispatchWindows(root).windows.every((w) => w.endedAt != null));
 });
 
 test('locked wildcard steering reports requested_agent_type "*" and delivered_archetype without upgrading identity_evidence', async (t) => {

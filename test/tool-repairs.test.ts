@@ -13,7 +13,19 @@ import { runNewRun } from '../src/commands/new-run.ts';
 import { readEventsStrict } from '../src/lib/run-ledger.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { LedgerWriter, writeRunDocument } from '../src/lib/run-ledger-write.ts';
-import { acquireWorkspaceLease, readEffectiveLease, readWorkspaceLease } from '../src/lib/workspace-lease.ts';
+import { readWorkspaceLease } from '../src/lib/workspace-lease.ts';
+import { openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
+
+/** Is this run's tool window closed (or never opened)? Replaces the old
+ * `readEffectiveLease(root) === null`, which asked whether a repo-wide
+ * reservation had been given back. Nothing is reserved now; what a terminal
+ * receipt still owes is a CLOSED window, or a later delivery isolates for
+ * ever against a neighbour that finished long ago. */
+function toolWindowOpen(root: string, runId: string): boolean {
+  return readDispatchWindows(root).windows.some(
+    (w) => w.dispatchId.startsWith(`tool:${runId}:`) && w.endedAt == null,
+  );
+}
 import { recoverInterruptedToolDispatchesForHelper } from '../src/lib/tool-exec.ts';
 import {
   BUNDLED_CLI,
@@ -123,7 +135,7 @@ test('two helpers racing the same attempt admit exactly one command, one dispatc
   }
 });
 
-test('a pre-supervisor lease reservation blocks other writers and is reclaimed only once the attempt is proven dead', (t) => {
+test('a live claim blocks a second writer, and recovery closes the attempt only once it is proven dead', (t) => {
   const setup = seedToolRepo(t, { test_runner: { command: exitsWith(0) } });
   const claimRel = `.fadeno/local/inflight/tool-${setup.runId}-tc-test-g1-a1.json`;
   const claimAbs = join(setup.root, claimRel);
@@ -153,21 +165,19 @@ test('a pre-supervisor lease reservation blocks other writers and is reclaimed o
     supervisor_claim: claimRel,
     workspace_mode: 'shared',
   }, new Date());
-  const holder = { id: `tool:${setup.runId}:test:g1:a1`, kind: 'engine' as const, runId: setup.runId, dispatchId: 'tc-test-g1:a1' };
-  acquireWorkspaceLease({
-    repoRoot: setup.root, workspaceMode: 'shared', holder,
-    supervisorPid: null, executorPid: null, processGroupId: null,
+  openDispatchWindow(setup.root, {
+    dispatchId: `tool:${setup.runId}:test:g1:a1`, runId: setup.runId, kind: 'engine', workspaceMode: 'shared',
   });
+  assert.ok(toolWindowOpen(setup.root, setup.runId), 'the live attempt has an open window');
 
-  // A reservation naming no process is conservatively live: there is no pid
-  // whose death would prove the detached executor is gone, so it blocks.
-  assert.ok(readEffectiveLease(setup.root) != null, 'a pid-less reservation still blocks');
-
-  // Recovery leaves a live attempt — and therefore its reservation — alone.
+  // Recovery leaves a live attempt alone. What stops a second writer here is
+  // the CLAIM — a pid this machine published — not a repo-wide reservation
+  // that nothing could ever prove stale.
   assert.equal(recoverInterruptedToolDispatchesForHelper(setup.root, setup.runDir, setup.runId), 0);
   assert.ok(existsSync(claimAbs), 'the live claim survives recovery');
-  assert.ok(readEffectiveLease(setup.root) != null, 'and so does its reservation');
-  assert.ok(!readEventsStrict(setup.runDir).some((e) => e.type === 'workspace_lease_recovered'));
+  assert.ok(toolWindowOpen(setup.root, setup.runId), 'and its window is still open');
+  assert.ok(!readEventsStrict(setup.runDir).some((e) => e.type === 'workspace_lease_recovered'),
+    'recovery no longer reclaims anything, so it writes no lease audit row');
   assert.throws(
     () => runToolRun({ repoRoot: setup.root, run: setup.runId }),
     (err) => /blocked — another live attempt/.test((err as Error).message),
@@ -179,10 +189,14 @@ test('a pre-supervisor lease reservation blocks other writers and is reclaimed o
   writeClaim({ pid: 999999, supervisor_pid: 999999, executor_pid: null, process_group_id: null });
   assert.equal(recoverInterruptedToolDispatchesForHelper(setup.root, setup.runDir, setup.runId), 1);
   assert.ok(!existsSync(claimAbs), 'the dead claim is cleared');
-  assert.equal(readWorkspaceLease(setup.root), null, 'the pid-less reservation is reclaimed');
-  const recovered = readEventsStrict(setup.runDir).find((e) => e.type === 'workspace_lease_recovered')!;
-  assert.ok(recovered, 'the reclaim is audited');
-  assert.equal((recovered.extra.previous_holder as { id: string }).id, holder.id);
+  assert.equal(readWorkspaceLease(setup.root), null, 'no writer lease was ever taken to reclaim');
+  // No `workspace_lease_recovered` row: there is no reservation to reclaim, so
+  // recovery's whole job is the terminal receipt the interrupted attempt never
+  // wrote. The audit rows existed only to explain a reclaim.
+  assert.ok(!readEventsStrict(setup.runDir).some((e) => e.type === 'workspace_lease_recovered'),
+    'recovery reclaims nothing and therefore audits nothing');
+  assert.ok(readEventsStrict(setup.runDir).some((e) => e.type === 'tool_failed' && e.extra.recovered === true),
+    'what it does write is the missing terminal receipt');
 
   const retry = runToolRun({ repoRoot: setup.root, run: setup.runId });
   assert.equal(retry.status, 'passed');
@@ -190,62 +204,23 @@ test('a pre-supervisor lease reservation blocks other writers and is reclaimed o
   assert.equal(runVerify({ repoRoot: setup.root, run: setup.runId }).findings.find((f) => f.check === 'tool-lifecycle')?.status, 'ok');
 });
 
-test('the pre-supervisor lease reservation names no process at all', async (t) => {
+test('a tool attempt writes no workspace lease at all', (t) => {
+  // REPLACED. This used to sample `workspace-lease.json` a hundred times a
+  // second through a deliberately-slowed helper boot, to prove the pre-spawn
+  // reservation named NO process until the supervisor could name the executor
+  // — because a record naming the short-lived helper would read as abandoned
+  // the instant it exited, while its detached executor kept writing.
+  //
+  // That shape was the least-bad answer to an unanswerable question, and the
+  // question is gone with the reservation. The property worth asserting now is
+  // the simple one: running a tool creates no lease file, so there is nothing
+  // for a reader to misjudge the liveness of.
   const setup = seedToolRepo(t, { test_runner: { command: ECHO_HELLO } });
-  const leasePath = join(setup.root, '.fadeno', 'local', 'workspace-lease.json');
-
-  // The window under test — reservation taken, supervisor not yet started — is
-  // normally the tens of milliseconds it takes to boot node, which is a race to
-  // observe rather than a fact to assert. Delaying every node boot by a second
-  // makes it a second wide, so what the reader below sees is determined by the
-  // code rather than by the scheduler.
-  const delayPath = join(setup.root, 'slow-boot.cjs');
-  writeFileSync(delayPath, `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);\n`);
-
-  const stopPath = join(setup.root, 'sampler-stop');
-  const sampler = spawn('node', ['-e', `
-    const fs = require('fs');
-    const [leasePath, stopPath] = process.argv.slice(1);
-    const deadline = Date.now() + 60000;
-    const seen = [];
-    let reads = 0;
-    while (Date.now() < deadline && !fs.existsSync(stopPath)) {
-      let record;
-      try { record = JSON.parse(fs.readFileSync(leasePath, 'utf8')); } catch { continue; }
-      reads += 1;
-      if (!record || !record.holder || !String(record.holder.id).startsWith('tool:')) continue;
-      const shape = [record.supervisor_pid, record.executor_pid, record.process_group_id]
-        .map((pid) => (pid == null ? 'null' : String(pid))).join(',');
-      if (seen[seen.length - 1] !== shape) seen.push(shape);
-    }
-    process.stdout.write(JSON.stringify({ reads, seen }));
-  `, leasePath, stopPath], { stdio: ['ignore', 'pipe', 'pipe'] });
-  const sampled = collect(sampler);
-
-  const helper = spawn('node', [SOURCE_CLI, 'tool-run', setup.runId], {
-    cwd: setup.root,
-    env: { ...process.env, NODE_OPTIONS: `--require ${delayPath}` },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const helperPid = helper.pid!;
-  const finished = await collect(helper);
-  writeFileSync(stopPath, '');
-  assert.equal(finished.code, 0, finished.stderr);
-
-  const observed = JSON.parse((await sampled).stdout) as { reads: number; seen: string[] };
-  assert.ok(observed.reads > 100, `the reader really sampled the lease (${observed.reads} reads)`);
-  // A record naming the helper as its supervisor, with no executor and no
-  // group, is exactly the shape a reader proves abandoned the moment the helper
-  // exits — while its detached executor may still be writing. The reservation
-  // must name nothing until the supervisor can name the executor.
-  assert.equal(observed.seen[0], 'null,null,null',
-    `the reservation is pid-less before the supervisor publishes identity (saw ${JSON.stringify(observed.seen)})`);
-  const published = observed.seen.findIndex((shape) => shape.split(',')[1] !== 'null');
-  assert.ok(published > 0, `the supervisor then publishes executor identity (${JSON.stringify(observed.seen)})`);
-  const namesHelper = observed.seen.findIndex((shape) => shape.split(',')[0] === String(helperPid));
-  assert.ok(namesHelper === -1 || namesHelper > published,
-    `the helper only names itself once it has taken the attempt back (${JSON.stringify(observed.seen)})`);
-  assert.equal(readEffectiveLease(setup.root), null, 'and the completed attempt released it');
+  assert.equal(runToolRun({ repoRoot: setup.root, run: setup.runId }).status, 'passed');
+  assert.equal(existsSync(join(setup.root, '.fadeno', 'local', 'workspace-lease.json')), false,
+    'no repo-wide reservation is written by a tool attempt');
+  assert.equal(readWorkspaceLease(setup.root), null);
+  assert.equal(toolWindowOpen(setup.root, setup.runId), false, 'and the completed attempt closed its window');
 });
 
 test('a helper stopped after its child exits but before attribution still owns the attempt, and the second helper cannot re-run it', async (t) => {
@@ -310,7 +285,7 @@ test('a helper stopped after its child exits but before attribution still owns t
   assert.equal(sha256Hex(onDisk), created[0]!.extra.sha256);
   assert.equal(JSON.parse(onDisk).status, 'passed');
   assert.ok(!existsSync(claimPath), 'the owner releases its claim with the terminal receipt');
-  assert.equal(readEffectiveLease(setup.root), null, 'and its lease');
+  assert.equal(toolWindowOpen(setup.root, setup.runId), false, 'and its window');
   assert.equal(runVerify({ repoRoot: setup.root, run: setup.runId }).findings.find((f) => f.check === 'tool-lifecycle')?.status, 'ok');
 });
 
@@ -456,7 +431,7 @@ test('a failed attribution keeps the sidecar bytes, leaves no planned artifact, 
   assert.ok(!events.some((e) => e.type === 'artifact_created'));
   assert.ok(!events.some((e) => e.type === 'tool_completed'));
   assert.ok(!existsSync(liveClaimFile(setup.root, setup.runId)), 'the claim is released');
-  assert.equal(readEffectiveLease(setup.root), null, 'the lease is released');
+  assert.equal(toolWindowOpen(setup.root, setup.runId), false, 'the window is closed');
 
   const next = runNext({ run: setup.runId, repoRoot: setup.root });
   assert.equal(next.status, 'ready');
@@ -526,24 +501,38 @@ test('stale sidecar bytes from a crashed attempt never cause a false concurrent-
   assert.equal(created.extra.details_sha256, sha256Hex(readFileSync(join(parked.runDir, payload.details_path))));
 });
 
-test('a timed-out attempt leaves its recorded process group dead (ESRCH) and attempt 2 succeeds', async (t) => {
-  const setup = seedToolRepo(t, { test_runner: { command: HANGS_ONCE, timeout_ms: 1500 } });
+test('a CANCELLED attempt leaves its recorded process group dead (ESRCH) and attempt 2 succeeds', async (t) => {
+  // INVERTED. This used to hang a tool under `timeout_ms: 1500` and assert the
+  // kernel killed it at the deadline. No deadline is armed any more, so the
+  // same end state is now reached the only way it should ever have been: a
+  // human decides. `fadeno cancel` sends SIGTERM to the recorded process
+  // group, and the escalation to SIGKILL after KILL_GRACE_MS is unchanged —
+  // cancellation is a decision, and decisions survived the removal.
+  const setup = seedToolRepo(t, { test_runner: { command: HANGS_ONCE } });
   const claimPath = liveClaimFile(setup.root, setup.runId);
   const child = startSourceCli(['tool-run', setup.runId], setup.root);
   const finished = collect(child);
 
   await waitUntil(() => (readClaim(claimPath)?.executor_pid ?? null) != null, 'the supervisor to publish an executor pid');
   const claim = readClaim(claimPath)!;
-  const group = claim.process_group_id ?? claim.executor_pid;
+  const group = (claim.process_group_id ?? claim.executor_pid) as number;
   assert.ok(typeof group === 'number' && group > 0, 'the claim records a process group to kill');
 
+  // The decision. `runCancel` reads the same claim a reporter reads. With the
+  // supervisor still alive it signals the supervisor, which is what reaps the
+  // whole detached group; the group itself is the fallback when the supervisor
+  // is already gone.
+  const cancelled = runCancel({ run: setup.runId, repoRoot: setup.root });
+  assert.equal(cancelled.resolvedBy, 'supervisor');
+  assert.equal(cancelled.signalledPid, claim.supervisor_pid);
+  assert.equal(cancelled.processGroupId, group, 'and the receipt names the group it will reap');
+
   const result = await finished;
-  assert.equal(result.code, 1, `the timed-out attempt is an infrastructure failure: ${result.stderr}`);
-  assert.match(result.stderr + result.stdout, /timed out/);
+  assert.notEqual(result.code, 0, `a cancelled attempt is not a success: ${result.stderr}`);
 
   await waitUntil(() => isEsrch(-group) && isEsrch(group), 'the executor process group to be reaped');
   assert.ok(!existsSync(claimPath), 'the claim of a dead attempt is withdrawn');
-  assert.ok(!existsSync(join(setup.runDir, 'artifacts/test-result.json')), 'a timeout never writes the planned artifact');
+  assert.ok(!existsSync(join(setup.runDir, 'artifacts/test-result.json')), 'a cancellation never writes the planned artifact');
 
   const retry = runToolRun({ repoRoot: setup.root, run: setup.runId });
   assert.equal(retry.attempt, 2, 'the retry is a new attempt ordinal');
@@ -555,7 +544,7 @@ test('a timed-out attempt leaves its recorded process group dead (ESRCH) and att
   assert.equal(runVerify({ repoRoot: setup.root, run: setup.runId }).findings.find((f) => f.check === 'tool-lifecycle')?.status, 'ok');
 });
 
-test('a lost supervisor with a possibly-live executor keeps claim and lease and blocks retry until the group is dead', async (t) => {
+test('a lost supervisor with a possibly-live executor keeps its claim and blocks retry until the group is dead', async (t) => {
   const setup = seedToolRepo(t, { test_runner: { command: HANGS_ONCE } });
   const claimPath = liveClaimFile(setup.root, setup.runId);
   const child = startSourceCli(['tool-run', setup.runId], setup.root);
@@ -577,12 +566,11 @@ test('a lost supervisor with a possibly-live executor keeps claim and lease and 
   const events = readEventsStrict(setup.runDir);
   assert.ok(!events.some((e) => e.type === 'tool_completed'));
   assert.ok(!events.some((e) => e.type === 'artifact_created'));
-  const lease = readEffectiveLease(setup.root);
-  // The helper is dead by now, so a record naming *it* as the supervisor would
-  // read as abandoned and stop blocking — whichever side of the supervisor's
-  // first publish the kill landed on.
-  assert.ok(lease != null && lease.holder.id.startsWith(`tool:${setup.runId}:test:g1:`), 'the writer lease is retained');
-  assert.notEqual(lease!.supervisor_pid, helperPid, 'and never reserved under the helper\'s own pid');
+  // The window stays OPEN: the helper died before its terminal receipt, so
+  // nothing closed it. That is the honest record — and, unlike the writer
+  // lease it replaces, an open window refuses nobody. It makes the next
+  // delivery isolate; it cannot make it fail.
+  assert.ok(toolWindowOpen(setup.root, setup.runId), 'the interrupted attempt leaves its window open');
 
   assert.throws(
     () => runToolRun({ repoRoot: setup.root, run: setup.runId }),
@@ -620,18 +608,21 @@ test('command-binding tampering is caught against the run snapshot', (t) => {
   assert.match(finding.detail, /digest|binding|argv/);
 });
 
-test('--timeout overrides the registry deadline and --timeout 0 disables it', (t) => {
-  const overridden = seedToolRepo(t, { test_runner: { command: ['sleep', '60'], timeout_ms: 300000 } });
-  const started = Date.now();
-  assert.throws(() => runToolRun({ repoRoot: overridden.root, run: overridden.runId, timeout: '1' }), (err) => err instanceof ToolRunError);
-  assert.ok(Date.now() - started < 10000, 'the override deadline, not the registry one, ended the attempt');
-  const dispatched = readEventsStrict(overridden.runDir).find((e) => e.type === 'tool_dispatched')!;
-  assert.equal(dispatched.extra.timeout_ms, 1000);
-
-  const disabled = seedToolRepo(t, { test_runner: { command: exitsWith(0), timeout_ms: 1000 } });
-  assert.equal(runToolRun({ repoRoot: disabled.root, run: disabled.runId, timeout: '0' }).status, 'passed');
-  const noDeadline = readEventsStrict(disabled.runDir).find((e) => e.type === 'tool_dispatched')!;
-  assert.ok(!('timeout_ms' in noDeadline.extra) || noDeadline.extra.timeout_ms == null);
+test('a registry timeout_ms is read, never armed, and never lands on a receipt', (t) => {
+  // INVERTED. This used to assert that `--timeout 1` killed a `sleep 60` in
+  // under ten seconds and stamped `timeout_ms: 1000` on the dispatch row.
+  // Both halves are gone: the flag does not exist, and no deadline is armed
+  // from any source. The registry key is still ACCEPTED — catalogs written
+  // before the removal declare it, and refusing would break them over
+  // something inert — so what is asserted now is that declaring it changes
+  // nothing about the attempt or its evidence.
+  const declared = seedToolRepo(t, { test_runner: { command: exitsWith(0), timeout_ms: 1000 } });
+  assert.equal(runToolRun({ repoRoot: declared.root, run: declared.runId }).status, 'passed',
+    'a declared deadline does not stop a tool that finishes');
+  const dispatched = readEventsStrict(declared.runDir).find((e) => e.type === 'tool_dispatched')!;
+  assert.ok(!('timeout_ms' in dispatched.extra), 'no deadline is recorded on the dispatch row');
+  const completed = readEventsStrict(declared.runDir).find((e) => e.type === 'tool_completed')!;
+  assert.ok(completed != null, 'and the attempt reaches a terminal receipt');
 });
 
 test('show and cancel see this run\'s tool claim and no other run\'s', (t) => {
@@ -795,10 +786,8 @@ test('two tool-runs racing recovery over the same dead attempt append exactly on
       supervisor_claim: claimRel,
       workspace_mode: 'shared',
     }, new Date());
-    const holder = { id: `tool:${setup.runId}:test:g1:a1`, kind: 'engine' as const, runId: setup.runId, dispatchId: 'tc-test-g1:a1' };
-    acquireWorkspaceLease({
-      repoRoot: setup.root, workspaceMode: 'shared', holder,
-      supervisorPid: null, executorPid: null, processGroupId: null,
+    openDispatchWindow(setup.root, {
+      dispatchId: `tool:${setup.runId}:test:g1:a1`, runId: setup.runId, kind: 'engine', workspaceMode: 'shared',
     });
 
     const barrierPath = join(setup.root, 'recovery-barrier.cjs');

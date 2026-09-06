@@ -13,34 +13,18 @@ import {
   runDispatch,
   DISPATCHES_FILE,
 } from '../src/commands/dispatch.ts';
-import {
-  WORKSPACE_LEASE_FILE,
-  acquireWorkspaceLease,
-  heartbeatWorkspaceLease,
-  readWorkspaceLease,
-  releaseWorkspaceLease,
-  isWorkspaceLeaseAlive,
-  readEffectiveLease,
-  createIsolatedWorktree,
-  collectIsolatedDiff,
-  removeIsolatedWorktree,
-  withIsolatedWorktree,
-  WorkspaceLeaseError,
-} from '../src/lib/workspace-lease.ts';
+import { createIsolatedWorktree, collectIsolatedDiff, removeIsolatedWorktree, withIsolatedWorktree } from '../src/lib/workspace-isolation.ts';
+import { WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
+import { openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
 import {
   readSupervisorStatus,
   readInflightClaim,
+  inflightClaimIsAlive,
   superviseArgv,
   supervisedSpawnError,
   SPAWN_FAILED_MARKER,
 } from '../src/lib/supervisor.ts';
 
-function aliveProbe(): void {}
-function deadProbe(): void {
-  const err = new Error('gone') as NodeJS.ErrnoException;
-  err.code = 'ESRCH';
-  throw err;
-}
 
 function seedCatalog(root: string, extra: Record<string, unknown> = {}): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
@@ -80,6 +64,16 @@ function evidenceRows(root: string): Record<string, unknown>[] {
 // ---------------------------------------------------------------------------
 // Diagnostics: bounded opt-in, head+tail, marker, atomic, machine-local
 // ---------------------------------------------------------------------------
+
+// The lease crash-boundary tests that stood here — acquire-crash-before-write,
+// acquire-crash-after-tmp-rename, heartbeat-crash, release-crash-partial-holders,
+// reclaim-after-dead-supervisor, pid-less-host-survives-deadProbe — are gone
+// with the lease. Five of the six asserted that a repo-wide reservation stayed
+// valid JSON across a crash; the sixth asserted the behaviour that made the
+// mechanism unfixable, namely that a pid-less host holder survives a probe
+// proving nothing is alive. There is no reservation to keep intact any more.
+// What a crash must still not lose is the in-flight CLAIM, and that is
+// asserted below.
 
 test('diagnostics: not persisted by default, only byte counters remain', (t) => {
   const root = tempRepo(t);
@@ -200,19 +194,18 @@ test('diagnostics: never gates control flow, bounded buffers', (t) => {
 // Isolated delivery lifecycle — detached worktree, never auto-merge
 // ---------------------------------------------------------------------------
 
-test('isolated dispatch: creates diff, omits workspace_changed, bypasses lease', (t) => {
+test('isolated dispatch: creates diff, omits workspace_changed, leaves the shared tree alone', (t) => {
   const root = tempRepo(t);
   initGit(root);
   seedCatalog(root, {
     models: { 'echo-worker': { provider: 'openai', id: 'echo-worker' } },
     harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'require(\'node:fs\').writeFileSync(\'isolated.txt\',\'hello\');'] } },
   });
-  // hold shared lease to prove bypass
-  // A LIVE holder: pid 99999 was dead by the kernel's own probe, and a dead
-  // lease is reclaimed by the next window — which is not a bypass failure,
-  // it is liveness working. Bypass means not waiting on a writer that is
-  // really there.
-  acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'blocker', kind: 'ad-hoc' }, supervisorPid: process.pid, probe: aliveProbe });
+  // Another delivery is writing the shared tree. It used to hold a lease that
+  // this dispatch had to be shown to bypass; now it holds nothing, and what is
+  // asserted instead is the thing that actually matters — the isolated
+  // dispatch's write does not reach the shared tree.
+  openDispatchWindow(root, { dispatchId: 'blocker', kind: 'ad-hoc', workspaceMode: 'shared' });
   const result = runDispatch({ archetype: 'worker', prompt: 'isolated-task', isolate: true, repoRoot: root, userPathOptions: { env: { FADENO_HARNESS: 'standalone' } } });
   // diff must be present
   const rows = evidenceRows(root);
@@ -225,9 +218,12 @@ test('isolated dispatch: creates diff, omits workspace_changed, bypasses lease',
   assert.equal('workspace_changed' in completed, false, 'workspace_changed must be omitted for isolated deliveries');
   // not auto-merged
   assert.equal(existsSync(join(root, 'isolated.txt')), false, 'isolated write must not leak to shared worktree');
-  // lease still held by blocker
-  assert.ok(existsSync(join(root, WORKSPACE_LEASE_FILE)));
-  assert.equal(readWorkspaceLease(root)?.holder.id, 'blocker');
+  // No lease file was created by any of this: nothing takes one any more.
+  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false, 'no dispatch may write a writer lease');
+  // The neighbour's window is still open and this dispatch's is closed.
+  const windows = readDispatchWindows(root).windows;
+  assert.ok(windows.some((w) => w.dispatchId === 'blocker' && w.endedAt == null), "the neighbour's window stays open");
+  assert.ok(windows.some((w) => w.dispatchId === result.dispatchId && w.endedAt != null), 'this dispatch closed its own');
 });
 
 test('an isolated dispatch and its shadow keep separate worktrees with separate lifetimes', (t) => {
@@ -272,111 +268,36 @@ test('isolated dispatch: empty diff is 0 bytes and preserved', (t) => {
 // Crash-boundary — hermetic, tempRepo, injected probe/now, valid JSON
 // ---------------------------------------------------------------------------
 
-test('acquire-crash-before-write', (t) => {
+test('supervisor-killed: the claim survives so the orphaned group stays cancellable', async (t) => {
+  // The lease half of this test is gone; the claim half is the half that was
+  // ever load-bearing. A SIGKILLed supervisor cannot reap its detached
+  // executor, and `fadeno cancel` needs a pid to signal — so the claim must
+  // outlive the supervisor, and it must still name the live process group.
   const root = tempRepo(t);
-  // No file before any acquire — crash before write leaves no torn file
-  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false);
-  acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'owner', kind: 'ad-hoc' }, supervisorPid: 1, probe: aliveProbe });
-  const raw = readFileSync(join(root, WORKSPACE_LEASE_FILE), 'utf8');
-  assert.doesNotThrow(() => JSON.parse(raw), 'valid JSON after acquire');
-});
-
-test('acquire-crash-after-tmp-rename', (t) => {
-  const root = tempRepo(t);
-  for (let i = 0; i < 3; i += 1) {
-    acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'a', kind: 'ad-hoc' }, supervisorPid: 1, probe: aliveProbe, now: new Date(`2026-08-17T00:00:0${i}Z`) });
-    const raw = readFileSync(join(root, WORKSPACE_LEASE_FILE), 'utf8');
-    assert.doesNotThrow(() => JSON.parse(raw), 'atomic tmp+rename must never expose torn JSON');
-    assert.ok(!existsSync(join(root, WORKSPACE_LEASE_FILE + '.tmp')), 'no temp left behind');
-  }
-});
-
-test('heartbeat-crash', (t) => {
-  const root = tempRepo(t);
-  acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'hb', kind: 'ad-hoc' }, supervisorPid: 1, probe: aliveProbe });
-  heartbeatWorkspaceLease({ repoRoot: root, holderId: 'hb', stdoutBytes: 10, probe: aliveProbe });
-  const raw = readFileSync(join(root, WORKSPACE_LEASE_FILE), 'utf8');
-  assert.doesNotThrow(() => JSON.parse(raw));
-  assert.equal((JSON.parse(raw) as any).stdout_bytes, 10);
-});
-
-test('release-crash-partial-holders', (t) => {
-  const root = tempRepo(t);
-  const first = { id: 'a', kind: 'host-dispatch' as const, runId: 'run-a', dispatchId: 'a' };
-  const second = { id: 'b', kind: 'host-dispatch' as const, runId: 'run-a', dispatchId: 'b' };
-  const now = new Date('2026-08-17T00:00:00Z').toISOString();
-  const legacy = {
-    workspace_mode: 'shared' as const,
-    holder: first,
-    holders: [first, second],
-    holder_started_at: { [JSON.stringify(['host-dispatch','a','run-a','a'])]: now, [JSON.stringify(['host-dispatch','b','run-a','b'])]: now },
-    holder_heartbeat_at: { [JSON.stringify(['host-dispatch','a','run-a','a'])]: now, [JSON.stringify(['host-dispatch','b','run-a','b'])]: now },
-    supervisor_pid: null,
-    executor_pid: null,
-    process_group_id: null,
-    started_at: now,
-    heartbeat_at: now,
-    last_output_at: null,
-    stdout_bytes: 0,
-    stderr_bytes: 0,
-  };
-  const abs = join(root, WORKSPACE_LEASE_FILE);
-  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
-  writeFileSync(abs, JSON.stringify(legacy, null, 2));
-  releaseWorkspaceLease({ repoRoot: root, holder: second });
-  const raw = readFileSync(join(root, WORKSPACE_LEASE_FILE), 'utf8');
-  assert.doesNotThrow(() => JSON.parse(raw));
-  const parsed = JSON.parse(raw) as any;
-  assert.equal(parsed.holders.length, 1);
-});
-
-test('reclaim-after-dead-supervisor', (t) => {
-  const root = tempRepo(t);
-  acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'stale', kind: 'ad-hoc' }, supervisorPid: 99, probe: aliveProbe });
-  const reclaimed = acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'fresh', kind: 'ad-hoc' }, supervisorPid: 100, probe: deadProbe });
-  assert.equal(reclaimed?.holder.id, 'fresh');
-  assert.doesNotThrow(() => JSON.parse(readFileSync(join(root, WORKSPACE_LEASE_FILE), 'utf8')));
-});
-
-test('pid-less-host-survives-deadProbe', (t) => {
-  const root = tempRepo(t);
-  const holder = { id: 'dispatch-1', kind: 'host-dispatch' as const, runId: 'run-a', dispatchId: 'dispatch-1' };
-  acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder, supervisorPid: null });
-  assert.equal(isWorkspaceLeaseAlive(readWorkspaceLease(root), deadProbe), true);
-  assert.equal(readEffectiveLease(root, deadProbe)?.holder.id, 'dispatch-1');
-  assert.doesNotThrow(() => JSON.parse(readFileSync(join(root, WORKSPACE_LEASE_FILE), 'utf8')));
-});
-
-test('supervisor-killed-atomics-lease-preserved', async (t) => {
-  const root = tempRepo(t);
-  const claimPath = join(root, 'lease-killed-claim.json');
-  const statusPath = join(root, 'lease-killed-claim.status.json');
-  const leasePath = join(root, 'workspace-lease.json');
-  const lockPath = join(root, '.workspace-lease.lock');
-  const holder = { id: 'kill-test', kind: 'engine' as const, runId: 'run-kill', dispatchId: 'dispatch-kill' };
-  writeFileSync(leasePath, JSON.stringify({ holder, workspace_mode: 'shared', supervisor_pid: 99999, started_at: new Date().toISOString(), heartbeat_at: new Date().toISOString(), stdout_bytes: 0, stderr_bytes: 0, last_output_at: null }));
+  const claimPath = join(root, 'killed-claim.json');
+  const statusPath = join(root, 'killed-claim.status.json');
   const { spawn } = await import('node:child_process');
-  const child = spawn(process.execPath, superviseArgv([process.execPath, '-e', "setTimeout(()=>process.exit(0), 5000)"], claimPath, statusPath, { leasePath, lockPath, holder }), { stdio: 'ignore' });
+  const child = spawn(process.execPath, superviseArgv([process.execPath, '-e', "setTimeout(()=>process.exit(0), 5000)"], claimPath, statusPath), { stdio: 'ignore' });
   const deadline = Date.now() + 5_000;
-  let liveLease: any = null;
+  let claim: any = null;
   while (Date.now() < deadline) {
-    try { liveLease = JSON.parse(readFileSync(leasePath, 'utf8')); } catch {}
-    if (liveLease?.supervisor_pid === child.pid && typeof liveLease?.process_group_id === 'number') break;
+    try { claim = JSON.parse(readFileSync(claimPath, 'utf8')); } catch {}
+    if (claim?.supervisor_pid === child.pid && typeof claim?.process_group_id === 'number') break;
     await new Promise((r) => setTimeout(r, 50));
   }
-  assert.equal(liveLease?.supervisor_pid, child.pid, 'supervisor must replace the pid-less reservation with its pid');
-  assert.equal(typeof liveLease?.executor_pid, 'number');
-  assert.equal(liveLease?.process_group_id, liveLease?.executor_pid);
+  assert.equal(claim?.supervisor_pid, child.pid, 'the supervisor publishes its own pid — spawnSync yields it too late');
+  assert.equal(typeof claim?.executor_pid, 'number');
+  assert.equal(claim?.process_group_id, claim?.executor_pid);
   try { process.kill(child.pid!, 'SIGKILL'); } catch {}
   await new Promise<void>((resolve) => child.once('close', () => resolve()));
   await new Promise((r) => setTimeout(r, 200));
   assert.ok(existsSync(claimPath), 'claim must remain so the orphaned executor group stays cancellable');
-  const preserved = JSON.parse(readFileSync(leasePath, 'utf8'));
-  assert.doesNotThrow(() => JSON.parse(readFileSync(leasePath, 'utf8')), 'lease must remain valid JSON after supervisor kill');
-  assert.equal(isWorkspaceLeaseAlive(preserved), true, 'live detached executor group must keep the lease blocking');
-  try { process.kill(-preserved.process_group_id, 'SIGKILL'); } catch {}
+  const preserved = readInflightClaim(claimPath, (p) => readFileSync(p, 'utf8'))!;
+  assert.ok(preserved != null, 'and must still parse');
+  assert.equal(inflightClaimIsAlive(preserved), true, 'a live detached group means the attempt is still running');
+  try { process.kill(-preserved.processGroupId!, 'SIGKILL'); } catch {}
   await new Promise((r) => setTimeout(r, 200));
-  assert.equal(isWorkspaceLeaseAlive(preserved), false, 'lease becomes reclaimable only after the executor group is gone');
+  assert.equal(inflightClaimIsAlive(preserved), false, 'and dead only once the group is actually gone');
 });
 
 test('supervisor-spawn-failed-127-distinguished', () => {

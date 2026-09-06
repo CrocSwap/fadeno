@@ -24,7 +24,13 @@ export type EligibilityState = 'eligible' | 'shadow_only' | 'forbidden';
 export interface CommandExecutorSpec {
   adapter: 'command';
   command: string[];
-  /** Hard deadline in milliseconds; null when absent (no deadline). */
+  /**
+   * Read, carried through snapshots, and NEVER armed. Fadeno stopped running
+   * executors under a deadline; a catalog that still declares `timeout_ms`
+   * loads with a note rather than a refusal, and this field is what the note
+   * is about. Nothing reads it to schedule anything — see
+   * `IGNORED_DEADLINE_NOTE_TOKEN`.
+   */
   timeoutMs?: number | null;
   /** Optional metadata recorded in dispatch evidence; never alters `command`. */
   model: string | null;
@@ -739,6 +745,7 @@ export function hostCandidateOf(compiled: CompiledDelivery | null, spec: Executo
 
 export interface ToolSpec {
   command: string[];
+  /** Read and never armed; see `CommandExecutorSpec.timeoutMs`. */
   timeoutMs?: number | null;
 }
 
@@ -1142,6 +1149,32 @@ function nextArchetypeFallback(
  * "same harness?" at resolution time. Nothing about the catalog itself varies
  * with it.
  */
+/**
+ * The sentence every ignored-deadline loader note ends with.
+ *
+ * Exported because it has three consumers that must agree exactly: the notes
+ * built below, `doctor`'s warning channel (via `ignoredDeadlineFindings` in
+ * `catalog-rot.ts`), and the docs-claims test that pairs the documented
+ * sentence with the code that emits it. A drifting spelling would not error —
+ * doctor would simply stop surfacing the note, which is the silent-wrong-answer
+ * shape this token exists to prevent.
+ */
+export const IGNORED_DEADLINE_NOTE_TOKEN =
+  'is ignored — Fadeno no longer runs executors under a deadline';
+
+/**
+ * A `timeout_ms` / `timeout` declaration that is read and never armed.
+ *
+ * Not a refusal. Catalogs written before deadlines were removed declare the
+ * key — this repo's own carried 25 of them — and refusing would turn a
+ * harmless stale key into a load-time failure of every command. It is parsed
+ * (so a malformed value is still an error, exactly as before), carried through
+ * snapshots for round-trip fidelity, and never handed to a supervisor.
+ */
+function ignoredDeadlineNote(source: string, label: string): string {
+  return `${source}: ${label} ${IGNORED_DEADLINE_NOTE_TOKEN} (a clock cannot tell slow from stuck); delete the key. End a long attempt with \`fadeno cancel\`.`;
+}
+
 export function parseExecutorProfile(text: string, source: string, host: HarnessId = 'standalone'): ExecutorProfile {
   let doc: unknown;
   try {
@@ -1351,6 +1384,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
             throw new ExecutorProfileError(`${source}: ${laneLabel}.timeout_ms must be a positive integer (milliseconds).`);
           }
           lane.timeout_ms = tm;
+          notes.push(ignoredDeadlineNote(source, `${laneLabel}.timeout_ms`));
         }
         const laneEligibility = readEligibility(rawLane, laneLabel, source);
         if (Object.keys(laneEligibility).length > 0) lane.eligibility = laneEligibility;
@@ -1634,6 +1668,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
           throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout_ms\` must be a positive integer (milliseconds).`);
         }
         timeoutMs = tm;
+        notes.push(ignoredDeadlineNote(source, `tool "${name}".timeout_ms`));
       }
       if (raw.timeout !== undefined) {
         if (timeoutMs != null) {
@@ -1644,6 +1679,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
           throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout\` must be a positive integer (seconds).`);
         }
         timeoutMs = tm * 1000;
+        notes.push(ignoredDeadlineNote(source, `tool "${name}".timeout`));
       }
       tools[name] = { command: cmd as string[], ...(timeoutMs != null ? { timeoutMs } : {}) };
     }

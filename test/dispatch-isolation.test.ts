@@ -4,13 +4,9 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { tempRepo } from './helpers.ts';
-import {
-  WORKSPACE_LEASE_FILE,
-  acquireWorkspaceLease,
-  collectIsolatedDiff,
-  createIsolatedWorktree,
-  removeIsolatedWorktree,
-} from '../src/lib/workspace-lease.ts';
+import { collectIsolatedDiff, createIsolatedWorktree, removeIsolatedWorktree } from '../src/lib/workspace-isolation.ts';
+import { WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
+import { openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
 
 function initGit(root: string): void {
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@invalid' };
@@ -24,7 +20,6 @@ function initGit(root: string): void {
   run(['commit', '-m', 'init']);
 }
 
-function aliveProbe(): void {}
 
 test('isolated worktree is cut from HEAD and preserves dirty workspace', (t) => {
   const root = tempRepo(t);
@@ -64,18 +59,22 @@ test('isolated worktree is cut from HEAD and preserves dirty workspace', (t) => 
   assert.equal(existsSync(join(root, 'isolated.txt')), false);
 });
 
-test('isolated worktree bypasses shared-writer lease', (t) => {
+test('an isolated worktree is cut while another writer is in the shared tree', (t) => {
   const root = tempRepo(t);
   initGit(root);
-  // hold shared lease with a live pid
-  acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'owner', kind: 'ad-hoc' }, supervisorPid: 99999, probe: aliveProbe });
-  assert.ok(existsSync(join(root, WORKSPACE_LEASE_FILE)));
-  // isolated creation must succeed even while shared lease is held
+  // A neighbour writing the shared tree. It used to hold a lease this had to
+  // be shown to bypass; the bypass is now structural rather than a special
+  // case, so what is asserted is that cutting a worktree neither consults nor
+  // creates any repo-wide state.
+  openDispatchWindow(root, { dispatchId: 'owner', kind: 'ad-hoc', workspaceMode: 'shared' });
   const wtPath = join(root, '.fadeno', 'local', 'isolated', 'bypass-1');
   const created = createIsolatedWorktree({ repoRoot: root, worktreePath: wtPath });
   assert.ok(existsSync(created.worktreeAbs));
-  // lease still held, untouched
-  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), true);
+  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false, 'no writer lease is written or required');
+  assert.ok(
+    readDispatchWindows(root).windows.some((w) => w.dispatchId === 'owner' && w.endedAt == null),
+    "the neighbour's window is untouched",
+  );
   removeIsolatedWorktree(root, created.worktreeAbs);
 });
 
@@ -98,7 +97,7 @@ test('isolated diff is binary-safe and preserved as artifact', (t) => {
   removeIsolatedWorktree(root, created.worktreeAbs);
 });
 
-test('non-git repo fails with WorkspaceLeaseError and does not create worktree', (t) => {
+test('non-git repo fails with WorkspaceIsolationError and does not create worktree', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   const wtPath = join(root, '.fadeno', 'local', 'isolated', 'no-git');
@@ -161,7 +160,7 @@ test('isolated-worktree-killed-diff-still-collectable: diff collectable after si
 test('isolated-diff-failure-preserves-worktree: worktree preserved when diff collection fails', async (t) => {
   const root = tempRepo(t);
   initGit(root);
-  const { withIsolatedWorktree: withWT, removeIsolatedWorktree: rmWT, createIsolatedWorktree: createWT } = await import('../src/lib/workspace-lease.ts');
+  const { withIsolatedWorktree: withWT, removeIsolatedWorktree: rmWT, createIsolatedWorktree: createWT } = await import('../src/lib/workspace-isolation.ts');
   const wtPath = join(root, '.fadeno', 'local', 'isolated', 'preserve-1');
   const created = createWT({ repoRoot: root, worktreePath: wtPath });
   writeFileSync(join(created.worktreeAbs, 'preserve.txt'), 'preserve me\n');

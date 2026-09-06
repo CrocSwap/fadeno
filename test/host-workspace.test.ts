@@ -434,7 +434,7 @@ test('withHostWorkspaceLock cleans up even after error', (t) => {
 test('isRegisteredWorktree proves exact registered worktree', async (t) => {
   const root = tempRepo(t);
   initGit(root);
-  const { isRegisteredWorktree } = await import('../src/lib/workspace-lease.ts');
+  const { isRegisteredWorktree } = await import('../src/lib/workspace-isolation.ts');
   const { prepareHostWorkspace, HOST_WORKTREES_DIR } = await import('../src/lib/host-workspace.ts');
   const { state } = prepareHostWorkspace({ repoRoot: root, run: 'r1', dispatchId: 'd1' });
   const wtAbs = join(root, state.workspace);

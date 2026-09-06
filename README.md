@@ -313,7 +313,6 @@ fadeno runs                                     # list run ledgers (newest first
 fadeno show <run-id-or-prefix>                  # logical-step projection (--events for the raw timeline)
 fadeno verify <run-id>                          # recompute the ledger's checkable claims; exit 0/1 (--latest for newest)
 fadeno drive <run-id>                           # engine: advance until terminal or a human pause (uses .fadeno/executors.yaml)
-fadeno drive <run-id> --timeout 300             # override hard deadline (seconds; 0 disables 20-min default)
 fadeno cancel <run-id>                          # cancel the active engine attempt (SIGTERM to its executor group)
 fadeno decide <run-id> <option>                 # resolve a paused human decision, then re-drive
 fadeno dispatch-prepare <run-id> <dispatch-id> --isolate  # opt-in worktree with the caller's dirty state replayed as its baseline
@@ -374,14 +373,16 @@ elapsed time and total run time. When progress exists, the view includes its
 phase and current action; it never infers internal state from busy/idle alone.
 Machine-local command facts are shown separately as harness-observed,
 non-gating state: process group and child PIDs, liveness, heartbeat/output age,
-byte counts, and terminal exit or signal where available. Command lanes default
-to a 20-minute hard deadline (`timeout_ms: 1200000`); override per invocation
-with `fadeno drive --timeout <seconds>` or `fadeno dispatch --timeout <seconds>`
-(`0` disables). A supervised timeout is recorded as `actor_failed.reason =
-"executor_timeout"` (engine) or `dispatch_completed.outcome = "timeout"`
-(ad-hoc) with `timeout_ms`/`deadline_at` and outranks the exit signal. `fadeno
-cancel <run>` safely stops the active engine attempt (`SIGTERM` to its executor
-group, preserving lease/claim until `close`). `fadeno show` surfaces a prominent
+byte counts, and terminal exit or signal where available. Executors run under **no deadline at all**: a clock cannot tell slow from
+stuck, and killing a print-at-exit executor destroys its report while its work
+survives in the diff. `--timeout` is gone from `dispatch`, `drive` and
+`tool-run`, and a `timeout_ms` left in a catalog is read, ignored, and reported
+by `fadeno doctor`. Ending a long attempt is a decision: `fadeno cancel <run>`
+stops the active engine attempt (`SIGTERM` to its executor group, escalating to
+`SIGKILL` after a 5s grace, preserving the claim until `close`), and `fadeno
+dispatches --cancel` does the same for an ad-hoc dispatch. Ledgers written
+before the removal still read: an `executor_timeout` or `outcome: "timeout"`
+row renders as it always did. `fadeno show` surfaces a prominent
 but non-gating `WARNING: no output observed for <duration> (non-gating)` after
 five minutes (`OUTPUT_IDLE_WARNING_MS`).
 

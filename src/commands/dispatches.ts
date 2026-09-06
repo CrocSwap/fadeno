@@ -30,7 +30,7 @@ import {
 } from './dispatch.ts';
 import { legacyDriverHarness } from '../lib/executors.ts';
 import { INFLIGHT_DIR, readInflightClaim } from '../lib/supervisor.ts';
-import { collectIsolatedDiff, removeIsolatedWorktree, withWorkspaceWindowLease, WorkspaceLeaseError, type LeaseHolder } from '../lib/workspace-lease.ts';
+import { collectIsolatedDiff, removeIsolatedWorktree, WorkspaceIsolationError } from '../lib/workspace-isolation.ts';
 import { settleIsolatedWork, type MergeBackResult } from '../lib/workspace-baseline.ts';
 
 export class DispatchesCommandError extends Error {}
@@ -2438,13 +2438,16 @@ export function runDispatchesMerge(opts: DispatchesMergeOptions = {}): Dispatche
   }
   const diffRel = join('.fadeno', 'local', 'outputs', `isolated-${id8}-merged.diff`).split('\\').join('/');
   const diff = collectIsolatedDiff({ repoRoot, worktreeAbs, diffAbs: join(repoRoot, diffRel), diffRel });
-  const holder: LeaseHolder = { id: `merge-back:${record.dispatchId}`, kind: 'ad-hoc', dispatchId: record.dispatchId };
+  // No window lease. A merge-back is a plain `git apply`: it lands whole or
+  // touches nothing, so a concurrent writer cannot make it half-apply — it can
+  // only make it refuse, which is the signal to rebase and re-apply, which is
+  // what `settleIsolatedWork` already does. The lease bought nothing here and
+  // cost a reservation nobody could prove dead.
   let settled: ReturnType<typeof settleIsolatedWork>;
   try {
-    settled = withWorkspaceWindowLease({ repoRoot, holder, now: opts.now }, () =>
-      settleIsolatedWork({ repoRoot, worktreeAbs, diff, baselineRef: `${record.dispatchId}:merged`, armLabel: 'primary', priorConflicts: record.primaryMerge?.conflicts ?? [] }));
+    settled = settleIsolatedWork({ repoRoot, worktreeAbs, diff, baselineRef: `${record.dispatchId}:merged`, armLabel: 'primary', priorConflicts: record.primaryMerge?.conflicts ?? [] });
   } catch (err) {
-    if (err instanceof WorkspaceLeaseError) throw new DispatchesCommandError(`could not take the workspace lease to merge ${id8}: ${err.message}. Nothing was applied.`);
+    if (err instanceof WorkspaceIsolationError) throw new DispatchesCommandError(`could not merge ${id8}: ${err.message}. Nothing was applied.`);
     throw err;
   }
   if (settled.stamp.status === 'unresolved') {

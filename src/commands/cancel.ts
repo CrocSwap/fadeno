@@ -156,7 +156,10 @@ export function runCancel(opts: CancelOptions): CancelResult {
   }
 
   // Never write the ledger; the active engine remains sole writer.
-  // Do not remove claim or release lease here — that is proven only at executor close.
+  // Do not remove the claim here — the executor is only proven gone at close,
+  // and the claim is what keeps it cancellable until then. (There is no lease
+  // to release any more; cancellation outlived it because stopping something
+  // on purpose is a decision, not a guess about whether it is still alive.)
 
   return {
     run: runId,

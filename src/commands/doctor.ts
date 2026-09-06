@@ -1,21 +1,15 @@
-import { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, delimiter, dirname, isAbsolute, join, sep } from 'node:path';
 import { runStatus, type StatusOptions } from './status.ts';
 import { listRetiredClaudeGridCells } from './steering.ts';
-import { ARCHETYPE_DISPLAY_ORDER, detectAmbientHarness, resolveRole } from '../lib/executors.ts';
-import { catalogRepairFindings, verificationFindings } from '../lib/catalog-rot.ts';
+import { ARCHETYPE_DISPLAY_ORDER, detectAmbientHarness, IGNORED_DEADLINE_NOTE_TOKEN, resolveRole } from '../lib/executors.ts';
+import { catalogRepairFindings, ignoredDeadlineFindings, verificationFindings } from '../lib/catalog-rot.ts';
 import { isListable, listHarnessModels, listingFindings } from '../lib/model-listing.ts';
 import { auditPersistedState } from '../lib/persisted-state.ts';
 import { loadLayeredProfile } from '../lib/config-layers.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
-import {
-  WORKSPACE_LEASE_FILE,
-  WORKSPACE_LEASE_LOCK,
-  readEffectiveLease,
-  readWorkspaceLease,
-} from '../lib/workspace-lease.ts';
-import { describeWorkspaceLeaseLiveness } from '../lib/supervisor.ts';
+import { describeVestigialWorkspaceLease } from '../lib/workspace-lease.ts';
 import { catalogLayerVersions, explainSuppressedBuiltin } from '../lib/config-layers.ts';
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
 import { codexUserAgentDir, readVerifiedModels, userPaths } from '../lib/user-paths.ts';
@@ -144,16 +138,6 @@ export function pluginSurface(env: NodeJS.ProcessEnv): { root: string; version: 
 }
 
 /** Read-only health checks; warnings never turn into a failing exit status. */
-/** Compact human duration for a lease hold: "3s", "12m", "1h47m". */
-function describeHeld(ms: number): string {
-  const totalMinutes = Math.floor(ms / 60_000);
-  if (totalMinutes < 1) return `${Math.max(0, Math.floor(ms / 1000))}s`;
-  if (totalMinutes < 60) return `${totalMinutes}m`;
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return minutes === 0 ? `${hours}h` : `${hours}h${minutes}m`;
-}
-
 export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const findings: DoctorFinding[] = [];
@@ -442,6 +426,11 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
         if (harness == null || modelId === 'current-host') continue;
         dialed.push({ archetype, harness, modelId, listable: isListable(layered.profile.harnesses?.[harness]) });
       }
+      // A `timeout_ms` the loader accepted and will never arm. Warned about
+      // rather than refused: catalogs written before deadlines were removed
+      // declare it, and a load-time refusal would break every command over a
+      // key that now does nothing.
+      findings.push(...ignoredDeadlineFindings(layered.profile.notes, IGNORED_DEADLINE_NOTE_TOKEN));
       findings.push(...verificationFindings({
         dialed,
         verifications: readVerifiedModels(opts.userPathOptions ?? {}),
@@ -885,118 +874,27 @@ function missingBundledTemplates(pluginRoot: string): string[] {
       findings.push(finding(`ignore:${pattern}`, 'warning', 'managed ignore entry is absent', remediation));
     }
   }
+  // The vestigial writer lease.
+  //
+  // This block used to be the lease's own health check: is the holder running,
+  // ended, or unobservable, and should a human `dispatch-fail` it. All of that
+  // was in service of a lock that no longer exists, and the most dangerous
+  // part of it was the remediation — every branch ended "only after verifying
+  // no writer remains", which is correct advice about a live lock and actively
+  // harmful about a file nothing reads. A user who dutifully hedged left a
+  // wedged repo wedged.
+  //
+  // What is left is one finding: the file (or its lock directory) is here, it
+  // does nothing, delete it. No staleness threshold, no pid probe, no
+  // liveness verdict — nothing that requires answering the question the whole
+  // mechanism was removed for being unable to answer.
   {
-    const LOCK_STALE_MS = 120_000;
-    let lockStale: { path: string; mtimeMs: number } | null = null;
-    const lockAbs = join(repoRoot, WORKSPACE_LEASE_LOCK);
-    if (existsSync(lockAbs)) {
-      try {
-        const lst = lstatSync(lockAbs);
-        if (lst.isSymbolicLink()) {
-          findings.push(finding(
-            'workspace-lease',
-            'warning',
-            `stale lock symlink at ${WORKSPACE_LEASE_LOCK}`,
-            `remove ${WORKSPACE_LEASE_LOCK} only after verifying no writer remains`,
-          ));
-        } else if (lst.isDirectory()) {
-          let mtime = lst.mtimeMs;
-          try {
-            mtime = statSync(lockAbs).mtimeMs;
-          } catch {}
-          if (Date.now() - mtime > LOCK_STALE_MS) {
-            lockStale = { path: WORKSPACE_LEASE_LOCK, mtimeMs: mtime };
-            findings.push(finding(
-              'workspace-lease',
-              'warning',
-              `stale lock directory at ${WORKSPACE_LEASE_LOCK} (mtime ${new Date(mtime).toISOString()})`,
-              `remove ${WORKSPACE_LEASE_LOCK} only after verifying no writer remains`,
-            ));
-          }
-        }
-      } catch {
-      }
-    }
-    let lease: ReturnType<typeof readWorkspaceLease> = null;
-    let effective: ReturnType<typeof readEffectiveLease> = null;
-    let leaseSymlinkWarning = false;
-    const leaseAbs = join(repoRoot, WORKSPACE_LEASE_FILE);
-    if (existsSync(leaseAbs)) {
-      try {
-        const lst = lstatSync(leaseAbs);
-        if (lst.isSymbolicLink()) {
-          findings.push(finding(
-            'workspace-lease',
-            'warning',
-            `unreadable workspace lease symlink at ${WORKSPACE_LEASE_FILE}`,
-            `remove ${WORKSPACE_LEASE_FILE} only after verifying no writer remains`,
-          ));
-          leaseSymlinkWarning = true;
-        }
-      } catch {}
-    }
-    if (!leaseSymlinkWarning) {
-      try {
-        lease = readWorkspaceLease(repoRoot);
-      } catch {
-        lease = null;
-      }
-      try {
-        effective = readEffectiveLease(repoRoot);
-      } catch {
-        effective = null;
-      }
-    }
-    if (leaseSymlinkWarning) {
-    } else if (lease == null) {
-      findings.push(finding('workspace-lease', 'ok', 'no active workspace lease'));
-    } else if (effective != null) {
-      const holder = lease.holder;
-      const holdersCount = lease.holders?.length ?? 1;
-      const liveness = describeWorkspaceLeaseLiveness(lease, repoRoot);
-      const held = describeHeld(liveness?.heldMs ?? 0);
-      // A running dispatch is not a problem, and calling it one had a cost:
-      // this check reported EVERY held lease as an abandoned host dispatch and
-      // offered `dispatch-fail` on it. Run against a live 47-minute command
-      // fallback, that destroys the run and re-does the work. Assert
-      // abandonment only where there is evidence for it.
-      if (liveness?.state === 'running') {
-        findings.push(finding(
-          'workspace-lease',
-          'ok',
-          `${holder.kind} "${holder.id}" is running (held ${held}, supervisor alive via ${liveness.claim})`,
-        ));
-      } else {
-        // The two remaining states are NOT the same claim, and the remediation
-        // says which one this is. `ended` has positive evidence the supervisor
-        // is gone; `unobservable` has no evidence either way — a host delivery
-        // runs in another agent's session, which publishes nothing here.
-        const ended = liveness?.state === 'ended';
-        const observed = ended
-          ? `held ${held}, supervisor has exited`
-          : `held ${held}, liveness not observable from here`;
-        const detail = `${holder.kind} "${holder.id}" (supervisor_pid ${lease.supervisor_pid ?? 'unknown'}, started ${lease.started_at}, ${observed}, holders: ${holdersCount})`;
-        const lead = ended
-          ? 'Its supervisor is gone, so recover it'
-          : 'If it is genuinely abandoned, recover it';
-        let remediation: string;
-        if (holder.kind === 'host-dispatch' && holder.runId != null && holder.dispatchId != null) {
-          remediation = `Inspect it with \`fadeno show ${holder.runId}\`; ${lead} with \`fadeno dispatch-complete ${holder.runId} ${holder.dispatchId}\` or \`fadeno dispatch-fail ${holder.runId} ${holder.dispatchId}\`; Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
-        } else if (holder.runId != null) {
-          remediation = `Inspect it with \`fadeno show ${holder.runId}\`; ${lead} with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
-        } else {
-          remediation = `Inspect it with \`fadeno show <run>\`; ${lead} with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
-        }
-        findings.push(finding('workspace-lease', 'warning', detail, remediation));
-      }
+    const vestigial = describeVestigialWorkspaceLease(repoRoot);
+    if (vestigial == null) {
+      findings.push(finding('workspace-lease', 'ok', 'no leftover writer lease (Fadeno no longer takes one)'));
     } else {
-      const holder = lease.holder;
-      const pid = lease.supervisor_pid ?? 'unknown';
-      const detail = `stale lease for "${holder.id}" (supervisor_pid ${pid} is dead)`;
-      const remediation = `re-acquire will reclaim it; or remove ${WORKSPACE_LEASE_FILE} only after verifying no writer remains`;
-      findings.push(finding('workspace-lease', 'warning', detail, remediation));
+      findings.push(finding('workspace-lease', 'warning', vestigial.detail, vestigial.remediation));
     }
-    void lockStale;
   }
   return { repoRoot, findings, ok: findings.every((item) => item.severity !== 'error') };
 }

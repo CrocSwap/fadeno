@@ -16,7 +16,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { IGNORED_OUTPUT_MAX_ENTRIES, scanIgnoredOutput } from '../src/lib/workspace-lease.ts';
+import { IGNORED_OUTPUT_MAX_ENTRIES, scanIgnoredOutput } from '../src/lib/workspace-isolation.ts';
 import { tempRepo } from './helpers.ts';
 
 const GIT_ENV = {

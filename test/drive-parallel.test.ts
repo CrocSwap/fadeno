@@ -455,12 +455,16 @@ test('schema repair isolation: one invalid member gets exactly one repair withou
   assert.equal(verify.ok, true);
 });
 
-test('timeout isolation: one timed-out member does not corrupt sibling evidence', (t) => {
+test('failure isolation: one failed member does not corrupt sibling evidence', (t) => {
+  // Was `timeout isolation`, driven by `timeout_ms: 800` on a member that
+  // slept 5s. No deadline is armed any more, so the member is made to fail the
+  // only way a member can fail on its own now — a nonzero exit. What is under
+  // test is unchanged and is the point: one member's failure must not
+  // contaminate its sibling's evidence in the same wave.
   const exec = {
     'ro-a': {
-      command: ['node', '-e', "setTimeout(()=>process.stdout.write(JSON.stringify(" + VALID_REVIEW + ")), 5000)"],
+      command: ['node', '-e', "process.stderr.write('boom'); process.exit(3)"],
       writeAccess: false,
-      timeoutMs: 800,
     },
     'ro-b': {
       command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`],
@@ -469,12 +473,11 @@ test('timeout isolation: one timed-out member does not corrupt sibling evidence'
   };
   const { root, runId } = seedMap(t, exec);
   const res = runDrive({ run: runId, repoRoot: root, parallel: 2 });
-  // One member timed out, so overall should be executor_failed (not terminal)
   assert.equal(res.outcome, 'executor_failed');
   const all = events(root, runId);
   const failed = ofType(all, 'actor_failed').find((e) => e.extra.actor === 'reviewer_a');
   assert.ok(failed);
-  assert.equal(failed!.extra.reason, 'executor_timeout');
+  assert.notEqual(failed!.extra.reason, 'executor_timeout', 'nothing produces a timeout receipt any more');
   const completed = ofType(all, 'actor_completed').find((e) => e.extra.actor === 'reviewer_b');
   assert.ok(completed && completed.extra.output_valid === true);
 });
@@ -755,11 +758,13 @@ flow:
   assert.equal(res2.outcome, 'terminal');
 });
 
-test('writer and reader overlap: lease held/released correctly and timeout does not orphan', async (t) => {
+test('writer and reader overlap: no lease is ever taken, and a failed member does not orphan', async (t) => {
   const { existsSync } = await import('node:fs');
   const { WORKSPACE_LEASE_FILE } = await import('../src/lib/workspace-lease.ts');
   const { readFileSync } = await import('node:fs');
-  // Reuse earlier writer/reader test but add lease assertions
+  // Was `lease held/released correctly`. There is no lease to hold: this now
+  // asserts the stronger and simpler property that a mixed writer/reader wave
+  // creates no repo-wide reservation at all, before or after.
   const sleepCmd = (ms: number) => ['node', '-e', `setTimeout(()=>process.stdout.write(JSON.stringify(${VALID_REVIEW})), ${ms})`];
   const playbookMixed = `kind: AgentPlaybook
 schema_version: "0.1"
@@ -789,30 +794,27 @@ flow:
     'rw-worker': { command: sleepCmd(800), writeAccess: true },
   };
   const { root, runId } = seedMap(t, execMixed, playbookMixed);
-  // Check lease not held before
-  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false);
+  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false, 'no lease before');
   const res = runDrive({ run: runId, repoRoot: root, parallel: 2 });
   assert.equal(res.outcome, 'terminal');
-  // After run, lease must be released
-  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false, 'lease must be released after wave');
-  // Timeout orphan check: one times out but sibling completes
-  const execTimeout = {
-    'ro-a': { command: ['node', '-e', "setTimeout(()=>process.stdout.write(JSON.stringify(" + VALID_REVIEW + ")), 5000)"], writeAccess: false, timeoutMs: 800 },
+  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false, 'and none after the wave');
+  // Orphan check: one member fails, the sibling completes, nothing is left behind.
+  const execFailing = {
+    'ro-a': { command: ['node', '-e', "process.stderr.write('boom'); process.exit(3)"], writeAccess: false },
     'ro-b': { command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`], writeAccess: false },
   };
-  const { root: root2, runId: id2 } = seedMap(t, execTimeout);
+  const { root: root2, runId: id2 } = seedMap(t, execFailing);
   const res2 = runDrive({ run: id2, repoRoot: root2, parallel: 2 });
   assert.equal(res2.outcome, 'executor_failed');
   const all2 = events(root2, id2);
   const failed = ofType(all2, 'actor_failed').find((e) => e.extra.actor === 'reviewer_a');
-  assert.equal(failed!.extra.reason, 'executor_timeout');
-  // Lease must not be left behind even after timeout
-  assert.equal(existsSync(join(root2, WORKSPACE_LEASE_FILE)), false, 'lease not held after timeout');
+  assert.ok(failed != null, 'the failing member gets a terminal receipt');
+  assert.equal(existsSync(join(root2, WORKSPACE_LEASE_FILE)), false, 'no lease is left behind by a failure either');
   // No orphan: verify actor-attempts clean and no leftover inflight with live claim
   const { runVerify } = await import('../src/commands/verify.ts');
   const v2 = runVerify({ run: id2, repoRoot: root2 });
   const actorAttempts = v2.findings.find((f) => f.check === 'actor-attempts');
-  assert.ok(actorAttempts && actorAttempts.status === 'ok', `actor-attempts must be clean despite expected timeout failure: ${actorAttempts?.detail}`);
+  assert.ok(actorAttempts && actorAttempts.status === 'ok', `actor-attempts must be clean despite the expected member failure: ${actorAttempts?.detail}`);
   const seqCheck = v2.findings.find((f) => f.check === 'seq-contiguity');
   if (seqCheck) assert.equal(seqCheck.status, 'ok');
 });

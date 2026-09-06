@@ -28,7 +28,6 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { WORKSPACE_LEASE_LOCK_STALE_MS, type WorkspaceLeaseRecord } from './workspace-lease.ts';
 
 /**
  * How often the supervisor checks whether the kernel is still there.
@@ -79,7 +78,7 @@ export function supervisedSpawnError(
 
 /**
  * The supervisor program. Reads `<parent-pid> <inflight> <status>
- * <lease-release-json> <cmd> [args...]` from argv, runs the executor in its
+ * <owner-json> <cmd> [args...]` from argv, runs the executor in its
  * own process group, and
  * forwards stdin down and exit status back so the kernel sees exactly what it
  * would have seen had it spawned the executor directly.
@@ -104,30 +103,38 @@ const SPAWN_FAILED_MARKER = ${JSON.stringify(SPAWN_FAILED_MARKER)};
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const rawArgs = process.argv.slice(1);
-let parentRaw, inflightPath, statusPath, leaseReleaseRaw, timeoutMsRaw, deadlineAtRaw, cmd;
+let parentRaw, inflightPath, statusPath, ownerRaw, cmd;
 let progressPath = '';
 let args;
-// A leading sentinel rather than another positional slot. The two forms below
-// are told apart by SNIFFING slots 4 and 5, and a sixth optional path — which
-// may be empty, absolute, or Windows-drive-prefixed — has no shape that could
-// not also be an executor argument. The sentinel is unambiguous by
-// construction, and \`superviseArgv\` emits it only when there is a progress
-// path to carry, so every existing argv keeps its exact byte layout.
+// A leading sentinel rather than another positional slot. The forms below are
+// told apart by SNIFFING, and an optional path — which may be empty, absolute,
+// or Windows-drive-prefixed — has no shape that could not also be an executor
+// argument. The sentinel is unambiguous by construction, and \`superviseArgv\`
+// emits it only when there is a progress path to carry.
+//
+// Two of the shapes below are LEGACY: they carry the deadline pair
+// (timeout-ms, deadline-at) this supervisor no longer arms. Fadeno stopped
+// running executors under a deadline, and the emitter stopped writing those
+// slots — but an argv built by an older caller (or by hand) must still land
+// its executor command in the right place rather than exec a millisecond
+// count. So the slots are still SNIFFED and then discarded: a deadline that
+// arrives is read, ignored, and never scheduled.
+const legacyDeadlineSlots = (a, b) =>
+  (a === '' || /^\\d+$/.test(a)) && (b === '' || /^\\d{4}-\\d{2}-\\d{2}T/.test(b));
 if (rawArgs[0] === ${JSON.stringify(SUPERVISE_PROGRESS_SENTINEL)}) {
-  [, parentRaw, inflightPath, statusPath, leaseReleaseRaw, timeoutMsRaw, deadlineAtRaw, progressPath, cmd, ...args] = rawArgs;
+  if (rawArgs.length >= 8 && legacyDeadlineSlots(rawArgs[5], rawArgs[6])) {
+    // legacy: sentinel parent inflight status lease timeout deadline progress cmd…
+    [, parentRaw, inflightPath, statusPath, ownerRaw, , , progressPath, cmd, ...args] = rawArgs;
+  } else {
+    [, parentRaw, inflightPath, statusPath, ownerRaw, progressPath, cmd, ...args] = rawArgs;
+  }
   if (args == null) args = [];
-} else if (rawArgs.length >= 7 && (rawArgs[4] === '' || /^\\d+$/.test(rawArgs[4])) && (rawArgs[5] === '' || /^\\d{4}-\\d{2}-\\d{2}T/.test(rawArgs[5]))) {
-  [parentRaw, inflightPath, statusPath, leaseReleaseRaw, timeoutMsRaw, deadlineAtRaw, cmd, ...args] = rawArgs;
-  if (args == null) args = [];
-} else if (rawArgs.length >= 4) {
-  [parentRaw, inflightPath, statusPath, leaseReleaseRaw, cmd, ...args] = rawArgs;
-  timeoutMsRaw = '';
-  deadlineAtRaw = '';
+} else if (rawArgs.length >= 7 && legacyDeadlineSlots(rawArgs[4], rawArgs[5])) {
+  // legacy: parent inflight status lease timeout deadline cmd…
+  [parentRaw, inflightPath, statusPath, ownerRaw, , , cmd, ...args] = rawArgs;
   if (args == null) args = [];
 } else {
-  [parentRaw, inflightPath, statusPath, leaseReleaseRaw, cmd, ...args] = rawArgs;
-  timeoutMsRaw = '';
-  deadlineAtRaw = '';
+  [parentRaw, inflightPath, statusPath, ownerRaw, cmd, ...args] = rawArgs;
   if (args == null) args = [];
 }
 const win = process.platform === 'win32';
@@ -140,10 +147,6 @@ let stderrBytes = 0;
 let claimWrite = 0;
 let statusWrite = 0;
 let claimDirty = false;
-let timeoutMs = null;
-let deadlineAt = null;
-let timedOut = false;
-let deadlineTimer = null;
 // The agent's own account of what it is doing, mirrored from the cooperative
 // sidecar the engine's prompt told it to keep. See src/lib/attempt-progress.ts
 // for why this process is the one that reads it. Harness-observed, never
@@ -154,37 +157,29 @@ let progressPhase = null;
 let progressCurrent = null;
 let progressUpdatedAt = null;
 let progressSource = null;
-try {
-  if (timeoutMsRaw && timeoutMsRaw !== '' && timeoutMsRaw !== 'null') {
-    const parsed = Number(timeoutMsRaw);
-    if (Number.isInteger(parsed) && parsed > 0) timeoutMs = parsed;
-  }
-} catch {}
-try {
-  if (deadlineAtRaw && deadlineAtRaw !== '' && deadlineAtRaw !== 'null') {
-    deadlineAt = String(deadlineAtRaw);
-  }
-} catch {}
-if (timeoutMs != null) {
-  deadlineAt = new Date(startedMs + timeoutMs).toISOString();
-}
 const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], detached: !win });
 let settled = false;
 let reaping = false;
 let spawnFailure = null;
-let leaseDesc = null;
-try { leaseDesc = leaseReleaseRaw ? JSON.parse(leaseReleaseRaw) : null; } catch {}
+let ownerDesc = null;
+try { ownerDesc = ownerRaw ? JSON.parse(ownerRaw) : null; } catch {}
 
 // Ownership handoff. A kernel that blocks inside \`spawnSync\` has nothing left
-// to do once we exit, so dropping its claim and lease at child close is right.
-// A kernel that *polls* our status file still has to read the output,
-// synthesize the result, place the artifact and attribute it — and a guard
-// dropped before that work is a window in which recovery can call the live
-// attempt interrupted and a second writer can re-run the command. Such a
-// caller names itself here; we then keep both guards and let it release them,
-// and fall back to releasing ourselves the moment that owner is gone.
-const ownerPid = leaseDesc && leaseDesc.owner && Number.isInteger(leaseDesc.owner.pid) && leaseDesc.owner.pid > 0
-  ? leaseDesc.owner.pid
+// to do once we exit, so dropping its claim at child close is right. A kernel
+// that *polls* our status file still has to read the output, synthesize the
+// result, place the artifact and attribute it — and a claim dropped before
+// that work is a window in which recovery can call the live attempt
+// interrupted and a second helper can re-run the command. Such a caller names
+// itself here; we then keep the claim and let it drop it, and fall back to
+// dropping it ourselves the moment that owner is gone.
+//
+// This is the ONLY thing the descriptor still carries. It used to carry a
+// writer lease as well — a path, a lock directory, and a holder this process
+// re-stamped every second and released at child close. The lease is gone (see
+// workspace-lease.ts); the claim is not, because the claim answers a question
+// that has an answer: \`fadeno cancel\` needs a pid to signal.
+const ownerPid = ownerDesc && ownerDesc.owner && Number.isInteger(ownerDesc.owner.pid) && ownerDesc.owner.pid > 0
+  ? ownerDesc.owner.pid
   : null;
 function ownerAlive() {
   if (ownerPid == null) return false;
@@ -222,9 +217,13 @@ function reportStatus(extra) {
       stdout_bytes: stdoutBytes,
       stderr_bytes: stderrBytes,
       duration_ms: Date.now() - startedMs,
-      timed_out: timedOut,
-      timeout_ms: timeoutMs,
-      deadline_at: deadlineAt,
+      // Vestigial, and constant from the release that removed executor
+      // deadlines onward: nothing here ever arms one, so nothing here can
+      // ever time out. Still written so the status file's documented shape
+      // does not change under a reader that predates the removal.
+      timed_out: false,
+      timeout_ms: null,
+      deadline_at: null,
       ...extra,
     });
     atomicWrite(statusPath, body, ++statusWrite);
@@ -334,7 +333,6 @@ const heartbeat = setInterval(() => {
   refreshProgress();
   writeClaim();
   claimDirty = false;
-  updateLease();
 }, ${HEARTBEAT_INTERVAL_MS});
 if (heartbeat.unref) heartbeat.unref();
 
@@ -383,113 +381,12 @@ function forward(source, destination, kind) {
 forward(child.stdout, process.stdout, 'stdout');
 forward(child.stderr, process.stderr, 'stderr');
 
-function waitSync(ms) {
-  try {
-    const signal = new Int32Array(new SharedArrayBuffer(4));
-    Atomics.wait(signal, 0, 0, ms);
-  } catch {}
-}
-
-function sameHolder(current, wanted) {
-  return current && wanted && current.id === wanted.id && current.kind === wanted.kind &&
-    (current.runId ?? null) === (wanted.runId ?? null) &&
-    (current.dispatchId ?? null) === (wanted.dispatchId ?? null);
-}
-
-// The in-process lease helper prunes abandoned lock directories; keep the
-// embedded supervisor equivalent so a crashed lock owner cannot turn a normal
-// child close into a permanent pid-less reservation.
-function withLeaseLock(action) {
-  const desc = leaseDesc;
-  if (!desc || typeof desc.leasePath !== 'string' || typeof desc.lockPath !== 'string' ||
-      !desc.holder || typeof desc.holder.id !== 'string' || typeof desc.holder.kind !== 'string') return;
-  let locked = false;
-  const deadline = Date.now() + 30000;
-  while (!locked && Date.now() < deadline) {
-    try { fs.mkdirSync(desc.lockPath); locked = true; }
-    catch (err) {
-      if (!err || err.code !== 'EEXIST') return;
-      try {
-        if (Date.now() - fs.statSync(desc.lockPath).mtimeMs > ${WORKSPACE_LEASE_LOCK_STALE_MS}) {
-          fs.rmdirSync(desc.lockPath);
-          continue;
-        }
-      } catch {}
-      waitSync(10);
-    }
-  }
-  if (!locked) return;
-  try { action(desc); }
-  finally { try { fs.rmdirSync(desc.lockPath); } catch {} }
-}
-
-// Publish the process identity and harness-observed counters into the durable
-// writer lease. The pre-spawn kernel reservation is intentionally pid-less;
-// this supervisor is the first process that can authoritatively name both
-// itself and its detached executor group.
-//
-// \`identity\` overrides who the record names. On the handoff path the executor
-// is gone and the owner is the only process still working under this holder,
-// so naming it keeps the lease blocking without a single instant in which
-// every published identity is dead — which is what a reclaiming writer reads
-// as "abandoned".
-function updateLease(identity) {
-  withLeaseLock((desc) => {
-    let lease = null;
-    try { lease = JSON.parse(fs.readFileSync(desc.leasePath, 'utf8')); } catch {}
-    if (!lease) return;
-    const holders = Array.isArray(lease.holders) && lease.holders.length > 0
-      ? lease.holders
-      : lease.holder ? [lease.holder] : [];
-    if (!holders.some((holder) => sameHolder(holder, desc.holder))) return;
-    const key = JSON.stringify([desc.holder.kind, desc.holder.id, desc.holder.runId ?? null, desc.holder.dispatchId ?? null]);
-    const updated = {
-      ...lease,
-      supervisor_pid: identity ? identity.supervisor_pid : process.pid,
-      executor_pid: identity ? identity.executor_pid : (child.pid ?? null),
-      process_group_id: identity ? identity.process_group_id : (!win && child.pid != null ? child.pid : null),
-      heartbeat_at: heartbeatAt,
-      last_output_at: lastOutputAt,
-      stdout_bytes: stdoutBytes,
-      stderr_bytes: stderrBytes,
-      holder_heartbeat_at: { ...(lease.holder_heartbeat_at || {}), [key]: heartbeatAt },
-    };
-    atomicWrite(desc.leasePath, JSON.stringify(updated), ++statusWrite);
-  });
-}
-
-// The kernel is blocked while we run, so it cannot safely release a shared
-// writer lease in a finally block: that would race executor shutdown after an
-// interruption. The supervisor releases only after child close (stdio drained)
-// and only when the durable record still names this holder.
-function releaseLease() {
-  withLeaseLock((desc) => {
-    let lease = null;
-    try { lease = JSON.parse(fs.readFileSync(desc.leasePath, 'utf8')); } catch {}
-    const wanted = desc.holder;
-    const holders = Array.isArray(lease && lease.holders) && lease.holders.length > 0
-      ? lease.holders
-      : lease && lease.holder ? [lease.holder] : [];
-    const index = holders.findIndex((holder) => sameHolder(holder, wanted));
-    if (index >= 0 && holders.length > 1) {
-      const remaining = holders.filter((_, candidate) => candidate !== index);
-      const key = JSON.stringify([wanted.kind, wanted.id, wanted.runId ?? null, wanted.dispatchId ?? null]);
-      const holderStarted = { ...(lease.holder_started_at || {}) };
-      const holderHeartbeat = { ...(lease.holder_heartbeat_at || {}) };
-      delete holderStarted[key];
-      delete holderHeartbeat[key];
-      const updated = { ...lease, holder: remaining[0], holders: remaining,
-        holder_started_at: holderStarted, holder_heartbeat_at: holderHeartbeat };
-      atomicWrite(desc.leasePath, JSON.stringify(updated), ++statusWrite);
-    } else if (index >= 0) {
-      try { fs.unlinkSync(desc.leasePath); } catch {}
-    }
-  });
-}
-
-// Close the pid-less pre-spawn interval as soon as the supervisor has defined
-// its lease helpers and knows the executor pid.
-updateLease();
+// The writer-lease helpers that used to live here — \`withLeaseLock\`,
+// \`sameHolder\`, \`updateLease\`, \`releaseLease\`, and the \`Atomics.wait\`
+// spin that backed them — are gone with the lease itself. This process no
+// longer publishes, refreshes, or releases any repo-wide reservation; the only
+// thing it still owns is the in-flight CLAIM above, which exists so
+// \`fadeno cancel\` has a pid to signal.
 
 function reap() {
   if (settled || reaping) return;
@@ -501,32 +398,22 @@ function reap() {
   const hard = setTimeout(() => {
     try { if (!win) process.kill(-child.pid, 'SIGKILL'); } catch {}
     // Do not release or exit here. \`close\` is the proof that the executor was
-    // reaped and its output pipes were drained; until then the lease and claim
-    // deliberately remain live, preventing a concurrent writer.
+    // reaped and its output pipes were drained; until then the CLAIM
+    // deliberately remains live, so \`fadeno cancel\` still has something to
+    // signal. It no longer excludes a concurrent writer — nothing does; an
+    // overlapping delivery is detected and stamped, not prevented.
   }, ${KILL_GRACE_MS});
   if (hard.unref) hard.unref();
 }
 
-function scheduleDeadline() {
-  if (timeoutMs == null || deadlineAt == null) return;
-  const deadlineMs = Date.parse(deadlineAt);
-  if (!Number.isFinite(deadlineMs)) return;
-  const delay = deadlineMs - Date.now();
-  if (delay <= 0) {
-    if (!settled && !reaping) {
-      timedOut = true;
-      reap();
-    }
-    return;
-  }
-  deadlineTimer = setTimeout(() => {
-    if (settled || reaping) return;
-    timedOut = true;
-    reap();
-  }, delay);
-  if (deadlineTimer.unref) deadlineTimer.unref();
-}
-scheduleDeadline();
+// No deadline is ever armed. \`reap\` above is reached only by a DECISION —
+// the kernel dying (re-parenting), or a signal a human sent through
+// \`fadeno cancel\` / \`dispatches --cancel\` / the harness.
+// Deadlines are gone because a clock cannot tell slow from stuck: on
+// 2026-09-06 five dispatches were killed at their deadlines with empty or
+// zero-byte reports while their work survived in the diffs every time,
+// because these are print-at-exit executors and the deadline killed only the
+// report.
 
 // The kernel dying re-parents us. Checking that beats probing its pid, which
 // a reused pid could answer for.
@@ -553,22 +440,14 @@ child.on('close', (code, signal) => {
   clearInterval(watch);
   clearInterval(heartbeat);
   clearInterval(claimFlush);
-  if (deadlineTimer) { try { clearTimeout(deadlineTimer); } catch {} }
   heartbeatAt = new Date().toISOString();
   // One last mirror: the agent's final sidecar write often lands moments
   // before it exits, and on the handoff path this claim outlives us.
   refreshProgress();
-  // The owner keeps the attempt exclusive through synthesis and attribution;
-  // we only hand the guards back when nobody is left to own them.
-  if (ownerAlive()) {
-    writeClaim();
-    updateLease({ supervisor_pid: ownerPid, executor_pid: null, process_group_id: null });
-  } else {
-    writeClaim();
-    updateLease(null);
-    releaseLease();
-    dropClaim();
-  }
+  // The owner keeps working through synthesis and attribution; we only drop
+  // the claim when nobody is left to own it.
+  writeClaim();
+  if (!ownerAlive()) dropClaim();
   if (spawnFailure != null) {
     // Marked so the kernel can tell "the executor binary is not there" from
     // "the executor ran and exited 127" — supervision must not erase a
@@ -597,26 +476,24 @@ child.on('close', (code, signal) => {
  * the spawn, from the executor's argv — so supervision changes how the process
  * is run without changing what the log says was run.
  */
-export interface SupervisorLeaseReleaseDescriptor {
-  /** Absolute durable lease file path. */
-  leasePath: string;
-  /** Absolute mkdir-lock path protecting the lease. */
-  lockPath: string;
-  /** Release only when the durable lease still names this full holder. */
-  holder: {
-    id: string;
-    kind: 'ad-hoc' | 'engine' | 'host-dispatch';
-    runId?: string;
-    dispatchId?: string;
-  };
+/**
+ * Who owns the in-flight claim once the supervisor exits.
+ *
+ * Was `SupervisorLeaseReleaseDescriptor`, and carried a lease path, a lock
+ * directory and a holder alongside this. All three are gone with the writer
+ * lease; the owner pid is not, because it answers a question that HAS an
+ * answer — "is the process that will write the terminal receipt still here?"
+ * — about a process on this machine that this process was handed directly.
+ */
+export interface SupervisorClaimOwner {
   /**
    * The polling parent that owns this attempt past child close.
    *
    * Present only for callers that keep working after the supervisor exits
    * (synthesis, artifact placement, attribution). While that pid is alive the
-   * supervisor keeps the claim and the lease and hands them to it; the moment
-   * it is gone the supervisor releases both itself, so a crashed owner never
-   * leaves a permanent reservation.
+   * supervisor keeps the claim and hands it over; the moment it is gone the
+   * supervisor drops the claim itself, so a crashed owner never leaves a
+   * permanent in-flight record.
    */
   owner?: { pid: number };
 }
@@ -625,8 +502,7 @@ export function superviseArgv(
   command: readonly string[],
   inflightPath = '',
   statusPath = '',
-  leaseRelease?: SupervisorLeaseReleaseDescriptor,
-  timeoutMs?: number | null,
+  claimOwner?: SupervisorClaimOwner,
   /**
    * Absolute path of the attempt's cooperative progress sidecar, when the
    * caller has a run context to name one — `<workspace>/` +
@@ -636,9 +512,9 @@ export function superviseArgv(
    */
   progressPath?: string | null,
 ): string[] {
-  const effectiveTimeout = typeof timeoutMs === 'number' && Number.isInteger(timeoutMs) && timeoutMs > 0
-    ? timeoutMs
-    : null;
+  // No deadline slots. There is no argv shape that can ask this supervisor for
+  // a deadline any more; the source still SNIFFS the old pair so a hand-built
+  // legacy argv lands its command correctly, and then discards it.
   if (typeof progressPath === 'string' && progressPath !== '') {
     return [
       '-e',
@@ -648,25 +524,8 @@ export function superviseArgv(
       String(process.pid),
       inflightPath,
       statusPath,
-      leaseRelease == null ? '' : JSON.stringify(leaseRelease),
-      effectiveTimeout == null ? '' : String(effectiveTimeout),
-      effectiveTimeout == null ? '' : new Date(Date.now() + effectiveTimeout).toISOString(),
+      claimOwner == null ? '' : JSON.stringify(claimOwner),
       progressPath,
-      ...command,
-    ];
-  }
-  if (typeof timeoutMs === 'number' && Number.isInteger(timeoutMs) && timeoutMs > 0) {
-    const deadlineAt = new Date(Date.now() + timeoutMs).toISOString();
-    return [
-      '-e',
-      SUPERVISOR_SOURCE,
-      '--',
-      String(process.pid),
-      inflightPath,
-      statusPath,
-      leaseRelease == null ? '' : JSON.stringify(leaseRelease),
-      String(timeoutMs),
-      deadlineAt,
       ...command,
     ];
   }
@@ -677,7 +536,7 @@ export function superviseArgv(
     String(process.pid),
     inflightPath,
     statusPath,
-    leaseRelease == null ? '' : JSON.stringify(leaseRelease),
+    claimOwner == null ? '' : JSON.stringify(claimOwner),
     ...command,
   ];
 }
@@ -699,6 +558,14 @@ export interface SupervisorStatus {
   lastOutputAt: string | null;
   stdoutBytes: number | null;
   stderrBytes: number | null;
+  /**
+   * Vestigial. Fadeno no longer runs executors under a deadline, so a status
+   * file written by this version always reports `false`/`null`/`null`. The
+   * fields are still read because a status file left by a supervisor that was
+   * already in flight across the upgrade can carry the old values, and a
+   * reader that silently dropped them would turn a real kill into an
+   * unexplained signal. Nothing branches on them.
+   */
   timedOut: boolean;
   timeoutMs: number | null;
   deadlineAt: string | null;
@@ -957,49 +824,50 @@ export function readInflightClaim(path: string, read: (p: string) => string): In
 }
 
 /**
- * What can actually be said about whether this lease's holder is still
- * working — as opposed to whether the lease still blocks, which is
- * `isWorkspaceLeaseAlive` and deliberately a different question.
+ * What can actually be said about whether a delivery is still working.
+ *
+ * This used to be the OBSERVATION half of the writer lease, deliberately kept
+ * out of `isWorkspaceLeaseAlive` so that a report could say "running" without
+ * an exclusion decision ever depending on it. The exclusion decision is gone
+ * and this is what is left: a reporter's answer, and only ever a reporter's
+ * answer.
  *
  * `unobservable` is the honest default and not a degraded answer: a host
  * delivery runs inside another agent session that publishes no process
- * identity here, so nothing on this machine can tell. The point of the
- * three-way answer is that a reporter can stop saying "abandoned" about a
- * dispatch it has no evidence for.
+ * identity here, so nothing on this machine can tell. That is exactly the
+ * fact the lease got wrong — it read "no identity" as "still holding, forever"
+ * — and the three-way answer is what lets a reporter say "I cannot tell"
+ * instead of either "abandoned" or "running".
  */
-export type WorkspaceLeaseLiveness =
-  /** A published process identity for this holder is still alive. */
+export type DeliveryLiveness =
+  /** A published process identity for this delivery is still alive. */
   | { state: 'running'; claim: string; heldMs: number }
   /** A claim was recorded and every identity on it is gone. */
   | { state: 'ended'; claim: string; heldMs: number }
-  /** No claim was ever recorded for this holder. */
+  /** No claim was ever recorded, so nothing here can say. */
   | { state: 'unobservable'; claim: null; heldMs: number };
 
 /**
- * Read the liveness the lease points at.
+ * Read the liveness an in-flight claim points at.
  *
- * Deliberately NOT wired into `isWorkspaceLeaseAlive`. That function decides
- * whether a second writer may enter, and its conservatism — a null
- * supervisor_pid stays blocking until a terminal receipt — is what keeps a
- * crash between executor exit and receipt from admitting one. An observation
- * may inform a human; it must never unlock the workspace.
+ * Gates nothing, blocks nothing, and unlocks nothing — there is no longer
+ * anything for it to unlock. A caller uses it to TELL someone what it sees.
  */
-export function describeWorkspaceLeaseLiveness(
-  record: WorkspaceLeaseRecord | null,
+export function describeClaimLiveness(
+  claimRel: string | null | undefined,
+  startedAt: string | null,
   repoRoot: string,
   opts: { now?: Date; probe?: (pid: number, signal: 0) => void; read?: (p: string) => string } = {},
-): WorkspaceLeaseLiveness | null {
-  if (record == null) return null;
+): DeliveryLiveness {
   const now = opts.now ?? new Date();
-  const started = Date.parse(record.started_at);
+  const started = startedAt == null ? Number.NaN : Date.parse(startedAt);
   const heldMs = Number.isNaN(started) ? 0 : Math.max(0, now.getTime() - started);
-  const rel = record.liveness_claim;
-  if (rel == null || rel === '') return { state: 'unobservable', claim: null, heldMs };
+  if (claimRel == null || claimRel === '') return { state: 'unobservable', claim: null, heldMs };
   const read = opts.read ?? ((path: string) => readFileSync(path, 'utf8'));
-  const claim = readInflightClaim(join(repoRoot, ...rel.split('/')), read);
-  if (claim == null) return { state: 'ended', claim: rel, heldMs };
+  const claim = readInflightClaim(join(repoRoot, ...claimRel.split('/')), read);
+  if (claim == null) return { state: 'ended', claim: claimRel, heldMs };
   const alive = opts.probe != null
     ? inflightClaimIsAlive(claim, opts.probe)
     : inflightClaimIsAlive(claim);
-  return { state: alive ? 'running' : 'ended', claim: rel, heldMs };
+  return { state: alive ? 'running' : 'ended', claim: claimRel, heldMs };
 }

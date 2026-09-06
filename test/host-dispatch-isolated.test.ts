@@ -12,7 +12,8 @@ import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
 import { runDispatchStart, runDispatchComplete, runDispatchFail, runDispatchProgress } from '../src/commands/dispatch.ts';
 import { readEvents } from '../src/lib/run-ledger.ts';
-import { acquireWorkspaceLease, readWorkspaceLease, WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
+import { readWorkspaceLease, WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
+import { openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
 import { hostDeliveryWorkspaceMode } from '../src/lib/host-dispatch.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { runVerify } from '../src/commands/verify.ts';
@@ -170,41 +171,38 @@ test('isolated failure lifecycle prepare → start → fail', (t) => {
   assert.equal(existsSync(wtAbs), false);
 });
 
-test('shared-lease bypass: isolated start succeeds while shared start blocks', (t) => {
+test('a neighbouring shared writer stops neither an isolated nor a shared start', (t) => {
+  // INVERTED. The blocker below was written pid-less "so it is always alive
+  // regardless of probe" — which is a precise statement of why the lease had
+  // to go: a holder nothing can probe is a holder nothing can ever clear.
+  // Isolated starts used to be interesting because they BYPASSED that; now
+  // neither start is refused, and the isolated one is still isolated.
   const { root, runId, request } = seedIsolatedRun(t);
-  // Hold shared lease with different holder — pid-less so always alive regardless of probe
-  acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'blocker', kind: 'ad-hoc' }, supervisorPid: null });
-  assert.ok(existsSync(join(root, WORKSPACE_LEASE_FILE)));
-  // For isolated, hold lease in original root should not block isolated start
-  const prep = runDispatchPrepare({ repoRoot: root, run: runId, dispatchId: request.dispatchId, isolate: true });
-  // Isolated start must succeed even though shared lease held
+  openDispatchWindow(root, { dispatchId: 'blocker', kind: 'ad-hoc', workspaceMode: 'shared' });
+
+  runDispatchPrepare({ repoRoot: root, run: runId, dispatchId: request.dispatchId, isolate: true });
   const isoStart = runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'host-iso' });
   assert.equal(isoStart.state, 'started');
-  // Shared path should block: try to start unprepared dispatch in same repo where lease is held by blocker
-  const { runId: run2, request: req2 } = (() => {
-    // reuse same root, create new run
-    writeFileSync(join(root, 'task2.md'), 'task2');
-    const { runId } = runNewRun({ repoRoot: root, playbook: 'isolated-host-fixture', task: 'second', inputs: ['Task=task2.md'] });
-    const driven2 = runDrive({ repoRoot: root, run: runId });
-    assert.equal(driven2.outcome, 'awaiting_host_dispatch');
-    return { runId, request: driven2.requests[0]! };
-  })();
-  // req2 is shared (not prepared), should be blocked by blocker lease
-  // But our blocker holder id is 'blocker', and host dispatch holder is dispatchId, so it should block
-  // However hostRequestNeedsLease checks writeAccess; for this fixture, luna is writeAccess true, so needs lease
-  // So shared start should throw WorkspaceLeaseError wrapped as HostDispatchError
-  let blocked = false;
-  try {
-    runDispatchStart({ repoRoot: root, run: run2, dispatchId: req2.dispatchId, agentId: 'host-shared' });
-  } catch (err) {
-    blocked = true;
-    assert.match((err as Error).message, /shared workspace is already held/);
-  }
-  assert.equal(blocked, true, 'shared start must be blocked by live lease');
-  // Isolated start already succeeded, proves bypass
-  // Shared path leasing unchanged: after releasing blocker, shared start should succeed
-  // Release blocker by removing lease file directly? Use release via direct rm? The blocker holds lease with supervisorPid 999999 which is not alive, but our probe is dummy alive, so it stays. We need to release it manually by removing file for test cleanup
-  rmSync(join(root, WORKSPACE_LEASE_FILE), { force: true });
+
+  writeFileSync(join(root, 'task2.md'), 'task2');
+  const { runId: run2 } = runNewRun({ repoRoot: root, playbook: 'isolated-host-fixture', task: 'second', inputs: ['Task=task2.md'] });
+  const driven2 = runDrive({ repoRoot: root, run: run2 });
+  assert.equal(driven2.outcome, 'awaiting_host_dispatch');
+  const req2 = driven2.requests[0]!;
+
+  const sharedStart = runDispatchStart({ repoRoot: root, run: run2, dispatchId: req2.dispatchId, agentId: 'host-shared' });
+  assert.equal(sharedStart.state, 'started', 'a shared start is no longer refused by a neighbour');
+  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false, 'and no writer lease was created by any of it');
+
+  // Window ids are run-qualified: these two runs of the same fixture generate
+  // the SAME host dispatch id, and an unqualified key would fold them into one
+  // record — losing exactly the overlap the log exists to report.
+  const open = readDispatchWindows(root).windows.filter((w) => w.endedAt == null).map((w) => w.dispatchId).sort();
+  assert.deepEqual(
+    open,
+    ['blocker', `${run2}:${req2.dispatchId}`, `${runId}:${request.dispatchId}`].sort(),
+    'all three windows are recorded, and the two same-named dispatches stay distinct',
+  );
 });
 
 test('exact-prompt-byte: shared envelope byte-identical to today, isolated adds header, sha invariant', (t) => {
@@ -452,59 +450,28 @@ test('dispatch-fail still throws when the worktree exists and collection fails',
   pruneWorktrees(root);
 });
 
-test('isolated progress does not touch the shared lease (byte-identical under conflicting live lease)', (t) => {
+test('progress heartbeats nothing, because there is no reservation to keep warm', (t) => {
+  // Both the isolated and shared halves of the old pair are folded into this.
+  // `dispatch-progress` used to refresh the shared lease's `heartbeat_at` so a
+  // reader could guess whether the holder was still alive — the guess this
+  // whole change removes. Progress remains what it always was: an attested,
+  // non-gating observation, and it now writes no machine-local liveness state
+  // at all.
   const { root, runId, request } = seedIsolatedRun(t);
-  runDispatchPrepare({ repoRoot: root, run: runId, dispatchId: request.dispatchId, isolate: true });
-  runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'host-iso' });
-  // Acquire a live shared lease for the dispatch's own holder — pre-fix this
-  // would heartbeat successfully and advance heartbeat_at, post-fix it must not.
-  const holder = { id: request.dispatchId, kind: 'host-dispatch' as const, runId, dispatchId: request.dispatchId };
-  const nowLease = new Date('2026-08-17T01:00:00.000Z');
-  acquireWorkspaceLease({
-    repoRoot: root,
-    workspaceMode: 'shared',
-    holder,
-    supervisorPid: process.pid,
-    executorPid: null,
-    processGroupId: null,
-    startedAt: nowLease,
-    heartbeatAt: nowLease,
-    stdoutBytes: 0,
-    stderrBytes: 0,
-    now: nowLease,
-  });
-  const leasePath = join(root, WORKSPACE_LEASE_FILE);
-  assert.ok(existsSync(leasePath));
-  const beforeText = readFileSync(leasePath, 'utf8');
-  const report = join(root, 'isolated-progress.json');
-  writeFileSync(report, JSON.stringify({ state: 'running', summary: 'isolated working', updated_at: '2026-08-17T01:01:00.000Z' }));
-  const receipt = runDispatchProgress({ repoRoot: root, run: runId, dispatchId: request.dispatchId, file: report, now: new Date('2026-08-17T01:02:00.000Z') });
-  assert.equal(receipt.state, 'running');
-  const afterText = readFileSync(leasePath, 'utf8');
-  assert.equal(afterText, beforeText, 'isolated progress must leave lease file byte-identical even for its own holder');
-  const lease = JSON.parse(afterText);
-  assert.equal(lease.holder.id, request.dispatchId);
-  assert.equal(lease.heartbeat_at, nowLease.toISOString(), 'isolated progress must not advance heartbeat_at');
-  // cleanup
-  rmSync(leasePath, { force: true });
-});
-
-test('shared progress still heartbeats its own lease', (t) => {
-  const { root, runId, request } = seedIsolatedRun(t);
-  // shared path: no prepare
   const startAt = new Date('2026-08-17T02:00:00.000Z');
   runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'host-shared', now: startAt });
-  const leasePath = join(root, WORKSPACE_LEASE_FILE);
-  assert.ok(existsSync(leasePath));
-  const beforeLease = JSON.parse(readFileSync(leasePath, 'utf8'));
-  assert.equal(beforeLease.heartbeat_at, startAt.toISOString());
+  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false, 'no lease is created by a shared start');
+
   const report = join(root, 'shared-progress.json');
   writeFileSync(report, JSON.stringify({ state: 'running', summary: 'shared working', updated_at: '2026-08-17T02:01:00.000Z' }));
-  const later = new Date('2026-08-17T02:05:00.000Z');
-  const receipt = runDispatchProgress({ repoRoot: root, run: runId, dispatchId: request.dispatchId, file: report, now: later });
-  assert.equal(receipt.state, 'running');
-  const afterLease = JSON.parse(readFileSync(leasePath, 'utf8'));
-  assert.equal(afterLease.heartbeat_at, later.toISOString(), 'shared progress should advance heartbeat_at');
+  const receipt = runDispatchProgress({ repoRoot: root, run: runId, dispatchId: request.dispatchId, file: report, now: new Date('2026-08-17T02:05:00.000Z') });
+  assert.equal(receipt.state, 'running', 'the semantic receipt is unchanged');
+  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false, 'and progress still creates no lease');
+
+  // The window is untouched by progress: only a terminal receipt closes one.
+  const window = readDispatchWindows(root).windows.find((w) => w.dispatchId === `${runId}:${request.dispatchId}`)!;
+  assert.ok(window != null, 'the start opened a window');
+  assert.equal(window.endedAt, null);
 });
 
 test('isolated and shared terminal events differ by exactly the five isolated keys', (t) => {

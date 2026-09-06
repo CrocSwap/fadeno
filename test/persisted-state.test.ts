@@ -656,15 +656,17 @@ test('audit: a surface nothing reads is still ok, and says why', (t) => {
 test('audit: a workspace lease its reader refuses is an error, not a free workspace', (t) => {
   const root = tempRepo(t);
   const abs = installFixture(root, join('.fadeno', 'local', 'workspace-lease.json'), 'workspace-lease', 'malformed.json');
-  // The premise: the reader really does get nothing out of it — and its `null`
-  // is indistinguishable from "no lease" everywhere else, which is how mutual
-  // exclusion silently stops excluding.
+  // The premise: the reader really does get nothing out of it. That used to be
+  // how mutual exclusion silently stopped excluding; there is nothing to
+  // exclude now, and the audit still has to report a surface it cannot read —
+  // saying nothing about a file it never opened is the defect this inventory
+  // exists to prevent, whatever the file is for.
   assert.equal(readWorkspaceLease(root), null);
 
   const found = auditFor(root, t, 'workspace-lease');
   assert.equal(found.severity, 'error');
   assert.match(found.detail, /workspace-lease\.json/);
-  assert.match(found.detail, /stops excluding writers/);
+  assert.match(found.detail, /Vestigial either way/);
   assert.match(found.remediation ?? '', new RegExp(escapeRe(abs)));
   assert.match(found.remediation ?? '', repoBackups(root));
 });
@@ -674,7 +676,8 @@ test('audit: a real captured lease reads back and names its holder', (t) => {
   installFixture(root, join('.fadeno', 'local', 'workspace-lease.json'), 'workspace-lease', 'current.json');
   const found = auditFor(root, t, 'workspace-lease');
   assert.equal(found.severity, 'ok', found.detail);
-  assert.match(found.detail, /shared lease held by "hd-ac-implement-g1-implementer-a1"/);
+  assert.match(found.detail, /leftover shared lease naming "hd-ac-implement-g1-implementer-a1"/);
+  assert.match(found.detail, /nothing reads it any more/);
 });
 
 test('audit: an absent lease is ok — absence is not damage', (t) => {

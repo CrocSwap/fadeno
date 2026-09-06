@@ -206,34 +206,43 @@ function outputNote(root: string, tag: string): { status: number | null; stdout:
   return { status: cli.status, stdout: cli.stdout, stderr: cli.stderr };
 }
 
-test('dispatch output: a dispatch the kernel killed at its deadline is reported as TIMED OUT before anything about attestation', (t) => {
-  const root = seedCatalog(t, { harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'setTimeout(()=>process.stdout.write(\'LATE\'),6000)'] } } });
-  const result = runDispatch({ archetype: 'worker', prompt: 'slow', tag: 'worker-slow', repoRoot: root, shared: true, timeoutMs: 1000, userPathOptions: onHarness('standalone') });
-  assert.equal(result.outcome, 'timeout');
-  assert.equal(result.signal, 'SIGTERM');
-  assert.equal(result.timeoutMs, 1000);
+test('dispatch output: a legacy TIMED OUT row still leads the note, ahead of attestation', (t) => {
+  // The two live-timeout tests that stood here are gone with the deadline —
+  // nothing can produce `outcome: "timeout"` any more. What must not regress
+  // is the READER: `.fadeno/dispatches.jsonl` files written before the removal
+  // carry these rows, and on 2026-08-22 a proxy relayed exactly one of them as
+  // "completed" because attestation alone cannot tell zero bytes hashed
+  // against zero bytes from a success. So the row is synthesized here and the
+  // verdict is asserted to lead.
+  const root = seedCatalog(t, { harnesses: { codex: { provider: 'openai', command: ['node', '-e', "process.stdout.write('ok')"] } } });
+  runDispatch({ archetype: 'worker', prompt: 'x', tag: 'legacy-timeout', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
+  const evidencePath = join(root, '.fadeno', 'dispatches.jsonl');
+  const rows = readFileSync(evidencePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  const completed = rows.findLast((row) => row.event === 'dispatch_completed')!;
+  // Rewrite it into the pre-removal shape, byte for byte as an old kernel wrote it.
+  completed.outcome = 'timeout';
+  completed.exit_code = null;
+  completed.signal = 'SIGTERM';
+  completed.output_bytes = 0;
+  completed.output_sha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+  completed.timeout_ms = 1000;
+  completed.deadline_at = '2026-08-22T00:00:01.000Z';
+  const outputSnapshot = completed.output_snapshot as string | undefined;
+  if (typeof outputSnapshot === 'string') writeFileSync(join(root, outputSnapshot), '');
+  writeFileSync(evidencePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`);
 
-  const rec = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-slow' });
-  assert.equal(rec.attested, 'match', 'empty bytes hash to the empty row — attestation alone cannot tell this apart from success');
-  assert.equal(rec.outcome, 'timeout');
-  assert.equal(rec.exitCode, null);
-  assert.equal(rec.signal, 'SIGTERM');
-  assert.equal(rec.outputBytes, 0);
+  const rec = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'legacy-timeout' });
+  assert.equal(rec.outcome, 'timeout', 'an old row still reads as a timeout');
   assert.equal(rec.timeoutMs, 1000);
+  assert.equal(rec.signal, 'SIGTERM');
 
-  const { stdout, stderr } = outputNote(root, 'worker-slow');
+  const { stdout, stderr } = outputNote(root, 'legacy-timeout');
   assert.equal(stdout, '');
-  assert.match(stderr, /— TIMED OUT: the kernel killed the executor at its 1s deadline \(SIGTERM\); the work did NOT finish\. 0 bytes of output were captured before the kill\./);
-  assert.match(stderr, /Re-dispatch with a larger --timeout, or none/);
+  assert.match(stderr, /TIMED OUT: the kernel killed the executor at its 1s deadline \(SIGTERM\); the work did NOT finish\. 0 bytes of output were captured before the kill\./);
+  // The advice changed with the mechanism: there is no larger --timeout to ask for.
+  assert.doesNotMatch(stderr, /--timeout/);
+  assert.match(stderr, /executor deadlines were removed/);
   assert.ok(stderr.indexOf('TIMED OUT') < stderr.indexOf('output attested'), 'the verdict leads; attestation follows');
-});
-
-test('dispatch output: the direct call names the deadline kill too, rather than a fabricated "exited 1"', (t) => {
-  const root = seedCatalog(t, { harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'setTimeout(()=>process.stdout.write(\'LATE\'),6000)'] } } });
-  const cli = spawnSync('node', [join(REPO_ROOT, 'src', 'cli.ts'), 'dispatch', '--archetype', 'worker', '--tag', 'worker-direct', '--shared', '--timeout', '1'], { cwd: root, encoding: 'utf8', input: 'slow', env: { ...process.env, FADENO_HARNESS: 'standalone' } });
-  assert.equal(cli.status, 1);
-  assert.match(cli.stderr, /dispatch: executor \S+ TIMED OUT — the kernel killed it at its 1s deadline \(SIGTERM\); the work did NOT finish\. 0 bytes/);
-  assert.doesNotMatch(cli.stderr, /exited 1/);
 });
 
 test('dispatch output: FAILED, NO OUTPUT and ok verdicts each lead the note', (t) => {

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { sha256Hex } from './artifact-manifest.ts';
 import { INFLIGHT_DIR, inflightClaimIsAlive, readInflightClaim, readSupervisorStatus, sleepSync, superviseArgv, supervisedSpawnError, supervisorCanStillReport } from './supervisor.ts';
-import { acquireWorkspaceLease, isWorkspaceLeaseAlive, readEffectiveLease, readWorkspaceLease, releaseWorkspaceLease, WorkspaceLeaseError, WORKSPACE_LEASE_FILE } from './workspace-lease.ts';
+import { closeDispatchWindow, openDispatchWindow } from './workspace-overlap.ts';
 import { atCwd, withDispatchProvenance, withoutHarnessIdentity } from './executors.ts';
 import { readEventsStrict, type RunEvent } from './run-ledger.ts';
 import { parseGeneration } from './prompt-resolve.ts';
@@ -59,7 +59,6 @@ export function synthesizeTestResult(opts: {
   stderr: string;
   exitCode: number | null;
   signal: string | null;
-  timedOut: boolean;
   spawnFailed: string | null;
 }): { result: SynthesizedTestResult; detailsContent: string | null } {
   const rendered = renderArgv(opts.argv);
@@ -74,10 +73,6 @@ export function synthesizeTestResult(opts: {
       if (parts.length > 0) parts.push('\n--- spawn ---\n');
       parts.push(opts.spawnFailed);
     }
-    if (opts.timedOut) {
-      if (parts.length > 0) parts.push('\n--- timeout ---\n');
-      parts.push(`timed out`);
-    }
     if (opts.signal) {
       if (parts.length > 0) parts.push('\n--- signal ---\n');
       parts.push(`terminated by ${opts.signal}`);
@@ -87,7 +82,7 @@ export function synthesizeTestResult(opts: {
 
   let status: 'passed' | 'failed' | 'error';
   let exitCode: number | null;
-  if (opts.spawnFailed != null || opts.timedOut || opts.signal != null) {
+  if (opts.spawnFailed != null || opts.signal != null) {
     status = 'error';
     exitCode = null;
   } else if (opts.exitCode === 0) {
@@ -171,7 +166,6 @@ export interface ToolProvenance {
   commandDigest: string;
   exitCode: number | null;
   signal: string | null;
-  timedOut: boolean;
   spawnFailed: string | null;
   durationMs: number | null;
   toolCallId: string;
@@ -294,7 +288,6 @@ export interface ToolCoreParams {
   /** 1-based loop iteration for a body step; null/absent for an outer step. */
   iteration?: number | null;
   command: string[]; // resolved argv
-  effectiveTimeoutMs: number | null;
   now?: Date;
   harnessEnv?: NodeJS.ProcessEnv;
 }
@@ -394,10 +387,11 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
     throw new ToolExecError(`tool attempt ${ids.toolCallId}:a${attempt} blocked — another live attempt for ${ids.toolCallId} holds ${liveClaim} (wait for it to terminate)`);
   }
 
-  const effectiveLeaseBefore = (() => { try { return readEffectiveLease(params.repoRoot); } catch { return null; } })();
-  if (effectiveLeaseBefore != null && isWorkspaceLeaseAlive(effectiveLeaseBefore)) {
-    throw new ToolExecError(`shared workspace is already held by ${effectiveLeaseBefore.holder.kind} "${effectiveLeaseBefore.holder.id}" (supervisor_pid ${effectiveLeaseBefore.supervisor_pid ?? 'unknown'}, started ${effectiveLeaseBefore.started_at}); holder "tool:${params.runId}:${params.stepId}:g${generation}:a${attempt}" must wait or retry.`);
-  }
+  // The repo-wide lease check that used to refuse here is gone. The
+  // `findLiveToolClaim` probe above is the one that mattered and it stays: it
+  // asks whether ANOTHER ATTEMPT AT THIS TOOL CALL is live, on a claim a
+  // process on this machine published, which is a question with an answer.
+  // "Is some unrelated writer somewhere in this repo still alive?" is not.
 
   ensureStepStarted(params);
 
@@ -477,34 +471,18 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
     dispatchId: `${ids.toolCallId}:a${attempt}`,
   };
   const withdrawClaim = (): void => { try { rmSync(claimAbs, { force: true }); } catch {} };
-  let leaseAcquired = false;
-  try {
-    // Reserve pid-lessly, exactly like the engine and host paths. Until the
-    // supervisor publishes executor/group identity there is no process whose
-    // death proves the executor is gone, and a record naming *this* process as
-    // the supervisor fails open the instant it exits: the reader sees one dead
-    // pid, no executor, no group, and reclaims a reservation whose detached
-    // executor may be running. A pid-less record is conservatively live and is
-    // reclaimed only by recovery, which first proves the attempt dangling.
-    acquireWorkspaceLease({
-      repoRoot: params.repoRoot,
-      workspaceMode: 'shared',
-      holder,
-      supervisorPid: null,
-      executorPid: null,
-      processGroupId: null,
-      startedAt: params.now,
-      heartbeatAt: params.now,
-      stdoutBytes: 0,
-      stderrBytes: 0,
-      now: params.now,
-    });
-    leaseAcquired = true;
-  } catch (err) {
-    withdrawClaim();
-    if (err instanceof WorkspaceLeaseError) throw new ToolExecError(err.message);
-    throw err;
-  }
+  // Record the window instead of reserving the repo. The old acquire was
+  // pid-less on purpose — no process's death could prove the detached executor
+  // gone — which is exactly what made it unreclaimable by anything but a
+  // recovery pass that first had to prove the attempt dangling. A window needs
+  // none of that machinery: it is closed by this attempt's terminal receipt.
+  openDispatchWindow(params.repoRoot, {
+    dispatchId: holder.id,
+    runId: params.runId,
+    kind: 'engine',
+    workspaceMode: 'shared',
+    ...(params.now != null ? { startedAt: params.now } : {}),
+  });
 
   const commandDigestValue = commandDigest(params.command);
   // Durable admission: check-then-append under the per-run ledger lock so two
@@ -556,11 +534,10 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         command_sha256: commandDigestValue,
         supervisor_claim: claimRel,
         workspace_mode: 'shared',
-        ...(params.effectiveTimeoutMs != null ? { timeout_ms: params.effectiveTimeoutMs } : {}),
       }, params.now ?? new Date());
     });
   } catch (err) {
-    if (leaseAcquired) try { releaseWorkspaceLease({ repoRoot: params.repoRoot, holder }); } catch {}
+    closeDispatchWindow(params.repoRoot, { dispatchId: holder.id, changedPaths: [] });
     withdrawClaim();
     if (err instanceof ToolExecError) throw err;
     if (err instanceof LedgerWriteError) throw new ToolExecError(err.message);
@@ -580,15 +557,11 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
   // This kernel polls the supervisor's status file rather than blocking inside
   // `spawnSync`, so it is still working when the supervisor exits: reading the
   // output, synthesizing, placing the artifact, attributing it. Naming
-  // ourselves as the owner keeps the claim and the lease with us across that
-  // window, and leaves the supervisor's own release in place for the crash
-  // path where nobody is left to hand them to.
-  const leaseRelease = {
-    leasePath: join(params.repoRoot, WORKSPACE_LEASE_FILE),
-    lockPath: join(params.repoRoot, '.fadeno', 'local', '.workspace-lease.lock'),
-    holder,
-    owner: { pid: process.pid },
-  };
+  // ourselves as the owner keeps the CLAIM with us across that window, and
+  // leaves the supervisor's own drop in place for the crash path where nobody
+  // is left to hand it to. (The lease this descriptor also used to carry is
+  // gone; the owner pid is not, because `fadeno cancel` needs one to signal.)
+  const claimOwner = { owner: { pid: process.pid } };
 
   let promptFd: number | null = null;
   let outFd: number | null = null;
@@ -601,7 +574,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
     outFd = openSync(outputSnapshotAbs, 'w');
     errFd = openSync(stderrSnapshotAbs, 'w');
     const argv = params.command;
-    child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, params.effectiveTimeoutMs ?? null), {
+    child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, claimOwner), {
       stdio: [promptFd, outFd, errFd],
       cwd: params.repoRoot,
       // A registered tool never coordinates, so it carries `deny`: `npm test`
@@ -641,7 +614,6 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       stderr: msg,
       exitCode: null,
       signal: null,
-      timedOut: false,
       spawnFailed: msg,
       claimAbs,
       statusAbs,
@@ -723,7 +695,6 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       stderr: 'supervisor lost',
       exitCode: null,
       signal: null,
-      timedOut: false,
       spawnFailed: infraMsg,
       claimAbs,
       statusAbs,
@@ -757,18 +728,6 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       try { rmSync(tmp, { force: true }); } catch {}
     }
   }
-  try {
-    acquireWorkspaceLease({
-      repoRoot: params.repoRoot,
-      workspaceMode: 'shared',
-      holder,
-      supervisorPid: process.pid,
-      executorPid: null,
-      processGroupId: null,
-      now: params.now,
-    });
-  } catch {}
-
   const durationMs = supervisorStatus.durationMs ?? (Date.now() - startedMs);
 
   // Read stdout/stderr with bounding/truncation, preserving observed exit
@@ -814,7 +773,6 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         stderr: `failed to read output snapshot: ${(err as Error).message}`,
         exitCode: null,
         signal: null,
-        timedOut: false,
         spawnFailed: `output unreadable: ${(err as Error).message}`,
         claimAbs,
         statusAbs,
@@ -843,7 +801,6 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
   } catch { stderr = ''; }
 
   const spawnFailed = supervisorStatus.spawnFailed ?? supervisedSpawnError(supervisorStatus.exitCode ?? null, stderr);
-  const timedOut = supervisorStatus.timedOut === true;
   const signal = supervisorStatus.signal ?? null;
   const exitCode = supervisorStatus.exitCode ?? null;
 
@@ -854,11 +811,10 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
     stderr,
     exitCode,
     signal,
-    timedOut,
     spawnFailed,
   });
 
-  // A close code of null with no signal, timeout, or spawn failure is a
+  // A close code of null with no signal or spawn failure is a
   // supervisor that could not observe how the child ended. There is no observed
   // exit behind it, so it can never become a `tool_completed` on the planned
   // path — it is infrastructure, and the attempt stays retryable.
@@ -869,7 +825,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
   // out — a usage message, a partial write, a stack trace — as the artifact the
   // step promised, and the step would look done.
   const failedByExit = captureMode === 'stdout-artifact' && exitCode != null && exitCode !== 0;
-  const isInfraFailure = spawnFailed != null || timedOut || signal != null || exitCode == null || failedByExit;
+  const isInfraFailure = spawnFailed != null || signal != null || exitCode == null || failedByExit;
 
   if (isInfraFailure) {
     // Attempt-scoped infra handling
@@ -891,7 +847,6 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       stderr,
       exitCode: failedByExit ? exitCode : null,
       signal,
-      timedOut,
       spawnFailed,
       claimAbs,
       statusAbs,
@@ -903,10 +858,9 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       detailsContent,
     });
     const msg = spawnFailed
-      ?? (timedOut ? 'timed out'
-        : signal ? `signal ${signal}`
-          : failedByExit ? `exited ${exitCode} without producing its artifact`
-            : 'ended without an observed exit code');
+      ?? (signal ? `signal ${signal}`
+        : failedByExit ? `exited ${exitCode} without producing its artifact`
+          : 'ended without an observed exit code');
     throw new ToolExecError(`tool "${params.toolName}" failed: ${msg}; attempt recorded as error TestResult at artifacts/attempts/${ids.toolCallId}-a${attempt}${extname(params.outputRel) || '.json'} (retryable)`);
   }
 
@@ -924,7 +878,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
     try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
     try { rmSync(statusAbs, { force: true }); } catch {}
     try { rmSync(claimAbs, { force: true }); } catch {}
-    try { releaseWorkspaceLease({ repoRoot: params.repoRoot, holder }); } catch {}
+    closeDispatchWindow(params.repoRoot, { dispatchId: holder.id, changedPaths: [] });
   };
 
   /**
@@ -1095,7 +1049,6 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         stderr: `tool stdout is not JSON, but the step declares artifact type "${schemaKey}"`,
         exitCode: null,
         signal: null,
-        timedOut: false,
         spawnFailed: `tool stdout is not JSON, but the step declares artifact type "${schemaKey}"`,
         claimAbs,
         statusAbs,
@@ -1128,7 +1081,6 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         stderr: `validation failed: ${msg}`,
         exitCode: null,
         signal: null,
-        timedOut: false,
         spawnFailed: `synthesized artifact invalid: ${msg}`,
         claimAbs,
         statusAbs,
@@ -1240,7 +1192,6 @@ function handleInfraFailure(opts: {
   stderr: string;
   exitCode: number | null;
   signal: string | null;
-  timedOut: boolean;
   spawnFailed: string | null;
   claimAbs: string;
   statusAbs: string;
@@ -1260,7 +1211,6 @@ function handleInfraFailure(opts: {
         stderr: opts.stderr,
         exitCode: opts.exitCode,
         signal: opts.signal,
-        timedOut: opts.timedOut,
         spawnFailed: opts.spawnFailed,
       });
   const result = synResult;
@@ -1305,7 +1255,9 @@ function handleInfraFailure(opts: {
     command_sha256: opts.commandDigestValue,
     exit_code: opts.exitCode,
     signal: opts.signal,
-    timed_out: opts.timedOut,
+    // Constant since executor deadlines were removed; kept so the row's shape
+    // does not change under a reader that predates the removal.
+    timed_out: false,
     spawn_failed: opts.spawnFailed,
     duration_ms: opts.durationMs,
     output: attemptRel,
@@ -1325,7 +1277,7 @@ function handleInfraFailure(opts: {
   try { rmSync(opts.stderrSnapshotAbs, { force: true }); } catch {}
   try { rmSync(opts.statusAbs, { force: true }); } catch {}
   try { rmSync(opts.claimAbs, { force: true }); } catch {}
-  try { releaseWorkspaceLease({ repoRoot: opts.repoRoot, holder: opts.holder }); } catch {}
+  closeDispatchWindow(opts.repoRoot, { dispatchId: opts.holder.id, changedPaths: [] });
 }
 
 /**
@@ -1373,7 +1325,7 @@ export function recoverInterruptedToolDispatchesShared(
 function recoverInterruptedToolDispatchesLocked(
   repoRoot: string,
   runDir: string,
-  runId: string,
+  _runId: string,
   now: Date | undefined,
   makeError: (msg: string) => Error,
 ): number {
@@ -1416,79 +1368,20 @@ function recoverInterruptedToolDispatchesLocked(
     }
     dangling.push(event);
   }
-  if (dangling.length > 0) {
-    let rawLease: ReturnType<typeof readWorkspaceLease> = null;
-    try { rawLease = readEffectiveLease(repoRoot); } catch {}
-    if (rawLease == null) {
-      try {
-        const candidate = readWorkspaceLease(repoRoot);
-        if (candidate != null && candidate.supervisor_pid == null && candidate.executor_pid == null && candidate.process_group_id == null) {
-          rawLease = candidate;
-        }
-      } catch {}
-    }
-    if (rawLease != null) {
-      const danglingToolIds = new Set(
-        dangling.map((event) => {
-          const step = typeof event.step === 'string' ? event.step : 'unknown';
-          const gen = typeof event.extra.generation === 'number' ? event.extra.generation : 1;
-          return `tool:${runId}:${step}:g${gen}:a${String(event.extra.attempt)}`;
-        }),
-      );
-      const danglingEngineIds = new Set(
-        events
-          .filter((e) => e.type === 'actor_dispatched' && typeof e.extra.actor_call_id === 'string' && typeof e.extra.attempt === 'number')
-          .filter((e) => !events.some((t) => (t.type === 'actor_completed' || t.type === 'actor_failed') && t.extra.actor_call_id === e.extra.actor_call_id && t.extra.attempt === e.extra.attempt))
-          .map((e) => `engine:${runId}:${String(e.extra.actor_call_id)}:a${String(e.extra.attempt)}`),
-      );
-      const allDangling = new Set([...danglingToolIds, ...danglingEngineIds]);
-      if (!allDangling.has(rawLease.holder.id)) {
-        try {
-          const writer = new LedgerWriter(runDir);
-          writer.append({
-            type: 'workspace_lease_reclaim_denied',
-            step: null,
-            previous_holder: rawLease.holder,
-            supervisor_pid: rawLease.supervisor_pid,
-            reason: 'active_writer',
-            recovered_at: (now ?? new Date()).toISOString(),
-            by: `engine:${runId}:recovery`,
-          }, now ?? new Date());
-        } catch {}
-        const holdersSuffix = (() => {
-          const holders = (rawLease.holders?.length ?? 1) > 1 ? rawLease.holders! : [rawLease.holder];
-          if (holders.length <= 1) return '';
-          return ` holders: ${holders.map((h) => `"${h.id}"`).join(', ')}`;
-        })();
-        throw makeError(
-          `shared workspace is already held by ${rawLease.holder.kind} "${rawLease.holder.id}"${holdersSuffix} (supervisor_pid ${rawLease.supervisor_pid ?? 'unknown'}, started ${rawLease.started_at}); holder "${runId}" must wait or retry. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`,
-        );
-      }
-      if (rawLease.supervisor_pid != null || rawLease.executor_pid != null || rawLease.process_group_id != null) {
-        throw makeError(`tool attempt still has a live executor identity in ${WORKSPACE_LEASE_FILE}; refusing to reclaim its lease while the supervisor or detached executor group may still be running.`);
-      }
-      const previous = rawLease;
-      try {
-        const released = releaseWorkspaceLease({ repoRoot, holder: rawLease.holder });
-        if (released) {
-          try {
-            const writer = new LedgerWriter(runDir);
-            const reason = previous.holder.kind === 'host-dispatch' ? 'abandoned_host' : 'abandoned_engine';
-            writer.append({
-              type: 'workspace_lease_recovered',
-              step: null,
-              recovered_holder: null,
-              previous_holder: previous.holder,
-              supervisor_pid: previous.supervisor_pid,
-              reason,
-              recovered_at: (now ?? new Date()).toISOString(),
-              by: `engine:${runId}:recovery`,
-            }, now ?? new Date());
-          } catch {}
-        }
-      } catch {}
-    }
-  }
+  // The lease-reclaim transaction that stood here is gone.
+  //
+  // It existed because a dangling attempt's own lease outlived it: pid-less by
+  // design, so nothing could prove the holder dead, so recovery had to prove
+  // the attempt dangling FIRST and then reclaim the reservation by hand —
+  // auditing `workspace_lease_recovered` / `workspace_lease_reclaim_denied`
+  // along the way, and refusing outright ("must wait or retry") when the
+  // holder was some unrelated writer. Every line of it was in service of a
+  // lock that no longer exists, and its refusal branch is precisely how a run
+  // could become unrecoverable: the recovery of a dangling attempt could be
+  // denied by the dangling attempt's own neighbour.
+  //
+  // Recovery below now does the only thing that was ever load-bearing: write
+  // the terminal receipt the interrupted attempt never wrote.
   let recovered = 0;
   for (const event of dangling) {
     const toolCallId = event.extra.tool_call_id as string;

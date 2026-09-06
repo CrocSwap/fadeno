@@ -597,7 +597,7 @@ function adviceFor(info: NextStepInfo, gate: NextGateInfo | null): string {
     if (info.artifact_type === 'test-result') {
       return (
         `tool step "${info.id}" produces test-result at ${output}. ` +
-        `If tool${tool} is registered in executors.yaml, run \`fadeno tool-run <run> [--tool${tool}] [--timeout <seconds>]\` to execute it; ` +
+        `If tool${tool} is registered in executors.yaml, run \`fadeno tool-run <run> [--tool${tool}]\` to execute it; ` +
         `otherwise write the artifact manually and attribute with \`fadeno tool-complete <run> --output ${output}\`. ` +
         `Then re-call \`fadeno next\`.`
       );

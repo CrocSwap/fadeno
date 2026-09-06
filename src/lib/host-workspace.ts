@@ -2,7 +2,19 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { collectIsolatedDiff, isRegisteredWorktree, removeIsolatedWorktree, withWorkspaceWindowLease, WORKSPACE_LEASE_LOCK_STALE_MS, WorkspaceLeaseError } from './workspace-lease.ts';
+import { collectIsolatedDiff, isRegisteredWorktree, removeIsolatedWorktree, WorkspaceIsolationError } from './workspace-isolation.ts';
+
+/**
+ * How old this module's OWN mkdir lock may be before it is reclaimed.
+ *
+ * Not the repo-wide writer lease, which is gone. This one guards a few
+ * milliseconds of host-workspace state file rewriting inside a single
+ * process's critical section — a mutex around a read-modify-write, not a
+ * reservation held across an agent's run — so the question it asks ("did a
+ * process die mid-rewrite?") is answerable by an mtime in a way "is an agent
+ * in another session still working?" never was.
+ */
+const WORKSPACE_LEASE_LOCK_STALE_MS = 120_000;
 import { applyWorkspaceBaseline, captureWorkspaceBaseline } from './workspace-baseline.ts';
 
 export const HOST_WORKSPACE_SCHEMA_VERSION = '1.0';
@@ -333,29 +345,25 @@ export function prepareHostWorkspace(opts: { repoRoot: string; run: string; disp
     try {
       // A detached worktree starts at clean HEAD, but a host reviewer must see
       // the same tracked and untracked state as the coordinator that spawned
-      // it. Capture under the short read window so a concurrent merge-back
-      // cannot produce a torn baseline, then commit that replay in the
+      // it. Capture the caller's state, then commit that replay in the
       // worktree. The resulting commit is the actual base for later diff
       // collection: the caller's pre-existing dirty work is input, not output.
-      const baseCommit = withWorkspaceWindowLease(
-        {
-          repoRoot,
-          holder: {
-            id: `baseline:host:${run}:${dispatchId}`,
-            kind: 'host-dispatch',
-            runId: run,
-            dispatchId,
-          },
-          mode: 'read',
-          ...(opts.now != null ? { now: opts.now } : {}),
-        },
-        () => applyWorkspaceBaseline(
-          repoRoot,
-          worktreeAbs,
-          captureWorkspaceBaseline(repoRoot),
-          `${run}:${dispatchId}`,
-          'host dispatch',
-        ),
+      //
+      // This capture used to run under a READ window lease, to keep a
+      // concurrent merge-back from producing a torn baseline. That lease is
+      // gone with every other one. What remains true is that a capture racing
+      // a merge-back reads a tree mid-apply — and what makes that survivable
+      // is the apply itself: `git apply` is atomic, so the window is the
+      // duration of one syscall-bounded write rather than the duration of an
+      // agent's run, and a baseline that did catch a partial state produces a
+      // diff that refuses to apply and rebases, which is the same path a
+      // stale baseline already takes.
+      const baseCommit = applyWorkspaceBaseline(
+        repoRoot,
+        worktreeAbs,
+        captureWorkspaceBaseline(repoRoot),
+        `${run}:${dispatchId}`,
+        'host dispatch',
       );
       const now = opts.now ?? new Date();
       const state: HostWorkspaceState = {
@@ -431,7 +439,7 @@ function collectVerifiedIsolatedDiff(opts: { repoRoot: string; workspaceRel: str
     return collectIsolatedDiff({ repoRoot: opts.repoRoot, worktreeAbs, diffAbs, diffRel: opts.diffRel });
   } catch (err) {
     if (err instanceof HostWorkspaceError) throw err;
-    if (err instanceof WorkspaceLeaseError) throw new HostWorkspaceError(err.message);
+    if (err instanceof WorkspaceIsolationError) throw new HostWorkspaceError(err.message);
     throw new HostWorkspaceError((err as Error).message ?? String(err));
   }
 }

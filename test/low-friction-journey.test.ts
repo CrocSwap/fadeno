@@ -24,7 +24,7 @@ import { runUninstall, UninstallError } from '../src/commands/uninstall.ts';
 import { maintainedHarnesses } from '../src/lib/installations.ts';
 import { runClean } from '../src/commands/clean.ts';
 import { runUnvendor } from '../src/commands/unvendor.ts';
-import { acquireWorkspaceLease } from '../src/lib/workspace-lease.ts';
+import { openDispatchWindow } from '../src/lib/workspace-overlap.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const REPO = join(import.meta.dirname, '..');
@@ -288,13 +288,16 @@ test('drive recovers a command start left without a terminal receipt', (t) => {
     attempt: 1,
     executor: 'fail-model',
   }, new Date('2026-08-11T03:00:01.000Z'));
-  const staleHolder = { id: 'engine:stale-run:old-call:a1', kind: 'engine' as const, runId: 'stale-run' };
-  acquireWorkspaceLease({
-    repoRoot: root,
+  // A window left open by an abandoned run from another lifetime. Under the
+  // lease this was a reservation that had to be RECLAIMED before this run
+  // could proceed; now it is a record that makes the next delivery isolate and
+  // refuses nobody, so recovery below is unaffected by it.
+  openDispatchWindow(root, {
+    dispatchId: 'engine:stale-run:old-call:a1',
+    runId: 'stale-run',
+    kind: 'engine',
     workspaceMode: 'shared',
-    holder: staleHolder,
-    supervisorPid: 999_999_999,
-    now: new Date('2026-08-11T03:00:01.000Z'),
+    startedAt: new Date('2026-08-11T03:00:01.000Z'),
   });
 
   const result = runDrive({ repoRoot: root, userPathOptions: paths, run: run.runId, env: null });
@@ -303,10 +306,15 @@ test('drive recovers a command start left without a terminal receipt', (t) => {
     event.type === 'actor_failed' && event.extra.reason === 'engine_interrupted',
   );
   assert.equal(recovered?.extra.recovered, true);
-  const leaseAudit = readEvents(run.runDir).events.find((event) => event.type === 'workspace_lease_recovered');
-  assert.deepEqual(leaseAudit?.extra.previous_holder, staleHolder);
-  assert.equal(leaseAudit?.extra.reason, 'dead_supervisor');
-  assert.equal(typeof leaseAudit?.extra.recovered_at, 'string');
+  // No lease audit row: there is no reservation to reclaim, so recovery's only
+  // job is the terminal receipt the interrupted attempt never wrote — and the
+  // abandoned window opened above does not stand in its way, which is the
+  // whole difference from the lease it replaces.
+  assert.equal(
+    readEvents(run.runDir).events.find((event) => event.type === 'workspace_lease_recovered'),
+    undefined,
+    'recovery reclaims nothing and therefore audits nothing',
+  );
   assert.match(result.actions.join('\n'), /recovered 1 interrupted command dispatch receipt/);
 });
 
@@ -587,28 +595,36 @@ test('Claude steering hook remains inert for native slots and is registered by t
   assert.equal(manifest.hooks.PreToolUse[0].matcher, 'Agent');
 });
 
-test('doctor workspace-lease: no active lease reports ok', (t) => {
+test('doctor workspace-lease: a repo with no leftover lease reports ok', (t) => {
   const root = tempRepo(t);
   const paths = isolatedUser(root);
   const result = runDoctor({ repoRoot: root, userPathOptions: paths });
-  const lease = result.findings.find((item) => item.check === 'workspace-lease' && item.detail === 'no active workspace lease');
-  assert.ok(lease, 'expected workspace-lease ok when none active');
+  const lease = result.findings.find((item) => item.check === 'workspace-lease')!;
+  assert.ok(lease, 'expected a workspace-lease finding');
   assert.equal(lease.severity, 'ok');
+  assert.match(lease.detail, /no longer takes one/);
 });
 
-test('doctor workspace-lease: live shared lease reports warning with remediation', (t) => {
+test('doctor workspace-lease: a leftover record is a warning that says deleting it is safe', (t) => {
+  // REPLACED the three tests that stood here (live lease / stale lease / stale
+  // lock). They asserted a liveness VERDICT on a holder — running, stale, or
+  // abandoned — and a remediation that told the operator to recover the
+  // dispatch and, in every branch, to remove the file "only after verifying no
+  // writer remains". Both are gone: there is no verdict to reach because
+  // nothing consults the record, and the hedge is what left a wedged repo
+  // wedged. One finding now, whatever the record says, and it is unconditional.
   const root = tempRepo(t);
   const paths = isolatedUser(root);
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   const runId = '2026-08-17-0001-live-lease';
   const holder = { id: 'live-holder', kind: 'host-dispatch' as const, runId, dispatchId: 'dispatch-live' };
-  // Use an alive pid (current process) so readEffectiveLease treats it as live; 999999 would be stale dead
-  const livePid = process.pid;
   writeFileSync(join(root, '.fadeno', 'local', 'workspace-lease.json'), JSON.stringify({
     workspace_mode: 'shared',
     holder,
     holders: [holder],
-    supervisor_pid: livePid,
+    // A live pid, which under the lease meant "running, do not touch"; the
+    // verdict is no longer reached, so this changes nothing about the finding.
+    supervisor_pid: process.pid,
     executor_pid: null,
     process_group_id: null,
     started_at: new Date('2026-08-17T00:00:00.000Z').toISOString(),
@@ -617,57 +633,23 @@ test('doctor workspace-lease: live shared lease reports warning with remediation
     stderr_bytes: 0,
     last_output_at: null,
   }));
-  const result = runDoctor({ repoRoot: root, userPathOptions: paths });
-  const lease = result.findings.find((item) => item.check === 'workspace-lease' && item.severity === 'warning' && item.detail.includes('live-holder'));
-  assert.ok(lease, 'expected live lease warning');
-  assert.ok(lease.detail.includes(`host-dispatch "live-holder"`), `detail missing holder: ${lease.detail}`);
-  assert.ok(lease.detail.includes(`supervisor_pid ${livePid}`), `detail missing pid: ${lease.detail}`);
-  assert.ok(lease.detail.includes('holders: 1'), `detail missing holders: ${lease.detail}`);
-  assert.ok(lease.remediation?.includes(`fadeno show ${runId}`));
-  assert.ok(lease.remediation?.includes(`fadeno dispatch-complete ${runId} dispatch-live`) || lease.remediation?.includes('dispatch-fail'));
-  assert.ok(lease.remediation?.includes('.fadeno/local/workspace-lease.json'));
-});
+  // A leftover lock directory is reported by the same finding rather than a
+  // separate staleness threshold — there is no lock to be stale.
+  mkdirSync(join(root, '.fadeno', 'local', '.workspace-lease.lock'), { recursive: true });
 
-test('doctor workspace-lease: stale lease reports warning with reclaim remediation', (t) => {
-  const root = tempRepo(t);
-  const paths = isolatedUser(root);
-  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
-  // Use a pid that is guaranteed dead: probe will say ESRCH, but doctor uses real process.kill -> pid 99999 likely dead or EPERM? Use 2147483647 unlikely
-  const deadPid = 2147483647;
-  writeFileSync(join(root, '.fadeno', 'local', 'workspace-lease.json'), JSON.stringify({
-    workspace_mode: 'shared',
-    holder: { id: 'stale-holder', kind: 'engine', runId: 'run-stale' },
-    supervisor_pid: deadPid,
-    executor_pid: null,
-    process_group_id: null,
-    started_at: new Date('2026-08-17T00:00:00.000Z').toISOString(),
-    heartbeat_at: new Date('2026-08-17T00:00:01.000Z').toISOString(),
-    stdout_bytes: 0,
-    stderr_bytes: 0,
-    last_output_at: null,
-  }));
   const result = runDoctor({ repoRoot: root, userPathOptions: paths });
-  const lease = result.findings.find((item) => item.check === 'workspace-lease' && item.detail.includes('stale-holder'));
-  assert.ok(lease, 'expected stale lease warning');
+  const lease = result.findings.find((item) => item.check === 'workspace-lease')!;
+  assert.ok(lease, 'expected a workspace-lease finding');
   assert.equal(lease.severity, 'warning');
-  assert.match(lease.detail, /stale lease for "stale-holder" \(supervisor_pid 2147483647 is dead\)/);
-  assert.ok(lease.remediation?.includes('re-acquire will reclaim it'));
-  assert.ok(lease.remediation?.includes('.fadeno/local/workspace-lease.json'));
-});
-
-test('doctor workspace-lease: stale lock directory reported as warning', (t) => {
-  const root = tempRepo(t);
-  const paths = isolatedUser(root);
-  const lockPath = join(root, '.fadeno', 'local', '.workspace-lease.lock');
-  mkdirSync(lockPath, { recursive: true });
-  // Make lock stale by setting mtime far in past
-  const staleTime = new Date(Date.now() - 200_000);
-  try { writeFileSync(join(lockPath, '.keep'), ''); } catch {}
-  try { utimesSync(lockPath, staleTime, staleTime); } catch {}
-  const result = runDoctor({ repoRoot: root, userPathOptions: paths });
-  const lockFinding = result.findings.find((item) => item.check === 'workspace-lease' && item.detail.includes('stale lock'));
-  assert.ok(lockFinding, 'expected stale lock warning');
-  assert.equal(lockFinding.severity, 'warning');
+  assert.match(lease.detail, /live-holder/);
+  assert.match(lease.detail, /nothing reads this file/);
+  assert.match(lease.detail, /\.workspace-lease\.lock/, 'the leftover lock is named too');
+  assert.match(lease.remediation ?? '', /Delete/);
+  assert.match(lease.remediation ?? '', /safe with work in flight/);
+  assert.doesNotMatch(lease.remediation ?? '', /only after verifying/i,
+    'the hedge that kept wedged repos wedged is gone');
+  assert.doesNotMatch(lease.remediation ?? '', /dispatch-fail/,
+    'a vestigial file is not an abandoned dispatch to recover');
 });
 
 test('doctor never acquires or deletes a lease', (t) => {

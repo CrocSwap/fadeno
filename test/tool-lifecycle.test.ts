@@ -11,7 +11,16 @@ import { runNext } from '../src/commands/next.ts';
 import { readEventsStrict } from '../src/lib/run-ledger.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { LedgerWriter } from '../src/lib/run-ledger-write.ts';
-import { acquireWorkspaceLease, readEffectiveLease, releaseWorkspaceLease } from '../src/lib/workspace-lease.ts';
+import { openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
+
+/** Is this run's tool window still open? Replaces `readEffectiveLease(root)
+ * === null`: nothing is reserved any more, but a terminal receipt still owes
+ * a closed window. */
+function toolWindowOpen(root: string, runId: string): boolean {
+  return readDispatchWindows(root).windows.some(
+    (w) => w.dispatchId.startsWith(`tool:${runId}:`) && w.endedAt == null,
+  );
+}
 import { TOOL_SUMMARY_MAX_BYTES, TOOL_DETAILS_MAX_BYTES } from '../src/lib/tool-exec.ts';
 import {
   BUNDLED_CLI,
@@ -154,16 +163,19 @@ test('an unregistered tool and a --tool mismatch each refuse before any spawn, e
   assert.ok(!readEventsStrict(mismatch.runDir).some((e) => e.type === 'tool_dispatched'));
 });
 
-test('spawn failure, timeout, and signal never produce passed and never complete the step', (t) => {
-  const cases: Array<{ label: string; command: string[]; timeoutMs?: number }> = [
+test('spawn failure and signal never produce passed and never complete the step', (t) => {
+  // The `timeout` row is gone: it declared `timeout_ms: 1000` on a `sleep 60`
+  // and expected the kernel to kill it. No deadline is armed from any source,
+  // so that row would now hang for a minute and then pass. The equivalent
+  // outcome reached by DECISION rather than by a clock is covered in
+  // tool-repairs ("a CANCELLED attempt leaves its recorded process group
+  // dead"); a declared-and-ignored `timeout_ms` is covered there too.
+  const cases: Array<{ label: string; command: string[] }> = [
     { label: 'spawn failure', command: ['/nonexistent-tool-binary'] },
-    { label: 'timeout', command: ['sleep', '60'], timeoutMs: 1000 },
     { label: 'signal', command: ['node', '-e', 'process.kill(process.pid, "SIGKILL")'] },
   ];
   for (const testCase of cases) {
-    const setup = seedToolRepo(t, {
-      test_runner: { command: testCase.command, ...(testCase.timeoutMs ? { timeout_ms: testCase.timeoutMs } : {}) },
-    });
+    const setup = seedToolRepo(t, { test_runner: { command: testCase.command } });
     assert.throws(
       () => runToolRun({ repoRoot: setup.root, run: setup.runId }),
       (err) => err instanceof ToolRunError && !/passed/.test(err.message),
@@ -176,7 +188,7 @@ test('spawn failure, timeout, and signal never produce passed and never complete
     assert.equal(parked.status, 'error', `${testCase.label}: parked result is an error`);
     assert.equal(parked.exit_code, null);
     assert.ok(!existsSync(inflightClaimPath(setup.root, setup.runId, 'tc-test-g1', 1)), `${testCase.label}: claim released`);
-    assert.equal(readEffectiveLease(setup.root), null, `${testCase.label}: lease released`);
+    assert.equal(toolWindowOpen(setup.root, setup.runId), false, `${testCase.label}: window closed`);
 
     // The parked error result carries no step-completing artifact event, so the
     // step is still the next actionable thing — the attempt stays retryable.
@@ -248,26 +260,28 @@ test('two loop generations write .v2 and .v3 with distinct preserved bytes and p
   assert.equal(findingFor(runVerify({ repoRoot: setup.root, run: setup.runId }).findings, 'tool-lifecycle').status, 'ok');
 });
 
-test("a foreign writer's lease refuses before spawn; a normal completion releases the lease", (t) => {
+test("a foreign writer no longer refuses a tool run; the run completes and closes its window", (t) => {
+  // INVERTED. This used to assert that an unrelated writer's lease made
+  // `tool-run` throw "already held" before it spawned anything. That refusal
+  // is exactly the mechanism removed: the foreign holder here has a live pid,
+  // but a HOST holder never did, so "already held" was a state a repo could
+  // enter and never leave. A neighbour writing the tree is now a fact to be
+  // recorded, not a veto.
   const setup = seedToolRepo(t, { test_runner: { command: exitsWith(0) } });
-  const holder = { id: 'tool:other-run:step:g1:a1', kind: 'engine' as const, runId: 'other-run', dispatchId: 'x' };
-  acquireWorkspaceLease({ repoRoot: setup.root, workspaceMode: 'shared', holder, supervisorPid: process.pid, executorPid: process.pid, processGroupId: process.pid });
+  openDispatchWindow(setup.root, {
+    dispatchId: 'tool:other-run:step:g1:a1', runId: 'other-run', kind: 'engine', workspaceMode: 'shared',
+  });
 
-  assert.throws(
-    () => runToolRun({ repoRoot: setup.root, run: setup.runId }),
-    (err) => /already held/.test((err as Error).message),
+  assert.equal(runToolRun({ repoRoot: setup.root, run: setup.runId }).status, 'passed',
+    'a neighbouring writer does not stop this run');
+  const events = readEventsStrict(setup.runDir);
+  assert.ok(events.some((e) => e.type === 'tool_dispatched'), 'the attempt really ran');
+  assert.equal(toolWindowOpen(setup.root, setup.runId), false, 'and closed its own window');
+  // The neighbour is untouched: closing a window is scoped to its own id.
+  assert.ok(
+    readDispatchWindows(setup.root).windows.some((w) => w.dispatchId === 'tool:other-run:step:g1:a1' && w.endedAt == null),
+    "the neighbour's window is not closed by someone else's receipt",
   );
-  const refused = readEventsStrict(setup.runDir);
-  assert.ok(!refused.some((e) => e.type === 'tool_dispatched'), 'refused before spawn');
-  // A refusal opens nothing. `step_started` is a scope decision, and appending
-  // one for a caller that was told to wait would shift the invocation number
-  // `fadeno prompt` derives from these events. (The immutable binding snapshot
-  // is still attested — it records what this run is bound to, not an attempt.)
-  assert.ok(!refused.some((e) => e.type === 'step_started' && e.step === 'test'), 'and opened no step scope');
-  releaseWorkspaceLease({ repoRoot: setup.root, holder });
-
-  assert.equal(runToolRun({ repoRoot: setup.root, run: setup.runId }).status, 'passed');
-  assert.equal(readEffectiveLease(setup.root), null, 'normal completion releases the lease');
 });
 
 for (const stream of ['stdout', 'stderr'] as const) {
@@ -392,7 +406,7 @@ test('an invalid synthesized TestResult leaves no planned artifact and the step 
   assert.ok(failed, 'the attempt still gets a terminal receipt');
   assert.equal(failed!.extra.output_valid, false);
   assert.ok(!existsSync(inflightClaimPath(setup.root, setup.runId, 'tc-test-g1', 1)), 'claim released');
-  assert.equal(readEffectiveLease(setup.root), null, 'lease released');
+  assert.equal(toolWindowOpen(setup.root, setup.runId), false, 'window closed');
 
   // Restore the schema: the same step retries as attempt 2 and completes.
   rmSync(schemaPath, { force: true });
@@ -407,17 +421,17 @@ test('an invalid synthesized TestResult leaves no planned artifact and the step 
 test('tool-run help, completion, and exit codes from the source CLI; bundled help stays in parity', (t) => {
   const help = runSourceCli(['tool-run', '--help']);
   assert.equal(help.status, 0);
-  assert.match(help.stdout, /fadeno tool-run <run> \[--tool <name>\] \[--timeout <seconds>\]/);
+  assert.match(help.stdout, /fadeno tool-run <run> \[--tool <name>\]/);
   assert.match(help.stdout, /--tool/);
-  assert.match(help.stdout, /--timeout/);
+  assert.doesNotMatch(help.stdout, /--timeout/, 'the deadline flag is removed, not merely undocumented');
 
   const bundled = spawnSync('node', [BUNDLED_CLI, 'tool-run', '--help'], { encoding: 'utf8' });
   assert.equal(bundled.status, 0);
-  assert.match(bundled.stdout, /fadeno tool-run <run> \[--tool <name>\] \[--timeout <seconds>\]/);
+  assert.match(bundled.stdout, /fadeno tool-run <run> \[--tool <name>\]/);
 
   const completion = runSourceCli(['completion', 'candidates', '3', '--', 'fadeno', 'tool-run', 'myrun', '--']);
   assert.match(completion.stdout, /--tool/);
-  assert.match(completion.stdout, /--timeout/);
+  assert.doesNotMatch(completion.stdout, /--timeout/);
 
   const passed = seedToolRepo(t, { test_runner: { command: exitsWith(0) } });
   const failed = seedToolRepo(t, { test_runner: { command: exitsWith(3) } });

@@ -7,7 +7,7 @@ import { stringify as stringifyYaml } from 'yaml';
 import { DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
 import { runDispatchesMerge, runDispatchesOutput } from '../src/commands/dispatches.ts';
 import { applyDiffToWorkspace, hasConflictMarkers, rebaseWorktreeOntoWorkspace, settleIsolatedWork } from '../src/lib/workspace-baseline.ts';
-import { collectIsolatedDiff } from '../src/lib/workspace-lease.ts';
+import { collectIsolatedDiff } from '../src/lib/workspace-isolation.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 

@@ -20,7 +20,6 @@ export class ToolRunError extends Error {}
 export interface ToolRunOptions {
   run: string;
   tool?: string;
-  timeout?: string;
   cwd?: string;
   repoRoot?: string;
   harness?: string;
@@ -37,18 +36,6 @@ export interface ToolRunResult {
   exitCode: number | null;
   attempt: number;
   durationMs: number | null;
-}
-
-function parseTimeoutSeconds(value: string | undefined): number | null | undefined {
-  if (value == null) return undefined;
-  const trimmed = value.trim();
-  if (!/^\d+$/.test(trimmed)) {
-    throw new ToolRunError(`Invalid --timeout "${value}". Use a non-negative integer seconds (0 disables deadline).`);
-  }
-  const sec = Number(trimmed);
-  if (!Number.isInteger(sec) || sec < 0) throw new ToolRunError(`Invalid --timeout "${value}". Use a non-negative integer seconds (0 disables deadline).`);
-  if (sec === 0) return 0;
-  return sec * 1000;
 }
 
 /**
@@ -213,16 +200,6 @@ export function runToolRun(opts: ToolRunOptions): ToolRunResult {
 
   const generation = parseGeneration(outputRel).generation;
 
-  let effectiveTimeoutMs: number | null | undefined;
-  const cliTimeout = parseTimeoutSeconds(opts.timeout);
-  if (cliTimeout !== undefined) {
-    effectiveTimeoutMs = cliTimeout === 0 ? null : cliTimeout;
-  } else if (spec.timeoutMs != null) {
-    effectiveTimeoutMs = spec.timeoutMs;
-  } else {
-    effectiveTimeoutMs = null;
-  }
-
   try {
     const result = executeToolCore({
       repoRoot,
@@ -237,7 +214,6 @@ export function runToolRun(opts: ToolRunOptions): ToolRunResult {
       loopOwner: step.loop.in_body ? step.loop.owner : null,
       iteration: step.loop.iteration,
       command: spec.command,
-      effectiveTimeoutMs: effectiveTimeoutMs ?? null,
       now: opts.now,
     });
     return {

@@ -6,6 +6,82 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Removed — BREAKING
+
+- **Executor deadlines, entirely.** `--timeout` is deleted from `fadeno
+  dispatch`, `fadeno drive` and `fadeno tool-run` (passing it is an
+  unknown-option error), no deadline is ever armed, and the supervisor no
+  longer takes deadline argv slots or schedules a timer. rc.59 had already
+  removed the DEFAULT deadline on the grounds that *a clock cannot tell slow
+  from stuck*; the opt-in survived, and its existence was enough. On 2026-09-06
+  a Codex director in basanos opted in and five dispatches were killed at their
+  deadlines — `2c5828a2`, `2ec47db8`, `0ba58a70` at 2,400 s, `18ec1a9a` at
+  1,800 s ("0 bytes of output were captured before the kill"), `0bbac080` at
+  1,200 s — all exit 143, all with empty or zero-byte reports, and in every
+  case the work itself survived in the diff. These are print-at-exit executors:
+  the deadline destroyed only the report. Ending a long attempt is a decision
+  for whoever can look at it — `fadeno show`, then `fadeno cancel` or `fadeno
+  dispatches --cancel`. **Cancellation is untouched**, TERM→KILL grace
+  included, because stopping something on purpose is a decision, not a guess.
+  A `timeout_ms` declared in a catalog or a snapshot is accepted, parsed, and
+  never armed: catalogs written before this release declare it, so refusing
+  would break them over an inert key. The loader records a note and `fadeno
+  doctor` raises it as an `ignored-deadline-key` warning. Ledgers written
+  earlier still read: `dispatch_completed.outcome = "timeout"` and
+  `actor_failed.reason = "executor_timeout"` render exactly as before.
+
+- **The repo-wide writer lease.** `acquireWorkspaceLease`,
+  `releaseWorkspaceLease`, `heartbeatWorkspaceLease`, `isWorkspaceLeaseAlive`,
+  window leases and their wait loop, every pid and process-group probe behind
+  them, and the `workspace_lease_recovered` / `workspace_lease_reclaim_denied`
+  audit rows are gone. It is the same defect as the deadline, one layer down:
+  the lease had to answer *"is this holder still alive?"*, and Fadeno cannot.
+  `isWorkspaceLeaseAlive` returned **true** for a record with no
+  `supervisor_pid` — nothing could prove it dead, so nothing ever reclaimed it
+  — and a host dispatch never has a pid, because it runs inside another agent's
+  session. Every shared host delivery therefore took a lock that was immortal
+  by construction: a 429-killed agent wedged the repo permanently, refusing
+  every later writer including the recovery of the very run that took it.
+  `.fadeno/local/workspace-lease.json` is now vestigial — read only so `doctor`
+  can report a leftover one and say, without hedging, that deleting it is safe.
+
+### Added
+
+- **Overlap detection (`concurrent_write`), which is what replaced the lock.**
+  Deleting the lease without this would trade a loud wedge for silent lost
+  writes, which is worse, so it is not optional. Contention is INVERTED: a
+  delivery that is not the sole writer is isolated automatically and the
+  receipt says so — "you must wait" became "you get your own tree", which turns
+  overlap into two diffs against a common base. Every delivery records a window
+  in `.fadeno/local/dispatch-windows.jsonl` (append-only, machine-local, never
+  ledger, never gating) and at its terminal receipt intersects its changed
+  paths with every window that overlapped it in time. A non-empty intersection
+  lands as `concurrent_write` on the receipt, naming the other dispatch and the
+  paths, with `attribution: delivery` (an isolated arm's own diff, so
+  attributable) or `workspace` (a shared tree's delta, an attestation only). An
+  overlapping window that has not closed yet is `pending`; the later-closing
+  side carries the concrete intersection, so each of the pair names the other.
+  Conflicts route to an integrator through the existing merge-back rebase.
+
+### Changed
+
+- **`src/lib/workspace-lease.ts` split.** Its own header always said it was two
+  modules — "Repo-wide writer leasing **and** isolated worktree delivery" — and
+  only one of them was a lock. Isolated worktree delivery, declared
+  `worktree_carry`, carry-mutation fingerprinting and the gitignored-output
+  scan moved to `src/lib/workspace-isolation.ts` unchanged (`WorkspaceLeaseError`
+  → `WorkspaceIsolationError`); the new `src/lib/workspace-overlap.ts` holds the
+  window log and detection; `workspace-lease.ts` keeps only the vestigial-file
+  reader.
+
+- **The host-lane note on `fadeno dispatch`.** It advertised `--timeout`, which
+  no longer exists, and sold the command lane on an isolated worktree, a
+  dispatch id and a terminal receipt — all three of which the host lane gives
+  inside an engine run (`dispatch-prepare --isolate`, the request's dispatch id,
+  `dispatch-complete`/`dispatch-fail`). It now names the engine run as the third
+  option and keeps only what is genuinely command-lane-only: `--diagnostics`,
+  and a shadow pair, which forces both arms onto the command lane by design.
+
 ### Changed — BREAKING
 
 - **A failed relay-fidelity check now REFUSES the dispatch.** `relay_attested:

@@ -506,11 +506,14 @@ export function collectHarnessObserved(
     }
   }
 
-  // The durable repo-wide lease is always projected so a repo-wide blocker
-  // is visible from any run's `fadeno show`. When the lease belongs to the
-  // run being shown, its runId is used only to suppress double-counting: if
-  // the same supervisor already has an inflight row, that row's fresher
-  // counters are preferred over a duplicate lease entry.
+  // A leftover `workspace-lease.json` is projected when one exists, so a
+  // record naming a delivery is visible from any run's `fadeno show`. It is
+  // VESTIGIAL: nothing writes it any more and nothing is blocked by it — see
+  // workspace-lease.ts. It stays visible because a repo upgraded mid-flight
+  // has one, often naming a delivery whose fate a reader still wants to know;
+  // `fadeno doctor` is what says to delete it. Non-gating, like every other
+  // row here. When it names the run being shown, its runId only suppresses
+  // double-counting: an inflight row's counters are fresher, so that row wins.
   const leasePath = join(repoRoot, WORKSPACE_LEASE_FILE);
   const lease = readWorkspaceLease(repoRoot);
   if (lease != null) {
@@ -571,9 +574,9 @@ export function collectHarnessObserved(
       });
     }
   } else if (existsSync(leasePath)) {
-    // A corrupt repo-wide writer record is itself operationally important. It
-    // may block acquisition even when none of its correlation metadata can be
-    // trusted, so surface an unknown diagnostic rather than hiding it.
+    // A leftover writer record that will not parse. It blocks nothing, but a
+    // reader looking for a delivery deserves to be told the file is there and
+    // unreadable rather than have it silently omitted.
     let holderId: string | null = null;
     let holderKind: string | null = null;
     let holderRunId: string | null = null;

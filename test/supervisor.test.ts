@@ -18,7 +18,7 @@ import {
   superviseArgv,
   supervisedSpawnError,
 } from '../src/lib/supervisor.ts';
-import { isWorkspaceLeaseAlive, readWorkspaceLease, releaseWorkspaceLease, WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
+import { WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
 import { echoedStdin, tempRepo } from './helpers.ts';
 
 /**
@@ -189,61 +189,44 @@ test('supervisor heartbeats and byte-counts exact forwarded stdout/stderr atomic
   assert.equal(status?.stderrBytes, 4);
 });
 
-test('supervisor executes with a lease descriptor and releases only the exact full holder', (t) => {
+test('the supervisor writes no lease, and an owner descriptor keeps the claim across handoff', (t) => {
+  // REPLACED. This whole test was the supervisor's writer-lease contract:
+  // release only the exact full holder, prune an abandoned lock directory,
+  // never release another run's lease that happens to share a local id, and
+  // preserve peer holders on a multi-holder record. Every clause of it was
+  // careful handling of a reservation that could not be shown to be dead —
+  // and the supervisor no longer touches one.
+  //
+  // What the descriptor still carries is the OWNER pid: the polling parent
+  // that keeps working after the supervisor exits, which is what stops a
+  // second helper re-running a command whose receipt has not been written yet.
   const root = tempRepo(t);
   const leasePath = join(root, 'workspace-lease.json');
-  const lockPath = join(root, '.workspace-lease.lock');
-  const holder = { id: 'call-1', kind: 'engine' as const, runId: 'run-a', dispatchId: 'dispatch-a' };
-  writeFileSync(leasePath, JSON.stringify({ holder }));
+  const claimPath = join(root, 'owner-claim.json');
+
   const executed = spawnSync(process.execPath, superviseArgv(
     [process.execPath, '-e', "process.stdout.write('ran')"],
+    claimPath,
     '',
-    '',
-    { leasePath, lockPath, holder },
   ), { encoding: 'utf8' });
   assert.equal(executed.status, 0, executed.stderr);
   assert.equal(executed.stdout, 'ran');
-  assert.equal(existsSync(leasePath), false, 'matching full holder is released after executor close');
+  assert.equal(existsSync(leasePath), false, 'the supervisor writes no writer lease');
+  assert.equal(existsSync(claimPath), false, 'and drops its claim once nobody owns the attempt');
 
-  writeFileSync(leasePath, JSON.stringify({ holder }));
-  mkdirSync(lockPath);
-  const staleTime = new Date(Date.now() - 180_000);
-  utimesSync(lockPath, staleTime, staleTime);
-  const staleLock = spawnSync(process.execPath, superviseArgv(
-    [process.execPath, '-e', 'process.exit(0)'],
+  // With a LIVE owner named, the claim is handed over rather than dropped:
+  // this process is still here, so the attempt is still being written.
+  const handed = spawnSync(process.execPath, superviseArgv(
+    [process.execPath, '-e', "process.stdout.write('ran')"],
+    claimPath,
     '',
-    '',
-    { leasePath, lockPath, holder },
+    { owner: { pid: process.pid } },
   ), { encoding: 'utf8' });
-  assert.equal(staleLock.status, 0, staleLock.stderr);
-  assert.equal(existsSync(lockPath), false, 'supervisor prunes an abandoned lease lock');
-  assert.equal(existsSync(leasePath), false, 'stale lock cannot prevent terminal lease release');
-
-  // Repeated local ids across runs are not the same holder. A delayed
-  // supervisor from run A must never release run B's durable lease.
-  writeFileSync(leasePath, JSON.stringify({ holder: { ...holder, runId: 'run-b' } }));
-  const stale = spawnSync(process.execPath, superviseArgv(
-    [process.execPath, '-e', 'process.exit(0)'],
-    '',
-    '',
-    { leasePath, lockPath, holder },
-  ), { encoding: 'utf8' });
-  assert.equal(stale.status, 0, stale.stderr);
-  assert.equal(existsSync(leasePath), true, 'different run identity must survive stale release');
-
-  const peer = { id: 'call-2', kind: 'host-dispatch' as const, runId: 'run-c', dispatchId: 'dispatch-b' };
-  const survivor = { id: 'call-1', kind: 'host-dispatch' as const, runId: 'run-c', dispatchId: 'dispatch-a' };
-  writeFileSync(leasePath, JSON.stringify({ holder: survivor, holders: [survivor, peer] }));
-  const memberRelease = spawnSync(process.execPath, superviseArgv(
-    [process.execPath, '-e', 'process.exit(0)'],
-    '',
-    '',
-    { leasePath, lockPath, holder: peer },
-  ), { encoding: 'utf8' });
-  assert.equal(memberRelease.status, 0, memberRelease.stderr);
-  const remaining = JSON.parse(readFileSync(leasePath, 'utf8')) as { holder: unknown; holders: unknown[] };
-  assert.deepEqual(remaining.holder, survivor);
-  assert.deepEqual(remaining.holders, [survivor], 'supervisor release preserves peer holders');
+  assert.equal(handed.status, 0, handed.stderr);
+  assert.ok(existsSync(claimPath), 'a live owner keeps the claim past supervisor exit');
+  const held = readInflightClaim(claimPath, (p) => readFileSync(p, 'utf8'))!;
+  assert.equal(held.ownerPid, process.pid, 'and the claim names who owns it');
+  assert.equal(inflightClaimIsAlive(held), true, 'so the attempt still reads as live');
 });
 
 test('in-flight liveness is conservative except for a proven missing pid', () => {
@@ -312,35 +295,46 @@ test('SIGKILLed supervisor preserves the production lease and claim until its or
   });
   kernel.stdin.end('prompt\n');
   const ticks = (): number => readdirSync(root).filter((name) => name.startsWith('orphan-tick-')).length;
+  // The CLAIM, not the lease, is what a reader watches now. It is also the
+  // only one of the two that ever carried a pid on the ad-hoc path, which is
+  // why it is the one that survived.
+  const claimDir = join(root, ...INFLIGHT_DIR.split('/'));
+  const readClaimFile = (): { path: string; claim: ReturnType<typeof readInflightClaim> } | null => {
+    let names: string[] = [];
+    try { names = readdirSync(claimDir).filter((n) => n.endsWith('.json') && !n.endsWith('.status.json')); } catch { return null; }
+    for (const name of names) {
+      const path = join(claimDir, name);
+      const claim = readInflightClaim(path, (p) => readFileSync(p, 'utf8'));
+      if (claim != null) return { path, claim };
+    }
+    return null;
+  };
   const deadline = Date.now() + 20_000;
-  let lease = readWorkspaceLease(root);
-  while ((ticks() === 0 || lease?.supervisor_pid == null || lease.process_group_id == null) && Date.now() < deadline) {
+  let live = readClaimFile();
+  while ((ticks() === 0 || live?.claim?.supervisorPid == null || live.claim.processGroupId == null) && Date.now() < deadline) {
     await sleep(100);
-    lease = readWorkspaceLease(root);
+    live = readClaimFile();
   }
-  assert.ok(lease?.supervisor_pid != null && lease.process_group_id != null, 'production lease never received process identity');
-  const processGroupId = lease.process_group_id;
+  assert.ok(live?.claim?.supervisorPid != null && live.claim.processGroupId != null, 'the claim never received process identity');
+  const processGroupId = live.claim.processGroupId!;
   t.after(() => { try { process.kill(-processGroupId, 'SIGKILL'); } catch {} });
-  const supervisorPid = lease.supervisor_pid;
+  const supervisorPid = live.claim.supervisorPid!;
   process.kill(supervisorPid, 'SIGKILL');
   await new Promise<void>((resolve) => kernel.once('close', () => resolve()));
   const afterKernel = ticks();
   await sleep(400);
   assert.ok(ticks() > afterKernel, 'fixture executor did not survive the supervisor SIGKILL, so the interlock was not exercised');
-  const preserved = readWorkspaceLease(root)!;
-  assert.equal(isWorkspaceLeaseAlive(preserved), true);
-  assert.ok(existsSync(join(root, ...INFLIGHT_DIR.split('/'), `${preserved.holder.dispatchId}.json`)), 'kernel must preserve the cancellable claim');
-  assert.throws(
-    () => runDispatch({ archetype: 'worker', prompt: 'second writer', repoRoot: root, userPathOptions: harnessOpts }),
-    /shared workspace is already held/,
-  );
+  const preserved = readInflightClaim(live.path, (p) => readFileSync(p, 'utf8'))!;
+  assert.ok(preserved != null, 'kernel must preserve the cancellable claim');
+  assert.equal(inflightClaimIsAlive(preserved), true, 'the orphaned group keeps the attempt live');
+  // No lease was ever written, so nothing refuses a second dispatch. It gets
+  // its own worktree instead — the inversion this whole change is about.
+  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false, 'no writer lease exists to refuse anyone');
   const cancelled = runDispatchesCancel({ repoRoot: root, tag: 'sigkill-orphan' });
-  assert.equal(cancelled.pid, -preserved.process_group_id!);
+  assert.equal(cancelled.pid, -processGroupId);
   const stopDeadline = Date.now() + 5_000;
-  while (isWorkspaceLeaseAlive(preserved) && Date.now() < stopDeadline) await sleep(50);
-  assert.equal(isWorkspaceLeaseAlive(preserved), false, 'cancelled orphan group must become reclaimable');
-  assert.equal(releaseWorkspaceLease({ repoRoot: root, holder: preserved.holder }), true);
-  assert.equal(existsSync(join(root, WORKSPACE_LEASE_FILE)), false);
+  while (inflightClaimIsAlive(preserved) && Date.now() < stopDeadline) await sleep(50);
+  assert.equal(inflightClaimIsAlive(preserved), false, 'a cancelled orphan group really dies');
 });
 
 test('a kernel that exits before supervisor initialization still reaps its executor', async (t) => {

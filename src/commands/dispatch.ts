@@ -64,26 +64,28 @@ import {
 import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
 import { fallbackClaimRelPath, INFLIGHT_DIR, readSupervisorStatus, sleepSync, superviseArgv, supervisedSpawnError, supervisorCanStillReport } from '../lib/supervisor.ts';
 import {
-  WORKSPACE_LEASE_FILE,
-  WORKSPACE_LEASE_LOCK,
-  acquireWorkspaceLease,
   carryDeclaredPaths,
   carryMutationStamp,
-  isWorkspaceLeaseAlive,
-  readWorkspaceLease,
-  releaseWorkspaceLease,
   scanIgnoredOutput,
   verifyCarriedPaths,
   withIsolatedWorktree,
-  withWorkspaceWindowLease,
-  WorkspaceLeaseError,
+  WorkspaceIsolationError,
   type CarryFingerprint,
   type IgnoredOutputScan,
-  type LeaseHolder,
-  type WorkspaceLeaseRecord,
   type WorkspaceMode,
   type WorktreeCarryMechanism,
-} from '../lib/workspace-lease.ts';
+} from '../lib/workspace-isolation.ts';
+import {
+  changedBetween,
+  closeDispatchWindow,
+  detectConcurrentWrites,
+  diffChangedPaths,
+  openDispatchWindow,
+  readDispatchWindows,
+  shouldAutoIsolate,
+  workspaceStatusMap,
+  type ConcurrentWriteStamp,
+} from '../lib/workspace-overlap.ts';
 import {
   applyWorkspaceBaseline,
   captureWorkspaceBaseline,
@@ -190,6 +192,12 @@ export function normalizeDispatchTag(tag: string | null | undefined): string | n
   return trimmed;
 }
 
+/**
+ * `timeout` is a READ-ONLY member. Fadeno no longer runs executors under a
+ * deadline, so nothing written from this release onward can carry it — but
+ * every ledger on disk that predates the removal does, and a reader that
+ * dropped the word would render a killed attempt as an unexplained `failed`.
+ */
 export type DispatchOutcome = 'ok' | 'failed' | 'empty' | 'timeout';
 
 const DISPATCH_OUTCOMES: readonly string[] = ['ok', 'failed', 'empty', 'timeout'];
@@ -250,8 +258,9 @@ export function scanDispatchResultClaim(stdout: string): DispatchResultClaim | n
  * `claimed`, when the executor stated an outcome via the protocol footer,
  * decides the exit-0 case outright: `failed` claimed at exit 0 is recorded as
  * failed (exit 0 can no longer launder a reported failure), and `ok` claimed
- * with bytes is ok. Timeout, spawn error, and signal still outrank any claim —
- * a process the kernel killed did not complete its report protocol either way.
+ * with bytes is ok. A spawn error, a signal, and a legacy row's timeout still
+ * outrank any claim — a process the kernel killed did not complete its report
+ * protocol either way.
  * Without a claim (or for callers predating the parameter) this is exactly the
  * pre-footer derivation.
  *
@@ -264,6 +273,11 @@ export function deriveDispatchOutcome(row: {
   signal?: string | null;
   error?: string | null;
   outputBytes: number | null;
+  /**
+   * Legacy only. No writer sets this any more — see `DispatchOutcome` — and
+   * the sole caller that still passes it is the reader that reconstructs an
+   * outcome for a pre-removal `dispatches.jsonl` row carrying `timeout_ms`.
+   */
   timedOut?: boolean | null;
 }, claimed?: DispatchResultClaim | null): DispatchOutcome | null {
   if (row.timedOut === true) return 'timeout';
@@ -895,8 +909,6 @@ export interface AdHocDispatchOptions {
    * and one-directional: it costs a comparison, never work.
    */
   ignoredOutput?: 'kept' | 'discardable' | null;
-  /** Hard executor deadline in milliseconds; 0 disables, null/undefined uses the route default. */
-  timeoutMs?: number | null;
   /** Bounded opt-in process output diagnostics (per-stream 32 KiB / 500 lines). */
   diagnostics?: boolean;
   /**
@@ -969,8 +981,6 @@ export interface AdHocDispatchResult {
   exitCode: number;
   /** The signal that ended the executor, when one did. */
   signal: string | null;
-  /** The deadline that killed it, when `outcome` is `timeout`. */
-  timeoutMs: number | null;
   /** The executor's report — cli.ts relays it verbatim to stdout. */
   stdout: string;
   stderr: string;
@@ -1432,15 +1442,28 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
    * the resolver's own choice, names the in-session agent as that choice
    * rather than as a downgrade, and keeps a real escalation open — per
    * invocation, so taking it cannot silently relocate the archetype.
+   *
+   * It used to advertise `--timeout`, which no longer exists, and it used to
+   * sell the command lane on three things the host lane supposedly could not
+   * do — an isolated worktree, a dispatch id, a terminal receipt. All three
+   * are available on the host lane inside an engine run: `fadeno
+   * dispatch-prepare --isolate` cuts the worktree, the request carries the
+   * dispatch id, and `dispatch-complete` / `dispatch-fail` write the terminal
+   * receipt. Selling a lane on capabilities the other lane also has is how a
+   * caller ends up choosing the command lane for a reason that was never
+   * true. What is genuinely command-lane-only is named instead.
    */
   const hostLaneNote = hostLanePreferred
     ? `NOTE: ${shape} resolves to the HOST lane here (${laneDecision.lane_reason}), so the resolver's own ` +
       `choice for this task is the in-session ${shape} agent — spawn it and you are done; it is not a ` +
-      'downgrade, it is the delivery every other caller gets. Dispatch it only when you specifically need ' +
-      'what in-session cannot give: an isolated worktree, a dispatch id, a terminal receipt, --timeout/' +
-      `--diagnostics, or a shadow pair. This call already delivers out of process down the harness's own ` +
-      'command lane; to send it to a DIFFERENT harness for this call only, without moving the dial, add ' +
-      '`--harness <id>` (`fadeno models` lists them).'
+      'downgrade, it is the delivery every other caller gets. If you need a dispatch id, an isolated ' +
+      'worktree and a terminal receipt, the host lane gives all three inside an engine run: `fadeno ' +
+      'dispatch-prepare --isolate`, then `dispatch-complete`/`dispatch-fail`. Dispatch down the command ' +
+      'lane only for what neither of those can give: `--diagnostics`, or a shadow pair (both arms are ' +
+      'forced onto the command lane so they are comparable, so a pair is command-lane by construction). ' +
+      `This call already delivers out of process down the harness's own command lane; to send it to a ` +
+      'DIFFERENT harness for this call only, without moving the dial, add `--harness <id>` (`fadeno ' +
+      'models` lists them).'
     : null;
   // The one delivery gate left. A host spec with a `fallback_command` is
   // dispatched down that lane — the same lane a selected pair forces both arms
@@ -1454,25 +1477,28 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // `current-host` is a reference-frame sentinel, not a model you can route
     // — suggesting `--harness` on it would be advice that cannot be followed.
     const dialModel = spec.model != null && spec.model !== 'current-host' ? spec.model : '<model>';
-    // The in-session agent is a FALLBACK, not an equivalent, and saying so is
-    // the point of this wording. A caller who reached for `fadeno dispatch`
-    // wanted what only a dispatch gives: an isolated worktree, an evidence row
-    // with a dispatch id readable by `--tag`, `--timeout`/`--diagnostics`, and
-    // shadow pairing. An in-session agent provides none of those and looks
-    // like it succeeded. On 2026-08-21 a coordinator hit this refusal, spawned
-    // the in-session agent, and reported it as "equivalent role, no
+    // A BARE in-session agent — one spawned straight from this session, with
+    // no run behind it — is not an equivalent, and saying so precisely is the
+    // point of this wording. On 2026-08-21 a coordinator hit this refusal,
+    // spawned the in-session agent, and reported it as "equivalent role, no
     // recursion" — while the instructions it was following asked it to read
     // the result back by tag and verify a dispatch id, which by then could
     // not exist.
-    // Precise about what is actually lost. An earlier version of this said the
-    // in-session path "writes no evidence row", which is FALSE — the steering
-    // hook writes a `host_delivery` / `native_delivery` row carrying the
-    // archetype, executor, model, effort, harness and a prompt snapshot. What
-    // it has no way to write is a terminal receipt: those rows carry no
-    // dispatch id, so there is no exit code, duration, captured output, or
-    // `--output tag:` handle. Overstating the loss is the same failure as
-    // understating it — this message exists because the previous one made a
-    // claim it had not checked.
+    //
+    // Precise about what is actually lost, and precise about who loses it.
+    // An earlier version said the in-session path "writes no evidence row",
+    // which is FALSE — the steering hook writes a `host_delivery` /
+    // `native_delivery` row carrying the archetype, executor, model, effort,
+    // harness and a prompt snapshot. What a BARE spawn has no way to write is
+    // a terminal receipt: those rows carry no dispatch id, so there is no exit
+    // code, duration, captured output, or `--output tag:` handle.
+    //
+    // The same version also claimed the host lane gives no isolated worktree,
+    // no dispatch id and no terminal receipt at all. That is only true of the
+    // bare spawn: a host delivery INSIDE AN ENGINE RUN gets all three from the
+    // host dispatch protocol. So the remedy named here is that run, not a
+    // re-dial, and `--timeout` — which no longer exists — is gone from the
+    // list of things the command lane uniquely offers.
     throw new DispatchCommandError(
       (hostLaneNote != null ? `${hostLaneNote}\n\n` : '') +
         `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc ` +
@@ -1480,11 +1506,14 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         `To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? '<archetype>'} ` +
         `${dialModel} --harness <id>\` (\`fadeno models\` lists the harnesses; one that declares a ` +
         '`command:` can be spawned). ' +
-        'An in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row (with ' +
-        'the prompt snapshot), but that row carries no dispatch id and no terminal receipt — no exit code, ' +
-        'no duration, no captured output, and nothing to read back with `fadeno dispatches --output ' +
-        'tag:<tag>`. It also runs in this workspace with no isolated worktree, honours neither --timeout ' +
-        'nor --diagnostics, and forms no shadow pair. Take it only if you do not need those.',
+        'A BARE in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row ' +
+        '(with the prompt snapshot), but that row carries no dispatch id and no terminal receipt — no exit ' +
+        'code, no duration, no captured output, and nothing to read back with `fadeno dispatches --output ' +
+        'tag:<tag>`. It also runs in this workspace with no isolated worktree, honours no --diagnostics, ' +
+        'and forms no shadow pair. ' +
+        'The host lane INSIDE AN ENGINE RUN is a different matter and is the better remedy here: it gives ' +
+        'a dispatch id, an isolated worktree (`fadeno dispatch-prepare --isolate`) and a terminal receipt ' +
+        '(`fadeno dispatch-complete` / `dispatch-fail`) without needing a command lane at all.',
     );
   }
   let command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;
@@ -1726,16 +1755,15 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // `CapturedWorkspaceBaseline` for why capturing per-arm would be wrong.
   let capturedBaselineMemo: CapturedWorkspaceBaseline | null = null;
   const capturedBaseline = (): CapturedWorkspaceBaseline => {
-    // Under the window lease: an engine member's merge-back may be writing
-    // this tree right now, and a capture that reads it mid-apply hands the
-    // executor a baseline no state ever had — a file copied mid-write lands
-    // truncated in the baseline commit. The engine's capture already waited
-    // its turn; this one read unleased.
+    // Read straight from the tree. This used to wait for a read window lease,
+    // because a merge-back was `git apply --3way` and could leave the tree
+    // half-applied for as long as it took. A merge-back is a plain `git
+    // apply` now: it lands whole or touches nothing, so the widest a racing
+    // capture can miss is the boundary between two complete states, and a
+    // baseline taken from either produces a diff that either applies or
+    // rebases. That is the same handling a merely STALE baseline already gets.
     if (capturedBaselineMemo == null) {
-      capturedBaselineMemo = withWorkspaceWindowLease(
-        { repoRoot, holder: { id: `baseline:${dispatchId}`, kind: 'ad-hoc', dispatchId }, mode: 'read' },
-        () => captureWorkspaceBaseline(repoRoot),
-      );
+      capturedBaselineMemo = captureWorkspaceBaseline(repoRoot);
     }
     return capturedBaselineMemo;
   };
@@ -1822,26 +1850,44 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         'to prevent. Run `git init` first, or drop --isolate to accept a shared-tree dispatch.',
     );
   }
-  const isolationOrigin: 'requested' | 'kernel' | null =
+  /**
+   * Another delivery is already writing the shared tree.
+   *
+   * This used to be a REFUSAL: `acquireWorkspaceLease` threw, and the caller
+   * was told to "wait or retry" for a holder that, on the host lane, had no
+   * pid and could therefore never be shown to have finished. Inverting it is
+   * the point of the change — contention answers "you get your own tree"
+   * instead of "you must wait", which is what turns two writers into two diffs
+   * against a common base rather than a queue behind a holder that may be dead.
+   *
+   * Only ever ADDS isolation, and only where isolation is possible. An
+   * explicit `--shared` still means shared: the caller asked to write this
+   * tree, and quietly giving them a worktree instead would be the same class
+   * of silent substitution `--isolate` refuses to make in the other direction.
+   */
+  const contention = opts.shared === true || !gitAvailable || isolationWithheld != null
+    ? { isolate: false, others: [] as ReturnType<typeof shouldAutoIsolate>['others'] }
+    : shouldAutoIsolate(repoRoot, dispatchId);
+  const isolationOrigin: 'requested' | 'kernel' | 'contended' | null =
     opts.shared === true ? null
       : opts.isolate === true ? 'requested'
-        : gitAvailable && isolationWithheld == null ? 'kernel'
+        : gitAvailable && isolationWithheld == null ? (contention.isolate ? 'contended' : 'kernel')
           : null;
   const workspaceMode: WorkspaceMode = isolationOrigin == null ? 'shared' : 'isolated';
-  // An isolated primary cannot touch the shared tree while it works, so it
-  // takes no lease for the duration — it takes one only across its merge-back.
-  // Net effect is MORE concurrency than a shared primary, which holds the
-  // repo-wide lease for its entire run.
-  //
-  // Every shared dispatch now takes the lease: nothing declares itself a
-  // non-writer any more, and the honest reading without that claim is that we
-  // do not know.
-  //
-  // `let`, not `const`: kernel isolation can fail before the spawn (no
-  // worktree, an uncarriable declared path, a baseline that will not replay)
-  // and degrade to shared, and the shared tree may not be written unleased.
-  // See the degradation path below, which acquires one at that point.
-  let needsLease = workspaceMode === 'shared';
+  if (isolationOrigin === 'contended') {
+    opts.onEcho?.(
+      `isolating: ${contention.others.length} other ${contention.others.length === 1 ? 'delivery is' : 'deliveries are'} ` +
+        `writing the shared tree (${contention.others.map((w) => w.dispatchId.slice(0, 8)).join(', ')}). ` +
+        'You get your own worktree; any overlap is recorded on both receipts.',
+    );
+  }
+  // Nothing is reserved either way. An isolated primary cannot touch the
+  // shared tree while it works; a shared one can, and is recorded as having
+  // been there rather than being granted it. Kernel isolation can still fail
+  // before the spawn (no worktree, an uncarriable declared path, a baseline
+  // that will not replay) and degrade to shared — see the degradation path
+  // below, which re-records the window in the mode it actually ran in.
+
   const commandSha256 = sha256Hex(JSON.stringify(command));
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   // The ambient host, recorded beside the executor harness. Under format 1.0
@@ -2020,105 +2066,34 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // Said at spawn, not at recovery: by the time recovery is needed, the
     // caller can no longer act on it for this dispatch.
     opts.onEcho?.(
-      'no --tag given: if this call is killed at a timeout you will lose this id. ' +
+      'no --tag given: if this call is interrupted you will lose this id. ' +
         'Pass `--tag <handle>` to make the report recoverable without it.',
     );
   }
 
-  // Resolve effective timeout: one CLI override applies to every lane; without
-  // one, each lane uses the `timeout_ms` its own snapshotted harness declares.
-  const timeoutFor = (laneSpec: CompiledDelivery['spec']): number | null => {
-    if (opts.timeoutMs === 0) return null;
-    if (typeof opts.timeoutMs === 'number' && Number.isInteger(opts.timeoutMs) && opts.timeoutMs > 0) {
-      return opts.timeoutMs;
-    }
-    if (
-      laneSpec.adapter === 'command' &&
-      typeof laneSpec.timeoutMs === 'number' &&
-      Number.isInteger(laneSpec.timeoutMs) &&
-      laneSpec.timeoutMs > 0
-    ) {
-      return laneSpec.timeoutMs;
-    }
-    return null;
-  };
-  const effectiveTimeoutMs = timeoutFor(spec);
-
-  // `let` for the same reason `needsLease` is: a kernel-isolated dispatch
-  // starts with no lease and acquires one only if isolation fails before the
-  // spawn and it has to fall back into the shared tree.
-  let leaseHolder: LeaseHolder | null = needsLease
-    ? { id: `ad-hoc:${dispatchId}`, kind: 'ad-hoc', dispatchId }
-    : null;
-  let dispatchLeaseExistingBefore: WorkspaceLeaseRecord | null = null;
-  let dispatchLeaseAliveBefore = false;
-  if (leaseHolder != null) {
-    try {
-      dispatchLeaseExistingBefore = readWorkspaceLease(repoRoot);
-    } catch {
-      dispatchLeaseExistingBefore = null;
-    }
-    dispatchLeaseAliveBefore = dispatchLeaseExistingBefore != null ? isWorkspaceLeaseAlive(dispatchLeaseExistingBefore) : false;
-  }
-  if (leaseHolder != null) {
-    try {
-      acquireWorkspaceLease({
-        repoRoot,
-        workspaceMode,
-        holder: leaseHolder,
-        // Durable pre-spawn reservation. The supervisor owns release after
-        // its executor process group has actually closed; the blocked kernel
-        // cannot safely stand in for that liveness fact.
-        supervisorPid: null,
-        executorPid: null,
-        processGroupId: null,
-        startedAt: now,
-        heartbeatAt: now,
-        stdoutBytes: 0,
-        stderrBytes: 0,
-        now,
-      });
-      // Audited reclaim: dead supervisor pid was reclaimed atomically inside the lock (contract 1.3).
-      if (dispatchLeaseExistingBefore != null && !dispatchLeaseAliveBefore && dispatchLeaseExistingBefore.supervisor_pid != null) {
-        try {
-          appendEvidenceRow(repoRoot, {
-            format: DISPATCHES_FORMAT,
-            timestamp: now.toISOString(),
-            event: 'workspace_lease_recovered',
-            recovered_holder: leaseHolder,
-            previous_holder: dispatchLeaseExistingBefore.holder,
-            supervisor_pid: dispatchLeaseExistingBefore.supervisor_pid,
-            reason: 'dead_supervisor',
-            recovered_at: now.toISOString(),
-            by: leaseHolder.id,
-            dispatch_id: dispatchId,
-          });
-        } catch {}
-      }
-    } catch (err) {
-      if (err instanceof WorkspaceLeaseError) {
-        // Audited denial when refusing to reclaim an abandoned host reservation (pid-less, conservatively live).
-        if (dispatchLeaseExistingBefore != null && dispatchLeaseAliveBefore && dispatchLeaseExistingBefore.supervisor_pid == null) {
-          try {
-            appendEvidenceRow(repoRoot, {
-              format: DISPATCHES_FORMAT,
-              timestamp: now.toISOString(),
-              event: 'workspace_lease_reclaim_denied',
-              recovered_holder: null,
-              previous_holder: dispatchLeaseExistingBefore.holder,
-              supervisor_pid: dispatchLeaseExistingBefore.supervisor_pid,
-              reason: 'abandoned_host',
-              recovered_at: now.toISOString(),
-              by: leaseHolder.id,
-              dispatch_id: dispatchId,
-            });
-          } catch {}
-        }
-        refuseDispatch(repoRoot, identity, 'workspace_lease', err.message, now);
-      }
-      throw err;
-    }
-  }
+  // Open this delivery's overlap window.
+  //
+  // Where the pre-spawn lease acquire used to be. The acquire was a
+  // RESERVATION: it refused any other shared writer for this dispatch's whole
+  // run, and released only when its holder could be proven gone — which for a
+  // pid-less holder was never. It also carried two audit rows,
+  // `workspace_lease_recovered` and `workspace_lease_reclaim_denied`, whose
+  // entire subject was reclaiming a reservation from a holder whose liveness
+  // nobody could establish. All of it is gone.
+  //
+  // A window reserves nothing and refuses no one. It records an interval so
+  // the terminal receipt can say who else was writing at the same time and
+  // where their edits met this one's.
+  openDispatchWindow(repoRoot, {
+    dispatchId,
+    kind: 'ad-hoc',
+    workspaceMode,
+    startedAt: now,
+  });
+  // The shared tree as it stands before this dispatch starts writing. Only
+  // read for a shared delivery: an isolated one's diff is a better path set,
+  // and unlike this one it is attributable to the delivery itself.
+  const overlapStatusBefore = workspaceMode === 'shared' ? workspaceStatusMap(repoRoot) : null;
 
   // Spend the relay markers HERE, on the last line before this dispatch becomes
   // a fact. Everything that could still refuse has already thrown, so this runs
@@ -2138,9 +2113,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       ...identity,
     });
   } catch (error) {
-    if (leaseHolder != null) {
-      try { releaseWorkspaceLease({ repoRoot, holder: leaseHolder }); } catch {}
-    }
+    closeDispatchWindow(repoRoot, { dispatchId, changedPaths: [] });
     throw error;
   }
 
@@ -2570,7 +2543,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       requestRecorded = true;
 
       const startedMs = Date.now();
-      const child = spawn(process.execPath, superviseArgv(shadowCommand, shadowInflightAbs, statusAbs, undefined, timeoutFor(shadowSpec)), {
+      const child = spawn(process.execPath, superviseArgv(shadowCommand, shadowInflightAbs, statusAbs, undefined), {
         cwd: shadowWorktreeAbs,
         // Without `atCwd` the shadow escapes its worktree and edits the real
         // workspace. FADENO_IN_SHADOW rides along so any fadeno the challenger
@@ -2687,7 +2660,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       diffBytes = Buffer.byteLength(diffContent);
     }
     const sOutputBytes = Buffer.byteLength(sStdout);
-    const sIsTimeout = status?.timedOut === true;
     // Same claim channel as the primary: a challenger that reports failure at
     // exit 0 is failed, so the pair is not judged against a laundered arm.
     const sOutcome = deriveDispatchOutcome({
@@ -2695,7 +2667,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       signal: sSignal as NodeJS.Signals | null,
       error: spawnFailedMsg,
       outputBytes: sOutputBytes,
-      timedOut: sIsTimeout ? true : null,
     }, scanDispatchResultClaim(sStdout));
     const sRow: Record<string, unknown> = {
       format: DISPATCHES_FORMAT,
@@ -2712,8 +2683,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       output_sha256: sOutputSha,
       output_bytes: sOutputBytes,
       ...(sOutcome != null ? { outcome: sOutcome } : {}),
-      ...(sIsTimeout && status?.timeoutMs != null ? { timeout_ms: status.timeoutMs } : {}),
-      ...(sIsTimeout && status?.deadlineAt != null ? { deadline_at: status.deadlineAt } : {}),
       diff_snapshot: pending.diffRel,
       diff_bytes: diffBytes,
     };
@@ -2844,23 +2813,14 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
     mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
     outputFd = openSync(outputAbs, 'w');
-    // Read at spawn time, not hoisted: a kernel-isolated dispatch whose
-    // worktree could not be prepared acquires a lease on its way into the
-    // shared tree, and the supervisor is what releases it once the executor's
-    // process group closes. A `const` captured before that fallback would hand
-    // the supervisor `undefined` and leak the lease for its full staleness
-    // window.
-    const leaseRelease = (): { leasePath: string; lockPath: string; holder: LeaseHolder } | undefined =>
-      leaseHolder == null ? undefined : {
-        leasePath: join(repoRoot, WORKSPACE_LEASE_FILE),
-        lockPath: join(repoRoot, WORKSPACE_LEASE_LOCK),
-        holder: leaseHolder,
-      };
+    // The supervisor is handed no lease descriptor: there is no lease for it
+    // to re-stamp or release. It still owns the in-flight CLAIM, which is what
+    // `fadeno cancel` signals.
     const invoke = (spawnCwd: string): SpawnSyncReturns<string> => {
       supervisorAttempted = true;
       const result = spawnSync(
         process.execPath,
-        superviseArgv(command, inflightAbs, statusAbs, leaseRelease(), effectiveTimeoutMs),
+        superviseArgv(command, inflightAbs, statusAbs),
         {
         input: prompt,
         encoding: 'utf8',
@@ -2926,33 +2886,24 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         // Runs here, with the worktree intact, because a merge-back that
         // finds the tree moved rebases IN the worktree, and one that ends
         // `unresolved` keeps it for whoever resolves the markers.
-        settle: isolationOrigin !== 'kernel' ? undefined : (worktreeAbs, diff) => {
-          // The lease, held across the whole turn — apply, rebase, re-apply
-          // — and nothing else. An isolated primary takes none while it works.
-          const mergeHolder: LeaseHolder = { id: `merge-back:${dispatchId}`, kind: 'ad-hoc', dispatchId };
+        settle: isolationOrigin === 'requested' ? undefined : (worktreeAbs, diff) => {
+          // No lease across the turn. `settleIsolatedWork` is apply → (if the
+          // tree moved) rebase → re-apply, and every one of those steps is a
+          // plain `git apply`: atomic, so a concurrent writer can make it
+          // refuse but cannot make it land half a patch. The old `blocked`
+          // outcome "could not acquire the workspace lease" no longer exists,
+          // because there is no turn to fail to get.
           let finalDiff = diff;
-          try {
-            withWorkspaceWindowLease({ repoRoot, holder: mergeHolder }, () => {
-              const settled = settleIsolatedWork({
-                repoRoot,
-                worktreeAbs,
-                diff,
-                baselineRef: `${dispatchId}:rebase`,
-                armLabel: 'primary',
-              });
-              primaryMerge = settled.stamp;
-              finalDiff = settled.diff;
+          {
+            const settled = settleIsolatedWork({
+              repoRoot,
+              worktreeAbs,
+              diff,
+              baselineRef: `${dispatchId}:rebase`,
+              armLabel: 'primary',
             });
-          } catch (err) {
-            // No turn at the window within its bound, so nothing was
-            // applied. The diff is durable and can be ported once the tree
-            // settles; applying anyway is the one outcome that could corrupt
-            // another writer.
-            if (!(err instanceof WorkspaceLeaseError)) throw err;
-            primaryMerge = {
-              status: 'blocked',
-              detail: `nothing was applied: could not acquire the workspace lease for merge-back (${err.message})`,
-            };
+            primaryMerge = settled.stamp;
+            finalDiff = settled.diff;
           }
           const stamp = primaryMerge as MergeBackResult;
           const worktreeRel = relative(repoRoot, worktreeAbs).split('\\').join('/');
@@ -2987,7 +2938,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         // (and, here, the only) work happens, not after.
         const isolatedCarry = carryDeclaredPaths(repoRoot, worktreeAbs, profile.worktreeCarry);
         if (isolatedCarry.failure != null) {
-          throw new WorkspaceLeaseError(
+          throw new WorkspaceIsolationError(
             `declared worktree_carry path "${isolatedCarry.failure.path}" exists but could not be carried into the isolated worktree by any mechanism (${isolatedCarry.failure.reason}) — refusing the dispatch rather than running it against an incomplete checkout.`,
           );
         }
@@ -3021,7 +2972,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         // and the pair is not a fair test, which is worth failing over
         // rather than recording a `baseline_commit` that only one arm has.
         if (pendingShadow != null && primaryBaseline !== pendingShadow.baselineCommit) {
-          throw new WorkspaceLeaseError(
+          throw new WorkspaceIsolationError(
             `the pair's two arms produced different baseline commits (${primaryBaseline.slice(0, 12)} vs ` +
               `${pendingShadow.baselineCommit.slice(0, 12)}) — they did not start from the same state, so the ` +
               'comparison would be meaningless. Refusing rather than recording a baseline only one arm has.',
@@ -3084,33 +3035,19 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         // mandatory would turn dispatches that work today into hard errors.
         const reason = isolationError instanceof Error ? isolationError.message : String(isolationError);
 
-        // The lease is the part that must not be waved through. A shared-tree
-        // dispatch holds the repo-wide writer lease for its whole run, and
-        // this one is about to become exactly that — with nothing left to
-        // contain it, since the worktree is what failed. If the lease cannot
-        // be taken, another writer holds the tree, and the honest outcome is
-        // the original isolation failure rather than an unleased write.
-        leaseHolder = { id: `ad-hoc:${dispatchId}`, kind: 'ad-hoc', dispatchId };
-        try {
-          acquireWorkspaceLease({
-            repoRoot,
-            workspaceMode: 'shared',
-            holder: leaseHolder,
-            supervisorPid: null,
-            executorPid: null,
-            processGroupId: null,
-            startedAt: now,
-            heartbeatAt: now,
-            stdoutBytes: 0,
-            stderrBytes: 0,
-            now,
-          });
-          needsLease = true;
-        } catch {
-          leaseHolder = null;
-          throw isolationError;
-        }
-
+        // This delivery is about to write the shared tree after all, with
+        // nothing left to contain it — the worktree is what failed. There is
+        // no lease to take on the way in, and nothing to refuse it. What the
+        // shared tree gets instead is the truth in the window log: the mode
+        // this delivery is ACTUALLY running in, so a sibling that closes later
+        // intersects against a shared path set rather than a worktree diff
+        // that was never collected.
+        openDispatchWindow(repoRoot, {
+          dispatchId,
+          kind: 'ad-hoc',
+          workspaceMode: 'shared',
+          startedAt: now,
+        });
         effectiveWorkspaceMode = 'shared';
         isolationDegraded = `the isolated worktree could not be prepared (${reason})`;
         spawned = invoke(repoRoot);
@@ -3133,7 +3070,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       opts.onEcho?.(`isolation degraded to shared: ${isolationDegraded}`);
     }
   } catch (error) {
-    if (error instanceof WorkspaceLeaseError) throw new DispatchCommandError(error.message);
+    if (error instanceof WorkspaceIsolationError) throw new DispatchCommandError(error.message);
     throw error;
   } finally {
     if (outputFd != null) closeSync(outputFd);
@@ -3142,9 +3079,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // executor may still be mutating the workspace and remains cancellable.
     if (!supervisorAttempted || supervisorTerminalObserved) {
       try { rmSync(inflightAbs, { force: true }); } catch { /* nothing to drop */ }
-      if (leaseHolder != null) {
-        try { releaseWorkspaceLease({ repoRoot, holder: leaseHolder }); } catch {}
-      }
     }
   }
   const durationMs = Date.now() - started;
@@ -3159,11 +3093,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const workspaceAfter = effectiveWorkspaceMode === 'isolated' ? null : workspaceFingerprint(repoRoot);
 
   const outputBytes = Buffer.byteLength(stdout);
-  // Status-file timeout facts outrank the supervisor process exit signal when classifying a receipt.
-  const supervisorStatus = readSupervisorStatus(statusAbs, (path) => {
-    try { return readFileSync(path, 'utf8'); } catch { return '{}'; }
-  });
-  const isTimeout = supervisorStatus?.timedOut === true;
   // The executor's explicit outcome claim, scanned from its collected report.
   // No well-formed claim leaves the derivation exactly as it was.
   const resultClaim = scanDispatchResultClaim(stdout);
@@ -3172,7 +3101,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     signal: spawned.signal,
     error: spawnFailure,
     outputBytes,
-    timedOut: isTimeout ? true : null,
   }, resultClaim);
 
   // Bounded opt-in diagnostics: machine-local only, never ledger-persisted
@@ -3230,8 +3158,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // Stated next to the event name so a row read on its own cannot pass as
     // success on the strength of `dispatch_completed` alone.
     ...(outcome != null ? { outcome } : {}),
-    ...(isTimeout && supervisorStatus?.timeoutMs != null ? { timeout_ms: supervisorStatus.timeoutMs } : {}),
-    ...(isTimeout && supervisorStatus?.deadlineAt != null ? { deadline_at: supervisorStatus.deadlineAt } : {}),
     // Only when a challenger actually fired. The primary's request row was
     // written before the roll, so this is the first row that can carry it.
     ...(pendingShadow != null ? { pair_id: pendingShadow.pairId, baseline_commit: pendingShadow.baselineCommit } : {}),
@@ -3306,6 +3232,58 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   if (effectiveWorkspaceMode === 'isolated') {
     delete (row as Record<string, unknown>).workspace_changed;
   }
+  // ---- Overlap detection ---------------------------------------------------
+  //
+  // The other half of removing the writer lock, and the half that makes
+  // removing it defensible. Prevention is gone; this is what replaced it, and
+  // shipping the removal without it would have traded a loud wedge for silent
+  // lost writes.
+  //
+  // Computed here, at the terminal receipt, so it sees the window log at the
+  // last possible moment and catches every sibling that closed while this
+  // delivery ran.
+  {
+    const endedIso = new Date(started + durationMs).toISOString();
+    // An isolated delivery's paths come from its own diff — attributable to
+    // it. A shared delivery's come from the tree's delta over its window,
+    // which includes whatever else touched the tree in the same minutes; the
+    // stamp records which of the two it is rather than letting a reader assume.
+    const primaryDiffRel = typeof row.diff_snapshot === 'string' ? row.diff_snapshot : null;
+    const changed = effectiveWorkspaceMode === 'isolated' && primaryDiffRel != null
+      ? diffChangedPaths(repoRoot, join(repoRoot, ...primaryDiffRel.split('/')))
+      : changedBetween(overlapStatusBefore, workspaceStatusMap(repoRoot));
+    const truncated = changed == null;
+    const paths = changed ?? [];
+    const log = readDispatchWindows(repoRoot);
+    const stamps: ConcurrentWriteStamp[] | null = detectConcurrentWrites(
+      {
+        dispatchId,
+        startedAt: now.toISOString(),
+        endedAt: endedIso,
+        workspaceMode: effectiveWorkspaceMode,
+        changedPaths: paths,
+        truncated,
+      },
+      log.windows,
+      { logDegraded: log.degraded },
+    );
+    // Absent when nothing overlapped, the same convention `carry_mutated` and
+    // `worktree_carry` follow: a field on every receipt is a field nobody reads.
+    if (stamps != null) {
+      row.concurrent_write = stamps;
+      opts.onEcho?.(
+        `concurrent_write: ${stamps.length} other ${stamps.length === 1 ? 'delivery' : 'deliveries'} ` +
+          `wrote while this one ran (${stamps.map((stamp) => `${stamp.dispatch_id.slice(0, 8)}:${stamp.paths_intersecting}`).join(', ')}). ` +
+          'The receipt names the intersecting paths.',
+      );
+    }
+    closeDispatchWindow(repoRoot, {
+      dispatchId,
+      changedPaths: paths,
+      truncated,
+      endedAt: new Date(started + durationMs),
+    });
+  }
   if (diagnosticsRel != null && diagnosticsBytes != null) {
     row.diagnostics_snapshot = diagnosticsRel;
     row.diagnostics_bytes = diagnosticsBytes;
@@ -3346,7 +3324,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     echo,
     exitCode: spawned.status ?? 1,
     signal: spawned.signal ?? null,
-    timeoutMs: isTimeout ? (supervisorStatus?.timeoutMs ?? null) : null,
     stdout,
     stderr: spawned.stderr ?? '',
     durationMs,

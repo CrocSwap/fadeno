@@ -1169,7 +1169,6 @@ function main(argv: string[]): number {
         'max-transitions': { type: 'string' },
         parallel: { type: 'string' },
         'actor-call': { type: 'string' },
-        timeout: { type: 'string' },
         input: { type: 'string', multiple: true },
         harness: { type: 'string' },
         user: { type: 'boolean' },
@@ -1691,13 +1690,13 @@ function main(argv: string[]): number {
     case 'tool-run': {
       const run = positionals[1];
       if (!run) {
-        throw new Error('Usage: fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]');
+        throw new Error('Usage: fadeno tool-run <run> [--tool <name>]');
       }
       // No --command escape hatch
       if (values.output != null) {
         throw new Error('fadeno tool-run has no --output; it executes the registered tool and synthesizes the artifact.');
       }
-      const result = runToolRun({ run, tool: values.tool, timeout: values.timeout });
+      const result = runToolRun({ run, tool: values.tool });
       // Print the path of the artifact that was actually written: `run` may be a
       // unique prefix, so only the resolved run id names a directory on disk.
       const repoRoot = findRepoRoot();
@@ -1856,7 +1855,7 @@ function main(argv: string[]): number {
     }
     case 'drive': {
       const run = positionals[1];
-      if (!run) throw new Error('Usage: fadeno drive <run> [--bind role=executor] [--unbind role] [--max-transitions n] [--parallel n] [--diagnostics] [--timeout <seconds>]');
+      if (!run) throw new Error('Usage: fadeno drive <run> [--bind role=executor] [--unbind role] [--max-transitions n] [--parallel n] [--diagnostics]');
       let maxTransitions: number | undefined;
       if (values['max-transitions'] != null) {
         const n = Number(values['max-transitions']);
@@ -1873,24 +1872,12 @@ function main(argv: string[]): number {
         }
         parallel = n;
       }
-      let timeoutMs: number | null | undefined;
-      if (values.timeout != null) {
-        if (!/^\d+$/.test(String(values.timeout).trim())) {
-          throw new Error(`Invalid --timeout "${values.timeout}". Use a non-negative integer seconds (0 disables the route deadline).`);
-        }
-        const sec = Number(String(values.timeout).trim());
-        if (!Number.isInteger(sec) || sec < 0) {
-          throw new Error(`Invalid --timeout "${values.timeout}". Use a non-negative integer seconds (0 disables the route deadline).`);
-        }
-        timeoutMs = sec === 0 ? 0 : sec * 1000;
-      }
       const result = (runDrive as any)({
         run,
         bind: values.bind,
         unbind: values.unbind,
         maxTransitions,
         parallel,
-        timeoutMs,
         diagnostics: Boolean(values.diagnostics),
         onAction: (line: string) => console.log(`  ${line}`),
       });
@@ -2127,17 +2114,6 @@ function main(argv: string[]): number {
     }
     case 'dispatch': {
       const promptFile = values['prompt-file'];
-      let dispatchTimeoutMs: number | null | undefined;
-      if (values.timeout != null) {
-        if (!/^\d+$/.test(String(values.timeout).trim())) {
-          throw new Error(`Invalid --timeout "${values.timeout}". Use a non-negative integer seconds (0 disables the route deadline).`);
-        }
-        const sec = Number(String(values.timeout).trim());
-        if (!Number.isInteger(sec) || sec < 0) {
-          throw new Error(`Invalid --timeout "${values.timeout}". Use a non-negative integer seconds (0 disables the route deadline).`);
-        }
-        dispatchTimeoutMs = sec === 0 ? 0 : sec * 1000;
-      }
       const result = (runDispatch as any)({
         archetype: values.archetype,
         role: values.role,
@@ -2145,7 +2121,6 @@ function main(argv: string[]): number {
         harness: values.harness ?? null,
         tag: values.tag,
         shadow: values.shadow,
-        timeoutMs: dispatchTimeoutMs,
         isolate: Boolean(values.isolate),
         shared: Boolean(values.shared),
         allowRelayMismatch: Boolean(values['allow-relay-mismatch']),
@@ -2178,18 +2153,7 @@ function main(argv: string[]): number {
       }
       if (result.stdout.length > 0) process.stdout.write(result.stdout);
       if (result.stderr.length > 0) process.stderr.write(result.stderr);
-      if (result.outcome === 'timeout') {
-        // A signal-killed process has no exit status; `exitCode` is a stand-in
-        // 1, and "exited 1" would hide the one fact that matters: the kernel
-        // killed this executor at its own deadline, so the work did not finish.
-        const deadline = result.timeoutMs != null ? `${Math.round(result.timeoutMs / 1000)}s ` : '';
-        console.error(
-          `dispatch: executor ${result.executor} TIMED OUT — the kernel killed it at its ${deadline}deadline` +
-            `${result.signal != null ? ` (${result.signal})` : ''}; the work did NOT finish. ` +
-            `${result.outputBytes} bytes of output were captured before the kill. ` +
-            'Re-dispatch with a larger --timeout, or none, rather than into the same wall.',
-        );
-      } else if (result.exitCode !== 0) {
+      if (result.exitCode !== 0) {
         // CLI-level diagnosis on stderr — a quiet executor otherwise leaves
         // only a bare exit code. stdout stays the executor's pure report.
         console.error(
@@ -2426,7 +2390,7 @@ function main(argv: string[]): number {
       }
       if (values.output != null) {
         // `--wait` in seconds: the number a caller reaches for after a
-        // ten-minute timeout is "another minute", not "60000".
+        // ten-minute wait is "another minute", not "60000".
         let waitMs = 0;
         if (values.wait != null) {
           const seconds = values.wait === '' ? 120 : Number(values.wait);
@@ -2439,7 +2403,7 @@ function main(argv: string[]): number {
         // cannot stand alone: `--output` takes a value, so `--output --tag x`
         // would swallow the flag. `--output tag:<handle>` is the single-token
         // form that always parses — and it is the one the proxy guard permits,
-        // because a caller recovering from a timeout should not also have to
+        // because a caller recovering from an interruption should not also have to
         // get flag ordering right.
         const inline = values.output.startsWith('tag:') ? values.output.slice(4) : null;
         const result = runDispatchesOutput({
@@ -2461,20 +2425,24 @@ function main(argv: string[]): number {
         // recover-by-tag path this command serves.
         process.stdout.write(result.bytes);
         // The verdict leads. "attested" only says these are the bytes the
-        // completion row hashed — a dispatch the kernel killed at its
-        // deadline attests perfectly, zero bytes to zero bytes, and on
+        // completion row hashed — a dispatch the kernel killed attests
+        // perfectly, zero bytes to zero bytes, and on
         // 2026-08-22 a proxy relayed exactly that as "completed". The bytes
         // are worthless without the verdict, so the verdict is what a relay
         // must carry, and it is spelled in capitals a reader cannot miss.
         const verdict = ((): string | null => {
           switch (result.outcome) {
             case 'timeout': {
+              // Legacy rows only: Fadeno no longer runs executors under a
+              // deadline, so nothing written now can reach this branch. A
+              // ledger recorded before the removal still can, and relaying
+              // its bytes as a success is exactly the 2026-08-22 failure.
               const deadline = result.timeoutMs != null ? `${Math.round(result.timeoutMs / 1000)}s ` : '';
               return (
                 `TIMED OUT: the kernel killed the executor at its ${deadline}deadline` +
                 `${result.signal != null ? ` (${result.signal})` : ''}; the work did NOT finish. ` +
                 `${result.outputBytes ?? 0} bytes of output were captured before the kill. ` +
-                'Re-dispatch with a larger --timeout, or none, rather than into the same wall.'
+                'This is an old receipt: executor deadlines were removed, and a re-dispatch runs without one.'
               );
             }
             case 'failed':

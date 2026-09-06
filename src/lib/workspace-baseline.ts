@@ -29,15 +29,18 @@
  * has no index and handles untracked paths natively, and reconciliation
  * never runs against the caller's tree at all.
  *
- * Every function here that touches the caller's tree is documented as
- * requiring the write window lease; the callers hold it. This module does
- * not take it, so that one window can cover apply → rebase → re-apply as a
- * single atomic turn.
+ * Nothing here excludes anyone. These functions used to be documented as
+ * requiring a write window lease, and the lease is gone — it could not tell a
+ * live holder from a dead one, and on the host lane it never got a pid to try
+ * with. What protects a merge-back now is the merge-back itself: a plain
+ * `git apply` is atomic (every hunk or none), so a tree that moved under it
+ * REFUSES rather than half-applies, and the refusal is the signal to rebase.
+ * A second writer cannot make that unsafe; it can only make it rebase.
  */
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { collectIsolatedDiff, type IsolatedDiffResult } from './workspace-lease.ts';
+import { collectIsolatedDiff, type IsolatedDiffResult } from './workspace-isolation.ts';
 
 const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 

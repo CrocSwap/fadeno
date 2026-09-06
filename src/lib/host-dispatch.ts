@@ -7,13 +7,12 @@ import { SchemaSet, schemaErrorMessages, type SchemaKind } from './playbook-vali
 import { extractSchemaEnvelope, type EnvelopeExtraction } from './schema-envelope.ts';
 import { runSchemaDirectories } from './definitions.ts';
 import { findRepoRoot } from './paths.ts';
-import { acquireWorkspaceLease, heartbeatWorkspaceLease, releaseWorkspaceLease, WorkspaceLeaseError, type LeaseHolder } from './workspace-lease.ts';
+import { closeDispatchWindow, openDispatchWindow } from './workspace-overlap.ts';
 import { readEventsStrict, resolveRun, RUN_LEDGER_SCHEMA_VERSION, RunLedgerError, type RunEvent } from './run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from './run-ledger-write.ts';
 import { parseSnapshotDocument, type SnapshotDocument } from './executors.ts';
-import { fallbackClaimRelPath } from './supervisor.ts';
 import { collectHostWorkspaceDiff, collectIsolatedRecoveryDiff, HostWorkspaceError, hostIsolatedDiffPath, hostWorktreePath, isHostPathSafe, readHostWorkspaceState, removeHostWorkspace, removeHostWorkspaceByPath, type HostWorkspaceState } from './host-workspace.ts';
-import { isRegisteredWorktree } from './workspace-lease.ts';
+import { isRegisteredWorktree } from './workspace-isolation.ts';
 
 export const DUPLICATE_START = 'duplicate_start' as const;
 export type HostDispatchErrorCode = typeof DUPLICATE_START;
@@ -718,27 +717,44 @@ function attemptPath(request: HostDispatchRequest): string {
   return `artifacts/attempts/${safeId}${suffix}`;
 }
 
-function hostLeaseHolder(runId: string, dispatchId: string): LeaseHolder {
-  return { id: dispatchId, kind: 'host-dispatch', runId, dispatchId };
+/**
+ * Close this delivery's overlap window.
+ *
+ * Replaces `releaseHostLease`, at every one of the same call sites, and the
+ * difference is the whole point of the change. The lease was a RESERVATION:
+ * while it stood, no other shared writer could start, and a host delivery
+ * never published a pid, so nothing could ever prove the holder gone. A
+ * 429-killed agent's lease outlived the agent forever and wedged the repo
+ * against every later run — including the recovery of the run that took it.
+ *
+ * A window reserves nothing. It records an interval, so a later delivery can
+ * say "we overlapped, and here is where our edits met". A window left open by
+ * a crash costs later deliveries an unnecessary isolated worktree; it cannot
+ * refuse them.
+ *
+ * Best-effort, like the release it replaces: terminal receipts are ledger
+ * facts and machine-local bookkeeping must never turn a recorded terminal into
+ * a CLI failure.
+ */
+/**
+ * A host dispatch's overlap-window id.
+ *
+ * `runId:dispatchId`, not the dispatch id alone. Host dispatch ids are derived
+ * from the step and role (`hd-ac-implement-g1-worker-a1`), so two runs of the
+ * same playbook produce the SAME id — and a window log keyed on it alone folds
+ * two concurrent deliveries into one record, which is precisely the overlap it
+ * exists to report. The engine and tool paths already qualify by run for the
+ * same reason; the ad-hoc kernel's id is a uuid and needs no prefix.
+ */
+function hostWindowId(runId: string, dispatchId: string): string {
+  return `${runId}:${dispatchId}`;
 }
 
-function hostRequestNeedsLease(_lookup: HostDispatchRequestLookup): boolean {
-  // Every SHARED host delivery takes the lease. Nothing declares itself a
-  // non-writer any more: `write_access` was a claim Fadeno never verified, and
-  // the honest reading without it is that we do not know. Isolated deliveries
-  // skip the lease by not being shared, which is a fact rather than a promise.
-  // See docs/experimental/permissions-and-isolation.md.
-  return true;
-}
-
-function releaseHostLease(repoRoot: string, runId: string, dispatchId: string): void {
+function closeHostWindow(repoRoot: string, runId: string, dispatchId: string, changedPaths: readonly string[] = []): void {
   try {
-    releaseWorkspaceLease({ repoRoot, holder: hostLeaseHolder(runId, dispatchId) });
-  } catch (error) {
-    // Terminal receipts are ledger facts; machine-local cleanup is
-    // best-effort and must not turn an already-recorded terminal into a CLI
-    // failure. A later idempotent terminal call retries this exact release.
-    if (!(error instanceof WorkspaceLeaseError)) throw error;
+    closeDispatchWindow(repoRoot, { dispatchId: hostWindowId(runId, dispatchId), changedPaths });
+  } catch {
+    // deliberately swallowed; see above
   }
 }
 
@@ -879,41 +895,28 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
       );
     }
   }
-  const lookup: HostDispatchRequestLookup = { runId, runDir, events, event: requestEvent, request, terminal: null };
-  const needsLease = isIsolated ? false : hostRequestNeedsLease(lookup);
-  const holder = hostLeaseHolder(runId, opts.dispatchId);
-  const acquireHostLease = (): void => {
-    if (!needsLease) return;
+  /**
+   * Open this delivery's overlap window.
+   *
+   * Where the lease acquire used to be, and it cannot fail the dispatch. The
+   * acquire could, and did: a shared host delivery that found a live lease was
+   * REFUSED, and because a host lease never had a pid to disprove, "live" was
+   * a state nothing could leave. Opening a window is a record, so the only
+   * question left is what a second writer should DO — and the answer is that
+   * it gets its own tree, not that it waits for one it cannot outlive.
+   */
+  const openHostWindow = (): void => {
     try {
-      acquireWorkspaceLease({
-        repoRoot,
-        workspaceMode: 'shared',
-        holder,
-        // Host execution outlives this short CLI process. A null pid is a
-        // durable reservation released only by its terminal receipt.
-        supervisorPid: null,
-        executorPid: null,
-        processGroupId: null,
-        // ...which is right for exclusion and blind for reporting: with no pid
-        // here, a 47-minute command fallback and an abandoned one are the same
-        // bytes. A command fallback DOES have a supervisor publishing pids, so
-        // record where to find it. Read-only — see
-        // `describeWorkspaceLeaseLiveness`; it can never unlock the workspace.
-        // Host delivery keeps null: it runs in another agent's session, which
-        // publishes no identity here, and claiming otherwise would be worse
-        // than admitting the state is unobservable.
-        livenessClaim: transport === 'command-fallback'
-          ? fallbackClaimRelPath(runId, opts.dispatchId)
-          : null,
+      openDispatchWindow(repoRoot, {
+        dispatchId: hostWindowId(runId, opts.dispatchId),
+        runId,
+        kind: 'host-dispatch',
+        workspaceMode: isIsolated ? 'isolated' : 'shared',
         startedAt: opts.now ?? new Date(),
-        heartbeatAt: opts.now ?? new Date(),
-        stdoutBytes: 0,
-        stderrBytes: 0,
-        now: opts.now,
       });
-    } catch (err) {
-      if (err instanceof WorkspaceLeaseError) throw new HostDispatchError(err.message);
-      throw err;
+    } catch {
+      // Never fatal: an unrecorded window costs a missed overlap report, and
+      // a dispatch that cannot start costs the work.
     }
   };
   const starts = startsFor(events, opts.dispatchId);
@@ -930,12 +933,12 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
     const priorTransport = normalizeDeliveryTransport(prior.extra.delivery_transport);
     const sameCommand = JSON.stringify(prior.extra.fallback_command ?? null) === JSON.stringify(opts.command ?? null);
     if (prior.extra.agent_id === opts.agentId && priorTransport === transport && sameCommand) {
-      acquireHostLease();
+      openHostWindow();
       return { dispatchId: opts.dispatchId, state: 'started', idempotent: true, agentId: opts.agentId };
     }
     throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already started with different delivery evidence.`);
   }
-  acquireHostLease();
+  openHostWindow();
   try {
     append(
     runDir,
@@ -993,7 +996,7 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
       opts.now,
     );
   } catch (err) {
-    if (needsLease) releaseHostLease(repoRoot, runId, opts.dispatchId);
+    closeHostWindow(repoRoot, runId, opts.dispatchId);
     throw err;
   }
   return { dispatchId: opts.dispatchId, state: 'started', idempotent: false, agentId: opts.agentId };
@@ -1021,7 +1024,7 @@ export function progressHostDispatch(opts: DispatchProgressOptions): HostDispatc
     throw new HostDispatchError(`--source must be one of: ${[...PROGRESS_SOURCES].join(', ')}.`);
   }
   const events = eventsFor(runDir);
-  const { request, event: requestEvent } = findRequest(runId, events, opts.dispatchId);
+  const { request } = findRequest(runId, events, opts.dispatchId);
   const starts = startsFor(events, opts.dispatchId);
   if (starts.length === 0) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" cannot report progress before dispatch-start.`);
   if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`, { code: DUPLICATE_START });
@@ -1051,27 +1054,11 @@ export function progressHostDispatch(opts: DispatchProgressOptions): HostDispatc
     return { dispatchId: opts.dispatchId, state: report.state, source, idempotent: true, reportSha256: digest };
   }
   const isIsolated = hostDeliveryWorkspaceMode(starts[0]!) === 'isolated';
-  const leaseLookup: HostDispatchRequestLookup = { runId, runDir, events, event: requestEvent, request, terminal: null };
-  if (!isIsolated && hostRequestNeedsLease(leaseLookup)) {
-    try {
-      heartbeatWorkspaceLease({
-        repoRoot,
-        holder: hostLeaseHolder(runId, opts.dispatchId),
-        holderId: opts.dispatchId,
-        heartbeatAt: opts.now ?? new Date(),
-        now: opts.now,
-      });
-    } catch (err) {
-      // Progress is an attested, non-gating observation. A missing or replaced
-      // machine-local lease must not make the semantic receipt fail; terminal
-      // completion/failure still performs exact-holder best-effort release.
-      if (err instanceof WorkspaceLeaseError) {
-        // intentionally ignored
-      } else {
-        throw err;
-      }
-    }
-  }
+  // No heartbeat. The lease this used to refresh was there so a reader could
+  // guess whether the holder was still alive; a window needs no such guess,
+  // because it is closed by the terminal receipt and by nothing else. Progress
+  // remains what it always was: an attested, non-gating observation.
+  void isIsolated;
   const agentId = starts[0]!.extra.agent_id;
   append(
     runDir,
@@ -1157,7 +1144,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
       }
       throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a different terminal receipt.`);
     } else {
-      releaseHostLease(repoRoot, runId, opts.dispatchId);
+      closeHostWindow(repoRoot, runId, opts.dispatchId);
       const prior = terminal[0]!;
       if (
         prior.type === 'actor_completed' &&
@@ -1301,7 +1288,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
         },
         opts.now,
       );
-      releaseHostLease(repoRoot, runId, opts.dispatchId);
+      closeHostWindow(repoRoot, runId, opts.dispatchId);
       return { dispatchId: opts.dispatchId, state: 'completed', idempotent: false, agentId, outputPath: parked, outputSha256: digest };
     }
   }
@@ -1450,7 +1437,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
         },
         opts.now,
       );
-      releaseHostLease(repoRoot, runId, opts.dispatchId);
+      closeHostWindow(repoRoot, runId, opts.dispatchId);
       return { dispatchId: opts.dispatchId, state: 'completed', idempotent: false, agentId, outputPath: outputRel, outputSha256: normalizedDigest };
     }
   }
@@ -1575,7 +1562,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
       },
       opts.now,
     );
-    releaseHostLease(repoRoot, runId, opts.dispatchId);
+    closeHostWindow(repoRoot, runId, opts.dispatchId);
     return { dispatchId: opts.dispatchId, state: 'completed', idempotent: false, agentId, outputPath: outputRel, outputSha256: digest };
   }
 }
@@ -1600,7 +1587,7 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
       }
       throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a different terminal receipt.`);
     } else {
-      releaseHostLease(repoRoot, runId, opts.dispatchId);
+      closeHostWindow(repoRoot, runId, opts.dispatchId);
       const prior = terminal[0]!;
       if (prior.type === 'actor_failed' && prior.extra.failure_reason === opts.reason) {
         return { dispatchId: opts.dispatchId, state: 'failed', idempotent: true, agentId: typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined };
@@ -1716,7 +1703,7 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
     return { dispatchId: opts.dispatchId, state: 'failed', idempotent: false, agentId: typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined };
   } else {
     append(runDir, { ...failedBase }, opts.now);
-    releaseHostLease(repoRoot, runId, opts.dispatchId);
+    closeHostWindow(repoRoot, runId, opts.dispatchId);
     return { dispatchId: opts.dispatchId, state: 'failed', idempotent: false, agentId: typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined };
   }
 }

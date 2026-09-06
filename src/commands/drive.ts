@@ -80,23 +80,22 @@ import {
   supervisorCanStillReport,
 } from '../lib/supervisor.ts';
 import {
-  WORKSPACE_LEASE_FILE,
-  WORKSPACE_LEASE_LOCK,
-  acquireWorkspaceLease,
   carryDeclaredPaths,
   collectIsolatedDiff,
   createIsolatedWorktree,
-  isWorkspaceLeaseAlive,
-  readEffectiveLease,
-  readWorkspaceLease,
-  releaseWorkspaceLease,
   removeIsolatedWorktree,
   scanIgnoredOutput,
-  withWorkspaceWindowLease,
-  WorkspaceLeaseError,
-  type LeaseHolder,
-  type WorkspaceLeaseRecord,
-} from '../lib/workspace-lease.ts';
+} from '../lib/workspace-isolation.ts';
+import {
+  changedBetween,
+  closeDispatchWindow,
+  detectConcurrentWrites,
+  diffChangedPaths,
+  openDispatchWindow,
+  readDispatchWindows,
+  workspaceStatusMap,
+  type ConcurrentWriteStamp,
+} from '../lib/workspace-overlap.ts';
 // The engine's attempts isolate the same way an ad-hoc dispatch's do, from
 // the same primitives, so a member's worktree is cut from HEAD and then given
 // the caller's uncommitted state rather than a clean checkout of it. Imported
@@ -177,8 +176,6 @@ export interface DriveOptions {
    * start new work for the role again without repeating `--bind`.
    */
   unbind?: string[];
-  /** Hard executor deadline in milliseconds; 0 disables, null/undefined uses the route default. */
-  timeoutMs?: number | null;
   /** Bounded opt-in process output diagnostics (per-stream 32 KiB / 500 lines). */
   diagnostics?: boolean;
   /** Max concurrent command deliveries within one ready wave (1–16, default 1). */
@@ -252,7 +249,6 @@ interface EngineCtx {
   /** Conflict rounds granted per actor call; see MAX_MERGE_CONFLICT_ROUNDS. */
   conflictRounds: Map<string, number>;
   diagnostics?: boolean;
-  timeoutMs?: number | null;
   parallel: number;
   now?: Date;
   act: (line: string) => void;
@@ -385,25 +381,11 @@ function freshEvents(runDir: string): RunEvent[] {
   }
 }
 
-function appendLeaseRecoveryAudit(
-  ctx: EngineCtx,
-  kind: 'workspace_lease_recovered' | 'workspace_lease_reclaim_denied',
-  previous: WorkspaceLeaseRecord,
-  newHolder: LeaseHolder | null,
-  byHolder: LeaseHolder,
-  reason: 'dead_supervisor' | 'abandoned_host' | 'active_writer' | 'abandoned_engine',
-): void {
-  appendEvent(ctx.runDir, {
-    type: kind,
-    step: null,
-    recovered_holder: newHolder,
-    previous_holder: previous.holder,
-    supervisor_pid: previous.supervisor_pid,
-    reason,
-    recovered_at: (ctx.now ?? new Date()).toISOString(),
-    by: byHolder.id,
-  }, ctx.now);
-}
+// `appendLeaseRecoveryAudit` is gone with the lease it audited. Every event it
+// wrote — `workspace_lease_recovered`, `workspace_lease_reclaim_denied` — was
+// about reclaiming a reservation from a holder nothing could prove dead. There
+// is no reservation, so there is nothing to reclaim and nothing to audit. Old
+// ledgers carrying those rows still read: nothing looks them up by type.
 
 /**
  * A hard-killed engine cannot append from a signal handler. On the next drive,
@@ -455,66 +437,14 @@ function recoverInterruptedCommandDispatches(ctx: EngineCtx): number {
       }
     }
   }
-  // Repo-wide lease also interlocks recovery after supervisor checks: a live
-  // lease held by another holder means another writer is active. Check after
-  // supervisor liveness so the more specific supervisor message is preserved.
-  // A dangling attempt's own lease must not block its recovery: the engine
-  // holder id is `engine:<runId>:<actorCallId>:a<attempt>` and is durable
-  // (supervisor_pid null) until the supervisor releases it after executor
-  // close. If the drive and supervisor were both SIGKILLed, that lease
-  // survives and would otherwise make the run unrecoverable.
-  if (dangling.length > 0) {
-    const effectiveLease = readEffectiveLease(ctx.repoRoot);
-    if (effectiveLease != null) {
-      const danglingIds = new Set(
-        dangling.map((event) => `engine:${ctx.runId}:${String(event.extra.actor_call_id)}:a${String(event.extra.attempt)}`),
-      );
-      if (!danglingIds.has(effectiveLease.holder.id)) {
-        const byHolder: LeaseHolder = { id: `engine:${ctx.runId}:recovery`, kind: 'engine', runId: ctx.runId };
-        try {
-          appendLeaseRecoveryAudit(
-            ctx,
-            'workspace_lease_reclaim_denied',
-            effectiveLease,
-            null,
-            byHolder,
-            'active_writer',
-          );
-        } catch {}
-        const holdersSuffix = (() => {
-          const holders = (effectiveLease.holders?.length ?? 1) > 1 ? effectiveLease.holders! : [effectiveLease.holder];
-          if (holders.length <= 1) return '';
-          return ` holders: ${holders.map((h) => `"${h.id}"`).join(', ')}`;
-        })();
-        throw new DriveError(
-          `shared workspace is already held by ${effectiveLease.holder.kind} "${effectiveLease.holder.id}"${holdersSuffix} ` +
-            `(supervisor_pid ${effectiveLease.supervisor_pid ?? 'unknown'}, started ${effectiveLease.started_at}); ` +
-            `holder "${ctx.runId}" must wait or retry. Inspect it with \`fadeno show ${effectiveLease.holder.runId ?? '<run>'}\`; ` +
-            'recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, ' +
-            `remove ${WORKSPACE_LEASE_FILE} as a last resort.`,
-        );
-      }
-      if (effectiveLease.supervisor_pid != null || effectiveLease.executor_pid != null || effectiveLease.process_group_id != null) {
-        throw new DriveError(
-          `command attempt still has a live executor identity in ${WORKSPACE_LEASE_FILE}; ` +
-            'refusing to reclaim its lease while the supervisor or detached executor group may still be running.',
-        );
-      }
-      // Reclaim the dangling attempt's own lease so recovery can proceed — audited per contract 1.3/3.4.
-      const previous = effectiveLease;
-      const byHolder: LeaseHolder = { id: `engine:${ctx.runId}:recovery`, kind: 'engine', runId: ctx.runId };
-      const reason = previous.holder.kind === 'host-dispatch' ? 'abandoned_host' as const : 'abandoned_engine' as const;
-      try {
-        const released = releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: effectiveLease.holder });
-        if (released) {
-          try {
-            appendLeaseRecoveryAudit(ctx, 'workspace_lease_recovered', previous, null, byHolder, reason);
-            ctx.act(`recovered workspace lease for "${previous.holder.id}" (${reason})`);
-          } catch {}
-        }
-      } catch {}
-    }
-  }
+  // A dangling attempt's own lease used to interlock its own recovery here:
+  // an engine holder is `engine:<runId>:<actorCallId>:a<attempt>` and was
+  // durable (supervisor_pid null) until a supervisor released it, so a drive
+  // and supervisor both SIGKILLed left a lease that made the run
+  // UNRECOVERABLE — the very run that took it could not clear it. That whole
+  // interlock is gone with the lease. Recovery now depends only on the
+  // supervisor-liveness checks above, which probe a pid this machine
+  // published and can therefore actually answer.
   let retainedWorktrees = 0;
   for (const event of dangling) {
     // An isolated attempt killed mid-flight leaves a worktree that was never
@@ -900,18 +830,6 @@ function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: stri
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
   }
-}
-
-function effectiveTimeoutMs(ctx: EngineCtx, spec: ExecutorSpec): number | null {
-  if (ctx.timeoutMs !== undefined && ctx.timeoutMs !== null) {
-    if (ctx.timeoutMs === 0) return null;
-    if (typeof ctx.timeoutMs === 'number' && Number.isInteger(ctx.timeoutMs) && ctx.timeoutMs > 0) return ctx.timeoutMs;
-    return null;
-  }
-  if (spec.adapter === 'command' && typeof (spec as any).timeoutMs === 'number' && Number.isInteger((spec as any).timeoutMs) && (spec as any).timeoutMs > 0) {
-    return (spec as any).timeoutMs as number;
-  }
-  return null;
 }
 
 /**
@@ -1314,7 +1232,10 @@ interface PendingAttempt {
   sessionId: string | null;
   executor: string;
   spec: import('../lib/executors.ts').ExecutorSpec;
-  leaseHolder: LeaseHolder | null;
+  /** This attempt's overlap-window id; closed by `collectCommandAttempt`. */
+  windowId: string;
+  /** Shared-tree status snapshot taken before the spawn, for the window's path set. */
+  statusBefore: Map<string, string> | null;
   claimRel: string;
   claimAbs: string;
   statusAbs: string;
@@ -1333,7 +1254,6 @@ interface PendingAttempt {
    * on the attempt's receipt so a shared-tree engine attempt is never silently
    * mistaken for an isolated one. */
   isolationDegraded: string | null;
-  effectiveTimeout: number | null;
   diagnosticsRel: string | null;
   diagnosticsBytes: number | null;
   child: import('node:child_process').ChildProcess | null;
@@ -1363,26 +1283,22 @@ function repoHasGit(repoRoot: string): boolean {
 }
 
 /**
- * Run `action` holding the repo-wide writer lease, waiting for it if another
- * holder has it.
+ * Run `action` against the shared tree.
  *
- * Isolated engine attempts run unleased — that is what buys the concurrency —
- * but two moments still touch the shared tree and must not interleave with
- * each other or with an ad-hoc dispatch's merge-back: reading the tree to
- * build an attempt's baseline, and applying an attempt's diff back into it.
- * Reading a tree mid-`git apply --3way` yields a half-applied patch, and two
- * concurrent applies can interleave hunks.
+ * This used to take a repo-wide window lease so a baseline capture and a
+ * merge-back could not interleave. The lease is gone; what made it seem
+ * necessary was `git apply --3way`, which could leave the caller's tree
+ * half-applied. The merge-back is a plain `git apply` now — atomic, every hunk
+ * or none — so a capture that races it reads either the before state or the
+ * after state, never a torn one, and an apply that races another apply
+ * REFUSES and rebases instead of interleaving hunks.
  *
- * The wait is what distinguishes this from `acquireWorkspaceLease` used
- * directly, which refuses immediately when the lease is held. Refusing would
- * be wrong here: contention is the NORMAL case once members run concurrently,
- * not an error condition.
+ * Kept as a named seam rather than inlined at four call sites: these are the
+ * moments that touch the shared tree, and naming them is what lets a reader
+ * find them all when the next question about concurrency arrives.
  */
-function withEngineTreeLease<T>(ctx: EngineCtx, label: string, action: () => T, mode: 'read' | 'write' = 'write'): T {
-  const holder: LeaseHolder = { id: `engine-tree:${ctx.runId}:${label}`, kind: 'engine', runId: ctx.runId };
-  // The wait, the kernel-pid stamp, and the release live with the lease so
-  // the ad-hoc dispatch's windows cannot drift from the engine's.
-  return withWorkspaceWindowLease({ repoRoot: ctx.repoRoot, holder, mode }, action);
+function onSharedTree<T>(_ctx: EngineCtx, _label: string, action: () => T, _mode: 'read' | 'write' = 'write'): T {
+  return action();
 }
 
 function parseParallelOption(value: unknown): number {
@@ -1636,7 +1552,7 @@ function beginCommandAttempt(
         // state; engine members are not being compared, and a member admitted
         // after an earlier one merged back must see that work, not a snapshot
         // predating it.
-        const baselineCommit = withEngineTreeLease(
+        const baselineCommit = onSharedTree(
           ctx, `baseline:${ids.actorCallId}:a${attempt}`,
           () => applyWorkspaceBaseline(
             ctx.repoRoot, created.worktreeAbs, captureWorkspaceBaseline(ctx.repoRoot), `${ctx.runId}:${id8}`, 'engine attempt',
@@ -1654,18 +1570,11 @@ function beginCommandAttempt(
       ctx.act(`isolation degraded to shared for ${ids.actorCallId} attempt ${attempt}: ${isolationDegraded}`);
     }
   }
-  // What actually happened. A degraded attempt runs in the shared tree and so
-  // must hold the lease a shared attempt holds.
+  // What actually happened. A degraded attempt runs in the shared tree; it no
+  // longer takes anything from anyone for doing so, it is simply recorded as
+  // having been there.
   const effectiveWorkspaceMode: 'shared' | 'isolated' = worktree != null ? 'isolated' : 'shared';
-  const needsLease = effectiveWorkspaceMode === 'shared';
-  const leaseHolder: LeaseHolder | null = needsLease
-    ? {
-        id: `engine:${ctx.runId}:${ids.actorCallId}:a${attempt}`,
-        kind: 'engine',
-        runId: ctx.runId,
-        dispatchId: `${ids.actorCallId}:a${attempt}`,
-      }
-    : null;
+  const windowId = `${ctx.runId}:${ids.actorCallId}:a${attempt}`;
   const withdrawClaim = (): void => { try { rmSync(claimAbs, { force: true }); } catch {} };
   /** Everything the dispatch row says about where this attempt runs, written
    * in one place so the isolated and shared branches cannot drift on it. */
@@ -1678,48 +1587,18 @@ function beginCommandAttempt(
     }
     if (isolationDegraded != null) row.workspace_mode_degraded = isolationDegraded;
   };
-  if (needsLease) {
-    const existingBefore = (() => {
-      try { return readWorkspaceLease(ctx.repoRoot); } catch { return null; }
-    })();
-    const aliveBefore = existingBefore == null ? false : isWorkspaceLeaseAlive(existingBefore);
-    try {
-      acquireWorkspaceLease({
-        repoRoot: ctx.repoRoot,
-        workspaceMode: effectiveWorkspaceMode,
-        holder: leaseHolder!,
-        supervisorPid: null,
-        executorPid: null,
-        processGroupId: null,
-        startedAt: ctx.now,
-        heartbeatAt: ctx.now,
-        stdoutBytes: 0,
-        stderrBytes: 0,
-        now: ctx.now,
-      });
-      stampWorkspace();
-      if (existingBefore != null && !aliveBefore && existingBefore.supervisor_pid != null) {
-        try {
-          appendLeaseRecoveryAudit(ctx, 'workspace_lease_recovered', existingBefore, leaseHolder!, leaseHolder!, 'dead_supervisor');
-          ctx.act(`recovered stale workspace lease for "${existingBefore.holder.id}" (dead supervisor_pid ${existingBefore.supervisor_pid})`);
-        } catch {}
-      }
-    } catch (err) {
-      if (err instanceof WorkspaceLeaseError) {
-        if (existingBefore != null && aliveBefore && existingBefore.supervisor_pid == null) {
-          try {
-            appendLeaseRecoveryAudit(ctx, 'workspace_lease_reclaim_denied', existingBefore, null, leaseHolder!, 'abandoned_host');
-          } catch {}
-        }
-        withdrawClaim();
-        throw new DriveError(err.message);
-      }
-      withdrawClaim();
-      throw err;
-    }
-  } else {
-    stampWorkspace();
-  }
+  // Open the overlap window and record where this attempt runs. Where the
+  // lease acquire used to be, and it cannot refuse: an acquire that found
+  // another holder threw `DriveError`, and a host holder had no pid to
+  // disprove, so "another holder" was a state a run could not get out of.
+  openDispatchWindow(ctx.repoRoot, {
+    dispatchId: windowId,
+    runId: ctx.runId,
+    kind: 'engine',
+    workspaceMode: effectiveWorkspaceMode,
+    ...(ctx.now != null ? { startedAt: ctx.now } : {}),
+  });
+  stampWorkspace();
 
   try {
     appendEvent(ctx.runDir, dispatched, ctx.now);
@@ -1729,14 +1608,11 @@ function beginCommandAttempt(
     );
     ctx.act(`external sandbox: ${executor} (${argv.join(' ')}) runs outside the current harness; evidence is recorded in the run ledger`);
   } catch (error) {
-    if (leaseHolder != null) {
-      try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
-    }
+    closeDispatchWindow(ctx.repoRoot, { dispatchId: windowId, changedPaths: [] });
     withdrawClaim();
     throw error;
   }
 
-  const effectiveTimeout = effectiveTimeoutMs(ctx, spec);
   // Prepare snapshot files for async supervisor collection.
   const outputSnapshotAbs = join(ctx.repoRoot, '.fadeno', 'local', 'outputs', `${ctx.runId}-${ids.actorCallId}-a${attempt}.out`);
   const stderrSnapshotAbs = join(ctx.repoRoot, '.fadeno', 'local', 'outputs', `${ctx.runId}-${ids.actorCallId}-a${attempt}.err`);
@@ -1781,11 +1657,11 @@ function beginCommandAttempt(
     }
   }
 
-  const leaseRelease = leaseHolder == null ? undefined : {
-    leasePath: join(ctx.repoRoot, WORKSPACE_LEASE_FILE),
-    lockPath: join(ctx.repoRoot, WORKSPACE_LEASE_LOCK),
-    holder: leaseHolder,
-  };
+  // The shared tree as it stands right before this attempt starts writing.
+  // Only meaningful for a shared attempt — an isolated one's own diff is a
+  // better path set, and an attributable one. Null when git could not answer,
+  // which makes the window `truncated` rather than "changed nothing".
+  const statusBefore = effectiveWorkspaceMode === 'shared' ? workspaceStatusMap(ctx.repoRoot) : null;
   const spawnCwd = worktree?.abs ?? ctx.repoRoot;
   // The agent was told this exact path by its own prompt (`prompt.ts:259`), and
   // it writes it relative to the workspace it runs in — the isolated worktree
@@ -1802,7 +1678,7 @@ function beginCommandAttempt(
     promptFd = openSync(promptFdPath, 'r');
     outFd = openSync(outputSnapshotAbs, 'w');
     errFd = openSync(stderrSnapshotAbs, 'w');
-    child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, effectiveTimeout, progressAbs), {
+    child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, undefined, progressAbs), {
       stdio: [promptFd, outFd, errFd],
       cwd: spawnCwd,
       // Same provenance the ad-hoc kernel stamps: an engine-dispatched actor is
@@ -1819,9 +1695,9 @@ function beginCommandAttempt(
     if (promptFd != null) try { closeSync(promptFd); } catch {}
     if (outFd != null) try { closeSync(outFd); } catch {}
     if (errFd != null) try { closeSync(errFd); } catch {}
-    // Withdraw claim and lease on synchronous spawn failure.
+    // Withdraw the claim and close the window on synchronous spawn failure.
     try { rmSync(claimAbs, { force: true }); } catch {}
-    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    closeDispatchWindow(ctx.repoRoot, { dispatchId: windowId, changedPaths: [] });
     try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
     try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
     throw new DriveError(`failed to spawn executor "${executor}": ${(err as Error).message}`);
@@ -1854,7 +1730,8 @@ function beginCommandAttempt(
     sessionId,
     executor,
     spec,
-    leaseHolder,
+    windowId,
+    statusBefore,
     claimRel,
     claimAbs,
     statusAbs,
@@ -1866,7 +1743,6 @@ function beginCommandAttempt(
     workspaceMode: effectiveWorkspaceMode,
     worktree,
     isolationDegraded,
-    effectiveTimeout,
     diagnosticsRel: null,
     diagnosticsBytes: null,
     child,
@@ -1878,7 +1754,7 @@ function beginCommandAttempt(
  * append receipts, and release lease/claim. Must be called once per begin.
  */
 function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): DispatchOutcome {
-  const { stepId, role, outputRel, artifactType, ids, attempt, executor, leaseHolder, statusAbs, claimAbs, outputSnapshotAbs, stderrSnapshotAbs, effectiveTimeout } = pending;
+  const { stepId, role, outputRel, artifactType, ids, attempt, executor, windowId, statusAbs, claimAbs, outputSnapshotAbs, stderrSnapshotAbs } = pending;
   /**
    * Every resource this attempt holds, released together.
    *
@@ -1929,7 +1805,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
         // conflicts, stop with the worktree retained. The rules live with
         // the helper, shared with the ad-hoc dispatch, so the two cannot
         // drift.
-        const settled = withEngineTreeLease(ctx, `merge:${ids.actorCallId}:a${attempt}`, () =>
+        const settled = onSharedTree(ctx, `merge:${ids.actorCallId}:a${attempt}`, () =>
           settleIsolatedWork({
             repoRoot: ctx.repoRoot,
             worktreeAbs: wt.abs,
@@ -1962,6 +1838,52 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
   // same reason.
   const takeMergeStamp = (): MergeBackResult | null => mergeStamp;
   const takeMergeDiff = (): { rel: string; bytes: number } | null => mergeDiff;
+  /**
+   * What this attempt changed, and the overlaps that implies.
+   *
+   * Computed once, at the terminal receipt, and memoized: `releaseAttempt` is
+   * idempotent by design and `workspaceFields` is called on several exits, so
+   * a second call must return the SAME stamps rather than re-reading a tree
+   * that has moved on since.
+   */
+  let overlapStamps: ConcurrentWriteStamp[] | null = null;
+  let windowClosed = false;
+  const closeAttemptWindow = (): void => {
+    if (windowClosed) return;
+    windowClosed = true;
+    const startedIso = new Date(pending.startedMs).toISOString();
+    const endedIso = (ctx.now ?? new Date()).toISOString();
+    // An isolated attempt's paths come from its own diff and are ATTRIBUTABLE
+    // to it. A shared attempt's come from the tree's delta over its window and
+    // are an attestation — the human editing in the same minutes is in there
+    // too. Both are useful for detecting an overlap; only the first is useful
+    // for saying whose work it was, which is why the stamp records which it is.
+    const diffRel = takeMergeDiff()?.rel ?? pending.worktree?.diffRel ?? null;
+    const changed = pending.worktree != null && diffRel != null
+      ? diffChangedPaths(ctx.repoRoot, join(ctx.repoRoot, ...diffRel.split('/')))
+      : changedBetween(pending.statusBefore, workspaceStatusMap(ctx.repoRoot));
+    const truncated = changed == null;
+    const paths = changed ?? [];
+    const log = readDispatchWindows(ctx.repoRoot);
+    overlapStamps = detectConcurrentWrites(
+      {
+        dispatchId: windowId,
+        startedAt: startedIso,
+        endedAt: endedIso,
+        workspaceMode: pending.workspaceMode,
+        changedPaths: paths,
+        truncated,
+      },
+      log.windows,
+      { logDegraded: log.degraded },
+    );
+    closeDispatchWindow(ctx.repoRoot, {
+      dispatchId: windowId,
+      changedPaths: paths,
+      truncated,
+      ...(ctx.now != null ? { endedAt: ctx.now } : {}),
+    });
+  };
   /** Workspace facts for this attempt's receipt, in one place so a failure
    * event and a completion event cannot disagree about where it ran. */
   const workspaceFields = (): Record<string, unknown> => {
@@ -1973,6 +1895,12 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
     const stamp = takeMergeStamp();
     if (stamp != null) out.merge_back = stamp;
     if (mergeIgnored != null) out.ignored_output_discarded = mergeIgnored;
+    // Deleting the writer lease without this would trade a loud wedge for
+    // silent lost writes. Absent when nothing overlapped, exactly like
+    // `carry_mutated`: an empty stamp on every receipt would bury the ones
+    // that mean something.
+    closeAttemptWindow();
+    if (overlapStamps != null) out.concurrent_write = overlapStamps;
     return out;
   };
   let released = false;
@@ -1984,7 +1912,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
     try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
     try { rmSync(statusAbs, { force: true }); } catch {}
     try { rmSync(claimAbs, { force: true }); } catch {}
-    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    closeAttemptWindow();
   };
   let sessionId: string | null = pending.sessionId;
   const startedMs = pending.startedMs;
@@ -2173,12 +2101,6 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
     appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'spawn_failed', error: spawnFailure }, ctx.now);
     releaseAttempt();
     return { kind: 'spawn_failed', detail: `${executor}: ${spawnFailure}` };
-  }
-  if (supervisorStatus.timedOut === true) {
-    const stderrTail = (stderr ?? '').slice(-STDERR_TAIL);
-    appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'executor_timeout', ...(supervisorStatus.timeoutMs != null ? { timeout_ms: supervisorStatus.timeoutMs } : {}), ...(supervisorStatus.deadlineAt != null ? { deadline_at: supervisorStatus.deadlineAt } : {}), ...(supervisorStatus.signal != null ? { signal: supervisorStatus.signal } : {}), ...(supervisorStatus.exitCode != null ? { exit_code: supervisorStatus.exitCode } : {}), stderr_tail: stderrTail }, ctx.now);
-    releaseAttempt();
-    return { kind: 'exit_nonzero', detail: `${executor} timed out after ${supervisorStatus.timeoutMs ?? effectiveTimeout ?? '?'}ms on ${stepId}${role ? ` (${role})` : ''}` };
   }
   if (supervisorStatus.signal != null) {
     const stderrTail = (stderr ?? '').slice(-STDERR_TAIL);
@@ -2466,26 +2388,17 @@ function runCommandWave(
         // checks below unreachable-in-effect: they would fire every time and
         // admit exactly one member. They are meaningful now.
         const needsLease = !repoHasGit(ctx.repoRoot);
-        // Still a real gate under isolation, because an isolated member can
-        // DEGRADE to shared and take the lease for its whole run. Its siblings
-        // must not be admitted behind it, or their merge-backs would sit
-        // waiting on a lease held until that member finishes.
-        if (inflight.some((p) => p.leaseHolder != null)) {
-          break;
-        }
-        if (needsLease) {
-          const effectiveLease = (() => { try { return readEffectiveLease(ctx.repoRoot); } catch { return null; } })();
-          // Any live lease here is by construction foreign: the wave enforces at-most-one live writer via the inflight check above.
-          if (effectiveLease != null && isWorkspaceLeaseAlive(effectiveLease)) {
-            throw new DriveError(
-              `shared workspace is already held by ${effectiveLease.holder.kind} "${effectiveLease.holder.id}"` +
-                ` (supervisor_pid ${effectiveLease.supervisor_pid ?? 'unknown'}, started ${effectiveLease.started_at}); ` +
-                `holder "${ctx.runId}" must wait or retry. Inspect it with \`fadeno show ${effectiveLease.holder.runId ?? '<run>'}\`; ` +
-                'recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, ' +
-                `remove ${WORKSPACE_LEASE_FILE} as a last resort.`,
-            );
-          }
-        }
+        // Serialize members only where the tree itself cannot support two of
+        // them: a repo with no git has no worktrees to isolate INTO, so a
+        // shared attempt really is the only kind and one-at-a-time is the only
+        // safe wave. With git, siblings overlap freely — each gets a worktree,
+        // and where their edits meet the receipts say so.
+        //
+        // The foreign-lease refusal that used to sit here is gone with the
+        // lease. It threw `shared workspace is already held by …` at a run
+        // that had done nothing wrong, on the strength of a record whose
+        // holder might have died an hour earlier and left no way to tell.
+        if (needsLease && inflight.length > 0) break;
         const preflight = evaluateMemberPreflight(ctx, stepId, head.role, binding);
         if (!preflight.ok) {
           const prior = priorAttempts(freshEvents(ctx.runDir), head.ids.actorCallId);
@@ -3080,15 +2993,10 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         }
         // Command head (binding already checked in the queue builder above).
         const binding = effectiveBinding(ctx, head.role);
-        const needsLease = true;
-        if (needsLease && inflight.some((p) => p.leaseHolder != null)) break;
-        if (needsLease) {
-          const effectiveLease = (() => { try { return readEffectiveLease(ctx.repoRoot); } catch { return null; } })();
-          // Any live lease here is by construction foreign: the wave enforces at-most-one live writer via the inflight check above.
-          if (effectiveLease != null && isWorkspaceLeaseAlive(effectiveLease)) {
-            throw new DriveError(`shared workspace is already held by ${effectiveLease.holder.kind} "${effectiveLease.holder.id}" (supervisor_pid ${effectiveLease.supervisor_pid ?? 'unknown'}, started ${effectiveLease.started_at}); holder "${ctx.runId}" must wait or retry. Inspect it with \`fadeno show ${effectiveLease.holder.runId ?? '<run>'}\`; recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`);
-          }
-        }
+        // Same rule as the pure-command wave above: one at a time only where
+        // isolation is unavailable, and no refusal on account of a foreign
+        // holder nothing can prove is still there.
+        if (!repoHasGit(ctx.repoRoot) && inflight.length > 0) break;
         if (inflight.length >= ctx.parallel) break;
         const preflight = evaluateMemberPreflight(ctx, stepId, head.role, binding);
         if (!preflight.ok) {
@@ -3190,15 +3098,6 @@ function driveTool(ctx: EngineCtx, step: import('../lib/flow-cursor.ts').NextSte
   if (outputRel == null) return 'needs_decision';
   const generation = parseGeneration(outputRel).generation;
   const loopOwner = step.loop.in_body ? bodyOwnerOf(ctx.playbook, step.id) : null;
-  const effectiveTimeoutMs = (() => {
-    if (ctx.timeoutMs !== undefined && ctx.timeoutMs !== null) {
-      if (ctx.timeoutMs === 0) return null;
-      if (typeof ctx.timeoutMs === 'number' && ctx.timeoutMs > 0) return ctx.timeoutMs;
-      return null;
-    }
-    if (spec.timeoutMs != null && spec.timeoutMs > 0) return spec.timeoutMs;
-    return null;
-  })();
   try {
     const result = executeToolCore({
       repoRoot: ctx.repoRoot,
@@ -3213,7 +3112,6 @@ function driveTool(ctx: EngineCtx, step: import('../lib/flow-cursor.ts').NextSte
       loopOwner,
       iteration: step.loop.iteration,
       command: spec.command,
-      effectiveTimeoutMs: effectiveTimeoutMs ?? null,
       now: ctx.now,
     });
     ctx.act(`tool ${toolName} → ${result.status} (exit ${result.exitCode}) → wrote ${outputRel}`);
@@ -3791,7 +3689,6 @@ function openEngine(opts: DriveOptions, repoRoot: string): OpenedEngine {
     repaired: new Set<string>(),
     conflictRounds: new Map<string, number>(),
     diagnostics: opts.diagnostics,
-    timeoutMs: opts.timeoutMs,
     parallel,
     now: opts.now,
     act,
@@ -4110,7 +4007,7 @@ export function runAttemptAccept(opts: AttemptAcceptOptions): AttemptAcceptResul
   const headRes = spawnSync('git', ['-C', worktreeAbs, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
   const baselineBefore = headRes.error == null && headRes.status === 0 ? String(headRes.stdout ?? '').trim() : null;
   const diff = collectIsolatedDiff({ repoRoot, worktreeAbs, diffAbs: join(repoRoot, diffRel), diffRel });
-  const settled = withEngineTreeLease(ctx, `merge:${callId}:a${newAttempt}`, () =>
+  const settled = onSharedTree(ctx, `merge:${callId}:a${newAttempt}`, () =>
     settleIsolatedWork({ repoRoot, worktreeAbs, diff, baselineRef: `${ctx.runId}:${id8}:rebase`, armLabel: 'engine attempt', priorConflicts }));
   if (settled.stamp.status === 'unresolved') {
     throw new DriveError(

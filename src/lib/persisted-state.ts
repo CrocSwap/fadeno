@@ -271,8 +271,12 @@ export const PERSISTED_SURFACES: readonly PersistedSurface[] = [
     versionField: null,
     currentVersion: null,
     reader: 'readWorkspaceLease (src/lib/workspace-lease.ts)',
-    writer: 'writeRecordAtomic, via acquire/release/heartbeatWorkspaceLease (src/lib/workspace-lease.ts)',
-    notes: 'Live lease for the shared workspace. Meaningless on another machine, so it is never migrated — only cleared.',
+    writer: 'nothing — the repo-wide writer lease was removed',
+    notes:
+      'VESTIGIAL. Fadeno no longer takes a repo-wide writer lease: it required proving a holder dead, ' +
+      'which a pid-less host delivery made impossible, so a killed agent wedged the repo forever. A file ' +
+      'here is a leftover from before the removal; `fadeno doctor` reports it and says to delete it. ' +
+      'Read only for that report, never migrated.',
   },
   {
     id: 'inflight-status',
@@ -974,9 +978,11 @@ const UNVERSIONED_READERS: Readonly<Record<string, UnversionedReader | null>> = 
 
   // `readWorkspaceLease` answers `null` for BOTH "no lease" and "a record
   // this build cannot use" — so existence is checked first and a null from a
-  // file that is there is a rejection, never an absence. That collapse is the
-  // whole reason a lease file damaged by a half-write reads as "workspace
-  // free" everywhere else: mutual exclusion silently stops excluding.
+  // file that is there is a rejection, never an absence. That distinction used
+  // to be load-bearing (a half-written lease read as "workspace free" and
+  // mutual exclusion silently stopped excluding). It no longer gates anything,
+  // and it is kept because this inventory's job is to say whether every
+  // persisted surface still reads back — including the ones nothing writes.
   'workspace-lease': ({ abs, repoRoot, surface }) => {
     const record = readWorkspaceLease(repoRoot);
     if (record == null) {
@@ -985,10 +991,11 @@ const UNVERSIONED_READERS: Readonly<Record<string, UnversionedReader | null>> = 
         rel: surface.relPath,
         abs,
         why: 'readWorkspaceLease refuses it — an unparsable record, an unknown workspace_mode, ' +
-          'a holder it cannot read, or a missing timestamp. A lease nothing can read is a lease that stops excluding writers',
+          'a holder it cannot read, or a missing timestamp. Vestigial either way: `fadeno doctor` reports ' +
+          'the leftover file and it is safe to delete',
       };
     }
-    return { state: 'read', detail: `${surface.relPath} reads back as a ${record.workspace_mode} lease held by "${record.holder.id}".` };
+    return { state: 'read', detail: `${surface.relPath} reads back as a leftover ${record.workspace_mode} lease naming "${record.holder.id}"; nothing reads it any more.` };
   },
 
   // Two document kinds in one directory (see the surface's notes); both are
