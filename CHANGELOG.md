@@ -50,6 +50,73 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Fixed
 
+- **A Codex agent file could be stale in a way nothing could detect, so the
+  permissions change above was inert for every existing install while every
+  surface said it was fine.** The commit that shipped it filed this and did not
+  fix it. `readCodexAgentFile` parsed neither `sandbox_mode` nor
+  `approval_policy`; `codexAgentIdentityStatus` compares model and effort only;
+  and the managed header's `digest=` is a sha256 of the file's OWN body, so it
+  is self-consistent by construction and agrees with whichever renderer wrote
+  it. A file cut by the previous build — retired `sandbox_mode =
+  "workspace-write"`, no `approval_policy`, model and effort still matching the
+  dial — therefore returned `current`: `fadeno status` printed `fresh`,
+  `restartRequired` stayed false, and `fadeno doctor` printed "managed
+  host-agent state is current" for a file whose sandbox line the renderer no
+  longer produces. The only way out was `fadeno steering apply --codex --force`
+  on a hunch. Same silent-wrong-answer class as the rest of this release: one
+  fact, several readers, and the one that mattered was not reading it.
+  The verdict is now `outdated`, a THIRD standing verdict alongside `unmanaged`
+  and `shadowed` rather than an overload of the identity comparison, which
+  6efe290 factored so `status` and `dial` judge identically and which is about
+  model and effort on purpose. Keep the two apart when reading a report:
+  **`stale` is the file's identity disagreeing with the dial; `outdated` is the
+  file's text disagreeing with this build's renderer.** It is decided before
+  any dial is consulted, which is what lets it hold for an unresolvable dial
+  and — the case most upgrading installs are actually in — for a command
+  BROKER, whose identity is deliberately never judged and which was otherwise
+  the one file shape that could never be reported stale at all. `status`,
+  `dial`, `doctor` and `fadeno status --json` all pick it up through the row
+  builder they already share, and `codexStandingReason` (the dial-free question
+  `doctor`'s project-shadow findings ask) stopped vouching for it on the day it
+  landed without being edited, because d1302f5 wrote that predicate to ask for
+  `not_applicable` rather than for NOT-`unmanaged`.
+  What the comparison is OVER is `CODEX_MANAGED_SETTINGS` — the keys the
+  renderers bake at a fixed value — and **both renderers now emit that list**
+  (`codexManagedSettingsBlock`) instead of spelling the two lines inline, so
+  what `steering apply` writes and what an existing file is judged against move
+  in one edit. A full-body digest against a fresh render was the obvious
+  alternative and is rejected twice over: a fresh render needs the dial cascade
+  (`renderCodexHostAgent` bakes the model, the effort and `formatDialRef`'s ref)
+  so it could never be a standing verdict, and it would churn on values that are
+  legitimately per-install and that the identity comparison already owns — the
+  baked `--host-executor` ref, the identity lines, a broker's relay from the
+  repo's catalog, and the absolute managed-CLI path, which flips the moment the
+  managed CLI is installed or removed. A digest cannot tell "the renderer
+  changed" from "this machine's CLI path changed"; both come back as one bit,
+  and the fix printed for the second would be a lie. So the narrower check
+  deliberately does NOT catch a prose-only change to `developer_instructions`, a
+  stale baked CLI path, or a relay the catalog has since moved. A build-stamp
+  comparison was rejected for the opposite reason: every release bumps
+  `packageVersion()`, so it would fire for every install after every upgrade
+  including the files whose text did not change, and a row whose remediation
+  ends in "start a fresh Codex session" cannot afford to cry wolf. The stamp is
+  reported as evidence beside the verdict instead — it is how a reader sees
+  which build wrote the file they are being told to re-cut.
+  The remediation needed no new spelling and no `--force`, which was checked by
+  running it rather than assumed: `managedAgentEmit` refreshes a file carrying
+  the managed header whenever its content differs, at either scope, and an
+  outdated file differs by definition — `--force` is scope-dependent and only
+  ever governs taking over a file Fadeno did NOT write. So an outdated file
+  falls through `codexIdentityRemediation` to the existing pair, and a
+  project-scope one correctly gets `--scope project` rather than the `--scope
+  user` that would rewrite the file the project copy makes invisible.
+  One knock-on, fixed in the same change because leaving it would have been the
+  same bug inside its own fix: `doctor`'s sole-project finding printed "carries
+  no managed header" for every file it could not vouch for, because `unmanaged`
+  was the only way to be one. Said of an outdated file that is false, and so was
+  the remediation it attached — Fadeno wrote the file and will happily re-cut
+  it. Both now come from the row's own verdict.
+
 - **`fadeno models --json` answered `fadeno_capable: false` for every codex
   delivery.** `argvGrantsFadenoShell` — the one predicate that reads a lane's
   argv to decide whether it can run the `fadeno` command family — knew only

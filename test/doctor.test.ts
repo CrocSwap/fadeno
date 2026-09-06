@@ -223,6 +223,7 @@ function brokerBody(archetype: string, resolveFlags: string): string {
     'model = "gpt-5.6-luna"',
     'model_reasoning_effort = "low"',
     'sandbox_mode = "danger-full-access"',
+    'approval_policy = "never"',
     '',
     'developer_instructions = """',
     `Run \`fadeno steering resolve --archetype ${archetype}${resolveFlags}\`.`,
@@ -363,6 +364,76 @@ test('doctor leaves the sole-project sentence unqualified for a managed project 
   assert.equal(/managed header/.test(sole.detail), false, sole.detail);
   assert.equal(/clean bill of health/.test(sole.detail), false, sole.detail);
   assert.equal(sole.remediation, 'Codex prefers project scope: once `fadeno setup --codex` materializes managed user-scope brokers, these files would win over them.');
+});
+
+/**
+ * The body the PREVIOUS build baked: an OS sandbox and no approval key at all.
+ * 3c785e0 retired it, and until 2026-09-06 nothing on any surface could see the
+ * difference — the header's digest covers the file's own body, so it agrees
+ * with itself no matter which renderer wrote it.
+ */
+function retiredBrokerBody(archetype: string): string {
+  return brokerBody(archetype, ' --host-executor sol --prompt-file <path>')
+    .replace('sandbox_mode = "danger-full-access"\n', 'sandbox_mode = "workspace-write"\n')
+    .replace('approval_policy = "never"\n', '');
+}
+
+/**
+ * `doctor`'s headline row for Codex, which said "managed host-agent state is
+ * current" for a file whose sandbox line this build's renderer no longer
+ * produces. That sentence is what made the BREAKING permissions change inert:
+ * an upgrading user had no signal to re-cut anything, and the one command that
+ * would have fixed it had to be run on a hunch.
+ */
+test('doctor does not call managed host-agent state current for a file this build no longer renders', (t) => {
+  const root = tempRepo(t);
+  const user = isolatedUser(t, root);
+  maintainCodex(user);
+  const userDir = codexUserAgents(root);
+  writeFileSync(join(userDir, 'fadeno-worker.toml'), managedBroker('0.6.1', retiredBrokerBody('worker')));
+  writeFileSync(join(userDir, 'fadeno-reviewer.toml'), managedBroker('0.6.1', brokerBody('reviewer', ' --prompt-file <path>')));
+  writeFileSync(join(userDir, 'fadeno-judge.toml'), managedBroker('0.6.1', brokerBody('judge', ' --prompt-file <path>')));
+
+  const result = runDoctor({ repoRoot: root, target: 'codex', userPathOptions: user });
+  const row = result.findings.find((f) => f.check === 'codex-agents')!;
+
+  assert.ok(row, `expected a codex-agents finding; got ${JSON.stringify(result.findings.map((f) => f.check))}`);
+  assert.equal(row.severity, 'warning');
+  assert.equal(/managed host-agent state is current/.test(row.detail), false, row.detail);
+  // The concrete damage, named: what the file says and what this build writes.
+  assert.match(row.detail, /sandbox_mode = "workspace-write" where this build renders "danger-full-access"/);
+  assert.match(row.detail, /no approval_policy where this build renders "never"/);
+  // And the command that fixes it, from the one place that spelling lives.
+  assert.ok(row.remediation!.includes('fadeno steering apply --codex --scope user'), row.remediation);
+});
+
+/**
+ * The sole-project sentence used to assert ONE reason for every unvouched file
+ * — "carries no managed header" — because `unmanaged` was the only way to be
+ * one. Said of an outdated file it is simply false, and its remediation was
+ * false too: `steering apply` refreshes a managed file in place, so telling its
+ * owner to move it out of the way sends them to undo work Fadeno will redo.
+ */
+test('doctor names an outdated sole-project file by its own standing, not the unmanaged one', (t) => {
+  const root = tempRepo(t);
+  const user = isolatedUser(t, root);
+  const projectDir = codexProjectAgents(root);
+  codexUserAgents(root); // present but empty: nothing to shadow
+  writeFileSync(join(projectDir, 'worker.toml'), managedBroker('0.6.1', retiredBrokerBody('worker')));
+
+  const result = runDoctor({ repoRoot: root, target: 'codex', userPathOptions: user });
+  const sole = result.findings.find((f) => f.check === 'codex-agents-project')!;
+
+  assert.equal(sole.severity, 'ok', 'the relational answer is unchanged: nothing is being shadowed');
+  assert.match(sole.detail, /nothing is being shadowed/);
+  assert.match(sole.detail, /not a clean bill of health/);
+  // Its OWN reason, not the other verdict's.
+  assert.match(sole.detail, /worker\.toml carries sandbox_mode = "workspace-write"/);
+  assert.equal(/carries no managed header/.test(sole.detail), false, sole.detail);
+  // And the fix that actually reaches a managed project file.
+  assert.match(sole.remediation!, /For worker\.toml, /);
+  assert.ok(sole.remediation!.includes('fadeno steering apply --codex --scope project'), sole.remediation);
+  assert.equal(/never refresh the unmanaged/.test(sole.remediation!), false, sole.remediation);
 });
 
 test('doctor reports an unmanaged project-scope Codex broker shadowing a managed user-scope one, and names the file to delete', (t) => {

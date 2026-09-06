@@ -30,6 +30,77 @@ const CODEX_MANAGED_VERSION_RE = /^# fadeno:managed\b[^\n]*?\bversion=(\S+)/;
  */
 export const CODEX_RESOLVE_FLAGS = ['--prompt-file', '--host-executor'] as const;
 
+/**
+ * The Codex settings every managed agent file this build renders carries, at
+ * the exact value the renderer writes — the part of the file that is neither
+ * per-install nor per-dial, and so can be judged off the text alone.
+ *
+ * Both renderers in `src/commands/steering.ts` emit this list through
+ * `codexManagedSettingsBlock`, and `readCodexAgentFile` reads the same list
+ * back off the file: one edit moves what `steering apply` bakes AND what an
+ * already-cut file is judged against, so the two cannot drift. That is the
+ * whole difference between this and `CODEX_RESOLVE_FLAGS`, which is a hand-kept
+ * list nothing renders from.
+ *
+ * The list is ENUMERATED rather than hashed against a fresh render, which was
+ * the obvious alternative and is not available here:
+ *
+ *  - A fresh render needs the dial cascade — `renderCodexHostAgent` bakes
+ *    `spec.model`, `spec.reasoningEffort` and `formatDialRef(cascade.ref)` —
+ *    so it could never be a STANDING verdict, and `codexStandingReason` (the
+ *    dial-free question `doctor`'s project-shadow findings ask) would keep
+ *    vouching for a file the identity row refuses. That is the exact
+ *    contradiction d1302f5 removed.
+ *  - It would churn on values that are legitimately per-install and that the
+ *    identity comparison already owns: the baked `--host-executor <ref>`, the
+ *    two identity lines, the broker's relay identity from the repo's catalog,
+ *    and the CLI path — an absolute path under the user's state home that
+ *    flips the moment the managed CLI is installed or removed. A digest cannot
+ *    tell "the renderer changed" from "this machine's CLI path changed"; both
+ *    come back as one bit, and the fix printed for the second is a lie.
+ *
+ * What it deliberately does not catch, stated so the gap is chosen rather than
+ * discovered: a change to the `developer_instructions` PROSE that introduces no
+ * new resolve flag and no new setting, a stale baked CLI path, and a broker
+ * whose relay identity the catalog has since moved. Those need the fresh render
+ * and its dial, and belong to a surface that has one.
+ */
+export const CODEX_MANAGED_SETTINGS: ReadonlyArray<{ key: string; value: string }> = [
+  { key: 'sandbox_mode', value: 'danger-full-access' },
+  { key: 'approval_policy', value: 'never' },
+];
+
+/**
+ * `CODEX_MANAGED_SETTINGS` as the TOML block the renderers write, so the file
+ * on disk is produced from the list the checker reads.
+ */
+export function codexManagedSettingsBlock(): string {
+  return CODEX_MANAGED_SETTINGS.map(({ key, value }) => `${key} = ${JSON.stringify(value)}\n`).join('');
+}
+
+/**
+ * Which of `CODEX_MANAGED_SETTINGS` this file does not carry at this build's
+ * value, each as the phrase an advisory prints: what the file says (or that it
+ * says nothing) and what this build renders instead.
+ *
+ * Read off the text, like `missingFlags`, because the damage is concrete: a
+ * file cut before 3c785e0 carries `sandbox_mode = "workspace-write"` and no
+ * `approval_policy`, so every worker it spawns runs under an OS sandbox and an
+ * approval gate that nothing headless can answer — the exact failure that
+ * commit shipped to remove.
+ */
+export function codexAgentSettingDrift(text: string): string[] {
+  const out: string[] = [];
+  for (const { key, value } of CODEX_MANAGED_SETTINGS) {
+    const found = tomlStringValue(text, key);
+    if (found === value) continue;
+    out.push(
+      `${found == null ? `no ${key}` : `${key} = ${JSON.stringify(found)}`} where this build renders ${JSON.stringify(value)}`,
+    );
+  }
+  return out;
+}
+
 const NAME_RE = /^name\s*=\s*"((?:[^"\\]|\\.)*)"/m;
 const MODEL_RE = /^model\s*=\s*"((?:[^"\\]|\\.)*)"/m;
 const EFFORT_RE = /^model_reasoning_effort\s*=\s*"((?:[^"\\]|\\.)*)"/m;
@@ -54,6 +125,16 @@ function unquoteToml(raw: string): string {
   }
 }
 
+/**
+ * One top-level `key = "value"` off an agent file, or null when the file states
+ * the key nowhere. Anchored per line, so the `"""` developer-instructions block
+ * cannot supply a value the renderer never wrote as a setting.
+ */
+function tomlStringValue(text: string, key: string): string | null {
+  const match = new RegExp(`^${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`, 'm').exec(text);
+  return match ? unquoteToml(match[1]!) : null;
+}
+
 /** Everything `doctor` and `steering resolve` read off one Codex agent file. */
 export interface CodexAgentFileState {
   /** The file's first line carries the managed header `steering apply`/`init` write. */
@@ -65,6 +146,12 @@ export interface CodexAgentFileState {
    * means it is current on the resolver contract, whatever stamped it.
    */
   missingFlags: string[];
+  /**
+   * Which of `CODEX_MANAGED_SETTINGS` this file does not carry at this build's
+   * value, already phrased for an advisory. Empty means its settings are the
+   * ones this build's renderers write.
+   */
+  settingDrift: string[];
   /** The file's `name` key — the archetype it materializes. */
   name: string | null;
   /** The file's `model` key. */
@@ -110,6 +197,7 @@ export function readCodexAgentFile(path: string): CodexAgentFileState | null {
     managed,
     version: versionMatch ? versionMatch[1]! : null,
     missingFlags,
+    settingDrift: codexAgentSettingDrift(text),
     name: nameMatch ? unquoteToml(nameMatch[1]!) : null,
     model: modelMatch ? unquoteToml(modelMatch[1]!) : null,
     reasoningEffort: effortMatch ? unquoteToml(effortMatch[1]!) : null,
@@ -277,7 +365,22 @@ export interface CodexAgentIdentityRow {
   path: string | null;
   file: { model: string | null; effort: string | null } | null;
   dial: CodexDialIdentity | null;
-  status: 'current' | 'stale' | 'missing' | 'not_applicable' | 'unmanaged' | 'shadowed';
+  /**
+   * The `version=` the managed header stamps, when the judged file carries one.
+   *
+   * Evidence, never the verdict. A build-stamp comparison was the other
+   * candidate for detecting an outdated file and is rejected on noise: every
+   * release bumps `packageVersion()`, so it would fire for every install after
+   * every upgrade, including the files whose text did not change — and its
+   * remediation ends in "start a fresh Codex session", which is disruptive
+   * enough that firing it on a no-op teaches the reader to skip the row. What
+   * the stamp is good for is telling a reader WHICH build wrote the file it is
+   * being told to re-cut, so it is reported beside a verdict earned elsewhere.
+   */
+  version: string | null;
+  /** `CodexAgentFileState.settingDrift` for the judged file; empty otherwise. */
+  settingDrift: string[];
+  status: 'current' | 'stale' | 'missing' | 'not_applicable' | 'unmanaged' | 'shadowed' | 'outdated';
 }
 
 /**
@@ -370,7 +473,12 @@ export function codexIdentityRemediation(rows: CodexAgentIdentityRow[]): string 
         continue;
       default:
         // `missing` has no file at either scope, so the managed set is what is
-        // wanted and user scope is where it lives.
+        // wanted and user scope is where it lives. `outdated` needs no third
+        // spelling and no `--force`: `managedAgentEmit` refreshes a file
+        // carrying the managed header whenever its content differs, at either
+        // scope, and an outdated file differs by definition. `--force` is
+        // scope-dependent and only ever governs taking over a file Fadeno did
+        // NOT write, which is the `unmanaged` arm above.
         add(row.scope === 'project' ? CODEX_PROJECT_IDENTITY_REMEDIATION : CODEX_IDENTITY_REMEDIATION);
     }
   }
@@ -430,6 +538,29 @@ export function codexAgentIdentityStatus(
  *    project scope on purpose — at USER scope a broker under a host dial IS
  *    ordinary drift that `--scope user` re-cuts, which is the `stale` verdict
  *    this surface has always given it.
+ *  - `outdated`: Fadeno wrote it, and its settings are not the ones this build
+ *    renders (`CODEX_MANAGED_SETTINGS`). Two verdicts about two different
+ *    disagreements, and the names are worth keeping straight: `stale` is the
+ *    file's IDENTITY disagreeing with the dial, `outdated` is the file's TEXT
+ *    disagreeing with this build's renderer. It is checked BEFORE any dial is
+ *    consulted, for three reasons — it holds when the dial is unresolvable
+ *    (`null`), it holds for a command BROKER, whose identity is deliberately
+ *    never judged and which is otherwise the one file shape that could never
+ *    be reported outdated at all, and it is what makes the answer a standing
+ *    one that `codexStandingReason` can ask for. It masks `stale` on a file
+ *    that is both, which costs nothing: the remediation for a given scope is
+ *    one command and it clears both.
+ *
+ *    The gap this closes: 3c785e0 moved every command lane to maximal
+ *    permissions and changed what these files bake — `sandbox_mode =
+ *    "danger-full-access"` and `approval_policy = "never"` in place of
+ *    `sandbox_mode = "workspace-write"` — and nothing on any surface could see
+ *    it. `readCodexAgentFile` parsed neither key, the identity comparison is
+ *    model and effort only, and the managed header's digest covers the file's
+ *    OWN body, so it is self-consistent by construction and agrees with a file
+ *    no renderer in this build would produce. A BREAKING change was therefore
+ *    inert for every existing install, under a `doctor` line reading "managed
+ *    host-agent state is current".
  *
  * A host agent is told from a broker by its baked `--host-executor`, the same
  * discriminator `findSpawnableCodexAgent` uses: only `renderCodexHostAgent`
@@ -443,11 +574,20 @@ export function codexAgentIdentityRow(
   dial: CodexDialIdentity | null,
 ): CodexAgentIdentityRow {
   if (candidate == null) {
-    return { archetype, scope: null, path: null, file: null, dial, status: 'missing' };
+    return {
+      archetype, scope: null, path: null, file: null, dial,
+      version: null, settingDrift: [], status: 'missing',
+    };
   }
   const file = { model: candidate.state.model, effort: candidate.state.reasoningEffort };
-  const base = { archetype, scope: candidate.scope, path: candidate.path, file, dial };
+  const base = {
+    archetype, scope: candidate.scope, path: candidate.path, file, dial,
+    version: candidate.state.version, settingDrift: candidate.state.settingDrift,
+  };
   if (!candidate.state.managed) return { ...base, status: 'unmanaged' };
+  // Before the dial, and before the shadowing question: this one is about the
+  // file's own text and is the only verdict a broker can earn.
+  if (candidate.state.settingDrift.length > 0) return { ...base, status: 'outdated' };
   if (candidate.scope === 'project' && candidate.state.hostExecutor == null && dial?.lane === 'host') {
     return { ...base, status: 'shadowed' };
   }
@@ -456,7 +596,7 @@ export function codexAgentIdentityRow(
 
 /**
  * The half of a row's verdict that needs no dial: can Fadeno vouch for the
- * file Codex would load at all?
+ * file Codex would load at all, and if not, WHY? `null` means it can.
  *
  * `doctor`'s project-shadow findings ask a RELATIONAL question — does this
  * project-scope file override the managed user-scope set? — and answer it
@@ -480,10 +620,34 @@ export function codexAgentIdentityRow(
  * Asking for `not_applicable` rather than asking NOT-`unmanaged` is deliberate
  * and fails safe: a standing verdict added to the builder later stops `doctor`
  * vouching automatically, instead of slipping past a predicate that only knew
- * one verdict's name.
+ * one verdict's name. That is not hypothetical any more — `outdated` is exactly
+ * such a verdict, added 2026-09-06, and this said "no" for it on the day it
+ * landed without being edited.
+ *
+ * It returns the REASON rather than a boolean, and that is the same argument
+ * one step further. Its one consumer used to supply the reason itself, printing
+ * "carries no managed header" for every unvouched file because `unmanaged` was
+ * the only way to be one; a second standing verdict turns that hardcoded
+ * half-sentence into a false statement about a file that DOES carry the header
+ * — the bug this verdict exists to catch, committed inside its own fix. So the
+ * clause comes from the same row as the verdict, and the `default` arm prints
+ * something true-but-vague rather than something confident and wrong.
+ *
+ * Takes the ROW, not the candidate, because `doctor` needs the verdict AND the
+ * clause for one file and must not build the row twice to get them — two
+ * readings of one file is how they start disagreeing.
  */
-export function codexAgentFileVouched(candidate: CodexAgentCandidate): boolean {
-  return codexAgentIdentityRow(candidate.archetype, candidate, null).status === 'not_applicable';
+export function codexStandingReason(row: CodexAgentIdentityRow): string | null {
+  switch (row.status) {
+    case 'not_applicable':
+      return null;
+    case 'unmanaged':
+      return 'carries no managed header';
+    case 'outdated':
+      return `carries ${row.settingDrift.join(', and ')}`;
+    default:
+      return `is not one Fadeno can vouch for (${row.status})`;
+  }
 }
 
 function identityText(identity: { model: string | null; effort: string | null } | null): string {
@@ -514,6 +678,14 @@ export function describeCodexAgentIdentityRow(row: CodexAgentIdentityRow): strin
   if (row.status === 'unmanaged') {
     return `${row.archetype} loads ${row.path}, which carries no managed header — Fadeno did not ` +
       'write it and cannot vouch for what it does';
+  }
+  if (row.status === 'outdated') {
+    // The stamped version is the reader's only way to see WHICH build wrote
+    // the file they are being told to re-cut, and a file stamped by this very
+    // build says something else again: the settings were edited after it was
+    // written. Both are worth printing; neither is the verdict.
+    return `${row.archetype} loads ${row.path}, cut by ${row.version == null ? 'an unstamped build' : `fadeno ${row.version}`} ` +
+      `and carrying ${row.settingDrift.join(', and ')} — re-cutting it is what applies this build's lane permissions`;
   }
   if (row.status === 'shadowed') {
     return `${row.archetype} loads the project-scope command broker ${row.path}, which shadows the ` +

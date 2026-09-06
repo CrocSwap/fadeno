@@ -897,6 +897,13 @@ const CLAIMS: Claim[] = [
         /codexAgentIdentityStatus/,
         /effectiveCodexAgentCandidates/,
         /not_applicable/,
+        // The standing half: the verdict about the file's TEXT rather than its
+        // identity, and the one list the renderers write it from. A doc that
+        // still describes two standing verdicts, or a source that stops
+        // rendering from the list it judges against, is the drift this catches.
+        /CODEX_MANAGED_SETTINGS/,
+        /codexManagedSettingsBlock/,
+        /outdated/,
       ],
     },
     src: {
@@ -909,6 +916,7 @@ const CLAIMS: Claim[] = [
         /codexAgentIdentityStatus/,
         /effectiveCodexAgentCandidates/,
         /not_applicable/,
+        /outdated/,
       ],
     },
   },

@@ -816,13 +816,33 @@ invisible rather than merely lower priority. `doctor` had applied that
 precedence since it grew shadow-drift findings; `status` and `dial` read the
 user path alone until 2026-09-06 and so could vouch for a file no session
 loads, which is the ordinary state of any repo `fadeno init` has scaffolded.
-`codexAgentIdentityRow` is the one builder both go through, and it adds the two
-verdicts that are about the file's standing rather than its identity:
+`codexAgentIdentityRow` is the one builder both go through, and it adds the
+three verdicts that are about the file's standing rather than its identity:
 `unmanaged` (Codex will load it, Fadeno did not write it, and matching
-model/effort keys do not license vouching for the rest of it) and `shadowed` (a
+model/effort keys do not license vouching for the rest of it), `shadowed` (a
 project-scope command broker shadows the host agent a host-lane dial needs, so
 the dialed identity can never spawn there — and a broker's relay identity is
-not drift). Each row carries the `scope` and `path` it judged, because the fix
+not drift), and `outdated` (Fadeno wrote it, and its settings are not the ones
+this build renders). `stale` and `outdated` are two different disagreements:
+`stale` is the file's IDENTITY against the dial, `outdated` is the file's TEXT
+against this build's renderer. The second is checked before any dial is
+consulted, so it holds for an unresolvable dial and for a command broker, whose
+identity is deliberately never judged. The comparison is over
+`CODEX_MANAGED_SETTINGS` — the keys the renderers bake at a fixed value,
+`sandbox_mode` and `approval_policy` — which both renderers emit through
+`codexManagedSettingsBlock` and `readCodexAgentFile` reads back, so what
+`steering apply` writes and what an existing file is judged against move in one
+edit. It is enumerated rather than digested against a fresh render because a
+fresh render needs the dial cascade (so it could never be the standing verdict
+`codexStandingReason` asks for) and would churn on the per-install values the
+identity comparison already owns — the baked executor ref, the identity lines,
+a broker's relay, and the absolute CLI path. It therefore does not catch a
+prose-only change to `developer_instructions`, a stale baked CLI path, or a
+moved relay. Until 2026-09-06 there was no check at all: 3c785e0 retired
+`sandbox_mode = "workspace-write"` in a BREAKING change and every surface kept
+calling the files it no longer renders `current`, because the managed header's
+digest covers each file's own body and so agrees with whichever renderer wrote
+it. Each row carries the `scope` and `path` it judged, because the fix
 depends on them: `CODEX_IDENTITY_REMEDIATION` (`--scope user`) rewrites a file
 a project copy is shadowing, `CODEX_PROJECT_IDENTITY_REMEDIATION` re-cuts or
 deletes the project copy, and `CODEX_UNMANAGED_IDENTITY_REMEDIATION` says to

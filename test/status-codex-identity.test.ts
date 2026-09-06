@@ -14,6 +14,7 @@ import {
   readCodexAgentFile,
   type CodexAgentIdentityRow,
 } from '../src/lib/codex-agent-file.ts';
+import { packageVersion } from '../src/lib/paths.ts';
 import { userPaths, writeUserDials, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -400,6 +401,173 @@ test('a missing file outranks the lane it would have been cut for', (t) => {
   assert.equal(row(materialization, 'reviewer').status, 'current');
   assert.equal(materialization.fresh, false);
   assert.equal(materialization.remediation, CODEX_IDENTITY_REMEDIATION);
+});
+
+/**
+ * Rewrite one materialized file's SETTINGS back to what the previous build
+ * baked: `sandbox_mode = "workspace-write"` and no `approval_policy` at all.
+ * The identity lines are untouched, so the file still agrees with the dial —
+ * which is precisely why nothing could see it.
+ */
+function retireSettings(path: string): void {
+  const text = readFileSync(path, 'utf8')
+    .replace(/^sandbox_mode = ".*"$/m, 'sandbox_mode = "workspace-write"')
+    .replace(/^approval_policy = ".*"\n/m, '');
+  writeFileSync(path, text, 'utf8');
+}
+
+/**
+ * The gap 3c785e0 filed and did not fix. It moved every command lane to
+ * maximal permissions, which for these files meant `sandbox_mode =
+ * "danger-full-access"` and `approval_policy = "never"` in place of
+ * `sandbox_mode = "workspace-write"` — and left every upgrading user's files
+ * frozen on the retired shape with no surface able to say so.
+ *
+ * The file below is the exact production state after that upgrade: managed,
+ * matching model, matching effort, retired settings. Model and effort are the
+ * whole of the identity comparison and the header's digest covers the file's
+ * OWN body, so both agreed with it; `status` said `fresh`, `doctor` printed
+ * "managed host-agent state is current", and the BREAKING change was inert
+ * while the report said everything was fine.
+ */
+test('a managed file carrying the retired sandbox settings is outdated, not current', (t) => {
+  const fx = fixture(t);
+  writeUserDials(fx.user, { reviewer: { model: 'terra' } });
+  materialize(fx);
+  const path = join(fx.agentDir, 'fadeno-reviewer.toml');
+  retireSettings(path);
+
+  const materialization = inspect(fx);
+  const reviewer = row(materialization, 'reviewer');
+  assert.equal(reviewer.status, 'outdated');
+  assert.equal(reviewer.scope, 'user');
+  assert.equal(reviewer.path, path);
+  // The identity is untouched and still agrees with the dial — the point being
+  // that the identity comparison is not what caught this, and could not be.
+  assert.deepEqual(reviewer.file, { model: 'gpt-5.6-terra', effort: 'xhigh' });
+  assert.equal(
+    codexAgentIdentityStatus(reviewer.file, reviewer.dial),
+    'current',
+    'the identity judge was right; the FILE was wrong in a way it never reads',
+  );
+  assert.equal(materialization.fresh, false);
+  assert.equal(materialization.restartRequired, true);
+  assert.equal(materialization.remediation, CODEX_IDENTITY_REMEDIATION);
+
+  // The detail names both retired settings and the build that wrote them, so
+  // the reader can tell an upgrade from a hand edit.
+  const detail = describeCodexAgentIdentityRow(reviewer);
+  assert.match(detail, /sandbox_mode = "workspace-write" where this build renders "danger-full-access"/);
+  assert.match(detail, /no approval_policy where this build renders "never"/);
+  assert.match(detail, new RegExp(`cut by fadeno ${packageVersion().replace(/\./g, '\\.')}`));
+
+  // The other two slots were materialized by this build and are untouched, so
+  // the verdict is about the file and not about the build being newer.
+  assert.equal(row(materialization, 'worker').status, 'current');
+  assert.equal(row(materialization, 'judge').status, 'current');
+});
+
+/**
+ * The same staleness on a command BROKER, which is the shape most upgrading
+ * installs are actually in: a broker's identity is the relay's by construction,
+ * so `codexAgentIdentityStatus` declines to judge it (`not_applicable`) and
+ * every identity-shaped check is blind to it by design. The settings verdict is
+ * asked before the dial for exactly this case.
+ */
+test('a broker carrying the retired sandbox settings is outdated, not not_applicable', (t) => {
+  const fx = fixture(t);
+  writeUserDials(fx.user, { judge: { model: 'opus' } });
+  materialize(fx);
+  const path = join(fx.agentDir, 'fadeno-judge.toml');
+  retireSettings(path);
+
+  const materialization = inspect(fx);
+  const judge = row(materialization, 'judge');
+  assert.equal(judge.dial?.lane, 'command', 'a command-lane dial, so the identity is never judged');
+  assert.equal(judge.status, 'outdated');
+  assert.equal(materialization.fresh, false);
+  assert.equal(materialization.remediation, CODEX_IDENTITY_REMEDIATION);
+});
+
+/**
+ * The remediation is a claim about the CLI, so it is proved the way the other
+ * two are: by running that exact argv and watching the verdict clear. `--force`
+ * is deliberately absent, and this is what proves it can be — `managedAgentEmit`
+ * refreshes a file carrying the managed header whenever its content differs,
+ * and an outdated file differs by definition.
+ */
+test('the frozen remediation command re-cuts an outdated file, with no --force', (t) => {
+  const fx = fixture(t);
+  writeUserDials(fx.user, { reviewer: { model: 'terra' } });
+  materialize(fx);
+  retireSettings(join(fx.agentDir, 'fadeno-reviewer.toml'));
+  assert.equal(row(inspect(fx), 'reviewer').status, 'outdated');
+
+  const result = spawnSync(
+    process.execPath,
+    [CLI, 'steering', 'apply', '--codex', '--scope', 'user'],
+    {
+      cwd: fx.root,
+      encoding: 'utf8',
+      env: {
+        PATH: process.env.PATH ?? '',
+        HOME: fx.user.home!,
+        CODEX_HOME: join(fx.user.home!, '.codex'),
+        FADENO_CONFIG_HOME: fx.user.env!.FADENO_CONFIG_HOME!,
+        FADENO_STATE_HOME: fx.user.env!.FADENO_STATE_HOME!,
+        FADENO_HARNESS: 'standalone',
+      },
+    },
+  );
+  assert.equal(result.status, 0, `remediation failed: ${result.stderr}`);
+
+  const after = inspect(fx);
+  assert.equal(row(after, 'reviewer').status, 'current');
+  assert.equal(after.fresh, true);
+  assert.equal(after.remediation, null);
+  const text = readFileSync(join(fx.agentDir, 'fadeno-reviewer.toml'), 'utf8');
+  assert.match(text, /^sandbox_mode = "danger-full-access"$/m);
+  assert.match(text, /^approval_policy = "never"$/m);
+});
+
+/**
+ * A project-scope outdated file must NOT be sent to `--scope user`, which
+ * rewrites the file the project copy makes invisible. Same rule the identity
+ * verdicts follow, and it comes free from `codexIdentityRemediation` — this
+ * pins that the new verdict actually goes through it.
+ */
+test('an outdated PROJECT file gets the project remediation, not the user one', (t) => {
+  const fx = fixture(t);
+  materialize(fx);
+  materializeProject(fx);
+  retireSettings(projectPath(fx, 'worker'));
+
+  const materialization = inspect(fx);
+  assert.equal(row(materialization, 'worker').status, 'outdated');
+  assert.equal(row(materialization, 'worker').scope, 'project');
+  assert.equal(materialization.remediation, CODEX_PROJECT_IDENTITY_REMEDIATION);
+  assert.notEqual(materialization.remediation, CODEX_IDENTITY_REMEDIATION);
+});
+
+/**
+ * An UNMANAGED file is not held to Fadeno's render contract: Fadeno did not
+ * write it, will never refresh it, and telling its owner to re-cut it would be
+ * wrong. `unmanaged` outranks `outdated` for that reason, and the remediation
+ * has to stay the move-it-out-of-the-way one.
+ */
+test('an unmanaged file is unmanaged, not outdated, whatever its settings say', (t) => {
+  const fx = fixture(t);
+  materialize(fx);
+  mkdirSync(join(fx.root, '.codex', 'agents'), { recursive: true });
+  writeFileSync(
+    projectPath(fx, 'reviewer'),
+    'name = "reviewer"\nsandbox_mode = "workspace-write"\n',
+    'utf8',
+  );
+
+  const materialization = inspect(fx);
+  assert.equal(row(materialization, 'reviewer').status, 'unmanaged');
+  assert.equal(materialization.remediation, CODEX_UNMANAGED_IDENTITY_REMEDIATION);
 });
 
 test('no report at all when Codex is not a maintained harness', (t) => {

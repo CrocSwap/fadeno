@@ -32750,6 +32750,25 @@ var CODEX_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
 var CODEX_MANAGED_MARK = "# fadeno:managed";
 var CODEX_MANAGED_VERSION_RE = /^# fadeno:managed\b[^\n]*?\bversion=(\S+)/;
 var CODEX_RESOLVE_FLAGS = ["--prompt-file", "--host-executor"];
+var CODEX_MANAGED_SETTINGS = [
+  { key: "sandbox_mode", value: "danger-full-access" },
+  { key: "approval_policy", value: "never" }
+];
+function codexManagedSettingsBlock() {
+  return CODEX_MANAGED_SETTINGS.map(({ key, value }) => `${key} = ${JSON.stringify(value)}
+`).join("");
+}
+function codexAgentSettingDrift(text2) {
+  const out = [];
+  for (const { key, value } of CODEX_MANAGED_SETTINGS) {
+    const found = tomlStringValue(text2, key);
+    if (found === value) continue;
+    out.push(
+      `${found == null ? `no ${key}` : `${key} = ${JSON.stringify(found)}`} where this build renders ${JSON.stringify(value)}`
+    );
+  }
+  return out;
+}
 var NAME_RE = /^name\s*=\s*"((?:[^"\\]|\\.)*)"/m;
 var MODEL_RE = /^model\s*=\s*"((?:[^"\\]|\\.)*)"/m;
 var EFFORT_RE = /^model_reasoning_effort\s*=\s*"((?:[^"\\]|\\.)*)"/m;
@@ -32760,6 +32779,10 @@ function unquoteToml(raw) {
   } catch {
     return raw;
   }
+}
+function tomlStringValue(text2, key) {
+  const match = new RegExp(`^${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`, "m").exec(text2);
+  return match ? unquoteToml(match[1]) : null;
 }
 function readCodexAgentFile(path) {
   let text2;
@@ -32780,6 +32803,7 @@ function readCodexAgentFile(path) {
     managed,
     version: versionMatch ? versionMatch[1] : null,
     missingFlags,
+    settingDrift: codexAgentSettingDrift(text2),
     name: nameMatch ? unquoteToml(nameMatch[1]) : null,
     model: modelMatch ? unquoteToml(modelMatch[1]) : null,
     reasoningEffort: effortMatch ? unquoteToml(effortMatch[1]) : null,
@@ -32838,18 +32862,45 @@ function codexAgentIdentityStatus(file, dial) {
 }
 function codexAgentIdentityRow(archetype, candidate, dial) {
   if (candidate == null) {
-    return { archetype, scope: null, path: null, file: null, dial, status: "missing" };
+    return {
+      archetype,
+      scope: null,
+      path: null,
+      file: null,
+      dial,
+      version: null,
+      settingDrift: [],
+      status: "missing"
+    };
   }
   const file = { model: candidate.state.model, effort: candidate.state.reasoningEffort };
-  const base = { archetype, scope: candidate.scope, path: candidate.path, file, dial };
+  const base = {
+    archetype,
+    scope: candidate.scope,
+    path: candidate.path,
+    file,
+    dial,
+    version: candidate.state.version,
+    settingDrift: candidate.state.settingDrift
+  };
   if (!candidate.state.managed) return { ...base, status: "unmanaged" };
+  if (candidate.state.settingDrift.length > 0) return { ...base, status: "outdated" };
   if (candidate.scope === "project" && candidate.state.hostExecutor == null && dial?.lane === "host") {
     return { ...base, status: "shadowed" };
   }
   return { ...base, status: codexAgentIdentityStatus(file, dial) };
 }
-function codexAgentFileVouched(candidate) {
-  return codexAgentIdentityRow(candidate.archetype, candidate, null).status === "not_applicable";
+function codexStandingReason(row) {
+  switch (row.status) {
+    case "not_applicable":
+      return null;
+    case "unmanaged":
+      return "carries no managed header";
+    case "outdated":
+      return `carries ${row.settingDrift.join(", and ")}`;
+    default:
+      return `is not one Fadeno can vouch for (${row.status})`;
+  }
 }
 function identityText(identity) {
   if (identity == null) return "missing";
@@ -32860,6 +32911,9 @@ function describeCodexAgentIdentityRow(row) {
   if (row.status === "missing") return `${row.archetype} file missing`;
   if (row.status === "unmanaged") {
     return `${row.archetype} loads ${row.path}, which carries no managed header \u2014 Fadeno did not write it and cannot vouch for what it does`;
+  }
+  if (row.status === "outdated") {
+    return `${row.archetype} loads ${row.path}, cut by ${row.version == null ? "an unstamped build" : `fadeno ${row.version}`} and carrying ${row.settingDrift.join(", and ")} \u2014 re-cutting it is what applies this build's lane permissions`;
   }
   if (row.status === "shadowed") {
     return `${row.archetype} loads the project-scope command broker ${row.path}, which shadows the managed user-scope agent \u2014 dial ${identityText(row.dial)} resolves to the host lane, which a broker can never deliver`;
@@ -33335,9 +33389,7 @@ model_reasoning_effort = ${tomlString(spec.reasoningEffort)}
 `;
   return `name = ${tomlString(archetype)}
 description = ${tomlString(`Fadeno hybrid ${archetype}: host-delivered on the session baseline, command-dispatched when the active loadout switches providers.`)}
-${identity}sandbox_mode = "danger-full-access"
-approval_policy = "never"
-
+${identity}${codexManagedSettingsBlock()}
 developer_instructions = """
 You are Fadeno's hybrid ${archetype}. Do not spawn subagents.
 
@@ -33394,9 +33446,7 @@ function renderCodexCommandBroker(archetype, cliPath, relay) {
 description = ${tomlString(`Fadeno command broker ${archetype}: delegates command slots through the active loadout and stops when a host slot needs host materialization.`)}
 model = ${tomlString(relay?.modelId ?? BUILTIN_CODEX_RELAY_MODEL)}
 model_reasoning_effort = ${tomlString(relay?.effort ?? BUILTIN_CODEX_RELAY_EFFORT)}
-sandbox_mode = "danger-full-access"
-approval_policy = "never"
-
+${codexManagedSettingsBlock()}
 developer_instructions = """
 You are Fadeno's command-broker ${archetype}. Do not spawn subagents.
 
@@ -35167,7 +35217,7 @@ function codexIdentityNotice(archetype, compiled, repoRoot, userPathOptions) {
     lane: compiled.harness === "codex" ? "host" : "command"
   };
   const row = codexAgentIdentityRow(archetype, candidate, dial);
-  if (row.status !== "stale" && row.status !== "unmanaged" && row.status !== "shadowed") return null;
+  if (row.status === "current" || row.status === "not_applicable" || row.status === "missing") return null;
   return {
     stale: true,
     status: row.status,
@@ -44099,7 +44149,8 @@ function runDoctor(opts = {}) {
       const project = candidate.state;
       const user = readCodexAgentFile((0, import_node_path53.join)(userDir, `fadeno-${candidate.archetype}.toml`));
       if (user == null) {
-        soleProject.push({ name, vouched: codexAgentFileVouched(candidate) });
+        const row = codexAgentIdentityRow(candidate.archetype, candidate, null);
+        soleProject.push({ name, row, standing: codexStandingReason(row) });
       } else if (!project.managed) {
         unmanagedShadow.push({ name, missingFlags: project.missingFlags });
       } else if (project.version != null && user.version != null && compareFadenoVersions(project.version, user.version) === -1) {
@@ -44108,13 +44159,21 @@ function runDoctor(opts = {}) {
     }
     const absolute = (names) => names.map((name) => (0, import_node_path53.join)(projectDir, name)).join(", ");
     if (soleProject.length > 0) {
-      const unvouched = soleProject.filter((item) => !item.vouched).map((item) => item.name);
+      const unvouched = soleProject.filter((item) => item.standing != null);
       const one = unvouched.length === 1;
+      const unmanaged = unvouched.filter((item) => item.row.status === "unmanaged").map((item) => item.name);
+      const refreshable = unvouched.filter((item) => item.row.status !== "unmanaged");
       findings.push(finding2(
         "codex-agents-project",
         "ok",
-        `project-scope Codex agent file(s) ${soleProject.map((item) => item.name).join(", ")} in ${projectDir} have no user-scope counterpart in ${userDir}, so nothing is being shadowed` + (unvouched.length === 0 ? "" : ` \u2014 which is all this check reads. ${unvouched.join(", ")} carr${one ? "ies" : "y"} no managed header, so this \`ok\` is not a clean bill of health for ${one ? "that file" : "those files"}; whether Codex would load something Fadeno can vouch for is the \`codex-agents\` check's question, answered there whenever Codex is a maintained harness`),
-        unvouched.length === 0 ? "Codex prefers project scope: once `fadeno setup --codex` materializes managed user-scope brokers, these files would win over them." : `Codex prefers project scope: once \`fadeno setup --codex\` materializes managed user-scope brokers, these files would win over them \u2014 and \`fadeno steering apply\` would never refresh the unmanaged one${one ? "" : "s"}. To hand ${one ? "that slot" : "those slots"} back, ${CODEX_UNMANAGED_IDENTITY_REMEDIATION}.`
+        `project-scope Codex agent file(s) ${soleProject.map((item) => item.name).join(", ")} in ${projectDir} have no user-scope counterpart in ${userDir}, so nothing is being shadowed` + (unvouched.length === 0 ? "" : ` \u2014 which is all this check reads. ${unvouched.map((item) => `${item.name} ${item.standing}`).join("; ")}, so this \`ok\` is not a clean bill of health for ${one ? "that file" : "those files"}; whether Codex would load something Fadeno can vouch for is the \`codex-agents\` check's question, answered there whenever Codex is a maintained harness`),
+        "Codex prefers project scope: once `fadeno setup --codex` materializes managed user-scope brokers, these files would win over them" + // The forward-looking half is still true, but on its own it implies
+        // the unmanaged file is an ordinary managed one that would simply
+        // win. It would win and never be refreshable, so the fix for that is
+        // printed from where it is defined rather than re-spelled here.
+        (unmanaged.length === 0 ? "" : ` \u2014 and \`fadeno steering apply\` would never refresh the unmanaged one${unmanaged.length === 1 ? "" : "s"}. To hand ${unmanaged.length === 1 ? "that slot" : "those slots"} back, ${CODEX_UNMANAGED_IDENTITY_REMEDIATION}`) + // And the fix for everything else, chosen by the one mapping that owns
+        // "which apply spelling reaches this file".
+        (refreshable.length === 0 ? "." : `. For ${refreshable.map((item) => item.name).join(", ")}, ${codexIdentityRemediation(refreshable.map((item) => item.row))}.`)
       ));
     }
     if (unmanagedShadow.length > 0) {

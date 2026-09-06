@@ -655,11 +655,19 @@ function codexIdentityNotice(
     lane: compiled.harness === 'codex' ? 'host' : 'command',
   };
   const row: CodexAgentIdentityRow = codexAgentIdentityRow(archetype, candidate, dial);
-  // Every verdict that means "the file that loads will not deliver this dial".
-  // `unmanaged` and `shadowed` are as much the dial's business as `stale` is:
-  // in all three the user has just moved an identity that the next spawn will
-  // not carry, which is the exact silence this notice was added to break.
-  if (row.status !== 'stale' && row.status !== 'unmanaged' && row.status !== 'shadowed') return null;
+  // Every verdict that means "the file that loads will not deliver this dial as
+  // this build intends". `unmanaged`, `shadowed` and `outdated` are as much the
+  // dial's business as `stale` is: in all four the user has just moved an
+  // identity the next spawn will not carry, or will carry under settings this
+  // build no longer renders — the exact silence this notice was added to break.
+  //
+  // Written as the list of verdicts that say NOTHING, not the list that speak.
+  // The allowlist it replaced would have swallowed `outdated` silently on the
+  // day it was added, which is the same shape of drift as the bug that added
+  // it: `current` and `not_applicable` are the only two verdicts that mean
+  // "fine", and `missing` is deliberately somebody else's report to make (see
+  // above).
+  if (row.status === 'current' || row.status === 'not_applicable' || row.status === 'missing') return null;
   return {
     stale: true,
     status: row.status,
