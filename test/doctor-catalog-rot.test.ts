@@ -66,8 +66,30 @@ function writeVerifications(root: string, rows: unknown[]): void {
   writeFileSync(join(dir, 'model-verifications.json'), `${JSON.stringify(rows)}\n`, 'utf8');
 }
 
+/**
+ * A timestamp `days` before the REAL clock. Correct only for tests that let
+ * the code under test read the real clock too — the `runDoctor` cases below,
+ * which write a verifications file and never pass a `now`.
+ */
 function daysAgo(days: number): string {
   return new Date(Date.now() - days * 86_400_000).toISOString();
+}
+
+/**
+ * A timestamp `days` before a FROZEN `now`.
+ *
+ * A test that pins `now` must build its fixtures from that same `now`.
+ * Mixing the two makes the fixture's age drift with wall-clock time, and the
+ * drift is one-way: the gap between a frozen `now` and the real clock only
+ * grows, so such a test does not flake — it passes until a threshold is
+ * crossed and then fails forever. This is not hypothetical. Three fixtures
+ * here used `daysAgo(VERIFICATION_MAX_AGE_DAYS + 1)` against a `now` frozen
+ * at 2026-09-05T12:00:00Z; that pair stopped being stale at exactly
+ * 2026-09-06T12:00:00Z, and a full-suite gate run three hours earlier was
+ * accurate when it was taken and wrong by lunchtime.
+ */
+function daysBefore(base: Date, days: number): string {
+  return new Date(base.getTime() - days * 86_400_000).toISOString();
 }
 
 /**
@@ -246,7 +268,7 @@ test('verificationFindings keys on the harness as well as the model id — the c
   const found = verificationFindings({
     dialed: [{ archetype: 'worker', harness: 'opencode', modelId: 'gpt-5.6-luna' }],
     // Verified on `codex`, which says nothing about what `opencode` lists.
-    verifications: [{ harness: 'codex', model: 'gpt-5.6-luna', verified_at: daysAgo(1) }],
+    verifications: [{ harness: 'codex', model: 'gpt-5.6-luna', verified_at: daysBefore(now, 1) }],
     now,
     verifyCommand: 'verify',
   });
@@ -267,7 +289,7 @@ test('verificationFindings audits an unlistable pair and re-words the remediatio
   // Stale: reported, naming the cache file the row has to be deleted from.
   const stale = verificationFindings({
     dialed: [unlistable],
-    verifications: [{ harness: 'claude', model: 'quiet-1', verified_at: daysAgo(VERIFICATION_MAX_AGE_DAYS + 1) }],
+    verifications: [{ harness: 'claude', model: 'quiet-1', verified_at: daysBefore(now, VERIFICATION_MAX_AGE_DAYS + 1) }],
     now,
     verifyCommand: '`v`',
     verificationsPath: '/state/fadeno/model-verifications.json',
@@ -278,7 +300,7 @@ test('verificationFindings audits an unlistable pair and re-words the remediatio
   // Without a path, the bare filename stands in rather than an empty gap.
   const noPath = verificationFindings({
     dialed: [unlistable],
-    verifications: [{ harness: 'claude', model: 'quiet-1', verified_at: daysAgo(VERIFICATION_MAX_AGE_DAYS + 1) }],
+    verifications: [{ harness: 'claude', model: 'quiet-1', verified_at: daysBefore(now, VERIFICATION_MAX_AGE_DAYS + 1) }],
     now,
     verifyCommand: '`v`',
   });
