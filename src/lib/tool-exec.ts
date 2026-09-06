@@ -4,7 +4,15 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { sha256Hex } from './artifact-manifest.ts';
 import { INFLIGHT_DIR, inflightClaimIsAlive, readInflightClaim, readSupervisorStatus, sleepSync, superviseArgv, supervisedSpawnError, supervisorCanStillReport } from './supervisor.ts';
-import { changedBetween, closeDispatchWindow, openDispatchWindow, workspaceStatusMap } from './workspace-overlap.ts';
+import {
+  changedBetween,
+  closeDispatchWindow,
+  detectConcurrentWrites,
+  openDispatchWindow,
+  readDispatchWindows,
+  workspaceStatusMap,
+  type ConcurrentWriteStamp,
+} from './workspace-overlap.ts';
 import { atCwd, withDispatchProvenance, withoutHarnessIdentity } from './executors.ts';
 import { readEventsStrict, type RunEvent } from './run-ledger.ts';
 import { parseGeneration } from './prompt-resolve.ts';
@@ -41,6 +49,24 @@ export function toolAttemptIds(stepId: string, generation: number): ToolAttemptI
     stepExecutionId: `se-${stepId}-g${generation}`,
     toolCallId: `tc-${stepId}-g${generation}`,
   };
+}
+
+/**
+ * The overlap-window id one tool attempt opens for itself.
+ *
+ * Qualified by run for the same reason a host window is: a step id repeats
+ * across runs, and a window log keyed on it alone would fold two concurrent
+ * attempts into one record — precisely the overlap it exists to report.
+ *
+ * Spelled once because it has two producers. `executeToolCore` opens the
+ * window; recovery closes the one a dead attempt never did, reconstructing
+ * this id from its `tool_dispatched` row. Two hand-written copies of the
+ * template is the one-list-two-consumers shape, and the divergence is silent
+ * in both directions: recovery closing a window nobody opened (an orphan the
+ * reader drops) while the real one stays open forever.
+ */
+export function toolWindowId(runId: string, stepId: string, generation: number, attempt: number): string {
+  return `tool:${runId}:${stepId}:g${generation}:a${attempt}`;
 }
 
 export interface SynthesizedTestResult {
@@ -465,12 +491,21 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
   }
 
   const holder = {
-    id: `tool:${params.runId}:${params.stepId}:g${generation}:a${attempt}`,
+    id: toolWindowId(params.runId, params.stepId, generation, attempt),
     kind: 'engine' as const,
     runId: params.runId,
     dispatchId: `${ids.toolCallId}:a${attempt}`,
   };
   const withdrawClaim = (): void => { try { rmSync(claimAbs, { force: true }); } catch {} };
+  /**
+   * When this attempt could first have been writing.
+   *
+   * Held rather than left to `openDispatchWindow`'s own default so overlap
+   * detection has an authoritative interval start even when the window log
+   * lost the open row — the in-process equivalent of the `actor_dispatched`
+   * timestamp `settleHostOverlap` falls back to.
+   */
+  const windowOpenedAt = params.now ?? new Date();
   // Record the window instead of reserving the repo. The old acquire was
   // pid-less on purpose — no process's death could prove the detached executor
   // gone — which is exactly what made it unreclaimable by anything but a
@@ -481,7 +516,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
     runId: params.runId,
     kind: 'engine',
     workspaceMode: 'shared',
-    ...(params.now != null ? { startedAt: params.now } : {}),
+    startedAt: windowOpenedAt,
   });
   /**
    * What this attempt changed, and who else was writing at the time.
@@ -497,20 +532,86 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
    * and for one reason: this kernel spawns the supervisor and polls it in the
    * SAME process, so both snapshots are taken by one caller around one
    * interval. Null on either side is `truncated` — "could not tell" — never an
-   * empty set. Memoized behind `windowClosed` because several exits release
-   * this attempt and a second reading would describe a tree that has moved on.
+   * empty set. Memoized behind `settleToolOverlap` because several exits
+   * release this attempt, and a second reading would describe a tree that has
+   * moved on — and would let the receipt and the window log disagree about
+   * what this one attempt changed.
    */
   const overlapStatusBefore = workspaceStatusMap(params.repoRoot);
+  /**
+   * Who else was writing while this attempt ran.
+   *
+   * The half of the window contract this path produced but never consumed: it
+   * opened a window, closed it with a real path set, and then wrote a terminal
+   * receipt that said nothing about the neighbours it had just been measured
+   * against. A shell command in the caller's tree collides exactly as hard as
+   * a host delivery does, so `fadeno show` and `fadeno verify` had nothing to
+   * project for the one lane whose writes are least visible.
+   *
+   * Settled ONCE, at the first terminal exit, and memoized: the path set that
+   * lands on the receipt and the one recorded in the window log are the same
+   * reading, so the two records can never disagree about what this attempt
+   * changed. Reading the log here — before `closeToolWindow` appends this
+   * window's own close — is `settleHostOverlap`'s ordering, and for its
+   * reason: detection sees the log at the last possible moment, and the close
+   * lands after the receipt is durable.
+   */
+  let settled: { stamps: ConcurrentWriteStamp[] | null; paths: string[]; truncated: boolean } | null = null;
+  const settleToolOverlap = (): ConcurrentWriteStamp[] | null => {
+    if (settled != null) return settled.stamps;
+    const changed = changedBetween(overlapStatusBefore, workspaceStatusMap(params.repoRoot));
+    const truncated = changed == null;
+    const paths = changed ?? [];
+    let stamps: ConcurrentWriteStamp[] | null = null;
+    try {
+      const log = readDispatchWindows(params.repoRoot);
+      // The window's own row is the authority on when this attempt started
+      // writing; the moment we opened it is the fallback for a log that lost
+      // that row. One of the two always answers here, unlike the host lane
+      // where both can be missing.
+      const mine = log.windows.find((w) => w.dispatchId === holder.id);
+      stamps = detectConcurrentWrites(
+        {
+          dispatchId: holder.id,
+          startedAt: mine?.startedAt ?? windowOpenedAt.toISOString(),
+          endedAt: (params.now ?? new Date()).toISOString(),
+          workspaceMode: 'shared',
+          // A self-truncated attempt arrives with an empty set on purpose:
+          // `detectConcurrentWrites` reads the pair as "could not tell", not
+          // as "nothing happened".
+          changedPaths: paths,
+          truncated,
+        },
+        log.windows,
+        { logDegraded: log.degraded },
+      );
+    } catch {
+      // Machine-local bookkeeping never turns a recorded terminal receipt into
+      // a failure. The receipt is the fact; the stamp is an observation about
+      // it, and an observation that could not be made is not a reason to lose
+      // the fact.
+    }
+    settled = { stamps, paths, truncated };
+    return stamps;
+  };
   let windowClosed = false;
   const closeToolWindow = (): void => {
     if (windowClosed) return;
     windowClosed = true;
-    const changed = changedBetween(overlapStatusBefore, workspaceStatusMap(params.repoRoot));
+    // Never a second reading of the tree: whatever the receipt was stamped
+    // against is what the log records.
+    settleToolOverlap();
+    const { paths, truncated } = settled!;
     closeDispatchWindow(params.repoRoot, {
       dispatchId: holder.id,
-      changedPaths: changed ?? [],
-      truncated: changed == null,
+      changedPaths: paths,
+      truncated,
     });
+  };
+  /** Absent when nothing overlapped — a field on every receipt is one nobody reads. */
+  const overlapFields = (): Record<string, unknown> => {
+    const stamps = settleToolOverlap();
+    return stamps != null ? { concurrent_write: stamps } : {};
   };
 
   const commandDigestValue = commandDigest(params.command);
@@ -650,6 +751,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       stderrSnapshotAbs,
       holder,
       closeWindow: closeToolWindow,
+      overlapFields,
       claimRel,
     });
     throw new ToolExecError(`failed to spawn tool "${params.toolName}": ${msg}`);
@@ -732,6 +834,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       stderrSnapshotAbs,
       holder,
       closeWindow: closeToolWindow,
+      overlapFields,
       claimRel,
     });
     throw new ToolExecError(`tool "${params.toolName}" supervisor lost without report`);
@@ -811,6 +914,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         stderrSnapshotAbs,
         holder,
         closeWindow: closeToolWindow,
+        overlapFields,
         claimRel,
       });
       throw new ToolExecError(`tool "${params.toolName}" output unreadable: ${(err as Error).message}`);
@@ -886,6 +990,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       stderrSnapshotAbs,
       holder,
       closeWindow: closeToolWindow,
+      overlapFields,
       claimRel,
       synthesizedResult: result,
       detailsContent,
@@ -958,6 +1063,10 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         status: parked.status,
         reason: 'concurrent_attribution',
         error: why,
+        // This attempt lost a race for the generation, which makes it the
+        // receipt MOST likely to have a neighbour worth naming — it is the one
+        // that provably had one.
+        ...overlapFields(),
       }, params.now ?? new Date());
     } catch (err) {
       if (err instanceof LedgerWriteError) return new ToolExecError(err.message);
@@ -1089,6 +1198,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         stderrSnapshotAbs,
         holder,
         closeWindow: closeToolWindow,
+        overlapFields,
         claimRel,
         synthesizedResult: result,
         detailsContent,
@@ -1122,6 +1232,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         stderrSnapshotAbs,
         holder,
         closeWindow: closeToolWindow,
+        overlapFields,
         claimRel,
       });
       throw new ToolExecError(
@@ -1176,6 +1287,12 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         ...(supervisorStatus.stderrBytes != null ? { stderr_bytes: supervisorStatus.stderrBytes } : {}),
         ...(detailsRel != null ? { details_path: detailsRel, details_bytes: detailsBytes, details_sha256: detailsSha } : {}),
         status: finalResult.status,
+        // A tool attempt that SUCCEEDED overlaps just as readily as one that
+        // failed — a formatter and a codegen step both finish cleanly and both
+        // rewrite the same tree. Settled here, inside the same critical section
+        // that places the bytes, so the receipt and the window log describe one
+        // reading of the tree rather than two.
+        ...overlapFields(),
       }, params.now ?? new Date());
     } catch (err) {
       // Withdraw the planned bytes only while nothing durable names them.
@@ -1242,6 +1359,15 @@ function handleInfraFailure(opts: {
    * window.
    */
   closeWindow: () => void;
+  /**
+   * The caller's memoized overlap settle, for the same reason `closeWindow` is
+   * passed rather than re-derived: it is the SAME reading of the tree the
+   * window log is closed with, and it must be taken before that close appends
+   * this window's own row. A failed attempt overlaps exactly as hard as a
+   * successful one — an executor killed after writing half its edits is the
+   * case most likely to have met another writer — so this path stamps too.
+   */
+  overlapFields: () => Record<string, unknown>;
   synthesizedResult?: SynthesizedTestResult;
   detailsContent?: string | null;
 }): void {
@@ -1312,6 +1438,7 @@ function handleInfraFailure(opts: {
       ? { details_path: detailsRel, details_bytes: Buffer.byteLength(detailsContent), details_sha256: sha256Hex(detailsContent) }
       : {}),
     status: result.status,
+    ...opts.overlapFields(),
   }, opts.now ?? new Date());
   // The claim and lease are released only on this path, which is reached solely
   // after the executor is proven dead (or never spawned); the still-alive orphan
@@ -1365,10 +1492,52 @@ export function recoverInterruptedToolDispatchesShared(
   }
 }
 
+/**
+ * Close the window a dead tool attempt left open, and claim nothing about it.
+ *
+ * Recovery writes the terminal receipt the interrupted attempt never wrote; a
+ * receipt still owes a CLOSED window. Left open, the dead attempt is read as
+ * "still writing" forever: `shouldAutoIsolate` isolates every later delivery
+ * in the repo against it, and every later receipt carries a `pending`
+ * `concurrent_write` naming it — a stamp whose whole meaning is "the other
+ * side closes later and records the intersection", promised on behalf of a
+ * process that died days ago.
+ *
+ * `truncated: true` with an empty set, never `changedPaths: []` alone. Recovery
+ * has no idea what the dead attempt changed — it holds no before-snapshot and
+ * the tree has moved on — and an untruncated empty set is a POSITIVE claim
+ * that it changed nothing, which every neighbour then intersects against. That
+ * is the bug `closeHostWindow` documents; truncated is the field for "could
+ * not tell".
+ *
+ * Only closes a window the log says is still OPEN. A close naming a window
+ * this log never saw begin is an orphan the reader drops anyway, and a second
+ * truncated close over an already-complete listing would downgrade a good
+ * record to a floor for nothing — `readDispatchWindows` merges duplicate
+ * closes precisely so it cannot be destructive, and this keeps it from being
+ * pointless too.
+ */
+function closeRecoveredToolWindow(repoRoot: string, windowId: string, now: Date | undefined): void {
+  try {
+    const existing = readDispatchWindows(repoRoot).windows.find((w) => w.dispatchId === windowId);
+    if (existing == null || existing.endedAt != null) return;
+    closeDispatchWindow(repoRoot, {
+      dispatchId: windowId,
+      changedPaths: [],
+      truncated: true,
+      ...(now != null ? { endedAt: now } : {}),
+    });
+  } catch {
+    // Machine-local bookkeeping never turns recovery into an error. The
+    // terminal receipt is the fact recovery exists to record; a window that
+    // could not be closed costs a later delivery an unnecessary worktree.
+  }
+}
+
 function recoverInterruptedToolDispatchesLocked(
   repoRoot: string,
   runDir: string,
-  _runId: string,
+  runId: string,
   now: Date | undefined,
   makeError: (msg: string) => Error,
 ): number {
@@ -1448,6 +1617,20 @@ function recoverInterruptedToolDispatchesLocked(
       signal: null,
       timed_out: false,
     }, now ?? new Date());
+    // After the receipt is durable, exactly as every other terminal does it: a
+    // window closed before a receipt that then failed to append costs a missed
+    // overlap, where a window closed a moment late costs nothing.
+    //
+    // The id is reconstructed from the dispatch row rather than remembered —
+    // the process that opened the window is gone, which is why we are here —
+    // so both halves of it come off the row. A row missing either is one no
+    // window id can be built for, and nothing is closed rather than an id
+    // guessed: an invented id would close a window belonging to some other
+    // attempt.
+    const generation = event.extra.generation;
+    if (typeof generation === 'number' && typeof event.step === 'string') {
+      closeRecoveredToolWindow(repoRoot, toolWindowId(runId, event.step, generation, attempt), now);
+    }
     recovered += 1;
   }
   return recovered;

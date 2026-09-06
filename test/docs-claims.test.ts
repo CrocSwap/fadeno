@@ -637,7 +637,11 @@ const CLAIMS: Claim[] = [
     id: 'concurrent-write-receipt',
     doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/concurrent_write/] },
     src: {
-      files: ['src/lib/workspace-overlap.ts', 'src/commands/dispatch.ts', 'src/commands/drive.ts'],
+      // `tool-exec.ts` is here because the docs say "on every lane": the tool
+      // path opened and closed windows for a release without ever stamping a
+      // receipt from them, which is the same silence as never detecting an
+      // overlap at all.
+      files: ['src/lib/workspace-overlap.ts', 'src/commands/dispatch.ts', 'src/commands/drive.ts', 'src/lib/tool-exec.ts'],
       patterns: [/concurrent_write/],
     },
   },

@@ -11,7 +11,7 @@ import { runNext } from '../src/commands/next.ts';
 import { readEventsStrict } from '../src/lib/run-ledger.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { LedgerWriter } from '../src/lib/run-ledger-write.ts';
-import { openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
+import { closeDispatchWindow, openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
 import { execFileSync } from 'node:child_process';
 
 /** Is this run's tool window still open? Replaces `readEffectiveLease(root)
@@ -520,4 +520,123 @@ test('a tool window in a tree git cannot read is TRUNCATED, never empty', (t) =>
   const window = readDispatchWindows(setup.root).windows.find((w) => w.dispatchId.startsWith(`tool:${setup.runId}:`))!;
   assert.equal(window.truncated, true, '"I could not tell" is not "nothing happened"');
   assert.deepEqual(window.changedPaths, []);
+});
+
+/** A throwaway git repo, so `workspaceStatusMap` has something to read. */
+function gitInitRepo(root: string): void {
+  const git = (...args: string[]): void => {
+    execFileSync('git', ['-C', root, ...args], {
+      stdio: 'pipe',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+    });
+  };
+  git('init', '-q');
+  git('config', 'user.email', 't@example.com');
+  git('config', 'user.name', 'T');
+}
+
+test('a tool attempt that overlapped another window is stamped concurrent_write on its terminal receipt', (t) => {
+  // The tool lane PRODUCED into the window log and never CONSUMED from it: it
+  // opened a window, closed it with a real path set, and then wrote a terminal
+  // receipt that said nothing about the neighbours it had just been measured
+  // against. `fadeno show` and `fadeno verify` read the key off receipts, so a
+  // shell command rewriting the caller's tree beside another delivery was the
+  // one lane with nothing to project.
+  const setup = seedToolRepo(t, {
+    test_runner: { command: ['node', '-e', "require('fs').writeFileSync('shared-file.txt','x')"] },
+  });
+  gitInitRepo(setup.root);
+
+  // A neighbour that began before this attempt and ends after it: the
+  // intervals intersect on a real clock without the test racing one.
+  openDispatchWindow(setup.root, {
+    dispatchId: 'neighbour-1',
+    runId: 'other-run',
+    kind: 'host-dispatch',
+    workspaceMode: 'shared',
+    startedAt: new Date(Date.now() - 60_000),
+  });
+  closeDispatchWindow(setup.root, {
+    dispatchId: 'neighbour-1',
+    changedPaths: ['shared-file.txt', 'neighbour-only.txt'],
+    endedAt: new Date(Date.now() + 60_000),
+  });
+
+  assert.equal(runToolRun({ repoRoot: setup.root, run: setup.runId }).status, 'passed');
+
+  const completed = readEventsStrict(setup.runDir).find((e) => e.type === 'tool_completed');
+  assert.ok(completed, 'the attempt reached its terminal receipt');
+  const stamps = completed!.extra.concurrent_write as Record<string, unknown>[] | undefined;
+  assert.ok(Array.isArray(stamps), 'the receipt carries the stamp, not only the window log');
+  const stamp = stamps!.find((s) => s.dispatch_id === 'neighbour-1');
+  assert.ok(stamp, `the overlapping neighbour is named (${JSON.stringify(stamps)})`);
+  assert.equal(stamp!.kind, 'host-dispatch');
+  assert.equal(stamp!.workspace_mode, 'shared');
+  assert.equal(stamp!.attribution, 'workspace', "a shared neighbour's set is an attestation, never attribution");
+  assert.equal(stamp!.paths_intersecting, 1, 'only the path both windows touched');
+  assert.deepEqual(stamp!.paths, ['shared-file.txt'], "the neighbour's own file is not this attempt's business");
+  assert.equal(stamp!.pending, undefined, 'the neighbour had closed, so a set existed to intersect');
+  assert.equal(stamp!.degraded, undefined, 'both listings were whole, so this is the set, not a floor');
+
+  // The receipt and the window log are ONE reading of the tree, not two: a
+  // second `workspaceStatusMap` at close time would describe a tree that had
+  // moved on since the receipt was stamped.
+  const window = readDispatchWindows(setup.root).windows.find((w) => w.dispatchId.startsWith(`tool:${setup.runId}:`))!;
+  assert.notEqual(window.endedAt, null, 'the terminal receipt still owes a closed window');
+  assert.ok(window.changedPaths!.includes('shared-file.txt'), 'and the log records what the receipt was stamped against');
+
+  // The projection reaches a human. `verify` walks every event for the key, so
+  // widening the producers needed no second list on the reading side.
+  const finding = findingFor(runVerify({ repoRoot: setup.root, run: setup.runId }).findings, 'concurrent-writes');
+  assert.equal(finding.status, 'warn', 'an overlap is an observation, never a verify failure');
+  assert.match(finding.detail, /shared-file\.txt/);
+});
+
+test('a tool attempt with no neighbour is not stamped with a false overlap', (t) => {
+  // The other half of the stamp being worth reading: a field on every receipt
+  // is a field nobody reads, and an overlap nobody had must not be published.
+  const setup = seedToolRepo(t, {
+    test_runner: { command: ['node', '-e', "require('fs').writeFileSync('solo.txt','x')"] },
+  });
+  gitInitRepo(setup.root);
+
+  assert.equal(runToolRun({ repoRoot: setup.root, run: setup.runId }).status, 'passed');
+
+  const completed = readEventsStrict(setup.runDir).find((e) => e.type === 'tool_completed')!;
+  assert.equal(completed.extra.concurrent_write, undefined, 'nobody else was writing, so the receipt says nothing');
+  const window = readDispatchWindows(setup.root).windows.find((w) => w.dispatchId.startsWith(`tool:${setup.runId}:`))!;
+  assert.ok(window.changedPaths!.includes('solo.txt'), 'the attempt still recorded what it wrote');
+  assert.equal(findingFor(runVerify({ repoRoot: setup.root, run: setup.runId }).findings, 'concurrent-writes').status, 'ok');
+});
+
+test('a tool attempt that fails is stamped too', (t) => {
+  // A failed attempt overlaps exactly as hard as a successful one — a command
+  // killed after writing half its edits is the case most likely to have met
+  // another writer — so the infra-failure path stamps as well.
+  const setup = seedToolRepo(t, {
+    test_runner: { command: ['node', '-e', "require('fs').writeFileSync('half-written.txt','x');process.kill(process.pid,'SIGKILL')"] },
+  });
+  gitInitRepo(setup.root);
+  openDispatchWindow(setup.root, {
+    dispatchId: 'neighbour-2',
+    kind: 'ad-hoc',
+    workspaceMode: 'shared',
+    startedAt: new Date(Date.now() - 60_000),
+  });
+  closeDispatchWindow(setup.root, {
+    dispatchId: 'neighbour-2',
+    changedPaths: ['half-written.txt'],
+    endedAt: new Date(Date.now() + 60_000),
+  });
+
+  assert.throws(() => runToolRun({ repoRoot: setup.root, run: setup.runId }));
+
+  const failed = readEventsStrict(setup.runDir).find((e) => e.type === 'tool_failed');
+  assert.ok(failed, 'the killed attempt still recorded a terminal receipt');
+  const stamps = failed!.extra.concurrent_write as Record<string, unknown>[] | undefined;
+  assert.ok(Array.isArray(stamps), `a failed receipt carries the overlap too (${JSON.stringify(failed!.extra)})`);
+  const stamp = stamps!.find((s) => s.dispatch_id === 'neighbour-2');
+  assert.ok(stamp, `the overlapping neighbour is named (${JSON.stringify(stamps)})`);
+  assert.equal(stamp!.paths_intersecting, 1);
+  assert.deepEqual(stamp!.paths, ['half-written.txt']);
 });

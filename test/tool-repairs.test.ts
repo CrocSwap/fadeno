@@ -14,7 +14,7 @@ import { readEventsStrict } from '../src/lib/run-ledger.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { LedgerWriter, writeRunDocument } from '../src/lib/run-ledger-write.ts';
 import { readWorkspaceLease } from '../src/lib/workspace-lease.ts';
-import { openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
+import { closeDispatchWindow, openDispatchWindow, readDispatchWindows, shouldAutoIsolate } from '../src/lib/workspace-overlap.ts';
 
 /** Is this run's tool window closed (or never opened)? Replaces the old
  * `readEffectiveLease(root) === null`, which asked whether a repo-wide
@@ -888,4 +888,92 @@ test('tool-run refuses a run whose ledger has no ready tool_call step', (t) => {
   );
   assert.deepEqual(readFileSync(join(setup.runDir, 'artifacts/test-result.json')), before);
   rmSync(join(setup.runDir, 'artifacts/test-result.details.txt'), { force: true });
+});
+
+test('recovery closes the window the dead attempt left open, and claims nothing about what it changed', (t) => {
+  // Recovery wrote the terminal receipt the interrupted attempt never wrote
+  // and stopped there, so the dead attempt's window stayed OPEN forever. Two
+  // consequences, both asserted below: `shouldAutoIsolate` reads a window that
+  // finished days ago as a writer still in the tree and isolates every later
+  // delivery against it, and every later receipt carries a `pending` stamp
+  // naming it — a stamp whose whole meaning is "the other side closes later
+  // and records the intersection", promised for a process that is gone.
+  const setup = seedToolRepo(t, { test_runner: { command: exitsWith(0) } });
+  const claimRel = `.fadeno/local/inflight/tool-${setup.runId}-tc-test-g1-a1.json`;
+  const claimAbs = join(setup.root, claimRel);
+  mkdirSync(join(claimAbs, '..'), { recursive: true });
+  writeFileSync(claimAbs, JSON.stringify({
+    pid: 999999, supervisor_pid: 999999, executor_pid: null, process_group_id: null,
+    started_at: new Date().toISOString(), heartbeat_at: new Date().toISOString(),
+    last_output_at: null, stdout_bytes: 0, stderr_bytes: 0,
+  }));
+  new LedgerWriter(setup.runDir).append({
+    type: 'tool_dispatched',
+    step: 'test',
+    tool: 'test_runner',
+    step_execution_id: 'se-test-g1',
+    tool_call_id: 'tc-test-g1',
+    attempt: 1,
+    generation: 1,
+    command: exitsWith(0),
+    command_sha256: sha256Hex(JSON.stringify(exitsWith(0))),
+    supervisor_claim: claimRel,
+    workspace_mode: 'shared',
+  }, new Date());
+  // The id recovery has to RECONSTRUCT: the process that opened this window is
+  // gone, which is the only reason recovery exists.
+  const windowId = `tool:${setup.runId}:test:g1:a1`;
+  openDispatchWindow(setup.root, {
+    dispatchId: windowId, runId: setup.runId, kind: 'engine', workspaceMode: 'shared',
+  });
+  assert.ok(toolWindowOpen(setup.root, setup.runId), 'the dead attempt left its window open');
+  assert.equal(shouldAutoIsolate(setup.root, 'a-later-delivery').isolate, true,
+    'the pre-fix symptom: a later delivery sees a competitor that died');
+
+  assert.equal(recoverInterruptedToolDispatchesForHelper(setup.root, setup.runDir, setup.runId), 1);
+  assert.ok(readEventsStrict(setup.runDir).some((e) => e.type === 'tool_failed' && e.extra.reason === 'engine_interrupted'),
+    'recovery still writes the missing terminal receipt');
+
+  const window = readDispatchWindows(setup.root).windows.find((w) => w.dispatchId === windowId)!;
+  assert.notEqual(window.endedAt, null, 'and a terminal receipt owes a closed window');
+  assert.equal(window.truncated, true,
+    'recovery holds no before-snapshot, so "could not tell" is the only honest answer');
+  assert.deepEqual(window.changedPaths, [],
+    'an untruncated empty set would be a POSITIVE claim that the dead attempt changed nothing');
+
+  assert.equal(shouldAutoIsolate(setup.root, 'a-later-delivery').isolate, false,
+    'the symptom is gone: nobody isolates against a delivery that finished');
+  assert.equal(toolWindowOpen(setup.root, setup.runId), false);
+});
+
+test('recovery does not downgrade a window that was already closed properly', (t) => {
+  // The other side of the same coin. A duplicate close MERGES rather than
+  // replaces, so an unconditional truncated re-close would mark a complete,
+  // attributable listing as a floor for nothing. Recovery closes only what the
+  // log says is still open.
+  const setup = seedToolRepo(t, { test_runner: { command: exitsWith(0) } });
+  const windowId = `tool:${setup.runId}:test:g1:a1`;
+  new LedgerWriter(setup.runDir).append({
+    type: 'tool_dispatched',
+    step: 'test',
+    tool: 'test_runner',
+    step_execution_id: 'se-test-g1',
+    tool_call_id: 'tc-test-g1',
+    attempt: 1,
+    generation: 1,
+    command: exitsWith(0),
+    command_sha256: sha256Hex(JSON.stringify(exitsWith(0))),
+    supervisor_claim: `.fadeno/local/inflight/tool-${setup.runId}-tc-test-g1-a1.json`,
+    workspace_mode: 'shared',
+  }, new Date());
+  openDispatchWindow(setup.root, {
+    dispatchId: windowId, runId: setup.runId, kind: 'engine', workspaceMode: 'shared',
+  });
+  closeDispatchWindow(setup.root, { dispatchId: windowId, changedPaths: ['a.txt'], truncated: false });
+
+  assert.equal(recoverInterruptedToolDispatchesForHelper(setup.root, setup.runDir, setup.runId), 1,
+    'the missing terminal receipt is still written');
+  const window = readDispatchWindows(setup.root).windows.find((w) => w.dispatchId === windowId)!;
+  assert.equal(window.truncated, false, 'a good record is not downgraded to a floor');
+  assert.deepEqual(window.changedPaths, ['a.txt'], 'and its listing survives');
 });

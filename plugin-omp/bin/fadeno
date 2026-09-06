@@ -28535,6 +28535,9 @@ function toolAttemptIds(stepId, generation) {
     toolCallId: `tc-${stepId}-g${generation}`
   };
 }
+function toolWindowId(runId, stepId, generation, attempt) {
+  return `tool:${runId}:${stepId}:g${generation}:a${attempt}`;
+}
 function synthesizeTestResult(opts) {
   const rendered = renderArgv(opts.argv);
   const combined = (() => {
@@ -28793,7 +28796,7 @@ function executeToolCore(params) {
     }
   }
   const holder = {
-    id: `tool:${params.runId}:${params.stepId}:g${generation}:a${attempt}`,
+    id: toolWindowId(params.runId, params.stepId, generation, attempt),
     kind: "engine",
     runId: params.runId,
     dispatchId: `${ids.toolCallId}:a${attempt}`
@@ -28804,24 +28807,60 @@ function executeToolCore(params) {
     } catch {
     }
   };
+  const windowOpenedAt = params.now ?? /* @__PURE__ */ new Date();
   openDispatchWindow(params.repoRoot, {
     dispatchId: holder.id,
     runId: params.runId,
     kind: "engine",
     workspaceMode: "shared",
-    ...params.now != null ? { startedAt: params.now } : {}
+    startedAt: windowOpenedAt
   });
   const overlapStatusBefore = workspaceStatusMap(params.repoRoot);
+  let settled = null;
+  const settleToolOverlap = () => {
+    if (settled != null) return settled.stamps;
+    const changed = changedBetween(overlapStatusBefore, workspaceStatusMap(params.repoRoot));
+    const truncated = changed == null;
+    const paths = changed ?? [];
+    let stamps = null;
+    try {
+      const log = readDispatchWindows(params.repoRoot);
+      const mine = log.windows.find((w) => w.dispatchId === holder.id);
+      stamps = detectConcurrentWrites(
+        {
+          dispatchId: holder.id,
+          startedAt: mine?.startedAt ?? windowOpenedAt.toISOString(),
+          endedAt: (params.now ?? /* @__PURE__ */ new Date()).toISOString(),
+          workspaceMode: "shared",
+          // A self-truncated attempt arrives with an empty set on purpose:
+          // `detectConcurrentWrites` reads the pair as "could not tell", not
+          // as "nothing happened".
+          changedPaths: paths,
+          truncated
+        },
+        log.windows,
+        { logDegraded: log.degraded }
+      );
+    } catch {
+    }
+    settled = { stamps, paths, truncated };
+    return stamps;
+  };
   let windowClosed = false;
   const closeToolWindow = () => {
     if (windowClosed) return;
     windowClosed = true;
-    const changed = changedBetween(overlapStatusBefore, workspaceStatusMap(params.repoRoot));
+    settleToolOverlap();
+    const { paths, truncated } = settled;
     closeDispatchWindow(params.repoRoot, {
       dispatchId: holder.id,
-      changedPaths: changed ?? [],
-      truncated: changed == null
+      changedPaths: paths,
+      truncated
     });
+  };
+  const overlapFields = () => {
+    const stamps = settleToolOverlap();
+    return stamps != null ? { concurrent_write: stamps } : {};
   };
   const commandDigestValue = commandDigest(params.command);
   try {
@@ -28951,6 +28990,7 @@ function executeToolCore(params) {
       stderrSnapshotAbs,
       holder,
       closeWindow: closeToolWindow,
+      overlapFields,
       claimRel
     });
     throw new ToolExecError(`failed to spawn tool "${params.toolName}": ${msg}`);
@@ -29024,6 +29064,7 @@ function executeToolCore(params) {
       stderrSnapshotAbs,
       holder,
       closeWindow: closeToolWindow,
+      overlapFields,
       claimRel
     });
     throw new ToolExecError(`tool "${params.toolName}" supervisor lost without report`);
@@ -29090,6 +29131,7 @@ function executeToolCore(params) {
         stderrSnapshotAbs,
         holder,
         closeWindow: closeToolWindow,
+        overlapFields,
         claimRel
       });
       throw new ToolExecError(`tool "${params.toolName}" output unreadable: ${err.message}`);
@@ -29158,6 +29200,7 @@ function executeToolCore(params) {
       stderrSnapshotAbs,
       holder,
       closeWindow: closeToolWindow,
+      overlapFields,
       claimRel,
       synthesizedResult: result,
       detailsContent
@@ -29228,7 +29271,11 @@ function executeToolCore(params) {
         } : {},
         status: parked.status,
         reason: "concurrent_attribution",
-        error: why
+        error: why,
+        // This attempt lost a race for the generation, which makes it the
+        // receipt MOST likely to have a neighbour worth naming — it is the one
+        // that provably had one.
+        ...overlapFields()
       }, params.now ?? /* @__PURE__ */ new Date());
     } catch (err) {
       if (err instanceof LedgerWriteError) return new ToolExecError(err.message);
@@ -29322,6 +29369,7 @@ function executeToolCore(params) {
         stderrSnapshotAbs,
         holder,
         closeWindow: closeToolWindow,
+        overlapFields,
         claimRel,
         synthesizedResult: result,
         detailsContent
@@ -29355,6 +29403,7 @@ function executeToolCore(params) {
         stderrSnapshotAbs,
         holder,
         closeWindow: closeToolWindow,
+        overlapFields,
         claimRel
       });
       throw new ToolExecError(
@@ -29400,7 +29449,13 @@ function executeToolCore(params) {
         ...supervisorStatus.stdoutBytes != null ? { stdout_bytes: supervisorStatus.stdoutBytes } : {},
         ...supervisorStatus.stderrBytes != null ? { stderr_bytes: supervisorStatus.stderrBytes } : {},
         ...detailsRel != null ? { details_path: detailsRel, details_bytes: detailsBytes, details_sha256: detailsSha } : {},
-        status: finalResult.status
+        status: finalResult.status,
+        // A tool attempt that SUCCEEDED overlaps just as readily as one that
+        // failed — a formatter and a codegen step both finish cleanly and both
+        // rewrite the same tree. Settled here, inside the same critical section
+        // that places the bytes, so the receipt and the window log describe one
+        // reading of the tree rather than two.
+        ...overlapFields()
       }, params.now ?? /* @__PURE__ */ new Date());
     } catch (err) {
       if (!artifactCreatedSucceeded && !pathNamedByLedger(readEventsStrict(params.runDir), params.outputRel)) {
@@ -29480,7 +29535,8 @@ function handleInfraFailure(opts) {
     output_valid: infraValid,
     ...infraValidationErrors != null ? { validation_errors: infraValidationErrors.slice(0, 5) } : {},
     ...detailsRel && detailsContent != null ? { details_path: detailsRel, details_bytes: Buffer.byteLength(detailsContent), details_sha256: sha256Hex(detailsContent) } : {},
-    status: result.status
+    status: result.status,
+    ...opts.overlapFields()
   }, opts.now ?? /* @__PURE__ */ new Date());
   try {
     (0, import_node_fs24.rmSync)(opts.outputSnapshotAbs, { force: true });
@@ -29514,7 +29570,20 @@ function recoverInterruptedToolDispatchesShared(repoRoot, runDir, runId, now, ma
     throw err;
   }
 }
-function recoverInterruptedToolDispatchesLocked(repoRoot, runDir, _runId, now, makeError) {
+function closeRecoveredToolWindow(repoRoot, windowId, now) {
+  try {
+    const existing = readDispatchWindows(repoRoot).windows.find((w) => w.dispatchId === windowId);
+    if (existing == null || existing.endedAt != null) return;
+    closeDispatchWindow(repoRoot, {
+      dispatchId: windowId,
+      changedPaths: [],
+      truncated: true,
+      ...now != null ? { endedAt: now } : {}
+    });
+  } catch {
+  }
+}
+function recoverInterruptedToolDispatchesLocked(repoRoot, runDir, runId, now, makeError) {
   let events;
   try {
     events = readEventsStrict(runDir);
@@ -29571,6 +29640,10 @@ function recoverInterruptedToolDispatchesLocked(repoRoot, runDir, _runId, now, m
       signal: null,
       timed_out: false
     }, now ?? /* @__PURE__ */ new Date());
+    const generation = event.extra.generation;
+    if (typeof generation === "number" && typeof event.step === "string") {
+      closeRecoveredToolWindow(repoRoot, toolWindowId(runId, event.step, generation, attempt), now);
+    }
     recovered += 1;
   }
   return recovered;
