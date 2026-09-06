@@ -1031,6 +1031,62 @@ export function isRegisteredWorktree(repoRoot: string, candidateAbs: string): bo
 }
 
 /**
+ * Every git-registered worktree of this repository whose directory lies at or
+ * under the repo-relative `relDir`, returned in `repoRoot`'s own path space.
+ *
+ * `fadeno clean` is the caller, and asking GIT rather than a ledger is the
+ * whole point. Clean used to deregister a hard-coded list of worktree KINDS —
+ * the shadow challengers `dispatches.jsonl` names — and `rmSync` the rest of
+ * `.fadeno/local`, so every kind added afterwards (run-scoped host worktrees,
+ * and the runless ad-hoc ones under `.fadeno/local/host-worktrees/adhoc/`) had
+ * its directory pulled out from under git without git being told, leaving a
+ * stale entry in `.git/worktrees` that makes a later `git worktree add` at the
+ * same path fail until someone prunes by hand. A reader carrying its own copy
+ * of "which kinds exist" is how that recurs; `git worktree list` already knows
+ * all of them, including the ones nobody has invented yet.
+ *
+ * A PRUNABLE entry — the directory is already gone, removed by hand or by an
+ * older `fadeno clean` — is INCLUDED rather than skipped, unlike
+ * `isRegisteredWorktree`'s stricter question. A stale registration is exactly
+ * what the caller is here to clear, and `git worktree remove --force` accepts
+ * one.
+ *
+ * Paths are rebuilt as `join(repoRoot, …)` rather than passed through from
+ * git, which prints them realpath-resolved: a caller working in a symlinked
+ * root (`/var/…` on macOS) has to get back paths it can compare with its own.
+ *
+ * Never throws. No git on PATH, a directory that is not a repository, or an
+ * unreadable listing all return an empty list — which leaves the caller
+ * exactly where it stood before this function existed.
+ */
+export function listRegisteredWorktreesUnder(repoRoot: string, relDir: string): string[] {
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const real = (path: string): string => {
+    try { return realpathSync(resolve(path)); } catch { return resolve(path); }
+  };
+  const rootReal = real(repoRoot);
+  let list: SpawnSyncReturns<string>;
+  try {
+    list = spawnSync('git', ['-C', repoRoot, 'worktree', 'list', '--porcelain'], { encoding: 'utf8', env });
+  } catch { return []; }
+  if (list.error != null || list.status !== 0) return [];
+  const out: string[] = [];
+  for (const entry of String(list.stdout ?? '').split('\n\n')) {
+    const line = entry.split('\n').find((l) => l.startsWith('worktree '));
+    if (line == null) continue;
+    const raw = line.slice('worktree '.length).trim();
+    if (raw === '') continue;
+    const rel = relative(rootReal, real(raw)).split('\\').join('/');
+    // The main worktree resolves to `''`; anything outside the repo root to a
+    // `../` path. Neither is under `relDir`, and neither is clean's business.
+    if (rel === '' || rel.startsWith('../')) continue;
+    if (!isAtOrUnder(rel, relDir)) continue;
+    out.push(join(repoRoot, ...rel.split('/')));
+  }
+  return out.sort();
+}
+
+/**
  * Best-effort removal of an isolated worktree. Failures are swallowed
  * because a killed delivery may have left the worktree in an unclean
  * state; the next `createIsolatedWorktree` prunes it.

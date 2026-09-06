@@ -19107,6 +19107,36 @@ function isRegisteredWorktree(repoRoot, candidateAbs) {
     return false;
   }
 }
+function listRegisteredWorktreesUnder(repoRoot, relDir) {
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const real = (path) => {
+    try {
+      return (0, import_node_fs11.realpathSync)((0, import_node_path11.resolve)(path));
+    } catch {
+      return (0, import_node_path11.resolve)(path);
+    }
+  };
+  const rootReal = real(repoRoot);
+  let list;
+  try {
+    list = (0, import_node_child_process3.spawnSync)("git", ["-C", repoRoot, "worktree", "list", "--porcelain"], { encoding: "utf8", env });
+  } catch {
+    return [];
+  }
+  if (list.error != null || list.status !== 0) return [];
+  const out = [];
+  for (const entry of String(list.stdout ?? "").split("\n\n")) {
+    const line = entry.split("\n").find((l) => l.startsWith("worktree "));
+    if (line == null) continue;
+    const raw = line.slice("worktree ".length).trim();
+    if (raw === "") continue;
+    const rel = (0, import_node_path11.relative)(rootReal, real(raw)).split("\\").join("/");
+    if (rel === "" || rel.startsWith("../")) continue;
+    if (!isAtOrUnder(rel, relDir)) continue;
+    out.push((0, import_node_path11.join)(repoRoot, ...rel.split("/")));
+  }
+  return out.sort();
+}
 function removeIsolatedWorktree(repoRoot, worktreeAbs) {
   try {
     (0, import_node_child_process3.spawnSync)("git", ["worktree", "remove", "--force", worktreeAbs], { cwd: repoRoot, encoding: "utf8" });
@@ -40310,10 +40340,16 @@ function knownFlagsFor(command2, subcommand) {
   const sub = subcommand != null ? spec.subcommands?.[subcommand] : void 0;
   return /* @__PURE__ */ new Set([...Object.keys(spec.options), ...sub != null ? Object.keys(sub.options) : []]);
 }
+var RETIRED_FLAGS = {
+  "--timeout": ["dispatch", "drive", "tool-run"]
+};
+function retiredFlagFor(command2, flag) {
+  return RETIRED_FLAGS[flag]?.includes(command2) ?? false;
+}
 function unknownFlagsFor(command2, subcommand, passed) {
   const known = knownFlagsFor(command2, subcommand);
   if (known == null) return [];
-  return passed.map((name) => `--${name}`).filter((flag) => !known.has(flag));
+  return passed.map((name) => `--${name}`).filter((flag) => !known.has(flag) && !retiredFlagFor(command2, flag));
 }
 function suggestFlag(command2, subcommand, flag) {
   const known = knownFlagsFor(command2, subcommand);
@@ -44254,27 +44290,29 @@ function runUninstall(opts) {
 var import_node_child_process16 = require("node:child_process");
 var import_node_fs56 = require("node:fs");
 var import_node_path57 = require("node:path");
+var LOCAL_DIR = ".fadeno/local";
 function runClean(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const candidates = [
     (0, import_node_path57.join)(repoRoot, ".fadeno", "runs"),
     (0, import_node_path57.join)(repoRoot, ".fadeno", "progress"),
-    (0, import_node_path57.join)(repoRoot, ".fadeno", "local"),
+    (0, import_node_path57.join)(repoRoot, ...LOCAL_DIR.split("/")),
     (0, import_node_path57.join)(repoRoot, ".fadeno", "dispatches.jsonl")
   ].filter(import_node_fs56.existsSync);
   const retainedShadowWorktrees = listRetainedShadowWorktrees({ repoRoot }).map(
     (w) => (0, import_node_path57.join)(repoRoot, w.workspace)
   );
+  const registeredWorktrees = listRegisteredWorktreesUnder(repoRoot, LOCAL_DIR);
   const removed = [];
-  const deregisteredShadowWorktrees = [];
+  const deregisteredWorktrees = [];
   if (opts.force) {
-    for (const worktree of retainedShadowWorktrees) {
+    for (const worktree of registeredWorktrees) {
       try {
         const result = (0, import_node_child_process16.spawnSync)("git", ["worktree", "remove", "--force", worktree], {
           cwd: repoRoot,
           encoding: "utf8"
         });
-        if (result.status === 0) deregisteredShadowWorktrees.push(worktree);
+        if (result.status === 0) deregisteredWorktrees.push(worktree);
       } catch {
       }
     }
@@ -44293,7 +44331,8 @@ function runClean(opts = {}) {
     removed,
     dryRun: !opts.force,
     retainedShadowWorktrees,
-    deregisteredShadowWorktrees
+    registeredWorktrees,
+    deregisteredWorktrees
   };
 }
 
@@ -45843,6 +45882,8 @@ function main(argv) {
         "no-steering": { type: "boolean" },
         "data-only": { type: "boolean" },
         "non-interactive": { type: "boolean" },
+        timeout: { type: "string" },
+        // retired: accepted, ignored, warned. See RETIRED_FLAGS.
         from: { type: "string" },
         "reset-runtime": { type: "boolean" },
         all: { type: "boolean" },
@@ -45941,6 +45982,11 @@ function main(argv) {
   }
   const { values, positionals } = parsed;
   const command2 = positionals[0];
+  if (command2 != null && values.timeout != null && retiredFlagFor(command2, "--timeout")) {
+    console.error(
+      `warning: \`--timeout\` ${IGNORED_DEADLINE_NOTE_TOKEN}. Nothing will stop this executor on a clock \u2014 a clock cannot tell slow from stuck. Stop work with \`fadeno cancel <run>\` or \`fadeno dispatches --cancel <id|tag:<tag>>\`. Remove the flag; it will go away.`
+    );
+  }
   if (command2 != null && values.help !== true && values.version !== true) {
     const unknown = unknownFlagsFor(command2, positionals[1], Object.keys(values));
     if (unknown.length > 0) {
@@ -46068,13 +46114,20 @@ function main(argv) {
       const result = runClean({ force: values.force });
       const paths = result.dryRun ? result.candidates : result.removed;
       for (const path of paths) console.log(`${result.dryRun ? "would remove" : "removed"} ${path}`);
+      if (result.registeredWorktrees.length > 0) {
+        const count = result.registeredWorktrees.length;
+        console.log(
+          `${count} registered git worktree${count === 1 ? "" : "s"} under .fadeno/local ${result.dryRun ? "would be deregistered and removed" : "deregistered"}:`
+        );
+        const shown = result.dryRun ? result.registeredWorktrees : result.deregisteredWorktrees;
+        for (const path of shown) console.log(`  ${path}`);
+      }
       if (result.retainedShadowWorktrees.length > 0) {
         const count = result.retainedShadowWorktrees.length;
         console.log(
-          `${count} retained shadow worktree${count === 1 ? "" : "s"} ${result.dryRun ? "would be deregistered and removed" : "deregistered"}:`
+          `${count} retained shadow worktree${count === 1 ? "" : "s"} named by the ledger \u2014 ${result.dryRun ? "this would delete" : "this deleted"} that pair evidence:`
         );
-        const shown = result.dryRun ? result.retainedShadowWorktrees : result.deregisteredShadowWorktrees;
-        for (const path of shown) console.log(`  ${path}`);
+        for (const path of result.retainedShadowWorktrees) console.log(`  ${path}`);
       }
       if (result.dryRun && paths.length > 0) console.log("Re-run with --force to remove these ignored runtime files.");
       return 0;

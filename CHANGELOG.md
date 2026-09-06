@@ -47,6 +47,27 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Added
 
+- **A recovery procedure in the host skill.** A Codex director reading these
+  skills cold in another repo reported that recovery guidance was thin —
+  missing terminal receipts, orphaned workspace records and staged build
+  artifacts had no documented inspection — and that the operating knowledge
+  that did exist lived only in a human handoff document, so a fresh host
+  repeated the earlier mistakes. It is documentable now that the pieces have
+  landed, and it is written the way a host works: inspect first (`fadeno
+  dispatches`, `show`, `verify`, `doctor`, `git status --short`), then act. It
+  names the second terminal receipt for a command dispatch nothing can signal
+  (`--cancel` first, then `--withdraw … --work-left`), `dispatch-withdraw` and
+  `dispatch-close` for their own lanes, the vestigial writer lease that
+  `doctor` says to delete, `.fadeno/local/host-workspaces`, what `fadeno clean`
+  takes with it, and the `git add -A` / `.gitignore` interaction that destroys
+  gitignored output along with the lever against it (`ignored_output: kept`,
+  which makes the kernel run shared rather than isolate). It also states what
+  `concurrent_write` does NOT cover: a host delivery closes its window with an
+  empty path set, so it carries no stamp of its own and nothing intersects it
+  afterwards — a clean `concurrent-writes` finding is not evidence that no host
+  delivery overlapped. `test/docs-claims.test.ts` pins every command, check
+  name and receipt field the procedure sends a host to read.
+
 - **Overlap detection (`concurrent_write`), which is what replaced the lock.**
   Deleting the lease without this would trade a loud wedge for silent lost
   writes, which is worse, so it is not optional. Contention is INVERTED: a
@@ -177,6 +198,32 @@ All notable changes to Fadeno are documented here. The format follows
   readers disagreeing about whether there was one costs the output.
 
 ### Fixed
+
+- **`fadeno clean --force` left stale git worktree registrations behind.** It
+  `rmSync`ed `.fadeno/local` wholesale but deregistered only the worktree KIND
+  the ledger names — shadow challengers. Every other registered worktree under
+  that directory had its working tree pulled out from under git with nothing
+  told, leaving an entry in `.git/worktrees` that makes a later `git worktree
+  add` at the same path fail until someone prunes by hand. Run-scoped host
+  worktrees from `dispatch-prepare --isolate` were already reachable this way,
+  and the runless `dispatch-open` added one more: its ad-hoc worktree under
+  `.fadeno/local/host-worktrees/adhoc/` belongs to no run ledger at all, so no
+  amount of ledger reading could ever have found it. The list now comes from
+  `git worktree list` (`listRegisteredWorktreesUnder`, `workspace-isolation.ts`)
+  rather than a hard-coded set of kinds, which is the shape of the bug rather
+  than one instance of it: a reader carrying its own copy of "which kinds
+  exist" is how this recurs. A prunable entry is included, because a stale
+  registration is exactly what is being cleared; no git, no repository, or an
+  unreadable listing all leave clean doing what it did before. `CleanResult`
+  reports `registeredWorktrees` and `deregisteredWorktrees`, replacing
+  `deregisteredShadowWorktrees`; `retainedShadowWorktrees` stays, and stays
+  ledger-derived, because it answers a different question — which pair evidence
+  this command is about to delete.
+
+- **The runner skill's tool-registry note still implied an armed deadline.**
+  `references/runtime.md` described the `tools:` registry as "static argv +
+  optional timeout"; `timeout` / `timeout_ms` is parsed, validated so a typo
+  stays an error, and never armed. It now says so.
 
 - **The engine recorded "I could not tell what was destroyed" as `[]`.**
   `drive.ts` wrote `ignored_output_discarded` as a bare `string[]` while

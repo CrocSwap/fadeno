@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { runClean } from '../src/commands/clean.ts';
 import { DISPATCHES_FILE, DISPATCHES_FORMAT } from '../src/commands/dispatch.ts';
@@ -87,6 +87,19 @@ function seedRetainedShadowWorktree(root: string, id8: string): string {
   return workspaceRel;
 }
 
+/**
+ * A registered worktree under `.fadeno/local` that NO ledger row names — the
+ * shape `fadeno dispatch-open` leaves behind (`host-worktrees/adhoc/<uuid>`),
+ * and the shape `dispatch-prepare --isolate` leaves behind one level up. The
+ * point of the fixture is that nothing in `dispatches.jsonl` points at it, so
+ * a ledger-driven cleaner cannot see it at all.
+ */
+function seedHostWorktree(root: string, rel: string): string {
+  mkdirSync(join(root, dirname(rel)), { recursive: true });
+  git(root, ['worktree', 'add', '--detach', join(root, rel), 'HEAD']);
+  return rel;
+}
+
 test('clean dry run lists retained shadow worktrees with a count, without touching git', (t) => {
   const root = tempRepo(t);
   initGit(root);
@@ -96,10 +109,56 @@ test('clean dry run lists retained shadow worktrees with a count, without touchi
   const result = runClean({ repoRoot: root });
   assert.equal(result.dryRun, true);
   assert.deepEqual(result.retainedShadowWorktrees, [worktreeAbs]);
-  assert.deepEqual(result.deregisteredShadowWorktrees, []);
+  assert.deepEqual(result.registeredWorktrees, [worktreeAbs]);
+  assert.deepEqual(result.deregisteredWorktrees, []);
   // A dry run must not deregister or delete anything.
   assert.ok(existsSync(worktreeAbs));
   assert.match(git(root, ['worktree', 'list']), /shadow\/aaaaaaaa/);
+});
+
+/**
+ * The wider bug: `runClean` deregistered only the worktree kind the LEDGER
+ * names — shadow challengers — and `rmSync`ed the rest of `.fadeno/local`. A
+ * retained host worktree, run-scoped or ad-hoc, had its directory deleted out
+ * from under git and left a stale `.git/worktrees` entry, which is what makes
+ * a later `git worktree add` at the same path fail. `fadeno dispatch-open`
+ * writes no run ledger at all, so no amount of ledger reading could have
+ * found its worktree; the list has to come from git.
+ */
+test('clean --force deregisters host worktrees no ledger row names', (t) => {
+  const root = tempRepo(t);
+  initGit(root);
+  const adhocRel = seedHostWorktree(root, '.fadeno/local/host-worktrees/adhoc/6ec645a7');
+  const runScopedRel = seedHostWorktree(root, '.fadeno/local/host-worktrees/run-1/hd-worker-a1');
+  const adhocAbs = join(root, adhocRel);
+  const runScopedAbs = join(root, runScopedRel);
+
+  const dry = runClean({ repoRoot: root });
+  assert.deepEqual(dry.registeredWorktrees, [adhocAbs, runScopedAbs].sort());
+  // No ledger names them, so the shadow-evidence list stays empty — the two
+  // lists answer different questions and must not be conflated.
+  assert.deepEqual(dry.retainedShadowWorktrees, []);
+
+  const result = runClean({ repoRoot: root, force: true });
+  assert.deepEqual(result.deregisteredWorktrees, [adhocAbs, runScopedAbs].sort());
+
+  const porcelain = git(root, ['worktree', 'list', '--porcelain']);
+  assert.doesNotMatch(porcelain, /host-worktrees/);
+  assert.equal(existsSync(join(root, '.fadeno', 'local')), false);
+  // The failure a stale registration causes: re-adding at the same path.
+  git(root, ['worktree', 'add', '--detach', adhocAbs, 'HEAD']);
+  assert.ok(existsSync(adhocAbs));
+});
+
+test('clean --force tolerates a repository git cannot read', (t) => {
+  const root = tempRepo(t);
+  // No `git init`: `git worktree list` exits non-zero, the listing is empty,
+  // and clean still removes the ignored runtime state it was asked to remove.
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  const result = runClean({ repoRoot: root, force: true });
+  assert.deepEqual(result.registeredWorktrees, []);
+  assert.deepEqual(result.deregisteredWorktrees, []);
+  assert.equal(existsSync(join(root, '.fadeno', 'local')), false);
 });
 
 // The bug this closes: `runClean` used to `rmSync` `.fadeno/local`
@@ -117,7 +176,7 @@ test('clean --force deregisters a real git worktree instead of orphaning it', (t
 
   const result = runClean({ repoRoot: root, force: true });
   assert.equal(result.dryRun, false);
-  assert.deepEqual(result.deregisteredShadowWorktrees, [worktreeAbs]);
+  assert.deepEqual(result.deregisteredWorktrees, [worktreeAbs]);
 
   // git no longer lists it as a worktree — this is the assertion that would
   // have failed against the old rmSync-only implementation.
@@ -164,5 +223,6 @@ test('clean reports an empty retained-worktree list when the ledger names none',
   writeFileSync(join(root, '.fadeno', 'runs', 'r', 'run.yaml'), 'status: running\n');
   const dry = runClean({ repoRoot: root });
   assert.deepEqual(dry.retainedShadowWorktrees, []);
-  assert.deepEqual(dry.deregisteredShadowWorktrees, []);
+  assert.deepEqual(dry.registeredWorktrees, []);
+  assert.deepEqual(dry.deregisteredWorktrees, []);
 });

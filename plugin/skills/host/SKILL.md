@@ -114,3 +114,87 @@ instruction to you: say what was refused, with its predicate and the model it
 would have run on, and let the user decide, rather than retrying the same work
 by another route.
 Do not create or modify `AGENTS.md` or `CLAUDE.md` to activate host mode.
+
+## Recovering a repo you did not leave
+
+A fresh host inherits a repo, not a transcript. Everything in step 1 reports
+and changes nothing; do it first, and say in your reply what you found.
+
+1. **Inspect.**
+   - `fadeno dispatches` — every dispatch the ledger holds, command, host and
+     runless, with its receipt.
+     `no completion recorded (killed or in flight)` is a row with no
+     terminal receipt: the thing to close. `WITHDRAWN … [work left at <path>]`
+     is one already retired, and that path is where its edits are. `--json`
+     for whole rows.
+   - `fadeno show <run>` — actors, workspace modes, `concurrent_write`
+     overlaps, discarded output, and — only in a repo upgraded mid-flight — a
+     leftover writer-lease row. All non-gating.
+   - `fadeno verify <run>` — recomputation, plus the two `warn` findings it
+     can raise but not adjudicate: `concurrent-writes` and `discarded-output`.
+     A `warn` never fails the run; it means the run STATED something you have
+     to act on.
+   - `fadeno doctor` — persisted state, including `workspace-lease` and
+     `persisted-state:host-workspace-state` for `.fadeno/local/host-workspaces`.
+   - `git status --short` — and name which dispatch you believe owns each
+     dirty file.
+
+2. **Give every open dispatch a terminal receipt.** Until it has one it reads
+   as potentially live to you and to everyone after you.
+   - Command lane: `fadeno dispatches --cancel <id|tag:<tag>>` first. It
+     signals a live executor and refuses when there is none — correctly. After
+     that refusal, `fadeno dispatches --withdraw <id|tag:<tag>> --reason
+     <text> [--work-left <path>]` records the receipt. Withdraw signals
+     nothing and removes no workspace, and is itself refused while any process
+     behind the claim is alive, so cancel really is first. `--work-left` is
+     recorded and never touched: it is how the next reader finds the surviving
+     edits without a transcript.
+   - Host request minted by the engine and never started:
+     `fadeno dispatch-withdraw <run> <dispatch-id> --reason <text>`. After
+     `dispatch-start` it is `dispatch-fail` instead.
+   - Runless host dispatch: `fadeno dispatch-close <id|tag:<handle>|last>
+     [--reason <text>] [--no-merge]`. `--reason` records FAILED and merges
+     nothing; the worktree is removed only when the work landed in your tree,
+     and every other ending retains it and says where.
+
+3. **Orphaned workspace records.** There is no repo-wide writer lease any
+   more: `fadeno doctor` reports `workspace-lease: no leftover writer lease
+   (Fadeno no longer takes one)`, and a file it does find is a leftover from
+   an older version that gates nothing — delete it, with work in flight too,
+   since nothing consults it and there is no writer to verify first. Host
+   workspace state is one file per dispatch under
+   `.fadeno/local/host-workspaces`, audited by `doctor`; a stale one is
+   removed, never migrated. A retained worktree under `.fadeno/local` is work
+   product, not litter: `fadeno clean` previews, and `fadeno clean --force`
+   deletes `.fadeno/local`, `.fadeno/runs`, `.fadeno/progress` and
+   `.fadeno/dispatches.jsonl` — the ledger you were just reading included. Run
+   the preview, copy out what you still need, then force.
+
+4. **Output that is not in your tree.** An isolated worktree merges back
+   through `git add -A`, which RESPECTS `.gitignore`, so anything written at a
+   gitignored path was staged by nothing and died with the worktree.
+   Command-lane deliveries record it as `ignored_output_discarded`, and it
+   reaches you three ways: a `discarded-output` warning from `fadeno verify`,
+   a row on `fadeno show`, and a banner printed in-band ahead of the bytes on
+   `fadeno dispatches --output` — in-band because a report saying "wrote the
+   analysis to `data/research/`" is describing files that are not there. A
+   shadow challenger's worktree is retained, so its discarded output is still
+   on disk (`[still on disk at <path> until fadeno clean]`) and can be copied
+   out; a primary's worktree is torn down, so its output is gone. The lever
+   for next time is `ignored_output: kept` on the archetype, or
+   `fadeno dispatch --ignored-output kept`, which makes the kernel run it SHARED
+   rather than isolate it — containment and any shadow pair are given up on
+   purpose, to protect the output.
+
+5. **Overlapping writes.** Nothing prevents two writers now; overlaps are
+   detected instead. A delivery whose changed paths intersect another
+   delivery's window carries a `concurrent_write` stamp, raised by `fadeno
+   verify` as `concurrent-writes` and projected per receipt by `fadeno show`.
+   It is an attestation, not an accusation: `attribution: workspace` means the
+   paths are a shared tree's delta over the window and include whatever anyone
+   else did in the same minutes, and granularity is per path, not per hunk.
+   **It under-reports for host deliveries** — a host delivery closes its
+   window with an empty path set, so it carries no stamp of its own and
+   nothing intersects it after it closes; only the time overlap survives, as a
+   `pending` stamp on the other side. A clean `concurrent-writes` finding is
+   not evidence that no host delivery overlapped yours.

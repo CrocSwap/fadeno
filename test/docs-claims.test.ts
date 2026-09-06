@@ -916,6 +916,48 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // The recovery procedure a fresh host actually follows. There was none
+    // until a Codex director reading these skills in another repo reported
+    // that the operating knowledge lived only in a human handoff document, so
+    // every new host repeated the earlier mistakes. Each token is a command, a
+    // check name, or a receipt field the procedure tells the host to go and
+    // read; a source that stops emitting one leaves the skill sending a host
+    // to look for output that no longer exists, which is worse than the gap it
+    // replaced.
+    id: 'host-recovery-procedure',
+    doc: {
+      files: ['templates/common/skills/fadeno-host/SKILL.md'],
+      patterns: [
+        /dispatches --withdraw/,
+        /dispatch-close/,
+        /concurrent-writes/,
+        /discarded-output/,
+        /--ignored-output/,
+        /no leftover writer lease/,
+        /host-workspaces/,
+      ],
+    },
+    src: {
+      files: [
+        'src/commands/dispatches.ts',
+        'src/commands/dispatch-adhoc.ts',
+        'src/commands/verify.ts',
+        'src/commands/doctor.ts',
+        'src/lib/host-workspace.ts',
+        'src/cli.ts',
+      ],
+      patterns: [
+        /runDispatchesWithdraw/,
+        /runDispatchClose/,
+        /'concurrent-writes'/,
+        /'discarded-output'/,
+        /'ignored-output'/,
+        /no leftover writer lease/,
+        /host-workspaces/,
+      ],
+    },
+  },
+  {
     id: 'omp-host-adapter',
     doc: {
       files: ['README.md', 'docs/kickoff-memo.md'],
