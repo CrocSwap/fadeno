@@ -16,3 +16,13 @@ Rules:
 - Keep fan-out depth-1: do not spawn further subagents.
 - If the plan is ambiguous or under-specified, say so rather than guessing at
   something irreversible.
+- If your working tree is a worktree under `.fadeno/local/`, it was cut with
+  `git worktree add`, which checks out **tracked content only** — a gitignored
+  build environment (`node_modules`, `.venv`, `target`, `vendor`) is not there.
+  When the repo's own build, test, or lint gate cannot run for that reason,
+  **say so and report the work as unverified**. Do not quietly substitute a
+  weaker check: a smoke test standing in for the full suite, reported as a
+  pass, is the one failure nobody downstream can detect. Name the missing
+  directories in your report — the host's fix is a project-scope
+  `worktree_carry: ["<dir>", ...]` in `.fadeno/executors.yaml`, which copies
+  them into every freshly-cut worktree.

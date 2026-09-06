@@ -239,6 +239,363 @@ export function carryDeclaredPaths(
 }
 
 // ---------------------------------------------------------------------------
+// UNDECLARED carry — the environment that never came along
+// ---------------------------------------------------------------------------
+//
+// `carryDeclaredPaths` is LOUD when a declared path cannot be carried: the
+// dispatch is refused rather than run against an incomplete checkout. It is
+// SILENT when nothing was declared at all, and there is no third state — a
+// repo that has never heard of `worktree_carry:` gets a worktree with no
+// build environment in it and no line anywhere saying so.
+//
+// Reported independently by two directors, on two harnesses, in one week:
+//
+// - A Python repo's isolated worktrees had no `.venv` and no installed console
+//   script, so the repo's own replay gate could not be run AT ALL. Eight
+//   reviews in one campaign, not one of them able to run the check the repo
+//   itself defines as the check.
+// - A Rust/Python repo's dispatches, "missing local .venv/system pytest …
+//   report direct test/smoke execution rather than the required normal
+//   pytest/full suite, **despite terminal ok receipts**".
+//
+// The second is the worse half and names the real cost: the receipt said `ok`
+// while validation silently degraded from full-suite to smoke. The reporter's
+// conclusion is the sentence worth keeping — *do not infer correctness from
+// exit 0*. Nothing in Fadeno was in a position to say otherwise, because
+// nothing in Fadeno had noticed the environment was missing.
+//
+// This section is the detector, as ONE list with TWO consumers.
+// `undeclaredCarryEnvironment` is the fact; `undeclaredCarryFindings` is
+// `doctor`'s sentence about that fact, and `dispatch.ts` puts the same fact on
+// the isolated completion row as `worktree_carry_absent`. A receipt and a
+// doctor finding that disagreed about whether this repo's environment travels
+// would be this very bug one level up, so neither computes its own answer.
+//
+// It detects and never repairs. Carrying a path nobody declared would be
+// exactly the unreviewable decision `scanIgnoredOutput` refuses to make in the
+// other direction: `worktree_carry:` is a claim about a repo that only the
+// repo can make, and guessing it would put a hardlinked `node_modules` — with
+// the shared-inode mutation hazard `carryPathIntoWorktree` documents — into
+// every worktree of every repo that happens to have one.
+
+/**
+ * The top-level directories that count as "the build environment".
+ *
+ * Inclusion test, applied to every entry below: the directory holds INSTALLED
+ * DEPENDENCIES or a materialized toolchain, it is conventionally gitignored,
+ * and reconstructing it inside a short-lived worktree means a network install
+ * or a cold build — which is time and permission a dispatch usually does not
+ * have, and is why its absence turns into a downgraded gate rather than a
+ * visible failure.
+ *
+ * Deliberately EXCLUDED, and each for a reason rather than an oversight:
+ *
+ * - Build OUTPUT — `dist/`, `build/`, `.next/`, `coverage/`. A run regenerates
+ *   these from sources the worktree does have, and carrying them in would seed
+ *   a worktree with artifacts of the primary's tree that a run could then read
+ *   as its own product. `ignored_output_discarded` is the field for output;
+ *   this is the field for input.
+ * - Regenerable caches — `.pytest_cache`, `.ruff_cache`, `.mypy_cache`,
+ *   `__pycache__`. Their absence costs seconds, never an answer, and a warning
+ *   about them would fire on almost every repo and train people to ignore it.
+ *
+ * `target` is the one entry that is also an output directory, and it is here
+ * on the dependency test rather than despite it: for Cargo it is where fetched
+ * and compiled dependencies live, and a cold `cargo test` in a throwaway
+ * worktree is the difference between a gate that runs and a gate that times
+ * out. (It is also Maven's output directory, where the same argument is
+ * weaker; a repo that disagrees declares its own `worktree_carry:` and this
+ * check then says nothing at all.)
+ *
+ * FIXED and SHALLOW on purpose — top-level names only, matched by name, never
+ * a walk. The known bound is a monorepo: `packages/web/node_modules` is not
+ * seen by this list, and finding it would need exactly the recursive walk
+ * every other detector in this module refuses. A repo in that shape declares
+ * `worktree_carry:` and gets the loud path instead of this one.
+ */
+export const CARRY_ENVIRONMENT_DIRECTORIES = [
+  'node_modules',
+  '.venv',
+  'venv',
+  '.tox',
+  '.nox',
+  'vendor',
+  'target',
+  '.gradle',
+  '.bundle',
+  '.terraform',
+  'Pods',
+] as const;
+
+/** What `undeclaredCarryEnvironment` found, and what it could not tell. */
+export interface UndeclaredCarryEnvironment {
+  /**
+   * Present, gitignored, and covered by no declared carry path, in
+   * `CARRY_ENVIRONMENT_DIRECTORIES` order so a receipt and a finding written
+   * seconds apart cannot differ by directory-listing order.
+   */
+  paths: string[];
+  /**
+   * Candidate names that exist on disk at the repo root, whatever their git
+   * status. A name here that is absent from `paths` is present and TRACKED
+   * (or explicitly declared), which is the case a caller must be able to
+   * describe rather than silently treat as "nothing found".
+   */
+  present: string[];
+  /**
+   * The ignore listing could not be run — not a git repository, a broken git,
+   * a spawn that failed. `paths` is then not a claim of "none"; it is empty
+   * because nothing could be asked. Same asymmetry `scanIgnoredOutput` keeps:
+   * "I could not tell" is never spelled "nothing".
+   */
+  unknown: boolean;
+}
+
+/**
+ * Which environment directories this repo has that an isolated worktree will
+ * not get.
+ *
+ * ## Why git does the ignored/tracked split
+ *
+ * `git ls-files --others --ignored --exclude-standard --directory` restricted
+ * to the candidate pathspecs answers both halves in one spawn, using the same
+ * exclude set `git worktree add` and `git add -A` obey:
+ *
+ * - `--others` means UNTRACKED, so a tracked `vendor/` is never listed — and a
+ *   tracked directory carries itself into a worktree, so listing it would be
+ *   the false positive that makes the whole check untrustworthy. Verified
+ *   directly: a `vendor/` that is both `git add -f`-tracked and matched by a
+ *   `.gitignore` pattern is absent from this listing and present in a fresh
+ *   `git worktree add`.
+ * - `--ignored` means the repo meant it, rather than the directory being
+ *   untracked noise someone forgot to commit.
+ * - The pathspec keeps this shallow: git walks the named directories only, so
+ *   this is not the tree scan `scanIgnoredOutput` pays for at repo root.
+ *
+ * A hand-rolled `.gitignore` reader would drift from the checkout it is
+ * predicting, which is the same argument `scanIgnoredOutput` makes and the
+ * reason neither one parses ignore files.
+ *
+ * ## Matching
+ *
+ * Only an entry that IS the candidate counts (`node_modules` or the
+ * `node_modules/` git spells for a wholly-ignored directory). An entry
+ * strictly beneath it — `vendor/cache/` under a tracked `vendor/` — means the
+ * directory as a whole is not ignored, so the checkout does bring most of it
+ * and telling someone to carry the parent would be wrong.
+ *
+ * A candidate already covered by `declared` (equal to it, or beneath a
+ * declared path) is dropped: it is the loud path's problem now, and naming it
+ * here would ask a repo to declare what it already declared.
+ */
+export function undeclaredCarryEnvironment(
+  repoRoot: string,
+  declared: readonly string[],
+  opts: { candidates?: readonly string[] } = {},
+): UndeclaredCarryEnvironment {
+  const candidates = opts.candidates ?? CARRY_ENVIRONMENT_DIRECTORIES;
+  const present: string[] = [];
+  for (const name of candidates) {
+    try {
+      if (existsSync(join(repoRoot, name))) present.push(name);
+    } catch {
+      // An unreadable repo root is the caller's problem, not this check's.
+    }
+  }
+  if (present.length === 0) return { paths: [], present, unknown: false };
+
+  // `isAtOrUnder`, not `startsWith`: a declared `node_modules` must not be
+  // read as covering a candidate named `node_modules_backup`. That precise
+  // bug is what the helper exists for; a second spelling of it here would
+  // reintroduce it one module section away from the warning about it.
+  const declaredPrefixes: string[] = [];
+  for (const entry of declared) {
+    if (typeof entry !== 'string') continue;
+    const norm = normalizeScanPath(entry);
+    if (norm.length === 0 || norm === '.') continue;
+    declaredPrefixes.push(norm);
+  }
+  const uncovered = present.filter(
+    (name) => !declaredPrefixes.some((prefix) => isAtOrUnder(normalizeScanPath(name), prefix)),
+  );
+  if (uncovered.length === 0) return { paths: [], present, unknown: false };
+
+  let result: SpawnSyncReturns<string>;
+  try {
+    result = spawnSync(
+      'git',
+      ['-C', repoRoot, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z', '--', ...uncovered],
+      { encoding: 'utf8', maxBuffer: IGNORED_OUTPUT_MAX_BUFFER },
+    );
+  } catch {
+    return { paths: [], present, unknown: true };
+  }
+  if (result.error != null || result.status !== 0) return { paths: [], present, unknown: true };
+
+  const listed = new Set<string>();
+  for (const field of String(result.stdout ?? '').split('\0')) {
+    if (field.length === 0) continue;
+    listed.add(normalizeScanPath(field));
+  }
+  return {
+    paths: uncovered.filter((name) => listed.has(normalizeScanPath(name))),
+    present,
+    unknown: false,
+  };
+}
+
+/**
+ * Structurally identical to `DoctorFinding` in `src/commands/doctor.ts`, and
+ * declared here for the same reason `catalog-rot.ts`, `workspace-lease.ts` and
+ * `workspace-overlap.ts` declare their own: `src/lib/` must not depend on
+ * `src/commands/`.
+ */
+export interface CarryGapFinding {
+  check: string;
+  severity: 'ok' | 'warning' | 'error';
+  detail: string;
+  remediation?: string;
+}
+
+const CARRY_CHECK = 'worktree-carry';
+
+/** The project catalog is the only layer allowed to declare this key
+ * (`config-layers.ts` refuses it elsewhere, since it describes one repo's
+ * build state), so the remediation may name that file unconditionally. */
+const CARRY_CATALOG = '.fadeno/executors.yaml';
+
+/**
+ * Has anything in this repo ever cut a worktree, or been in a position to?
+ *
+ * The gate exists so a repo that has never dispatched is not lectured about a
+ * key it has no use for yet. Three signals, any one of which is enough: the
+ * dispatch ledger exists (every lane appends to it), or a command-lane
+ * isolated worktree directory exists, or a host-lane one does. Presence is
+ * checked, never contents: a swept `.fadeno/local` still proves worktrees were
+ * cut here, and `fadeno clean --force` removing the ledger is a reason to say
+ * less, not a reason to be wrong.
+ */
+function hasDispatchActivity(repoRoot: string): boolean {
+  const markers = [
+    join(repoRoot, '.fadeno', 'dispatches.jsonl'),
+    join(repoRoot, '.fadeno', 'local', 'isolated'),
+    join(repoRoot, '.fadeno', 'local', 'host-worktrees'),
+  ];
+  for (const marker of markers) {
+    try {
+      if (existsSync(marker)) return true;
+    } catch {
+      // Unreadable is not evidence either way; try the next marker.
+    }
+  }
+  return false;
+}
+
+/** The exact line to paste, built from what was actually found. */
+function carryYamlLine(paths: readonly string[]): string {
+  return `worktree_carry: [${paths.map((path) => JSON.stringify(path)).join(', ')}]`;
+}
+
+/**
+ * What `doctor` says about a repo whose build environment does not travel.
+ *
+ * One row always, `ok` when there is nothing to say — a check that stays
+ * silent is indistinguishable from a check that did not run, which is the
+ * precedent `workspace-lease` set and `dispatch-window-log` follows.
+ *
+ * Never `error`. `doctor`'s error tier sets a non-zero exit and is spent on
+ * state that stops Fadeno working; an undeclared carry stops nothing. It makes
+ * every isolated dispatch's validation quietly weaker than it reads, which is
+ * precisely what `warning` is for and emphatically not `ok`.
+ *
+ * ## What a declaration buys, and what it does not
+ *
+ * A repo that declares ANY carry gets an `ok` row and no second-guessing of
+ * WHICH paths it chose. That is a deliberate stopping point: a declaration is
+ * a statement by someone who has seen this repo, and a check that argued with
+ * it would fire on every repo that carries only what its gate needs. The
+ * residual gap is real and is named in the row rather than hidden — a repo
+ * that declares `node_modules` and not `.venv` has the polymarket failure
+ * again, one directory over — so the `ok` detail lists what is present and
+ * undeclared without raising the severity over it.
+ */
+export function undeclaredCarryFindings(
+  repoRoot: string,
+  declared: readonly string[],
+  opts: { candidates?: readonly string[] } = {},
+): CarryGapFinding[] {
+  const found = undeclaredCarryEnvironment(repoRoot, declared, opts);
+
+  if (declared.length > 0) {
+    const alsoPresent = found.paths.length > 0
+      ? ` Also present, gitignored, and NOT declared: ${found.paths.join(', ')} — this check does not argue with a ` +
+        'declaration, but a gate that needs one of those still cannot run in a worktree.'
+      : '';
+    return [{
+      check: CARRY_CHECK,
+      severity: 'ok',
+      detail:
+        `${CARRY_CATALOG} declares worktree_carry: ${declared.join(', ')}, so those paths are copied into every ` +
+        `freshly-cut worktree before the executor starts.${alsoPresent}`,
+    }];
+  }
+
+  if (!hasDispatchActivity(repoRoot)) {
+    return [{
+      check: CARRY_CHECK,
+      severity: 'ok',
+      detail:
+        'no dispatch has cut a worktree in this repository yet, so nothing here has needed a build environment ' +
+        'carried into one. `worktree_carry:` in ' + CARRY_CATALOG + ' is what declares one when that changes.',
+    }];
+  }
+
+  if (found.unknown) {
+    return [{
+      check: CARRY_CHECK,
+      severity: 'ok',
+      detail:
+        'the gitignored listing could not be run here, so this check cannot say whether a build environment ' +
+        'would travel into an isolated worktree. Not a claim that one would.',
+    }];
+  }
+
+  if (found.paths.length === 0) {
+    const tracked = found.present.length > 0
+      ? ` ${found.present.join(', ')} ${found.present.length === 1 ? 'is' : 'are'} present and tracked, so a ` +
+        'worktree gets that content for free.'
+      : '';
+    return [{
+      check: CARRY_CHECK,
+      severity: 'ok',
+      detail: `no gitignored build environment at the top level of this repository that a worktree would miss.${tracked}`,
+    }];
+  }
+
+  const named = found.paths.join(', ');
+  return [{
+    check: CARRY_CHECK,
+    severity: 'warning',
+    detail:
+      `this repository dispatches, and ${named} ${found.paths.length === 1 ? 'is' : 'are'} gitignored, so ` +
+      `${found.paths.length === 1 ? 'it does' : 'they do'} not exist inside an isolated worktree — ` +
+      '`git worktree add` checks out TRACKED content only. Nothing is declared in ' + CARRY_CATALOG +
+      ', so nothing carries them in. An agent working there cannot run the repo\'s own gate and will usually ' +
+      'substitute a weaker one and finish successfully: the observed failure is a terminal `ok` receipt over ' +
+      'validation that silently degraded from the full suite to a smoke test. Do not infer correctness from exit 0.',
+    remediation:
+      `Add this line to ${CARRY_CATALOG} (project scope only — the user and builtin catalogs refuse the key, ` +
+      'because it describes this repo\'s build state and nobody else\'s):\n\n' +
+      `    ${carryYamlLine(found.paths)}\n\n` +
+      'Each declared path is carried into a freshly-cut worktree by reflink → hardlink → full copy before the ' +
+      'executor runs, and a declared path that exists and cannot be carried REFUSES the dispatch rather than ' +
+      'running it against an incomplete checkout. Drop any entry a run does not actually need; a hardlinked ' +
+      'tree shares inodes with yours, so a tool that writes one of these files in place writes yours too ' +
+      '(recorded after the fact as `carry_mutated`, never prevented).',
+  }];
+}
+
+// ---------------------------------------------------------------------------
 // Carry mutation detection — `carry_mutated`
 // ---------------------------------------------------------------------------
 

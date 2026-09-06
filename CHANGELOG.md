@@ -356,6 +356,43 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Added
 
+- **`worktree_carry:` is no longer silent when a repo declares none.** The key
+  that carries a repo's gitignored build environment into a freshly-cut
+  worktree has existed, been parse-validated, and been refused outside project
+  scope for several releases — documented only in `docs/experimental/` and
+  `docs/roadmap.md`, in no skill and no agent body. So it was loud in exactly
+  one direction: a DECLARED path that cannot be carried refuses the dispatch,
+  and a repo that declared nothing got a worktree with no environment in it and
+  no line anywhere saying so. Two directors reported the consequence
+  independently in the same week. In one repo (Python) no isolated worktree had
+  a `.venv` or an installed console script, so **not one review in an
+  eight-review campaign could run the repo's own replay gate**. In another
+  (Rust/Python, a different harness) three dispatches "missing local
+  .venv/system pytest … report direct test/smoke execution rather than the
+  required normal pytest/full suite, **despite terminal ok receipts**" — the
+  dispatch returned `ok` while validation degraded from full-suite to smoke,
+  invisibly. Their conclusion is the one to keep: *do not infer correctness
+  from exit 0*.
+  Three surfaces now say it. `fadeno doctor` gains a `worktree-carry` finding
+  that fires only where the failure is real — this repo dispatches, a
+  gitignored environment directory is actually present at the top level, and
+  nothing is declared — and its remediation prints **the exact line to paste**,
+  naming the directories it found (`worktree_carry: ["node_modules", ".venv"]`).
+  A directory that is present but TRACKED is never named, because a tracked
+  `vendor/` carries itself; git answers both the ignored and the tracked half,
+  through the same exclude set `git worktree add` obeys, restricted to a fixed
+  shallow candidate list rather than a tree walk. A command-lane isolated
+  completion row records `worktree_carry_absent` when the environment did not
+  come along, so a receipt claiming a suite passed carries the fact that the
+  suite could not have run the way the repo runs it. And the key is now written
+  down where an agent reads it rather than only in a design doc: the host skill
+  (including that **the host lane carries nothing at all**, declared or not),
+  and the `worker` and `reviewer` agent bodies, which are told to report a gate
+  they could not run instead of substituting a weaker one.
+  Skills, agent bodies and hooks are read at **host session start**, so the two
+  agent-facing halves of this reach anyone only after a plugin refresh and a
+  fresh session; the doctor check and the receipt field are live as soon as the
+  CLI is.
 - **A recovery procedure in the host skill.** A Codex director reading these
   skills cold in another repo reported that recovery guidance was thin —
   missing terminal receipts, orphaned workspace records and staged build

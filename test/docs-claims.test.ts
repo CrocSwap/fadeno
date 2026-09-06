@@ -996,6 +996,29 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // `worktree_carry:` was implemented, validated, project-scoped, and
+    // documented ONLY in `docs/experimental/` — so the people who needed it
+    // (an agent inside a worktree with no `.venv`, and the host who could fix
+    // it in one line) never saw the key at all. This pins it to the surfaces
+    // they DO read: the host skill, the two role agent bodies, and the doctor
+    // check that prints the line to paste. A source that renames the key or
+    // drops the check leaves three agent-facing surfaces telling people to
+    // write YAML that does nothing.
+    id: 'worktree-carry-reaches-agents',
+    doc: {
+      files: [
+        'templates/common/skills/fadeno-host/SKILL.md',
+        'templates/claude/claude-agents/worker.md',
+        'templates/claude/claude-agents/reviewer.md',
+      ],
+      patterns: [/worktree_carry/, /worktree_carry_absent/, /tracked content only/],
+    },
+    src: {
+      files: ['src/lib/workspace-isolation.ts', 'src/lib/executors.ts', 'src/commands/dispatch.ts'],
+      patterns: [/undeclaredCarryFindings/, /worktree_carry_absent/, /'worktree_carry'/],
+    },
+  },
+  {
     id: 'omp-host-adapter',
     doc: {
       files: ['README.md', 'docs/kickoff-memo.md'],

@@ -100,6 +100,24 @@ Fadeno.
   subagent is not covered, Codex-hosted agents are not covered at all, and it
   reads shell text without being a shell. Isolation is the protection; the hook
   only catches the reflex.
+- An isolated worktree is cut with `git worktree add`, which checks out
+  **tracked content only**, so a gitignored build environment — `node_modules`,
+  `.venv`, `target`, `vendor` — is not in it. An agent that lands there cannot
+  run the repo's own gate, and what it usually does instead is run a weaker one
+  and finish successfully: a terminal `ok` receipt over validation that
+  degraded from the full suite to a smoke test. **Do not infer correctness from
+  exit 0** when the environment may not have travelled. Declare what must
+  travel, once, in project scope — `worktree_carry: ["node_modules", ".venv"]`
+  in `.fadeno/executors.yaml`. Each declared path is copied into every
+  freshly-cut worktree before the executor starts, and a declared path that
+  exists and cannot be carried refuses the dispatch rather than running it
+  against an incomplete checkout. `fadeno doctor` reports the directories it
+  actually found and prints the exact line to paste, and a command-lane
+  isolated receipt records `worktree_carry_absent` naming what did not come
+  along. **The host lane does not carry anything**: a worktree from
+  `fadeno dispatch-open` or `fadeno dispatch-prepare --isolate` gets tracked
+  content only, declaration or no declaration, so before you believe a host
+  agent's verification, confirm the check it names could actually run there.
 - Fadeno is in beta. When concrete friction attributable to Fadeno occurs,
   append it to `./.fadeno/feedback.md` with the date, host, task, observed
   behavior, evidence, impact, and workaround when known. Do not invent

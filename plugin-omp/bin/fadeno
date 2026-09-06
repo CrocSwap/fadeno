@@ -19340,6 +19340,125 @@ function carryDeclaredPaths(repoRoot, worktreeAbs, declared, opts = {}) {
   const fingerprint = opts.fingerprint === false ? emptyCarryFingerprint() : fingerprintCarriedPaths(repoRoot, records);
   return { records, failure: null, fingerprint };
 }
+var CARRY_ENVIRONMENT_DIRECTORIES = [
+  "node_modules",
+  ".venv",
+  "venv",
+  ".tox",
+  ".nox",
+  "vendor",
+  "target",
+  ".gradle",
+  ".bundle",
+  ".terraform",
+  "Pods"
+];
+function undeclaredCarryEnvironment(repoRoot, declared, opts = {}) {
+  const candidates = opts.candidates ?? CARRY_ENVIRONMENT_DIRECTORIES;
+  const present = [];
+  for (const name of candidates) {
+    try {
+      if ((0, import_node_fs11.existsSync)((0, import_node_path11.join)(repoRoot, name))) present.push(name);
+    } catch {
+    }
+  }
+  if (present.length === 0) return { paths: [], present, unknown: false };
+  const declaredPrefixes = [];
+  for (const entry of declared) {
+    if (typeof entry !== "string") continue;
+    const norm = normalizeScanPath(entry);
+    if (norm.length === 0 || norm === ".") continue;
+    declaredPrefixes.push(norm);
+  }
+  const uncovered = present.filter(
+    (name) => !declaredPrefixes.some((prefix) => isAtOrUnder(normalizeScanPath(name), prefix))
+  );
+  if (uncovered.length === 0) return { paths: [], present, unknown: false };
+  let result;
+  try {
+    result = (0, import_node_child_process3.spawnSync)(
+      "git",
+      ["-C", repoRoot, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z", "--", ...uncovered],
+      { encoding: "utf8", maxBuffer: IGNORED_OUTPUT_MAX_BUFFER }
+    );
+  } catch {
+    return { paths: [], present, unknown: true };
+  }
+  if (result.error != null || result.status !== 0) return { paths: [], present, unknown: true };
+  const listed = /* @__PURE__ */ new Set();
+  for (const field of String(result.stdout ?? "").split("\0")) {
+    if (field.length === 0) continue;
+    listed.add(normalizeScanPath(field));
+  }
+  return {
+    paths: uncovered.filter((name) => listed.has(normalizeScanPath(name))),
+    present,
+    unknown: false
+  };
+}
+var CARRY_CHECK = "worktree-carry";
+var CARRY_CATALOG = ".fadeno/executors.yaml";
+function hasDispatchActivity(repoRoot) {
+  const markers = [
+    (0, import_node_path11.join)(repoRoot, ".fadeno", "dispatches.jsonl"),
+    (0, import_node_path11.join)(repoRoot, ".fadeno", "local", "isolated"),
+    (0, import_node_path11.join)(repoRoot, ".fadeno", "local", "host-worktrees")
+  ];
+  for (const marker of markers) {
+    try {
+      if ((0, import_node_fs11.existsSync)(marker)) return true;
+    } catch {
+    }
+  }
+  return false;
+}
+function carryYamlLine(paths) {
+  return `worktree_carry: [${paths.map((path) => JSON.stringify(path)).join(", ")}]`;
+}
+function undeclaredCarryFindings(repoRoot, declared, opts = {}) {
+  const found = undeclaredCarryEnvironment(repoRoot, declared, opts);
+  if (declared.length > 0) {
+    const alsoPresent = found.paths.length > 0 ? ` Also present, gitignored, and NOT declared: ${found.paths.join(", ")} \u2014 this check does not argue with a declaration, but a gate that needs one of those still cannot run in a worktree.` : "";
+    return [{
+      check: CARRY_CHECK,
+      severity: "ok",
+      detail: `${CARRY_CATALOG} declares worktree_carry: ${declared.join(", ")}, so those paths are copied into every freshly-cut worktree before the executor starts.${alsoPresent}`
+    }];
+  }
+  if (!hasDispatchActivity(repoRoot)) {
+    return [{
+      check: CARRY_CHECK,
+      severity: "ok",
+      detail: "no dispatch has cut a worktree in this repository yet, so nothing here has needed a build environment carried into one. `worktree_carry:` in " + CARRY_CATALOG + " is what declares one when that changes."
+    }];
+  }
+  if (found.unknown) {
+    return [{
+      check: CARRY_CHECK,
+      severity: "ok",
+      detail: "the gitignored listing could not be run here, so this check cannot say whether a build environment would travel into an isolated worktree. Not a claim that one would."
+    }];
+  }
+  if (found.paths.length === 0) {
+    const tracked = found.present.length > 0 ? ` ${found.present.join(", ")} ${found.present.length === 1 ? "is" : "are"} present and tracked, so a worktree gets that content for free.` : "";
+    return [{
+      check: CARRY_CHECK,
+      severity: "ok",
+      detail: `no gitignored build environment at the top level of this repository that a worktree would miss.${tracked}`
+    }];
+  }
+  const named = found.paths.join(", ");
+  return [{
+    check: CARRY_CHECK,
+    severity: "warning",
+    detail: `this repository dispatches, and ${named} ${found.paths.length === 1 ? "is" : "are"} gitignored, so ${found.paths.length === 1 ? "it does" : "they do"} not exist inside an isolated worktree \u2014 \`git worktree add\` checks out TRACKED content only. Nothing is declared in ` + CARRY_CATALOG + ", so nothing carries them in. An agent working there cannot run the repo's own gate and will usually substitute a weaker one and finish successfully: the observed failure is a terminal `ok` receipt over validation that silently degraded from the full suite to a smoke test. Do not infer correctness from exit 0.",
+    remediation: `Add this line to ${CARRY_CATALOG} (project scope only \u2014 the user and builtin catalogs refuse the key, because it describes this repo's build state and nobody else's):
+
+    ${carryYamlLine(found.paths)}
+
+Each declared path is carried into a freshly-cut worktree by reflink \u2192 hardlink \u2192 full copy before the executor runs, and a declared path that exists and cannot be carried REFUSES the dispatch rather than running it against an incomplete checkout. Drop any entry a run does not actually need; a hardlinked tree shares inodes with yours, so a tool that writes one of these files in place writes yours too (recorded after the fact as \`carry_mutated\`, never prevented).`
+  }];
+}
 var CARRY_FINGERPRINT_MAX_ENTRIES = 25e4;
 var CARRY_DRIFT_MAX_EXAMPLES = 10;
 var HAZARD_KINDS = ["in_place_write", "metadata_only"];
@@ -24009,6 +24128,7 @@ ${DISPATCH_RESULT_FOOTER}`;
     let isolatedDiffBytes = null;
     let isolatedCarryRecords = [];
     let isolatedCarryFingerprint = null;
+    let isolatedCarryAbsent = [];
     let isolatedIgnoredOutput = null;
     const takeIsolatedIgnoredOutput = () => isolatedIgnoredOutput;
     let isolatedBaselineCommit = null;
@@ -24133,6 +24253,7 @@ ${DISPATCH_RESULT_FOOTER}`;
           }
           isolatedCarryRecords = isolatedCarry.records;
           isolatedCarryFingerprint = isolatedCarry.fingerprint;
+          isolatedCarryAbsent = undeclaredCarryEnvironment(repoRoot, profile.worktreeCarry).paths;
           const baselineRef = pendingShadow?.pairId ?? dispatchId;
           const primaryBaseline = applyWorkspaceBaseline(
             repoRoot,
@@ -24309,6 +24430,9 @@ ${truncatedStderr}
     }
     if (effectiveWorkspaceMode === "isolated" && isolatedCarryRecords.length > 0) {
       row.worktree_carry = isolatedCarryRecords;
+    }
+    if (isolatedCarryAbsent.length > 0) {
+      row.worktree_carry_absent = isolatedCarryAbsent;
     }
     if (effectiveWorkspaceMode === "isolated") {
       delete row.workspace_changed;
@@ -44926,6 +45050,7 @@ function runDoctor(opts = {}) {
         verifyCommand: "`fadeno models verify`",
         verificationsPath: userPaths(opts.userPathOptions ?? {}).modelVerificationsFile
       }));
+      findings.push(...undeclaredCarryFindings(repoRoot, layered.profile.worktreeCarry));
       const probeable = dialed.filter((dial) => dial.listable);
       if (opts.probeModels === true) {
         const probeHarnesses = [...new Set(probeable.map((dial) => dial.harness))].sort();

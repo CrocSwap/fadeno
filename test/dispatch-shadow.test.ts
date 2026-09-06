@@ -917,6 +917,47 @@ test('--isolate carries declared worktree_carry paths into the isolated worktree
   assert.match(carry[0]!.mechanism, /^(reflink|hardlink|copy)$/);
 });
 
+// The UNDECLARED case, which was the silent one. A repo that never heard of
+// `worktree_carry:` gets the same empty worktree and, until `worktree_carry_absent`,
+// a receipt indistinguishable from one whose environment was intact — which is
+// how two directors ended up with terminal `ok` rows over a gate that had
+// quietly downgraded to a smoke test.
+test('an isolated dispatch whose repo declares no carry records what did not come along', (t) => {
+  const root = seedTwoProviders(t, ECHO('REPORT:'), ECHO('CHALLENGER:'));
+  initGit(root);
+  mkdirSync(join(root, 'node_modules'), { recursive: true });
+  writeFileSync(join(root, 'node_modules', 'marker.txt'), 'installed');
+  writeFileSync(join(root, '.gitignore'), 'node_modules/\n', { flag: 'a' });
+
+  const result = runDispatch({
+    archetype: 'worker', prompt: 'isolated, nothing declared', repoRoot: root,
+    isolate: true, userPathOptions: onHarness('standalone'),
+  });
+  assert.equal(result.exitCode, 0);
+
+  const row = evidenceRows(root).find((r) => r.event === 'dispatch_completed')! as Record<string, unknown>;
+  assert.deepEqual(row.worktree_carry_absent, ['node_modules']);
+  assert.equal(row.worktree_carry, undefined, 'nothing was declared, so nothing was carried');
+});
+
+test('a declared carry leaves no absence note — the row states one thing, not two', (t) => {
+  const root = seedTwoProviders(t, ECHO('REPORT:'), ECHO('CHALLENGER:'), { worktree_carry: ['node_modules'] });
+  initGit(root);
+  mkdirSync(join(root, 'node_modules'), { recursive: true });
+  writeFileSync(join(root, 'node_modules', 'marker.txt'), 'installed');
+  writeFileSync(join(root, '.gitignore'), 'node_modules/\n', { flag: 'a' });
+
+  const result = runDispatch({
+    archetype: 'worker', prompt: 'isolated, declared', repoRoot: root,
+    isolate: true, userPathOptions: onHarness('standalone'),
+  });
+  assert.equal(result.exitCode, 0);
+
+  const row = evidenceRows(root).find((r) => r.event === 'dispatch_completed')! as Record<string, unknown>;
+  assert.equal(row.worktree_carry_absent, undefined);
+  assert.equal((row.worktree_carry as Array<{ path: string }>)[0]!.path, 'node_modules');
+});
+
 test('a declared-but-uncarriable worktree_carry path refuses the whole isolated dispatch, not just a shadow arm', (t) => {
   // Unlike a shadow (whose carry failure refuses only the challenger, leaving
   // the primary's own result untouched), an isolated dispatch's worktree IS

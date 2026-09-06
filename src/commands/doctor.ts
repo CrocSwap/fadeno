@@ -11,6 +11,7 @@ import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
 import { describeVestigialWorkspaceLease } from '../lib/workspace-lease.ts';
 import { dispatchWindowLogFindings, overlapSnapshotFindings } from '../lib/workspace-overlap.ts';
+import { undeclaredCarryFindings } from '../lib/workspace-isolation.ts';
 import { catalogLayerVersions, explainSuppressedBuiltin } from '../lib/config-layers.ts';
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
 import { codexUserAgentDir, readVerifiedModels, userPaths } from '../lib/user-paths.ts';
@@ -449,6 +450,19 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
         verifyCommand: '`fadeno models verify`',
         verificationsPath: userPaths(opts.userPathOptions ?? {}).modelVerificationsFile,
       }));
+      // A third silent decay, and the one that costs a whole review campaign:
+      // `worktree_carry:` is the project catalog key that carries a repo's
+      // gitignored build environment into an isolated worktree, and NOTHING
+      // said a word when a repo that dispatches declared none. The failure it
+      // produces is a terminal `ok` receipt over a gate that silently
+      // downgraded to a smoke test, because the agent had no `.venv` to run
+      // the real one with. Pushed here rather than beside the workspace
+      // findings at the end of this function for one reason: this is the only
+      // scope where the DECLARATION is in hand — `layered.profile.worktreeCarry`
+      // — and re-loading the catalog to ask again is how two readers of one key
+      // start to disagree. A catalog that would not load reports `configuration`
+      // above and skips this check with it, exactly as the two above it do.
+      findings.push(...undeclaredCarryFindings(repoRoot, layered.profile.worktreeCarry));
       // The listing check answers the other half of the same question — not
       // "when was this last confirmed" but "is it in the listing right now" —
       // so it runs against the same `dialed` set, restricted to the harnesses

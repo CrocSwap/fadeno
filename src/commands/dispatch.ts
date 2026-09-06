@@ -70,6 +70,7 @@ import {
   ignoredOutputRetentionEcho,
   ignoredOutputStamp,
   scanIgnoredOutput,
+  undeclaredCarryEnvironment,
   verifyCarriedPaths,
   withIsolatedWorktree,
   WorkspaceIsolationError,
@@ -2998,6 +2999,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // to do. Populated below, inside the isolated branch only.
   let isolatedCarryRecords: Array<{ path: string; mechanism: WorktreeCarryMechanism }> = [];
   let isolatedCarryFingerprint: CarryFingerprint | null = null;
+  // The other half of that gap, and the silent one. A DECLARED path that will
+  // not carry refuses the dispatch below; a repo that declared nothing gets a
+  // worktree with no build environment in it and, until this field, no line
+  // anywhere saying so — the receipt read `ok` while the agent inside had no
+  // `.venv` to run the repo's gate with and ran something weaker instead.
+  let isolatedCarryAbsent: string[] = [];
   // Annotated and read through a helper rather than narrowed inline: the only
   // assignment happens inside the `withIsolatedWorktree` callback, and TS's
   // control-flow analysis collapses the union to `null` at the row-projection
@@ -3217,6 +3224,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         }
         isolatedCarryRecords = isolatedCarry.records;
         isolatedCarryFingerprint = isolatedCarry.fingerprint;
+        // Read at the cut, beside the carry it is the absence of, so the row
+        // states a fact about the worktree this delivery actually got rather
+        // than about the repo minutes later.
+        isolatedCarryAbsent = undeclaredCarryEnvironment(repoRoot, profile.worktreeCarry).paths;
         // Replay the caller's pre-spawn state. `git worktree add` cuts a clean
         // checkout of HEAD, so without this the executor works against a tree
         // that is missing every uncommitted change the caller has — and then
@@ -3520,6 +3531,15 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
   if (effectiveWorkspaceMode === 'isolated' && isolatedCarryRecords.length > 0) {
     row.worktree_carry = isolatedCarryRecords;
+  }
+  // Absent when there was nothing to say, the same convention `worktree_carry`
+  // and `carry_mutated` follow. Present, it names the gitignored build
+  // directories this worktree did not get — so a reader who sees a receipt
+  // claiming the suite passed can see that the suite could not have run the
+  // way the repo runs it. Attestation, not accusation: it says what was
+  // missing, never that the result is wrong.
+  if (isolatedCarryAbsent.length > 0) {
+    row.worktree_carry_absent = isolatedCarryAbsent;
   }
   // Isolated deliveries omit workspace_changed by construction (contract 1.2)
   if (effectiveWorkspaceMode === 'isolated') {
