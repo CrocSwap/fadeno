@@ -319,6 +319,28 @@ function printRuns(runs: RunSummary[]): void {
   console.log(`\n${runs.length} run${runs.length === 1 ? '' : 's'} (${parts.join(', ')})`);
 }
 
+/**
+ * Clear one shadow attachment, or every one when `archetype` is null.
+ *
+ * ONE renderer for two spellings — `fadeno dial clear-shadow` and
+ * `fadeno shadow clear`. Shadows only ever live in `.fadeno/local/dials`, so
+ * neither spelling takes a scope flag, and a second copy of this output is
+ * exactly how the two would start disagreeing about what was cleared.
+ */
+function clearShadow(archetype: string | null, json: boolean): number {
+  const result = runDialClearShadow({ archetype });
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  if (result.archetype == null) {
+    console.log(result.removed ? `cleared ${result.count} shadow attachment(s)` : 'no shadow attachments to clear (.fadeno/local/dials)');
+    return 0;
+  }
+  console.log(`cleared shadow attachment: ${result.archetype} (was ${result.cleared!.model});`);
+  return 0;
+}
+
 function printDispatches(result: DispatchesResult): void {
   if (result.lines.length === 0) {
     console.log(result.summary);
@@ -1997,18 +2019,7 @@ function main(argv: string[]): number {
       }
       if (sub === 'clear-shadow') {
         if (positionals.length > 3) throw new Error('Usage: fadeno dial clear-shadow [<archetype>]');
-        const archetype = positionals[2] ?? null;
-        const result = runDialClearShadow({ archetype });
-        if (values.json) {
-          console.log(JSON.stringify(result, null, 2));
-          return 0;
-        }
-        if (result.archetype == null) {
-          console.log(result.removed ? `cleared ${result.count} shadow attachment(s)` : 'no shadow attachments to clear (.fadeno/local/dials)');
-          return 0;
-        }
-        console.log(`cleared shadow attachment: ${result.archetype} (was ${result.cleared!.model});`);
-        return 0;
+        return clearShadow(positionals[2] ?? null, Boolean(values.json));
       }
       if (sub === 'shadow') {
         const shadowUsage = 'Usage: fadeno dial shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]]';
@@ -2105,7 +2116,15 @@ function main(argv: string[]): number {
     // (`runShadowCommand`) as the `dial` subcommand above, so the two
     // spellings cannot drift apart.
     case 'shadow': {
-      const shadowUsage = 'Usage: fadeno shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]]';
+      // `fadeno shadow clear [<archetype>]` — the detach half of this command,
+      // which previously existed only as `fadeno dial clear-shadow`. Safe as a
+      // subcommand because `clear` is a RESERVED archetype name (runDialShadow
+      // refuses it), so it can never shadow a real archetype.
+      if (positionals[1] === 'clear') {
+        if (positionals.length > 3) throw new Error('Usage: fadeno shadow clear [<archetype>]');
+        return clearShadow(positionals[2] ?? null, Boolean(values.json));
+      }
+      const shadowUsage = 'Usage: fadeno shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]] | fadeno shadow clear [<archetype>]';
       if (positionals.length > 3) throw new Error(shadowUsage);
       const archetype = positionals[1];
       const model = positionals[2];

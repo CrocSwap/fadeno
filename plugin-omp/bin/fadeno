@@ -43850,10 +43850,14 @@ var TOP_LEVEL = {
     "fadeno dial <a>,<b>[,...] <model>[@effort] [options]",
     "fadeno dial clear [<archetype>] [--session|--user|--repo]",
     "fadeno dial shadow [<archetype> <model>[@effort]] [options]",
-    "fadeno dial clear-shadow [<archetype>]",
+    "fadeno dial clear-shadow [<archetype>]        (alias: fadeno shadow clear)",
     "fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]"
-  ], ["Cascade: binding \u2192 session dial \u2192 repo pin \u2192 user dial \u2192 base."]),
-  shadow: aliasPage(SHADOW_PAGE, ["fadeno shadow", "fadeno shadow <archetype> <model>[@effort] [options]"], "`fadeno shadow` is an alias for `fadeno dial shadow`."),
+  ], [
+    "Cascade: binding \u2192 session dial \u2192 repo pin \u2192 user dial \u2192 base.",
+    "`shadow` attaches a one-shot challenger; `--rate <r>` rolls it on that fraction of dispatches and `--n <count>` caps how many roll. Shadows roll on ad-hoc `fadeno dispatch` only \u2014 `fadeno drive` runs are unpaired.",
+    "`clear-shadow` with an archetype detaches that one and fails if it has none; with NO archetype it detaches EVERY attachment. Shadows live only in `.fadeno/local/dials`, so \u2014 unlike `clear` \u2014 it takes no `--session|--user|--repo` scope flag."
+  ]),
+  shadow: aliasPage(SHADOW_PAGE, ["fadeno shadow", "fadeno shadow <archetype> <model>[@effort] [options]", "fadeno shadow clear [<archetype>]"], "`fadeno shadow` is an alias for `fadeno dial shadow`, and `fadeno shadow clear` for `fadeno dial clear-shadow`."),
   steering: page("Resolve dials or materialize harness steering.", ["fadeno steering resolve --archetype <name> [options]", "fadeno steering apply --codex|--claude|--opencode|--omp [options]"]),
   dispatch: page("Resolve an archetype and invoke it once.", ["fadeno dispatch --archetype <name> [options]", "fadeno dispatch --model <ref> [options]"], ["Read prompt text from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted.", "Dispatches isolate by default and merge a successful primary diff back. `--isolate` withholds merge-back; `--shadow <ref>` adds a one-shot challenger.", "A failed relay-fidelity check refuses the dispatch before the executor spawns; `--allow-relay-mismatch` proceeds and records `relay_mismatch_allowed: true`.", "Recover output with `fadeno dispatches --output tag:<tag> --wait 120`."]),
   "dispatch-prepare": page("Prepare an isolated workspace for a pending host dispatch.", "fadeno dispatch-prepare <run> <dispatch-id> --isolate"),
@@ -44438,6 +44442,19 @@ function printRuns(runs) {
   const parts = [...statusCounts.entries()].sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0).map(([status, n]) => `${n} ${status}`);
   console.log(`
 ${runs.length} run${runs.length === 1 ? "" : "s"} (${parts.join(", ")})`);
+}
+function clearShadow(archetype, json) {
+  const result = runDialClearShadow({ archetype });
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  if (result.archetype == null) {
+    console.log(result.removed ? `cleared ${result.count} shadow attachment(s)` : "no shadow attachments to clear (.fadeno/local/dials)");
+    return 0;
+  }
+  console.log(`cleared shadow attachment: ${result.archetype} (was ${result.cleared.model});`);
+  return 0;
 }
 function printDispatches(result) {
   if (result.lines.length === 0) {
@@ -45886,18 +45903,7 @@ Or advance manually with the playbook cursor:`);
       }
       if (sub === "clear-shadow") {
         if (positionals.length > 3) throw new Error("Usage: fadeno dial clear-shadow [<archetype>]");
-        const archetype = positionals[2] ?? null;
-        const result = runDialClearShadow({ archetype });
-        if (values.json) {
-          console.log(JSON.stringify(result, null, 2));
-          return 0;
-        }
-        if (result.archetype == null) {
-          console.log(result.removed ? `cleared ${result.count} shadow attachment(s)` : "no shadow attachments to clear (.fadeno/local/dials)");
-          return 0;
-        }
-        console.log(`cleared shadow attachment: ${result.archetype} (was ${result.cleared.model});`);
-        return 0;
+        return clearShadow(positionals[2] ?? null, Boolean(values.json));
       }
       if (sub === "shadow") {
         const shadowUsage = "Usage: fadeno dial shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]]";
@@ -45974,7 +45980,11 @@ Or advance manually with the playbook cursor:`);
     // (`runShadowCommand`) as the `dial` subcommand above, so the two
     // spellings cannot drift apart.
     case "shadow": {
-      const shadowUsage = "Usage: fadeno shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]]";
+      if (positionals[1] === "clear") {
+        if (positionals.length > 3) throw new Error("Usage: fadeno shadow clear [<archetype>]");
+        return clearShadow(positionals[2] ?? null, Boolean(values.json));
+      }
+      const shadowUsage = "Usage: fadeno shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]] | fadeno shadow clear [<archetype>]";
       if (positionals.length > 3) throw new Error(shadowUsage);
       const archetype = positionals[1];
       const model = positionals[2];

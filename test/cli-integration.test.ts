@@ -413,3 +413,46 @@ test('CLI preflight refreshes older runtime without changing stdout/exit, never 
   assert.equal(readFileSync(up2.managedCli, 'utf8'), 'old2', 'unknown typo command must not trigger preflight refresh');
   assert.ok(!unknown.stderr.includes('refreshed') && !unknown.stdout.includes('refreshed'), 'unknown command should not emit refresh message');
 });
+
+test('`fadeno shadow clear` is the detach half of `fadeno shadow`, and renders identically to `dial clear-shadow`', (t) => {
+  // The papercut this closes: `fadeno shadow` set an attachment but had no way
+  // to remove one — you had to know the differently-spelled `fadeno dial
+  // clear-shadow`. Both spellings share one renderer, and this pins that: a
+  // second copy of the output is how the two would start disagreeing about
+  // what was cleared.
+  const root = tempRepo(t);
+  const dials = join(root, '.fadeno', 'local', 'dials');
+  const seed = (): void => {
+    mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+    writeFileSync(dials, JSON.stringify({ shadows: { worker: { model: 'm1' }, reviewer: { model: 'm2' } } }));
+  };
+
+  seed();
+  const viaShadow = cli(root, ['shadow', 'clear', 'worker']);
+  assert.equal(viaShadow.status, 0, viaShadow.output);
+  assert.match(viaShadow.output, /cleared shadow attachment: worker/);
+  assert.ok(!JSON.parse(readFileSync(dials, 'utf8')).shadows.worker, 'the attachment is gone from disk');
+
+  seed();
+  const viaDial = cli(root, ['dial', 'clear-shadow', 'worker']);
+  assert.equal(viaDial.output, viaShadow.output, 'the two spellings must render the same bytes');
+
+  // No archetype clears EVERY attachment — the behaviour the help now states.
+  seed();
+  const all = cli(root, ['shadow', 'clear']);
+  assert.equal(all.status, 0, all.output);
+  assert.match(all.output, /cleared 2 shadow attachment\(s\)/);
+  // With no dials beside them, clearing the last attachment removes the state
+  // file rather than leaving an empty husk — either shape means "no shadows".
+  assert.deepEqual(
+    existsSync(dials) ? JSON.parse(readFileSync(dials, 'utf8')).shadows ?? {} : {},
+    {},
+  );
+
+  // Asymmetry that is real and now documented: naming an absent archetype is
+  // an error, while the bare form is a no-op on an empty set.
+  const missing = cli(root, ['shadow', 'clear', 'nosuch']);
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.output, /no shadow attachment for "nosuch"/);
+  assert.equal(cli(root, ['shadow', 'clear']).status, 0);
+});
