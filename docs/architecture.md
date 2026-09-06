@@ -298,6 +298,15 @@ back to ordinary file completion when no specialized candidates apply.
   `concurrent-writes` warning — never a failure: an overlap is not proof of
   damage), by `show` (a `concurrent writes` section), and by `dispatches`,
   which is the only reader of an ad-hoc dispatch's copy.
+  The log is BOUNDED without a lock. A terminal compacts it past 256 KiB and
+  `fadeno clean --windows` does so on demand, dropping unusable rows (one torn
+  append otherwise degrades every later receipt in the repo, permanently, since
+  nothing else rewrites an append-only file) and any closed window that can no
+  longer meet anything. An open window is never dropped whatever its age —
+  dropping it would silently un-isolate live contention — so a leaked one is a
+  `doctor` finding naming its dispatch id, with no claim about liveness. The
+  rewrite hard-links the inode before renaming the path and drains what raced
+  it, so no append is lost and no lock is taken.
 - **`receipt-attestations.ts`** — the one parser for the two receipt fields
   that describe damage the kernel detected and could not prevent:
   `concurrent_write` above, and `ignored_output_discarded` (gitignored content

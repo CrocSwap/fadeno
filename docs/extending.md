@@ -658,6 +658,17 @@ What replaced it:
   at its terminal receipt, with the repo-relative paths it changed. Append-only
   and machine-local, never ledger evidence, never gating — the thing it
   observes is concurrent writers, so it must not itself need a lock.
+- **Compaction.** Append-only is not unbounded. A terminal compacts the log
+  once it passes 256 KiB, and `fadeno clean --windows` does it on demand:
+  unusable rows are dropped (a torn append otherwise makes every later receipt
+  in the repo carry the log-unreadable stamp, forever, since nothing else
+  rewrites the file), and so is any CLOSED window whose interval can no longer
+  meet anything. An OPEN window is never dropped at any age — it is the
+  auto-isolate signal — so `fadeno doctor` reports one that has been open
+  implausibly long instead, naming its dispatch id and claiming nothing about
+  whether it is alive. The rewrite hard-links the log before renaming over it
+  and drains what raced, so it needs no lock of its own; `fadeno clean --force`
+  deletes the file outright, open windows included, and is the wrong tool here.
 - **`concurrent_write` receipts.** At the terminal receipt a delivery
   intersects its own path set with every window that overlapped it in time —
   on every lane, host deliveries included (`completeHostDispatch` and

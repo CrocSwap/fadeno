@@ -16566,7 +16566,7 @@ function parseSnapshotDocument(text2, source) {
 
 // src/commands/dispatch.ts
 var import_node_child_process7 = require("node:child_process");
-var import_node_crypto7 = require("node:crypto");
+var import_node_crypto8 = require("node:crypto");
 var import_node_fs16 = require("node:fs");
 var import_node_os2 = require("node:os");
 var import_node_path16 = require("node:path");
@@ -17919,7 +17919,7 @@ function spawnMarkerIsFresh(value, now, maxAgeMs) {
 }
 
 // src/lib/host-dispatch.ts
-var import_node_crypto6 = require("node:crypto");
+var import_node_crypto7 = require("node:crypto");
 var import_node_fs14 = require("node:fs");
 var import_node_path14 = require("node:path");
 
@@ -18196,6 +18196,7 @@ function definitionSourceSummary(repoRoot) {
 // src/lib/workspace-overlap.ts
 var import_node_fs8 = require("node:fs");
 var import_node_path8 = require("node:path");
+var import_node_crypto3 = require("node:crypto");
 var import_node_child_process2 = require("node:child_process");
 
 // src/lib/receipt-attestations.ts
@@ -18332,6 +18333,61 @@ function closeDispatchWindow(repoRoot, opts) {
     changed_paths: capped ? paths.slice(0, WINDOW_MAX_PATHS) : paths,
     truncated: Boolean(opts.truncated) || capped
   });
+  try {
+    compactDispatchWindows(repoRoot, { minBytes: WINDOW_LOG_COMPACT_BYTES });
+  } catch {
+  }
+}
+function parseWindowLogLine(line) {
+  let parsed;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const row = parsed;
+  const id = typeof row.dispatch_id === "string" && row.dispatch_id.length > 0 ? row.dispatch_id : null;
+  if (id == null) return null;
+  if (row.event === "window_opened") {
+    const startedAt = typeof row.started_at === "string" ? row.started_at : null;
+    if (startedAt == null || Number.isNaN(Date.parse(startedAt))) return null;
+    return {
+      kind: "open",
+      id,
+      startedAt,
+      runId: typeof row.run_id === "string" ? row.run_id : null,
+      windowKind: row.kind === "engine" || row.kind === "host-dispatch" ? row.kind : "ad-hoc",
+      workspaceMode: row.workspace_mode === "isolated" ? "isolated" : "shared"
+    };
+  }
+  if (row.event === "window_closed") {
+    const endedAt = typeof row.ended_at === "string" ? row.ended_at : null;
+    if (endedAt == null || Number.isNaN(Date.parse(endedAt))) return null;
+    const raw = Array.isArray(row.changed_paths) ? row.changed_paths : null;
+    if (raw == null) return null;
+    const paths = raw.filter((p) => typeof p === "string");
+    return { kind: "close", id, endedAt, paths, truncated: row.truncated === true || paths.length !== raw.length };
+  }
+  return null;
+}
+function classifyWindowLog(text2) {
+  const entries = [];
+  let degraded = false;
+  const lines = text2.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index];
+    if (raw.trim().length === 0) {
+      if (index === lines.length - 1) continue;
+      degraded = true;
+      entries.push({ raw, row: null });
+      continue;
+    }
+    const row = parseWindowLogLine(raw);
+    if (row == null) degraded = true;
+    entries.push({ raw, row });
+  }
+  return { entries, degraded };
 }
 function readDispatchWindows(repoRoot) {
   const abs = windowsAbs(repoRoot);
@@ -18342,76 +18398,281 @@ function readDispatchWindows(repoRoot) {
   } catch {
     return { windows: [], degraded: true };
   }
+  const { entries, degraded: lineDegraded } = classifyWindowLog(text2);
+  let degraded = lineDegraded;
   const byId = /* @__PURE__ */ new Map();
-  let degraded = false;
-  const lines = text2.split("\n");
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line.trim().length === 0) {
-      if (index !== lines.length - 1) degraded = true;
-      continue;
-    }
-    let row;
-    try {
-      const parsed = JSON.parse(line);
-      if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
-        degraded = true;
-        continue;
-      }
-      row = parsed;
-    } catch {
+  for (const entry of entries) {
+    const row = entry.row;
+    if (row == null || row.kind !== "open") continue;
+    if (byId.has(row.id)) continue;
+    byId.set(row.id, {
+      dispatchId: row.id,
+      runId: row.runId,
+      kind: row.windowKind,
+      workspaceMode: row.workspaceMode,
+      startedAt: row.startedAt,
+      endedAt: null,
+      changedPaths: null,
+      truncated: false
+    });
+  }
+  for (const entry of entries) {
+    const row = entry.row;
+    if (row == null || row.kind !== "close") continue;
+    const open = byId.get(row.id);
+    if (open == null) {
       degraded = true;
       continue;
     }
-    const id = typeof row.dispatch_id === "string" && row.dispatch_id.length > 0 ? row.dispatch_id : null;
-    if (id == null) {
-      degraded = true;
-      continue;
-    }
-    if (row.event === "window_opened") {
-      if (byId.has(id)) continue;
-      const mode = row.workspace_mode === "isolated" ? "isolated" : "shared";
-      const kind = row.kind === "engine" || row.kind === "host-dispatch" ? row.kind : "ad-hoc";
-      const startedAt = typeof row.started_at === "string" ? row.started_at : null;
-      if (startedAt == null || Number.isNaN(Date.parse(startedAt))) {
-        degraded = true;
-        continue;
-      }
-      byId.set(id, {
-        dispatchId: id,
-        runId: typeof row.run_id === "string" ? row.run_id : null,
-        kind,
-        workspaceMode: mode,
-        startedAt,
-        endedAt: null,
-        changedPaths: null,
-        truncated: false
-      });
-    } else if (row.event === "window_closed") {
-      const open = byId.get(id);
-      if (open == null) {
-        degraded = true;
-        continue;
-      }
-      const endedAt = typeof row.ended_at === "string" ? row.ended_at : null;
-      if (endedAt == null || Number.isNaN(Date.parse(endedAt))) {
-        degraded = true;
-        continue;
-      }
-      const raw = Array.isArray(row.changed_paths) ? row.changed_paths : null;
-      if (raw == null) {
-        degraded = true;
-        continue;
-      }
-      const parsed = raw.filter((p) => typeof p === "string");
-      open.endedAt = endedAt;
-      open.changedPaths = open.changedPaths == null ? parsed : [.../* @__PURE__ */ new Set([...open.changedPaths, ...parsed])].sort();
-      open.truncated = open.truncated || row.truncated === true || parsed.length !== raw.length;
-    } else {
-      degraded = true;
-    }
+    open.endedAt = row.endedAt;
+    open.changedPaths = open.changedPaths == null ? row.paths : [.../* @__PURE__ */ new Set([...open.changedPaths, ...row.paths])].sort();
+    open.truncated = open.truncated || row.truncated;
   }
   return { windows: [...byId.values()], degraded };
+}
+var WINDOW_LOG_RETENTION_MS = 24 * 60 * 60 * 1e3;
+var WINDOW_LOG_COMPACT_BYTES = 256 * 1024;
+function noCompaction(skipped, over = {}) {
+  return {
+    path: DISPATCH_WINDOWS_FILE,
+    compacted: false,
+    dryRun: false,
+    skipped,
+    bytesBefore: 0,
+    bytesAfter: 0,
+    rowsBefore: 0,
+    rowsDropped: 0,
+    unreadableRowsDropped: 0,
+    windowsDropped: 0,
+    openWindowsKept: 0,
+    rowsDrained: 0,
+    ...over
+  };
+}
+function compactDispatchWindows(repoRoot, opts = {}) {
+  const abs = windowsAbs(repoRoot);
+  const dryRun = opts.dryRun === true;
+  let bytesBefore;
+  try {
+    if (!(0, import_node_fs8.existsSync)(abs)) return noCompaction("there is no window log to compact", { dryRun });
+    bytesBefore = (0, import_node_fs8.statSync)(abs).size;
+  } catch {
+    return noCompaction("the window log could not be inspected", { dryRun });
+  }
+  const minBytes = opts.minBytes ?? 0;
+  if (bytesBefore < minBytes) {
+    return noCompaction("the window log is below the compaction threshold", {
+      dryRun,
+      bytesBefore,
+      bytesAfter: bytesBefore
+    });
+  }
+  let buf;
+  try {
+    buf = (0, import_node_fs8.readFileSync)(abs);
+  } catch {
+    return noCompaction("the window log could not be read", { dryRun, bytesBefore, bytesAfter: bytesBefore });
+  }
+  const readBytes = buf.length;
+  const { entries } = classifyWindowLog(buf.toString("utf8"));
+  const firstOpenMs = /* @__PURE__ */ new Map();
+  const lastCloseMs = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    const row = entry.row;
+    if (row == null) continue;
+    if (row.kind === "open") {
+      if (!firstOpenMs.has(row.id)) firstOpenMs.set(row.id, Date.parse(row.startedAt));
+    } else {
+      const ended = Date.parse(row.endedAt);
+      const previous = lastCloseMs.get(row.id);
+      if (previous == null || ended > previous) lastCloseMs.set(row.id, ended);
+    }
+  }
+  const nowMs = (opts.now ?? /* @__PURE__ */ new Date()).getTime();
+  let earliestOpenStart = Number.POSITIVE_INFINITY;
+  let openWindowsKept = 0;
+  for (const [id, started] of firstOpenMs) {
+    if (lastCloseMs.has(id)) continue;
+    openWindowsKept += 1;
+    if (started < earliestOpenStart) earliestOpenStart = started;
+  }
+  const horizon = Math.min(earliestOpenStart, nowMs - (opts.retentionMs ?? WINDOW_LOG_RETENTION_MS));
+  const droppableIds = /* @__PURE__ */ new Set();
+  for (const [id, closed] of lastCloseMs) {
+    if (!firstOpenMs.has(id)) continue;
+    if (closed < horizon) droppableIds.add(id);
+  }
+  const kept = [];
+  const keptOpenIds = /* @__PURE__ */ new Set();
+  let unreadableRowsDropped = 0;
+  for (const entry of entries) {
+    const row = entry.row;
+    if (row == null) {
+      unreadableRowsDropped += 1;
+      continue;
+    }
+    if (row.kind === "close" && !firstOpenMs.has(row.id)) {
+      unreadableRowsDropped += 1;
+      continue;
+    }
+    if (droppableIds.has(row.id)) continue;
+    if (row.kind === "open") keptOpenIds.add(row.id);
+    kept.push(entry.raw);
+  }
+  const rowsBefore = entries.length;
+  const rowsDropped = rowsBefore - kept.length;
+  const plan = {
+    path: DISPATCH_WINDOWS_FILE,
+    compacted: false,
+    dryRun,
+    skipped: null,
+    bytesBefore,
+    bytesAfter: bytesBefore,
+    rowsBefore,
+    rowsDropped,
+    unreadableRowsDropped,
+    windowsDropped: droppableIds.size,
+    openWindowsKept,
+    rowsDrained: 0
+  };
+  if (rowsDropped === 0) {
+    return { ...plan, skipped: "the window log holds no row that can be dropped" };
+  }
+  if (dryRun) return plan;
+  const suffix = `${process.pid}-${(0, import_node_crypto3.randomUUID)()}`;
+  const temporary = `${abs}.compact-${suffix}`;
+  const sidecar = `${abs}.draining-${suffix}`;
+  try {
+    (0, import_node_fs8.writeFileSync)(temporary, kept.length === 0 ? "" : `${kept.join("\n")}
+`, { flag: "wx" });
+  } catch {
+    try {
+      (0, import_node_fs8.rmSync)(temporary, { force: true });
+    } catch {
+    }
+    return { ...plan, skipped: "the compacted window log could not be staged" };
+  }
+  try {
+    (0, import_node_fs8.linkSync)(abs, sidecar);
+  } catch {
+    try {
+      (0, import_node_fs8.rmSync)(temporary, { force: true });
+    } catch {
+    }
+    return {
+      ...plan,
+      skipped: "the window log could not be hard-linked, so a concurrent append could be lost; nothing was rewritten"
+    };
+  }
+  try {
+    (0, import_node_fs8.renameSync)(temporary, abs);
+  } catch {
+    try {
+      (0, import_node_fs8.rmSync)(temporary, { force: true });
+    } catch {
+    }
+    try {
+      (0, import_node_fs8.rmSync)(sidecar, { force: true });
+    } catch {
+    }
+    return { ...plan, skipped: "the compacted window log could not be moved into place" };
+  }
+  let rowsDrained = 0;
+  try {
+    const raced = (0, import_node_fs8.readFileSync)(sidecar);
+    if (raced.length > readBytes) {
+      const { entries: tail } = classifyWindowLog(raced.subarray(readBytes).toString("utf8"));
+      for (const entry of tail) {
+        if (entry.row?.kind === "open") keptOpenIds.add(entry.row.id);
+      }
+      for (const entry of tail) {
+        const row = entry.row;
+        if (row == null) continue;
+        if (row.kind === "close" && !keptOpenIds.has(row.id)) continue;
+        (0, import_node_fs8.appendFileSync)(abs, `${entry.raw}
+`, "utf8");
+        rowsDrained += 1;
+      }
+    }
+  } catch {
+  }
+  try {
+    (0, import_node_fs8.rmSync)(sidecar, { force: true });
+  } catch {
+  }
+  let bytesAfter = bytesBefore;
+  try {
+    bytesAfter = (0, import_node_fs8.statSync)(abs).size;
+  } catch {
+  }
+  return { ...plan, compacted: true, bytesAfter, rowsDrained };
+}
+var OPEN_WINDOW_STALE_MS = 24 * 60 * 60 * 1e3;
+var WINDOW_LOG_CHECK = "dispatch-window-log";
+var COMPACT_COMMAND = "`fadeno clean --windows`";
+function describeBytes(bytes) {
+  return bytes < 1024 ? `${bytes} B` : `${Math.round(bytes / 1024)} KiB`;
+}
+function dispatchWindowLogFindings(repoRoot, opts = {}) {
+  const abs = windowsAbs(repoRoot);
+  let bytes;
+  try {
+    if (!(0, import_node_fs8.existsSync)(abs)) {
+      return [{
+        check: WINDOW_LOG_CHECK,
+        severity: "ok",
+        detail: `no write-window log yet (${DISPATCH_WINDOWS_FILE}) \u2014 nothing has opened a dispatch window in this repository`
+      }];
+    }
+    bytes = (0, import_node_fs8.statSync)(abs).size;
+  } catch {
+    return [{
+      check: WINDOW_LOG_CHECK,
+      severity: "warning",
+      detail: `${DISPATCH_WINDOWS_FILE} exists but could not be inspected, so overlap detection is reading a file this check cannot see`,
+      remediation: `Check the permissions on ${(0, import_node_path8.dirname)(DISPATCH_WINDOWS_FILE)}. Nothing is gated by this log \u2014 a delivery that cannot read it still runs, its receipt just says less.`
+    }];
+  }
+  const now = opts.now ?? /* @__PURE__ */ new Date();
+  const { windows, degraded } = readDispatchWindows(repoRoot);
+  const plan = compactDispatchWindows(repoRoot, { now, dryRun: true });
+  const findings = [];
+  if (degraded) {
+    findings.push({
+      check: WINDOW_LOG_CHECK,
+      severity: "warning",
+      detail: `${DISPATCH_WINDOWS_FILE} carries ${plan.unreadableRowsDropped > 0 ? `${plan.unreadableRowsDropped} ` : ""}row(s) no reader can use \u2014 a torn append, a blank line, or a close whose open the log never saw. The log is append-only, so this does not heal: every receipt written from now on carries a \`concurrent_write\` stamp naming \`<window log unreadable>\`, which says the list of deliveries that overlapped it is a floor rather than the set`,
+      remediation: `${COMPACT_COMMAND} rewrites the log without the unusable rows and keeps every open window. Nothing else clears it \u2014 no dispatch rewrites this file, so the torn row and the stamp it causes stay until something does.`
+    });
+  }
+  const stale = windows.filter((w) => w.endedAt == null && now.getTime() - Date.parse(w.startedAt) > OPEN_WINDOW_STALE_MS).sort((a, b) => a.startedAt < b.startedAt ? -1 : a.startedAt > b.startedAt ? 1 : 0);
+  if (stale.length > 0) {
+    const shown = stale.slice(0, 5).map((w) => `"${w.dispatchId}" (${w.kind}, ${w.workspaceMode}, open since ${w.startedAt})`);
+    const rest = stale.length > shown.length ? `, +${stale.length - shown.length} more` : "";
+    findings.push({
+      check: WINDOW_LOG_CHECK,
+      severity: "warning",
+      detail: `${stale.length} write window(s) have been open for more than ${OPEN_WINDOW_STALE_MS / 36e5} hours: ${shown.join("; ")}${rest}. A delivery that was killed never closed its window, and every later dispatch reads it as a live writer \u2014 so they auto-isolate into their own worktrees when they did not need to`,
+      remediation: `Nothing closes these automatically, and nothing here decides whether the delivery is alive \u2014 that question is what the writer lease died of. The cost of leaving them is a worktree per dispatch, never a refusal. To close one, give it a terminal receipt: \`fadeno dispatch-close <id>\` for a runless host dispatch, \`fadeno dispatch-fail <run> <dispatch-id> --reason <text>\` inside a run. ${COMPACT_COMMAND} will NOT drop them: an open window is the auto-isolate signal.`
+    });
+  }
+  if (bytes >= WINDOW_LOG_COMPACT_BYTES && plan.rowsDropped > 0) {
+    findings.push({
+      check: WINDOW_LOG_CHECK,
+      severity: "warning",
+      detail: `${DISPATCH_WINDOWS_FILE} is ${describeBytes(bytes)} across ${plan.rowsBefore} rows, of which ${plan.rowsDropped} can be dropped (${plan.windowsDropped} closed window(s) whose interval can no longer meet anything). The whole file is re-read on every dispatch terminal and every auto-isolate decision`,
+      remediation: `${COMPACT_COMMAND}. A dispatch terminal also compacts on its own past ${describeBytes(WINDOW_LOG_COMPACT_BYTES)}, so a log this size means nothing has closed a window since it grew.`
+    });
+  }
+  if (findings.length === 0) {
+    const open = windows.filter((w) => w.endedAt == null).length;
+    findings.push({
+      check: WINDOW_LOG_CHECK,
+      severity: "ok",
+      detail: `${DISPATCH_WINDOWS_FILE} reads clean: ${windows.length} window(s), ${open} still open, ${describeBytes(bytes)}`
+    });
+  }
+  return findings;
 }
 function openWindowsOtherThan(repoRoot, dispatchId) {
   return readDispatchWindows(repoRoot).windows.filter((w) => w.endedAt == null && w.dispatchId !== dispatchId).sort((a, b) => a.startedAt < b.startedAt ? -1 : a.startedAt > b.startedAt ? 1 : 0);
@@ -18724,7 +18985,7 @@ function listArtifacts(runDir) {
 // src/lib/run-ledger-write.ts
 var import_node_fs10 = require("node:fs");
 var import_node_path10 = require("node:path");
-var import_node_crypto3 = require("node:crypto");
+var import_node_crypto4 = require("node:crypto");
 var import_yaml5 = __toESM(require_dist(), 1);
 var LedgerWriteError = class extends Error {
 };
@@ -18781,7 +19042,7 @@ function withRunLock(runDir, action) {
 }
 function writeRunDocument(runDir, document) {
   const target = (0, import_node_path10.join)(runDir, "run.yaml");
-  const tmp = `${target}.tmp-${process.pid}-${(0, import_node_crypto3.randomUUID)()}`;
+  const tmp = `${target}.tmp-${process.pid}-${(0, import_node_crypto4.randomUUID)()}`;
   (0, import_node_fs10.writeFileSync)(tmp, `${RUN_YAML_MODELINE}
 ${(0, import_yaml5.stringify)(document)}`, "utf8");
   try {
@@ -18858,11 +19119,11 @@ function scanLastSeq(eventsPath) {
 var import_node_fs13 = require("node:fs");
 var import_node_path13 = require("node:path");
 var import_node_child_process5 = require("node:child_process");
-var import_node_crypto5 = require("node:crypto");
+var import_node_crypto6 = require("node:crypto");
 
 // src/lib/workspace-isolation.ts
 var import_node_fs11 = require("node:fs");
-var import_node_crypto4 = require("node:crypto");
+var import_node_crypto5 = require("node:crypto");
 var import_node_path11 = require("node:path");
 var import_node_child_process3 = require("node:child_process");
 var WorkspaceIsolationError = class extends Error {
@@ -19191,7 +19452,7 @@ function collectIsolatedDiff(opts) {
     throw new WorkspaceIsolationError(`could not collect isolated worktree diff: ${reason.slice(0, ISOLATED_DIFF_MAX_NOTE)}`);
   }
   const diffContent = Buffer.from(diffRes.stdout ?? []);
-  const tmp = `${opts.diffAbs}.tmp-${process.pid}-${(0, import_node_crypto4.randomUUID)()}`;
+  const tmp = `${opts.diffAbs}.tmp-${process.pid}-${(0, import_node_crypto5.randomUUID)()}`;
   (0, import_node_fs11.writeFileSync)(tmp, diffContent);
   try {
     (0, import_node_fs11.renameSync)(tmp, opts.diffAbs);
@@ -19677,7 +19938,7 @@ function writeStateAtomic(repoRoot, state) {
   const rel = hostWorkspaceStatePath(state.run, state.dispatch_id);
   const abs = assertHostPathSafe(repoRoot, rel);
   (0, import_node_fs13.mkdirSync)((0, import_node_path13.dirname)(abs), { recursive: true });
-  const tmp = `${abs}.tmp-${process.pid}-${(0, import_node_crypto5.randomUUID)()}`;
+  const tmp = `${abs}.tmp-${process.pid}-${(0, import_node_crypto6.randomUUID)()}`;
   (0, import_node_fs13.writeFileSync)(tmp, `${JSON.stringify(state, null, 2)}
 `, "utf8");
   try {
@@ -20446,7 +20707,7 @@ function settleHostOverlap(opts) {
   };
 }
 function writeArtifactAtomic(path, bytes) {
-  const temporary = `${path}.tmp-${process.pid}-${(0, import_node_crypto6.randomUUID)()}`;
+  const temporary = `${path}.tmp-${process.pid}-${(0, import_node_crypto7.randomUUID)()}`;
   try {
     (0, import_node_fs14.writeFileSync)(temporary, bytes, { flag: "wx" });
     (0, import_node_fs14.renameSync)(temporary, path);
@@ -22354,7 +22615,7 @@ function retainExecutorStderr(opts) {
   const abs = (0, import_node_path16.join)(opts.repoRoot, ...opts.rel.split("/"));
   try {
     (0, import_node_fs16.mkdirSync)((0, import_node_path16.dirname)(abs), { recursive: true });
-    const tmp = `${abs}.tmp-${process.pid}-${(0, import_node_crypto7.randomUUID)()}`;
+    const tmp = `${abs}.tmp-${process.pid}-${(0, import_node_crypto8.randomUUID)()}`;
     (0, import_node_fs16.writeFileSync)(tmp, body, "utf8");
     try {
       (0, import_node_fs16.renameSync)(tmp, abs);
@@ -22783,7 +23044,7 @@ ${prompt}`;
     briefApplied = briefName;
     opts.onEcho?.(`brief: ${briefName} (${(0, import_node_path16.relative)(repoRoot, briefPath) || briefPath}) composed ahead of the task`);
   }
-  const dispatchId = (0, import_node_crypto7.randomUUID)();
+  const dispatchId = (0, import_node_crypto8.randomUUID)();
   const now = opts.now ?? /* @__PURE__ */ new Date();
   const relay = readRelayAttestation(repoRoot, callerPrompt, now);
   const relayAttested = relay.verdict;
@@ -23040,8 +23301,8 @@ ${DISPATCH_RESULT_FOOTER}`;
     const shadowExecutorNameInner = pairCandidate.executorName;
     const shadowSourceTag = pairCandidate.sourceTag;
     const shadowNow = /* @__PURE__ */ new Date();
-    const shadowDispatchId = (0, import_node_crypto7.randomUUID)();
-    const pairId = (0, import_node_crypto7.randomUUID)();
+    const shadowDispatchId = (0, import_node_crypto8.randomUUID)();
+    const pairId = (0, import_node_crypto8.randomUUID)();
     const shadowId8 = shadowDispatchId.slice(0, 8);
     const shadowOutputRel = (0, import_node_path16.join)(".fadeno", "local", "outputs", `shadow-${shadowId8}.md`).split("\\").join("/");
     const shadowOutputAbs = (0, import_node_path16.join)(repoRoot, shadowOutputRel);
@@ -23739,7 +24000,7 @@ ${truncatedStderr}
         const diagRel = (0, import_node_path16.join)(".fadeno", "local", "outputs", "diagnostics", `dispatch-${dispatchId}.log`).split("\\").join("/");
         const diagAbs = (0, import_node_path16.join)(repoRoot, diagRel);
         (0, import_node_fs16.mkdirSync)((0, import_node_path16.join)(repoRoot, ".fadeno", "local", "outputs", "diagnostics"), { recursive: true });
-        const tmp = `${diagAbs}.tmp-${process.pid}-${(0, import_node_crypto7.randomUUID)()}`;
+        const tmp = `${diagAbs}.tmp-${process.pid}-${(0, import_node_crypto8.randomUUID)()}`;
         (0, import_node_fs16.writeFileSync)(tmp, content, "utf8");
         try {
           (0, import_node_fs16.renameSync)(tmp, diagAbs);
@@ -24348,7 +24609,7 @@ function parseTraitSection(body) {
 }
 
 // src/commands/dispatch-adhoc.ts
-var import_node_crypto8 = require("node:crypto");
+var import_node_crypto9 = require("node:crypto");
 var import_node_fs18 = require("node:fs");
 var import_node_path18 = require("node:path");
 var DispatchAdhocError = class extends Error {
@@ -24488,7 +24749,7 @@ function runDispatchOpen(opts = {}) {
   }
   const archetype = opts.archetype?.trim() || null;
   const note = opts.note?.trim() || null;
-  const dispatchId = (0, import_node_crypto8.randomUUID)();
+  const dispatchId = (0, import_node_crypto9.randomUUID)();
   let prepared;
   try {
     prepared = prepareHostWorkspace({ repoRoot, run: ADHOC_HOST_SCOPE, dispatchId, now });
@@ -26676,13 +26937,13 @@ function runDiagram(opts) {
 
 // src/commands/drive.ts
 var import_node_child_process9 = require("node:child_process");
-var import_node_crypto11 = require("node:crypto");
+var import_node_crypto12 = require("node:crypto");
 var import_node_fs25 = require("node:fs");
 var import_node_path26 = require("node:path");
 var import_yaml11 = __toESM(require_dist(), 1);
 
 // src/lib/node-instance.ts
-var import_node_crypto9 = require("node:crypto");
+var import_node_crypto10 = require("node:crypto");
 var NodeInstanceError = class extends Error {
 };
 var STEP = /^[a-z0-9][a-z0-9_]*$/;
@@ -26798,7 +27059,7 @@ function nodeInstanceArtifactScope(id) {
   }).join("/")}`;
 }
 function digestId(prefix, parts) {
-  const digest4 = (0, import_node_crypto9.createHash)("sha256").update(parts.join("\0")).digest("hex").slice(0, 20);
+  const digest4 = (0, import_node_crypto10.createHash)("sha256").update(parts.join("\0")).digest("hex").slice(0, 20);
   return `${prefix}-${digest4}`;
 }
 function stepExecutionIdFor(nodeInstance) {
@@ -28481,7 +28742,7 @@ function runRun(opts) {
 // src/lib/tool-exec.ts
 var import_node_fs24 = require("node:fs");
 var import_node_path25 = require("node:path");
-var import_node_crypto10 = require("node:crypto");
+var import_node_crypto11 = require("node:crypto");
 var import_node_child_process8 = require("node:child_process");
 
 // src/lib/run-scope.ts
@@ -28634,7 +28895,7 @@ function pathNamedByLedger(events, rel) {
 function placeBytesExclusive(runDir, rel, contents, events) {
   const abs = (0, import_node_path25.join)(runDir, rel);
   (0, import_node_fs24.mkdirSync)((0, import_node_path25.dirname)(abs), { recursive: true });
-  const tmp = `${abs}.tmp-${(0, import_node_crypto10.randomUUID)()}`;
+  const tmp = `${abs}.tmp-${(0, import_node_crypto11.randomUUID)()}`;
   (0, import_node_fs24.writeFileSync)(tmp, contents, "utf8");
   try {
     (0, import_node_fs24.linkSync)(tmp, abs);
@@ -28654,7 +28915,7 @@ function placeBytesExclusive(runDir, rel, contents, events) {
 function writeAttemptBytes(runDir, rel, contents) {
   const abs = (0, import_node_path25.join)(runDir, rel);
   (0, import_node_fs24.mkdirSync)((0, import_node_path25.dirname)(abs), { recursive: true });
-  const tmp = `${abs}.tmp-${(0, import_node_crypto10.randomUUID)()}`;
+  const tmp = `${abs}.tmp-${(0, import_node_crypto11.randomUUID)()}`;
   (0, import_node_fs24.writeFileSync)(tmp, contents, "utf8");
   try {
     (0, import_node_fs24.renameSync)(tmp, abs);
@@ -28765,7 +29026,7 @@ function executeToolCore(params) {
       stdout_bytes: 0,
       stderr_bytes: 0
     };
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto10.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto11.randomUUID)()}`;
     try {
       (0, import_node_fs24.writeFileSync)(tmp, JSON.stringify(initialClaim), { flag: "wx" });
       try {
@@ -29070,7 +29331,7 @@ function executeToolCore(params) {
     throw new ToolExecError(`tool "${params.toolName}" supervisor lost without report`);
   }
   {
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto10.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto11.randomUUID)()}`;
     try {
       (0, import_node_fs24.writeFileSync)(tmp, ownedClaimBody(), "utf8");
       (0, import_node_fs24.renameSync)(tmp, claimAbs);
@@ -29307,7 +29568,7 @@ function executeToolCore(params) {
     if (detailsContent != null && plannedDetailsRel != null) {
       const detailsAbs = (0, import_node_path25.join)(params.runDir, plannedDetailsRel);
       (0, import_node_fs24.mkdirSync)((0, import_node_path25.dirname)(detailsAbs), { recursive: true });
-      const tmpDetails = `${detailsAbs}.tmp-${(0, import_node_crypto10.randomUUID)()}`;
+      const tmpDetails = `${detailsAbs}.tmp-${(0, import_node_crypto11.randomUUID)()}`;
       (0, import_node_fs24.writeFileSync)(tmpDetails, detailsContent, "utf8");
       let usePlanned;
       try {
@@ -30318,7 +30579,7 @@ function beginCommandAttempt(ctx, stepId, role, generation, inBody, outputRel, a
     } else {
       session = "fresh";
       if (spec.command.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-        sessionId = (0, import_node_crypto11.randomUUID)();
+        sessionId = (0, import_node_crypto12.randomUUID)();
         argv = substituteSessionId(spec.command, sessionId);
       }
     }
@@ -30384,7 +30645,7 @@ ${repairCore}`;
       stdout_bytes: 0,
       stderr_bytes: 0
     };
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto11.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto12.randomUUID)()}`;
     try {
       (0, import_node_fs25.writeFileSync)(tmp, JSON.stringify(initialClaim), { flag: "wx" });
       (0, import_node_fs25.linkSync)(tmp, claimAbs);
@@ -30895,7 +31156,7 @@ ${truncatedStderr}
       const diagRel = (0, import_node_path26.join)(".fadeno", "local", "outputs", "diagnostics", `${ctx.runId}-${ids.actorCallId}-a${attempt}.log`).split("\\").join("/");
       const diagAbs = (0, import_node_path26.join)(ctx.repoRoot, diagRel);
       (0, import_node_fs25.mkdirSync)((0, import_node_path26.join)(ctx.repoRoot, ".fadeno", "local", "outputs", "diagnostics"), { recursive: true });
-      const tmp = `${diagAbs}.tmp-${process.pid}-${(0, import_node_crypto11.randomUUID)()}`;
+      const tmp = `${diagAbs}.tmp-${process.pid}-${(0, import_node_crypto12.randomUUID)()}`;
       (0, import_node_fs25.writeFileSync)(tmp, content, "utf8");
       try {
         (0, import_node_fs25.renameSync)(tmp, diagAbs);
@@ -32827,7 +33088,7 @@ var import_node_os3 = require("node:os");
 var import_node_path31 = require("node:path");
 
 // src/lib/omp-steering.ts
-var import_node_crypto12 = require("node:crypto");
+var import_node_crypto13 = require("node:crypto");
 var import_node_fs28 = require("node:fs");
 var import_node_path29 = require("node:path");
 var OMP_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
@@ -32835,7 +33096,7 @@ var OMP_PROJECT_EXTENSION_ENTRY = "./.omp/extensions/fadeno-steering.ts";
 var AGENT_MARK = /<!-- fadeno:managed version=([^\s]+) digest=([0-9a-f]{64}) -->/;
 var EXTENSION_MARK = /^\/\/ fadeno:managed version=([^\s]+)(?: digest=([0-9a-f]{64}))?$/m;
 function digest(text2) {
-  return (0, import_node_crypto12.createHash)("sha256").update(text2).digest("hex");
+  return (0, import_node_crypto13.createHash)("sha256").update(text2).digest("hex");
 }
 function missing(path) {
   return { path, present: false, managed: false, valid: false, version: null, digest: null, digestValid: null, stale: false };
@@ -32959,7 +33220,7 @@ function inspectOmpMaterialization(repoRoot, expected) {
 }
 
 // src/lib/codex-agent-file.ts
-var import_node_crypto13 = require("node:crypto");
+var import_node_crypto14 = require("node:crypto");
 var import_node_fs29 = require("node:fs");
 var import_node_path30 = require("node:path");
 var CODEX_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
@@ -32971,7 +33232,7 @@ function codexManagedBody(text2) {
   return headerEnd < 0 ? "" : text2.slice(headerEnd + 1);
 }
 function codexManagedDigest(body) {
-  return (0, import_node_crypto13.createHash)("sha256").update(body).digest("hex");
+  return (0, import_node_crypto14.createHash)("sha256").update(body).digest("hex");
 }
 function stampCodexManagedAgent(body, version) {
   return `${CODEX_MANAGED_MARK} version=${version} digest=${codexManagedDigest(body)}
@@ -34858,7 +35119,7 @@ var import_node_path34 = require("node:path");
 var import_yaml12 = __toESM(require_dist(), 1);
 
 // src/lib/installations.ts
-var import_node_crypto14 = require("node:crypto");
+var import_node_crypto15 = require("node:crypto");
 var import_node_fs32 = require("node:fs");
 var import_node_path33 = require("node:path");
 var InstallationError = class extends Error {
@@ -34903,7 +35164,7 @@ function writeInstallationManifest(paths, manifest) {
   (0, import_node_fs32.renameSync)(tmp, paths.installationsFile);
 }
 function fileDigest(path) {
-  return (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs32.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto15.createHash)("sha256").update((0, import_node_fs32.readFileSync)(path)).digest("hex");
 }
 var VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/;
 function compareFadenoVersions(a, b) {
@@ -40473,7 +40734,7 @@ var COMMANDS = {
   doctor: command({ "--codex": NONE, "--claude": NONE, "--opencode": NONE, "--omp": NONE, "--probe-models": NONE, "--json": NONE }),
   vendor: command({ "--codex": NONE, "--claude": NONE, "--grok": NONE, "--opencode": NONE, "--omp": NONE, "--with-hooks": NONE, "--no-steering": NONE, "--force": NONE }),
   uninstall: command({ "--codex": NONE, "--claude": NONE, "--all": NONE, "--purge-user-data": NONE, "--force": NONE }),
-  clean: command({ "--force": NONE }),
+  clean: command({ "--force": NONE, "--windows": NONE }),
   unvendor: command({ "--force": NONE }),
   evidence: command({}, ["free"], { promote: command({}, ["run"]) }),
   init: command({
@@ -41171,7 +41432,7 @@ function runShadowApply(opts) {
 
 // src/commands/bakeoff.ts
 var import_node_child_process14 = require("node:child_process");
-var import_node_crypto15 = require("node:crypto");
+var import_node_crypto16 = require("node:crypto");
 var import_node_fs44 = require("node:fs");
 var import_node_path44 = require("node:path");
 var import_ajv2 = __toESM(require_ajv(), 1);
@@ -41952,7 +42213,7 @@ function adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts) {
   const evidenceMode = opts.evidence ?? "inlined";
   const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
   const pairId8 = measurement.pairId.slice(0, 8);
-  const judgeRun = (0, import_node_crypto15.randomUUID)().slice(0, 8);
+  const judgeRun = (0, import_node_crypto16.randomUUID)().slice(0, 8);
   const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeHarness: opts.judgeHarness ?? null, now: opts.now };
   const comparisonResult = dispatchJudge(prepared.comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}-${judgeRun}` });
   const comparisonParsed = extractJsonObject(comparisonResult.stdout);
@@ -42303,7 +42564,7 @@ function runDispatchWithdraw(opts) {
 // src/commands/tool-complete.ts
 var import_node_fs46 = require("node:fs");
 var import_node_path47 = require("node:path");
-var import_node_crypto16 = require("node:crypto");
+var import_node_crypto17 = require("node:crypto");
 var ToolCompleteError = class extends Error {
 };
 function runToolComplete(opts) {
@@ -42387,7 +42648,7 @@ function runToolComplete(opts) {
   {
     const nowIso = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
     const claim = { pid: process.pid, supervisor_pid: process.pid, executor_pid: null, process_group_id: null, started_at: nowIso, heartbeat_at: nowIso, last_output_at: null, stdout_bytes: 0, stderr_bytes: 0 };
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto16.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto17.randomUUID)()}`;
     try {
       (0, import_node_fs46.writeFileSync)(tmp, JSON.stringify(claim), { flag: "wx" });
       (0, import_node_fs46.linkSync)(tmp, claimAbs);
@@ -42466,7 +42727,7 @@ function runToolComplete(opts) {
 // src/commands/tool-run.ts
 var import_node_fs47 = require("node:fs");
 var import_node_path48 = require("node:path");
-var import_node_crypto17 = require("node:crypto");
+var import_node_crypto18 = require("node:crypto");
 var import_yaml21 = __toESM(require_dist(), 1);
 var ToolRunError = class extends Error {
 };
@@ -42520,7 +42781,7 @@ function ensureProfileSnapshot2(repoRoot, runDir, _runId, now, userPathOptions, 
   }
   const extraRefs = [...Object.values(liveLayers.session), ...Object.values(liveLayers.repo), ...Object.values(liveLayers.user), ...Object.values(liveProfile.bindings), ...bindRefs];
   const text2 = serializeSnapshot(liveProfile, extraRefs, roleArchetypes);
-  const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto17.randomUUID)()}`;
+  const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto18.randomUUID)()}`;
   (0, import_node_fs47.writeFileSync)(tmp, text2, "utf8");
   try {
     (0, import_node_fs47.renameSync)(tmp, snapshotPath);
@@ -43744,14 +44005,14 @@ var import_node_fs51 = require("node:fs");
 var import_node_path52 = require("node:path");
 
 // src/lib/opencode-steering.ts
-var import_node_crypto18 = require("node:crypto");
+var import_node_crypto19 = require("node:crypto");
 var import_node_fs50 = require("node:fs");
 var import_node_path51 = require("node:path");
 var OPENCODE_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
 var AGENT_MARK2 = /<!-- fadeno:managed version=([^\s]+) digest=([0-9a-f]{64}) -->/;
 var PLUGIN_MARK = /^\/\/ fadeno:managed version=([^\s]+)(?: digest=([0-9a-f]{64}))?$/m;
 function digest2(text2) {
-  return (0, import_node_crypto18.createHash)("sha256").update(text2).digest("hex");
+  return (0, import_node_crypto19.createHash)("sha256").update(text2).digest("hex");
 }
 function missing2(path) {
   return {
@@ -44705,11 +44966,12 @@ function runDoctor(opts = {}) {
       findings.push(finding2("workspace-lease", "warning", vestigial.detail, vestigial.remediation));
     }
   }
+  findings.push(...dispatchWindowLogFindings(repoRoot));
   return { repoRoot, findings, ok: findings.every((item) => item.severity !== "error") };
 }
 
 // src/commands/vendor.ts
-var import_node_crypto19 = require("node:crypto");
+var import_node_crypto20 = require("node:crypto");
 var import_node_fs53 = require("node:fs");
 var import_node_path54 = require("node:path");
 function makeVendoredCodexAgentsTrackable(repoRoot) {
@@ -44729,7 +44991,7 @@ function digestTree(root) {
     for (const entry of (0, import_node_fs53.readdirSync)(dir, { withFileTypes: true })) {
       const full = (0, import_node_path54.join)(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.isFile()) files[(0, import_node_path54.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto19.createHash)("sha256").update((0, import_node_fs53.readFileSync)(full)).digest("hex");
+      else if (entry.isFile()) files[(0, import_node_path54.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto20.createHash)("sha256").update((0, import_node_fs53.readFileSync)(full)).digest("hex");
     }
   }
   walk(root);
@@ -44742,7 +45004,7 @@ function ownedVendoredFiles(repoRoot, init) {
     if (result.status !== "created" && result.status !== "overwritten") continue;
     const rel = (0, import_node_path54.relative)(repoRoot, result.path).split("\\").join("/");
     if (shared.has(rel) || rel.startsWith("../") || !(0, import_node_fs53.existsSync)(result.path)) continue;
-    owned[rel] = (0, import_node_crypto19.createHash)("sha256").update((0, import_node_fs53.readFileSync)(result.path)).digest("hex");
+    owned[rel] = (0, import_node_crypto20.createHash)("sha256").update((0, import_node_fs53.readFileSync)(result.path)).digest("hex");
   }
   return owned;
 }
@@ -44772,13 +45034,13 @@ function runVendor(opts) {
 }
 
 // src/commands/evidence.ts
-var import_node_crypto20 = require("node:crypto");
+var import_node_crypto21 = require("node:crypto");
 var import_node_fs54 = require("node:fs");
 var import_node_path55 = require("node:path");
 var EvidenceError = class extends Error {
 };
 function sha256(path) {
-  return (0, import_node_crypto20.createHash)("sha256").update((0, import_node_fs54.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto21.createHash)("sha256").update((0, import_node_fs54.readFileSync)(path)).digest("hex");
 }
 function copyOne(source, destination, rel, files) {
   if ((0, import_node_fs54.existsSync)(destination)) {
@@ -44956,6 +45218,10 @@ var import_node_child_process16 = require("node:child_process");
 var import_node_fs56 = require("node:fs");
 var import_node_path57 = require("node:path");
 var LOCAL_DIR = ".fadeno/local";
+function runCleanWindows(opts = {}) {
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  return { repoRoot, compaction: compactDispatchWindows(repoRoot) };
+}
 function runClean(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const candidates = [
@@ -45002,13 +45268,13 @@ function runClean(opts = {}) {
 }
 
 // src/commands/unvendor.ts
-var import_node_crypto21 = require("node:crypto");
+var import_node_crypto22 = require("node:crypto");
 var import_node_fs57 = require("node:fs");
 var import_node_path58 = require("node:path");
 var UnvendorError = class extends Error {
 };
 function digest3(path) {
-  return (0, import_node_crypto21.createHash)("sha256").update((0, import_node_fs57.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto22.createHash)("sha256").update((0, import_node_fs57.readFileSync)(path)).digest("hex");
 }
 function runUnvendor(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
@@ -45212,7 +45478,12 @@ var TOP_LEVEL = {
     "fadeno uninstall --codex|--claude|--all [options]",
     "fadeno uninstall --purge-user-data --force [--codex|--claude|--all]"
   ]),
-  clean: page("Preview or remove ignored repository runtime state.", "fadeno clean [--force]"),
+  clean: page("Preview or remove ignored repository runtime state.", [
+    "fadeno clean [--force]",
+    "fadeno clean --windows"
+  ], [
+    "--windows deletes nothing: it compacts .fadeno/local/dispatch-windows.jsonl, dropping torn rows and closed windows that can no longer overlap anything, and keeping every open one. Use it when doctor reports the write-window log degraded \u2014 `--force` would delete that log along with the open windows of deliveries writing right now."
+  ]),
   unvendor: page("Remove lock-owned vendored files.", "fadeno unvendor [--force]"),
   evidence: page("Promote a verified run receipt.", "fadeno evidence promote <run>"),
   init: page("Scaffold project-owned Fadeno capability.", "fadeno init --codex|--claude|--grok|--opencode|--omp [options]"),
@@ -45482,7 +45753,7 @@ var PAGE_OPTIONS = {
   doctor: withGlobals("--codex", "--claude", "--opencode", "--omp", "--probe-models", "--json"),
   vendor: withGlobals("--codex", "--claude", "--grok", "--opencode", "--omp", "--no-steering", "--force"),
   uninstall: withGlobals("--codex", "--claude", "--all", "--purge-user-data", "--force"),
-  clean: withGlobals("--force"),
+  clean: withGlobals("--force", "--windows"),
   unvendor: withGlobals("--force"),
   evidence: withGlobals(),
   init: withGlobals("--codex", "--claude", "--grok", "--opencode", "--omp", "--with-hooks", "--with-steering", "--no-steering", "--data-only", "--force"),
@@ -45541,7 +45812,10 @@ var PAGE_OPTIONS = {
   "completion bash": withGlobals()
 };
 var PATH_OPTION_HINTS = {
-  clean: { "--force": "Remove ignored runtime state" },
+  clean: {
+    "--force": "Remove ignored runtime state",
+    "--windows": "Compact the write-window log instead; deletes nothing, keeps every open window"
+  },
   unvendor: { "--force": "Also remove modified lock-owned files" },
   uninstall: { "--force": "Required with --purge-user-data; confirms removal" },
   vendor: { "--force": "Overwrite managed vendored files" },
@@ -46616,6 +46890,7 @@ function main(argv) {
         json: { type: "boolean" },
         "probe-models": { type: "boolean" },
         "agent-id": { type: "string" },
+        windows: { type: "boolean" },
         workspace: { type: "string" },
         branch: { type: "string" },
         file: { type: "string" },
@@ -46777,6 +47052,18 @@ function main(argv) {
       return result.preserved.length === 0 ? 0 : 2;
     }
     case "clean": {
+      if (values.windows) {
+        const { compaction } = runCleanWindows();
+        if (!compaction.compacted) {
+          console.log(`${compaction.path}: nothing compacted \u2014 ${compaction.skipped ?? "no reason recorded"}`);
+          return 0;
+        }
+        console.log(
+          `compacted ${compaction.path}: ${compaction.rowsBefore} rows \u2192 ${compaction.rowsBefore - compaction.rowsDropped + compaction.rowsDrained} (${compaction.unreadableRowsDropped} unreadable, ${compaction.windowsDropped} closed window(s) past overlap, ${compaction.openWindowsKept} open window(s) kept)`
+        );
+        console.log(`  ${compaction.bytesBefore} \u2192 ${compaction.bytesAfter} bytes`);
+        return 0;
+      }
       const result = runClean({ force: values.force });
       const paths = result.dryRun ? result.candidates : result.removed;
       for (const path of paths) console.log(`${result.dryRun ? "would remove" : "removed"} ${path}`);

@@ -3,6 +3,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { findRepoRoot } from '../lib/paths.ts';
 import { listRegisteredWorktreesUnder } from '../lib/workspace-isolation.ts';
+import { compactDispatchWindows, type WindowLogCompaction } from '../lib/workspace-overlap.ts';
 import { listRetainedShadowWorktrees } from './dispatches.ts';
 
 /**
@@ -16,6 +17,29 @@ import { listRetainedShadowWorktrees } from './dispatches.ts';
 const LOCAL_DIR = '.fadeno/local';
 
 export interface CleanOptions { cwd?: string; repoRoot?: string; force?: boolean }
+
+export interface CleanWindowsResult { repoRoot: string; compaction: WindowLogCompaction }
+
+/**
+ * `fadeno clean --windows` — compact the write-window log, delete nothing else.
+ *
+ * A separate entry point rather than a flag on `runClean`, because it is the
+ * OPPOSITE of what `runClean --force` does to the same file. `.fadeno/local` is
+ * one of `runClean`'s candidates, so `--force` deletes the window log outright,
+ * along with every retained shadow worktree and every run ledger. That is the
+ * right sledgehammer for "reclaim this repo's runtime state" and the wrong one
+ * for "one row in a machine-local log is torn": deleting the log also deletes
+ * the OPEN windows in it, which un-isolates deliveries that are writing right
+ * now — the one thing `compactDispatchWindows` refuses to do.
+ *
+ * So this mode takes no `--force`. It removes only rows that can no longer say
+ * anything to anyone, it is a no-op when there are none, and it is what
+ * `doctor` names when it finds a degraded log.
+ */
+export function runCleanWindows(opts: { cwd?: string; repoRoot?: string } = {}): CleanWindowsResult {
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  return { repoRoot, compaction: compactDispatchWindows(repoRoot) };
+}
 export interface CleanResult {
   repoRoot: string;
   candidates: string[];

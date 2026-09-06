@@ -108,7 +108,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   doctor: command({ '--codex': NONE, '--claude': NONE, '--opencode': NONE, '--omp': NONE, '--probe-models': NONE, '--json': NONE }),
   vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--opencode': NONE, '--omp': NONE, '--with-hooks': NONE, '--no-steering': NONE, '--force': NONE }),
   uninstall: command({ '--codex': NONE, '--claude': NONE, '--all': NONE, '--purge-user-data': NONE, '--force': NONE }),
-  clean: command({ '--force': NONE }),
+  clean: command({ '--force': NONE, '--windows': NONE }),
   unvendor: command({ '--force': NONE }),
   evidence: command({}, ['free'], { promote: command({}, ['run']) }),
   init: command({

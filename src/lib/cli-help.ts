@@ -64,7 +64,12 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     'fadeno uninstall --codex|--claude|--all [options]',
     'fadeno uninstall --purge-user-data --force [--codex|--claude|--all]',
   ]),
-  clean: page('Preview or remove ignored repository runtime state.', 'fadeno clean [--force]'),
+  clean: page('Preview or remove ignored repository runtime state.', [
+    'fadeno clean [--force]',
+    'fadeno clean --windows',
+  ], [
+    '--windows deletes nothing: it compacts .fadeno/local/dispatch-windows.jsonl, dropping torn rows and closed windows that can no longer overlap anything, and keeping every open one. Use it when doctor reports the write-window log degraded — `--force` would delete that log along with the open windows of deliveries writing right now.',
+  ]),
   unvendor: page('Remove lock-owned vendored files.', 'fadeno unvendor [--force]'),
   evidence: page('Promote a verified run receipt.', 'fadeno evidence promote <run>'),
   init: page('Scaffold project-owned Fadeno capability.', 'fadeno init --codex|--claude|--grok|--opencode|--omp [options]'),
@@ -248,7 +253,7 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   doctor: withGlobals('--codex', '--claude', '--opencode', '--omp', '--probe-models', '--json'),
   vendor: withGlobals('--codex', '--claude', '--grok', '--opencode', '--omp', '--no-steering', '--force'),
   uninstall: withGlobals('--codex', '--claude', '--all', '--purge-user-data', '--force'),
-  clean: withGlobals('--force'),
+  clean: withGlobals('--force', '--windows'),
   unvendor: withGlobals('--force'),
   evidence: withGlobals(),
   init: withGlobals('--codex', '--claude', '--grok', '--opencode', '--omp', '--with-hooks', '--with-steering', '--no-steering', '--data-only', '--force'),
@@ -308,7 +313,10 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
 };
 
 const PATH_OPTION_HINTS: Record<string, Record<string, string>> = {
-  clean: { '--force': 'Remove ignored runtime state' },
+  clean: {
+    '--force': 'Remove ignored runtime state',
+    '--windows': 'Compact the write-window log instead; deletes nothing, keeps every open window',
+  },
   unvendor: { '--force': 'Also remove modified lock-owned files' },
   uninstall: { '--force': 'Required with --purge-user-data; confirms removal' },
   vendor: { '--force': 'Overwrite managed vendored files' },

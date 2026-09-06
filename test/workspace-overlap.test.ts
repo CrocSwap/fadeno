@@ -1,21 +1,25 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
   changedBetween,
   closeDispatchWindow,
+  compactDispatchWindows,
   detectConcurrentWrites,
   diffChangedPaths,
+  dispatchWindowLogFindings,
   DISPATCH_WINDOWS_FILE,
   openDispatchWindow,
   openWindowsOtherThan,
   readDispatchWindows,
   shouldAutoIsolate,
+  WINDOW_LOG_COMPACT_BYTES,
   WINDOW_MAX_PATHS,
   workspaceStatusMap,
 } from '../src/lib/workspace-overlap.ts';
+import { runCleanWindows } from '../src/commands/clean.ts';
 import {
   concurrentWriteStrength,
   describeConcurrentWrite,
@@ -358,6 +362,266 @@ test('diffChangedPaths reads a collected diff without needing its worktree', (t)
   writeFileSync(diffAbs, patch);
   assert.deepEqual(diffChangedPaths(root, diffAbs), ['a.txt']);
   assert.equal(diffChangedPaths(root, join(root, 'missing.diff')), null, 'a patch that cannot be read is unknown, not empty');
+});
+
+// ---------------------------------------------------------------------------
+// Compaction. Append-only is how the log stays lock-free, not a licence to
+// grow forever — and one torn line used to poison every later receipt in the
+// repo, permanently and silently, because nothing ever rewrote the file.
+// ---------------------------------------------------------------------------
+
+function opened(id: string, at: string, over: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    event: 'window_opened',
+    dispatch_id: id,
+    run_id: null,
+    kind: 'ad-hoc',
+    workspace_mode: 'shared',
+    started_at: at,
+    ...over,
+  });
+}
+
+function closed(id: string, at: string, paths: string[] = []): string {
+  return JSON.stringify({ event: 'window_closed', dispatch_id: id, ended_at: at, changed_paths: paths, truncated: false });
+}
+
+/** Write a window log verbatim. `trailingNewline: false` leaves a torn last line. */
+function writeWindowLog(root: string, lines: string[], opts: { trailingNewline?: boolean } = {}): void {
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  const text = lines.join('\n') + (opts.trailingNewline === false ? '' : '\n');
+  writeFileSync(join(root, DISPATCH_WINDOWS_FILE), text, 'utf8');
+}
+
+test('compaction drops a torn line and the log reads clean afterwards', (t) => {
+  const root = tempRepo(t);
+  // The exact shape an interrupted append leaves: a fragment glued to whatever
+  // was appended next, so ONE line that parses as nothing.
+  writeWindowLog(root, [
+    opened('d1', '2026-09-06T10:00:00.000Z'),
+    closed('d1', '2026-09-06T10:05:00.000Z', ['src/a.ts']),
+    `{"event":"window_clos${opened('d2', '2026-09-06T10:06:00.000Z')}`,
+    opened('d3', '2026-09-06T10:07:00.000Z'),
+  ]);
+  assert.equal(readDispatchWindows(root).degraded, true, 'precondition: the log is poisoned');
+
+  // A retention far longer than the log's age, so the ONLY thing compaction
+  // can drop here is the unusable line — the repair, isolated from the pruning.
+  const result = compactDispatchWindows(root, {
+    now: new Date('2026-09-06T10:10:00.000Z'),
+    retentionMs: 365 * 24 * 60 * 60 * 1000,
+  });
+  assert.equal(result.compacted, true);
+  assert.equal(result.rowsDropped, 1);
+  assert.equal(result.unreadableRowsDropped, 1);
+  assert.equal(result.windowsDropped, 0, 'nothing aged out; only the torn row went');
+
+  const after = readDispatchWindows(root);
+  assert.equal(after.degraded, false, 'the poison is gone, so later receipts stop carrying the unreadable stamp');
+  assert.deepEqual(after.windows.map((w) => w.dispatchId), ['d1', 'd3']);
+  assert.deepEqual(after.windows[0]!.changedPaths, ['src/a.ts'], 'and the rows that survived are unchanged');
+});
+
+test('compaction never drops an open window, however old, and an open window pins everything after it', (t) => {
+  const root = tempRepo(t);
+  // A crashed writer from January. Dropping it would silently un-isolate real
+  // contention, which is the one failure this whole module exists to prevent —
+  // so it survives, and its start is the floor under everything else.
+  writeWindowLog(root, [
+    opened('leaked', '2026-01-01T00:00:00.000Z'),
+    opened('d1', '2026-09-01T10:00:00.000Z'),
+    closed('d1', '2026-09-01T10:05:00.000Z'),
+  ]);
+  const before = readFileSync(join(root, DISPATCH_WINDOWS_FILE), 'utf8');
+
+  const pinned = compactDispatchWindows(root, { now: new Date('2026-09-06T10:00:00.000Z') });
+  assert.equal(pinned.compacted, false, 'nothing may be dropped while a window opened before it is still open');
+  assert.match(pinned.skipped!, /no row that can be dropped/);
+  assert.equal(pinned.openWindowsKept, 1);
+  assert.equal(
+    readFileSync(join(root, DISPATCH_WINDOWS_FILE), 'utf8'),
+    before,
+    'a no-op does not touch the file at all — a rewrite is the only way compaction could ever tear it',
+  );
+
+  // Now the same log with the leak closed: d1 is free to go, and an open
+  // window that started AFTER d1 closed is still never dropped.
+  const root2 = tempRepo(t);
+  writeWindowLog(root2, [
+    opened('d1', '2026-09-01T10:00:00.000Z'),
+    closed('d1', '2026-09-01T10:05:00.000Z'),
+    opened('still-open', '2026-09-05T09:00:00.000Z'),
+  ]);
+  const aged = compactDispatchWindows(root2, { now: new Date('2026-09-06T10:00:00.000Z') });
+  assert.equal(aged.compacted, true);
+  assert.equal(aged.windowsDropped, 1);
+  assert.equal(aged.openWindowsKept, 1);
+  const read = readDispatchWindows(root2);
+  assert.deepEqual(read.windows.map((w) => w.dispatchId), ['still-open']);
+  assert.equal(read.windows[0]!.endedAt, null, 'and it is still the auto-isolate signal');
+  assert.equal(shouldAutoIsolate(root2, 'mine').isolate, true, 'which is the thing that must not change');
+  assert.equal(read.degraded, false, 'compaction can never turn a clean log into a degraded one');
+});
+
+test('compaction preserves the exact overlap answers the uncompacted log gave', (t) => {
+  const root = tempRepo(t);
+  const now = new Date('2026-09-06T10:00:00.000Z');
+  writeWindowLog(root, [
+    // Finished last week: it can no longer meet anything that has not already
+    // closed, and nothing recomputes a closed window's receipt.
+    opened('gone', '2026-09-01T10:00:00.000Z'),
+    closed('gone', '2026-09-01T10:30:00.000Z', ['src/a.ts']),
+    // Finished half an hour ago, inside the retention margin.
+    opened('recent', '2026-09-06T09:00:00.000Z'),
+    closed('recent', '2026-09-06T09:30:00.000Z', ['src/a.ts', 'src/b.ts']),
+    opened('live', '2026-09-06T09:15:00.000Z'),
+  ]);
+  const self = {
+    dispatchId: 'live',
+    startedAt: '2026-09-06T09:15:00.000Z',
+    endedAt: now.toISOString(),
+    workspaceMode: 'shared' as const,
+    changedPaths: ['src/b.ts'],
+  };
+  const before = detectConcurrentWrites(self, readDispatchWindows(root).windows);
+  assert.ok(before != null && before.length === 1 && before[0]!.dispatch_id === 'recent');
+
+  const result = compactDispatchWindows(root, { now });
+  assert.equal(result.compacted, true);
+  assert.equal(result.windowsDropped, 1);
+
+  const read = readDispatchWindows(root);
+  assert.equal(read.degraded, false);
+  assert.deepEqual(detectConcurrentWrites(self, read.windows), before, 'the answer a still-open delivery gets is byte-identical');
+  assert.deepEqual(read.windows.map((w) => w.dispatchId), ['recent', 'live']);
+});
+
+test('a close is matched to its open anywhere in the file, not only ahead of it', (t) => {
+  // The property compaction depends on: rows that raced the rewrite are
+  // drained back at the END, so a close can legitimately precede its own open.
+  // "No matching open" has to mean "nowhere in this file", which is what the
+  // doc comment always claimed.
+  const root = tempRepo(t);
+  writeWindowLog(root, [
+    closed('d1', '2026-09-06T10:05:00.000Z', ['src/a.ts']),
+    opened('d1', '2026-09-06T10:00:00.000Z'),
+  ]);
+  const read = readDispatchWindows(root);
+  assert.equal(read.degraded, false, 'both rows are here, so nothing is missing');
+  assert.equal(read.windows.length, 1);
+  assert.equal(read.windows[0]!.endedAt, '2026-09-06T10:05:00.000Z');
+  assert.deepEqual(read.windows[0]!.changedPaths, ['src/a.ts']);
+
+  // A close whose open is genuinely nowhere is still an orphan, still degraded.
+  const root2 = tempRepo(t);
+  writeWindowLog(root2, [closed('ghost', '2026-09-06T10:05:00.000Z')]);
+  assert.equal(readDispatchWindows(root2).degraded, true);
+  assert.equal(readDispatchWindows(root2).windows.length, 0);
+  // And compaction is what clears it.
+  assert.equal(compactDispatchWindows(root2, { now: new Date('2026-09-06T10:10:00.000Z') }).unreadableRowsDropped, 1);
+  assert.equal(readDispatchWindows(root2).degraded, false);
+});
+
+test('a dispatch terminal compacts the log once it is worth compacting', (t) => {
+  const root = tempRepo(t);
+  const padPaths = Array.from({ length: 20 }, (_, i) => `src/generated/module-${String(i).padStart(4, '0')}.ts`);
+  const lines: string[] = [];
+  let bytes = 0;
+  for (let index = 0; bytes <= WINDOW_LOG_COMPACT_BYTES; index += 1) {
+    const id = `old-${index}`;
+    const open = opened(id, '2020-01-01T00:00:00.000Z');
+    const close = closed(id, '2020-01-01T00:05:00.000Z', padPaths);
+    lines.push(open, close);
+    bytes += open.length + close.length + 2;
+  }
+  writeWindowLog(root, lines);
+  assert.ok(statSync(join(root, DISPATCH_WINDOWS_FILE)).size > WINDOW_LOG_COMPACT_BYTES, 'precondition: months of history');
+
+  openDispatchWindow(root, { dispatchId: 'now', kind: 'ad-hoc', workspaceMode: 'shared' });
+  closeDispatchWindow(root, { dispatchId: 'now', changedPaths: ['src/a.ts'] });
+
+  assert.ok(
+    statSync(join(root, DISPATCH_WINDOWS_FILE)).size < WINDOW_LOG_COMPACT_BYTES,
+    'the terminal that was already reading the whole file is what bounds it',
+  );
+  const read = readDispatchWindows(root);
+  assert.equal(read.degraded, false);
+  assert.deepEqual(read.windows.map((w) => w.dispatchId), ['now'], 'and this delivery keeps its own window');
+  assert.deepEqual(read.windows[0]!.changedPaths, ['src/a.ts']);
+});
+
+test('doctor names a degraded window log and stays quiet about a clean one', (t) => {
+  const quiet = tempRepo(t);
+  const none = dispatchWindowLogFindings(quiet);
+  assert.equal(none.length, 1);
+  assert.equal(none[0]!.severity, 'ok', 'a repo that never dispatched is not a defect');
+  assert.match(none[0]!.detail, /no write-window log yet/);
+
+  writeWindowLog(quiet, [opened('d1', '2026-09-06T09:50:00.000Z'), closed('d1', '2026-09-06T09:55:00.000Z')]);
+  const clean = dispatchWindowLogFindings(quiet, { now: new Date('2026-09-06T10:00:00.000Z') });
+  assert.equal(clean.length, 1);
+  assert.equal(clean[0]!.severity, 'ok');
+  assert.match(clean[0]!.detail, /reads clean/);
+
+  const torn = tempRepo(t);
+  writeWindowLog(torn, [
+    opened('d1', '2026-09-06T09:50:00.000Z'),
+    '{"event":"window_clos',
+  ], { trailingNewline: false });
+  const findings = dispatchWindowLogFindings(torn, { now: new Date('2026-09-06T10:00:00.000Z') });
+  const degraded = findings.find((f) => /no reader can use/.test(f.detail))!;
+  assert.ok(degraded != null, 'today this is completely silent, which is what makes it permanent');
+  assert.equal(degraded.severity, 'warning', 'not ok — and not error: this log is machine-local and never gating');
+  assert.match(degraded.detail, /append-only, so this does not heal/);
+  assert.match(degraded.remediation!, /fadeno clean --windows/);
+
+  // Through doctor itself, which is the surface a human actually meets.
+  const doctor = runDoctor({ repoRoot: torn });
+  const row = doctor.findings.find((f) => f.check === 'dispatch-window-log' && f.severity === 'warning')!;
+  assert.ok(row != null);
+  assert.equal(doctor.ok, true, 'a machine-local log must never fail doctor outright');
+});
+
+test('doctor names an implausibly old open window without deciding whether it is alive', (t) => {
+  const root = tempRepo(t);
+  writeWindowLog(root, [
+    opened('run-7:abandoned', '2026-09-01T00:00:00.000Z', { kind: 'host-dispatch' }),
+    opened('fresh', '2026-09-06T09:55:00.000Z'),
+  ]);
+  const findings = dispatchWindowLogFindings(root, { now: new Date('2026-09-06T10:00:00.000Z') });
+  const stale = findings.find((f) => /open for more than/.test(f.detail))!;
+  assert.ok(stale != null);
+  assert.equal(stale.severity, 'warning');
+  assert.match(stale.detail, /"run-7:abandoned"/);
+  assert.doesNotMatch(stale.detail, /"fresh"/, 'a window that is merely running is not a finding');
+  // The lease died of answering "is the holder alive?". Nothing here answers it.
+  assert.match(stale.remediation!, /nothing here decides whether the delivery is alive/);
+  assert.match(stale.remediation!, /will NOT drop them/);
+
+  // And compaction agrees with the remediation: the leaked window stays.
+  compactDispatchWindows(root, { now: new Date('2026-09-06T10:00:00.000Z'), retentionMs: 0 });
+  assert.deepEqual(
+    readDispatchWindows(root).windows.map((w) => w.dispatchId).sort(),
+    ['fresh', 'run-7:abandoned'],
+  );
+});
+
+test('`fadeno clean --windows` compacts without deleting, and is a no-op on a clean log', (t) => {
+  const root = tempRepo(t);
+  writeWindowLog(root, [
+    opened('gone', '2020-01-01T00:00:00.000Z'),
+    closed('gone', '2020-01-01T00:05:00.000Z'),
+    opened('live', new Date().toISOString()),
+  ]);
+  const first = runCleanWindows({ repoRoot: root });
+  assert.equal(first.compaction.compacted, true);
+  assert.equal(first.compaction.windowsDropped, 1);
+  assert.ok(first.compaction.bytesAfter < first.compaction.bytesBefore);
+  assert.deepEqual(readDispatchWindows(root).windows.map((w) => w.dispatchId), ['live']);
+
+  const second = runCleanWindows({ repoRoot: root });
+  assert.equal(second.compaction.compacted, false, 'running it twice must not rewrite anything');
+  assert.match(second.compaction.skipped!, /no row that can be dropped/);
 });
 
 test('the leftover lease file is reported as vestigial and safe to delete', (t) => {

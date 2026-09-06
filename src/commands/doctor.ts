@@ -10,6 +10,7 @@ import { loadLayeredProfile } from '../lib/config-layers.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
 import { describeVestigialWorkspaceLease } from '../lib/workspace-lease.ts';
+import { dispatchWindowLogFindings } from '../lib/workspace-overlap.ts';
 import { catalogLayerVersions, explainSuppressedBuiltin } from '../lib/config-layers.ts';
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
 import { codexUserAgentDir, readVerifiedModels, userPaths } from '../lib/user-paths.ts';
@@ -960,5 +961,10 @@ function missingBundledTemplates(pluginRoot: string): string[] {
       findings.push(finding('workspace-lease', 'warning', vestigial.detail, vestigial.remediation));
     }
   }
+  // What replaced that lease writes an append-only log nothing ever mentioned.
+  // A torn line in it degrades every receipt the repo writes from then on, and
+  // there was no surface that said the file existed, let alone that it was
+  // broken.
+  findings.push(...dispatchWindowLogFindings(repoRoot));
   return { repoRoot, findings, ok: findings.every((item) => item.severity !== 'error') };
 }

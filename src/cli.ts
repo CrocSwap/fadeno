@@ -79,7 +79,7 @@ import { runDoctor, type DoctorFinding } from './commands/doctor.ts';
 import { runVendor } from './commands/vendor.ts';
 import { runEvidencePromote } from './commands/evidence.ts';
 import { runUninstall } from './commands/uninstall.ts';
-import { runClean } from './commands/clean.ts';
+import { runClean, runCleanWindows } from './commands/clean.ts';
 import { runUnvendor } from './commands/unvendor.ts';
 import { runCancel, CancelError } from './commands/cancel.ts';
 import type { DiagramFormat } from './lib/diagram.ts';
@@ -1296,6 +1296,7 @@ function main(argv: string[]): number {
         json: { type: 'boolean' },
         'probe-models': { type: 'boolean' },
         'agent-id': { type: 'string' },
+        windows: { type: 'boolean' },
         workspace: { type: 'string' },
         branch: { type: 'string' },
         file: { type: 'string' },
@@ -1493,6 +1494,26 @@ function main(argv: string[]): number {
       return result.preserved.length === 0 ? 0 : 2;
     }
     case 'clean': {
+      // `--windows` is a mode, not a modifier: it compacts the write-window
+      // log and deletes nothing. Checked before `--force` is read, because
+      // `--force` on the ordinary path DELETES that log along with the rest of
+      // `.fadeno/local` — including the open windows of deliveries writing
+      // right now — which is the opposite of what compaction is for.
+      if (values.windows) {
+        const { compaction } = runCleanWindows();
+        if (!compaction.compacted) {
+          console.log(`${compaction.path}: nothing compacted — ${compaction.skipped ?? 'no reason recorded'}`);
+          return 0;
+        }
+        console.log(
+          `compacted ${compaction.path}: ${compaction.rowsBefore} rows → ` +
+            `${compaction.rowsBefore - compaction.rowsDropped + compaction.rowsDrained} ` +
+            `(${compaction.unreadableRowsDropped} unreadable, ${compaction.windowsDropped} closed window(s) ` +
+            `past overlap, ${compaction.openWindowsKept} open window(s) kept)`,
+        );
+        console.log(`  ${compaction.bytesBefore} → ${compaction.bytesAfter} bytes`);
+        return 0;
+      }
       const result = runClean({ force: values.force });
       const paths = result.dryRun ? result.candidates : result.removed;
       for (const path of paths) console.log(`${result.dryRun ? 'would remove' : 'removed'} ${path}`);

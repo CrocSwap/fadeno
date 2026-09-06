@@ -50,6 +50,47 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Fixed
 
+- **The write-window log grew without bound, and one torn line in it degraded
+  every receipt the repo wrote from then on — permanently, and with nothing
+  anywhere that said the file existed.**
+  `.fadeno/local/dispatch-windows.jsonl` is the append-only log that replaced
+  the writer lease. Every dispatch appended an open row and a close row and
+  nothing ever removed either, so a repo months into using Fadeno re-read its
+  whole history on every dispatch terminal, every `shouldAutoIsolate` and every
+  overlap detection. Worse, `readDispatchWindows` reports `degraded` for any
+  unusable line — and a torn line is exactly what an interrupted append leaves
+  — which puts `UNREADABLE_WINDOW_LOG_ID` on every later receipt in that repo.
+  Append-only meant nothing rewrote the file, so that state was terminal, and
+  no surface named the file, so nobody knew to delete it.
+  `compactDispatchWindows` drops the unusable rows and any CLOSED window whose
+  interval can no longer meet anything — before the earliest still-open window
+  began, and past a 24h margin for a delivery whose open row never reached the
+  log. An OPEN window is never dropped at any age: it is the auto-isolate
+  signal, and dropping it silently un-isolates real contention.
+  It does not race the appenders it exists among, and it does not take a lock
+  to avoid doing so. A read-modify-rename loses whatever lands in between, and
+  that loss is not benign in both directions — a lost close leaks a window open
+  (over-isolation, which is safe), but a lost OPEN orphans its close and
+  degrades the log permanently, which is the state being repaired. So the
+  rewrite `link()`s the current inode to a sidecar before `rename()`ing the
+  path to the new one: appenders that opened the path first still write to the
+  old inode, which is read past its noted size afterwards and drained back. No
+  append is discarded. What that costs is line ORDER, so `readDispatchWindows`
+  now folds without regard to it — "a close whose open the log never saw is an
+  orphan" was always the invariant, and "no open EARLIER IN THE FILE" was an
+  accident of the single-pass fold.
+  Where it runs: a dispatch terminal compacts opportunistically past 256 KiB
+  (that path already reads the whole file, and after one pass the next several
+  hundred closes pay one `statSync`), and `fadeno clean --windows` is the
+  explicit form — it deletes nothing, unlike `fadeno clean --force`, which
+  removes the log along with the open windows of deliveries writing right now.
+  `fadeno doctor` finally names the file: degraded rows, an open window that
+  has been open implausibly long (named by dispatch id, with no claim about
+  whether it is alive — that question is what the lease died of), and a log
+  large enough to be worth compacting. All `warning`, never `error`: this log
+  is machine-local and never gating, and doctor's error tier is for state that
+  stops Fadeno working.
+
 - **A Codex agent file could be stale in a way nothing could detect, so the
   permissions change above was inert for every existing install while every
   surface said it was fine.** The commit that shipped it filed this and did not
