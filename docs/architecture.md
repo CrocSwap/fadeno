@@ -677,9 +677,11 @@ the `DESTRUCTIVE_GIT` subcommands — `checkout`, `switch`, `restore`, `reset`,
 in a shared tree against its own explicit instructions. `git stash list|show`
 and `git clean -n` pass; the main session is never guarded. The coverage is
 **partial and documented as such**: identification is by `agent_type`, so a role
-brief handed to a plain `claude`-type subagent is invisible to it, Codex has no
-Bash `PreToolUse` hook at all, and the statement splitter reads shell text
-without being a shell. Isolation (`--isolate`) is the protection for two
+brief handed to a plain `claude`-type subagent is invisible to it, Codex-hosted
+role agents are not covered because Fadeno wires no Bash guard there yet (a gap
+in our wiring, not a Codex limit — Codex 0.153.4 fires `PreToolUse` for every
+tool and its payload carries `tool_input` and `agent_type`), and the statement
+splitter reads shell text without being a shell. Isolation (`--isolate`) is the protection for two
 concurrent implementers; the hook only catches the reflex.
 
 `.fadeno/local/` is per-machine session state (sticky dials at `.fadeno/local/dials`, proxy

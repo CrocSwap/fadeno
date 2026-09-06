@@ -30,8 +30,14 @@
 //     `fadeno:worker`/`reviewer`/`judge` carries no identifying `agent_type`
 //     and is NOT covered. Nothing here can distinguish it from any other
 //     generic subagent, so coverage follows the agent TYPE, not the job.
-//   - Codex has no Bash PreToolUse hook at all (`templates/codex/hooks/` is a
-//     spawn guard), so Codex-hosted role agents are not covered either.
+//   - Codex-hosted role agents are not covered, because Fadeno wires no Bash
+//     guard there yet — `templates/codex/hooks/` registers PreToolUse only on
+//     the spawn tool. That is a GAP IN OUR WIRING, not a Codex limit: Codex
+//     0.153.4 fires PreToolUse for every tool (`bash`, `local_shell`) and its
+//     payload carries `tool_input` and `agent_type`, which is everything this
+//     guard reads. Verified against the schemas embedded in the shipped
+//     binary (`pre-tool-use.command.input`), and `templates/codex/hooks/
+//     spawn-guard.mjs` already reads `tool_input` off the same event.
 //   - The statement splitter below is a tripwire, not a sandbox: it reads
 //     shell text without being a shell. An agent that means to get around it
 //     can (a script file, an alias, an odd quoting). It is here to stop the
