@@ -22,6 +22,7 @@ import {
   type DispatchesResult,
   runDispatchesMerge,
 } from './commands/dispatches.ts';
+import { renderExecutorStderr } from './lib/diagnostics.ts';
 import { runDiagram } from './commands/diagram.ts';
 import { DRIVE_PARALLEL_DEFAULT, DRIVE_PARALLEL_MAX, DRIVE_PARALLEL_MIN, runAttemptAccept, runDrive, type DriveResult } from './commands/drive.ts';
 import { runGate } from './commands/gate.ts';
@@ -941,7 +942,18 @@ function printDialShow(result: DialShowResult, emptyMessage?: string): void {
   // column used to be called `via` precisely because `harness` was taken.
   // `(home)` marks a row whose DIAL named no harness — the registry answered,
   // whether through the provider's home claim or a model-level `harness:`.
-  const header = `${'archetype'.padEnd(12)}  ${'model'.padEnd(18)}  ${'effort'.padEnd(8)}  ${'harness'.padEnd(22)}  source`;
+  // `lane` sits between the harness and the source because it is what the two
+  // columns to its left decide together and neither shows: effort moves a
+  // delivery off the host lane only when PINNED, and the harness only when it
+  // is not this session's host. A reader who has to infer the lane from those
+  // two gets it wrong in exactly the cases that matter, and a preflight is
+  // where that inference gets acted on — a director read this table plus a
+  // shell `steering resolve`, concluded no host delegate existed, and routed a
+  // five-lane campaign onto the command lane.
+  //
+  // Same `decideLane` as `dial resolve` and as the resolution echo's
+  // `[command lane: …]` label; see `EffectiveRow.lane`.
+  const header = `${'archetype'.padEnd(12)}  ${'model'.padEnd(18)}  ${'effort'.padEnd(8)}  ${'harness'.padEnd(22)}  ${'lane'.padEnd(9)}  source`;
   console.log(header);
   for (const row of result.rows) {
     const arch = row.archetype.padEnd(12);
@@ -968,7 +980,12 @@ function printDialShow(result: DialShowResult, emptyMessage?: string): void {
     // left. Printing both as "via" on one line was the collision that kept
     // the column named `harness` in the first place.
     const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : '';
-    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}`);
+    // `restart` rather than `restart_required`: the column is 9 wide and the
+    // full value is the one lane nobody can act on anyway — the reason for it
+    // is one `--json` away. `host` and `command` print in full, because those
+    // two are what a reader is deciding between.
+    const lane = (row.lane === 'restart_required' ? 'restart' : row.lane).padEnd(9);
+    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${lane}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}`);
     if (row.shadow) console.log(formatShadowLine(row.shadow, '  '));
   }
   // One line, once, when any shadow is shown. The shadow row reads as a
@@ -1580,6 +1597,13 @@ function main(argv: string[]): number {
           session_effort: result.session_effort,
           lane: result.lane,
           lane_reason: result.lane_reason,
+          // WHO ASKED, and what a caller holding the host identity would get.
+          // `lane` alone is not a property of the dial and must never be read
+          // as one: a resolve from a shell names no `--host-executor`, so its
+          // `lane` is `command` for that caller while `host_frame` reports the
+          // host lane the work actually belongs on. A director read the former
+          // as the latter and lost a five-lane campaign to the command lane.
+          host_frame: result.host_frame,
           harness: result.harness,
           variant: result.variant ?? null,
           host: result.host ?? null,
@@ -2243,7 +2267,31 @@ function main(argv: string[]): number {
         );
       }
       if (result.stdout.length > 0) process.stdout.write(result.stdout);
-      if (result.stderr.length > 0) process.stderr.write(result.stderr);
+      // The executor's raw transcript is NOT relayed here any more. It used to
+      // be, unbounded: a Codex director's 7 KB report arrived beside ~127,000
+      // output tokens of executor chatter, which for a host agent lands in a
+      // context window and pushes out the answer it asked for.
+      //
+      // Silencing it wholesale is the opposite mistake, and one this line has
+      // already paid for twice (7c7a0f6, 828dbcf): a finding on a stream
+      // nobody reads is not a finding. The reconciliation is that Fadeno's own
+      // decision-changing notices do not travel here at all — the relay
+      // quarantine banner is on stdout above, and resolution, isolation,
+      // ignored-output and transcript notices came out through `onEcho` before
+      // this point — so what is left in `result.stderr` is a third party's
+      // diagnostic noise. That is retained to a path (echoed by `onEcho`, and
+      // stamped on the completion row for the caller who lost the echo), and
+      // reaches the terminal only when the caller has no working result to
+      // read instead.
+      const dispatchFailed = result.exitCode !== 0 || result.outcome === 'empty';
+      const executorStderr = renderExecutorStderr({
+        stderr: result.stderr,
+        transcript: result.transcript,
+        // A retention failure prints the excerpt whatever the outcome: with no
+        // file to point at, the terminal is the only copy left.
+        actionable: dispatchFailed || result.transcript.path == null,
+      });
+      if (executorStderr != null) process.stderr.write(executorStderr);
       if (result.exitCode !== 0) {
         // CLI-level diagnosis on stderr — a quiet executor otherwise leaves
         // only a bare exit code. stdout stays the executor's pure report.
@@ -2258,8 +2306,11 @@ function main(argv: string[]): number {
         // backgrounding its real work, looks like from out here. Say so and
         // fail, rather than hand the caller an empty report to relay.
         console.error(
+          // "above" is now always true: `renderExecutorStderr` says "none"
+          // out loud rather than printing nothing, so this never points a
+          // reader at output they will assume scrolled past.
           `dispatch: executor ${result.executor} exited 0 but produced no output — ` +
-            `nothing was relayed. Check the executor's own stderr above, and that ` +
+            `nothing was relayed. Check the executor's stderr above, and that ` +
             `its model id resolves (fadeno dial resolve --archetype <archetype>).`,
         );
         return 1;
@@ -2275,7 +2326,24 @@ function main(argv: string[]): number {
         onEcho: (line) => console.error(line),
       });
       if (result.stdout.length > 0) process.stdout.write(result.stdout);
-      if (result.stderr.length > 0) process.stderr.write(result.stderr);
+      // The same unbounded write lived here, and a fix on `dispatch` alone
+      // would have left the flood reachable through the fallback lane.
+      //
+      // With one difference this lane must not lose: on an idempotent replay
+      // `result.stderr` is the KERNEL's recorded `failure_reason`, not an
+      // executor transcript — one decision-changing sentence, relayed whole.
+      // `transcript.bytes > 0` is what tells the two apart, and only a real
+      // transcript is excerpted.
+      if (result.transcript.bytes > 0) {
+        const fallbackStderr = renderExecutorStderr({
+          stderr: result.stderr,
+          transcript: result.transcript,
+          actionable: result.exitCode !== 0 || result.transcript.path == null,
+        });
+        if (fallbackStderr != null) process.stderr.write(fallbackStderr);
+      } else if (result.stderr.length > 0) {
+        process.stderr.write(result.stderr);
+      }
       if (result.exitCode !== 0) console.error(`dispatch-fallback: executor ${result.executor} exited ${result.exitCode}`);
       return result.exitCode;
     }
@@ -2694,7 +2762,16 @@ function main(argv: string[]): number {
             `${overlapNamed.length === 1 ? 'delivery' : 'deliveries'} overlapped this one ` +
             `(${overlapNamed.map((stamp) => stamp.dispatchId.slice(0, 8)).join(', ')}) — an ` +
             'attestation, not proof of damage; `fadeno dispatches` names the intersecting paths';
-        const note = [relay, discarded, verdict, merge, attestation, overlap]
+        // Where the executor's stderr went. Last in the list because it is a
+        // pointer, not a finding — but present at all because `dispatch`
+        // stopped relaying that transcript and now echoes its path on stderr,
+        // and stderr is precisely what the caller reaching for this command
+        // has already lost.
+        const transcript = result.stderrSnapshot == null
+          ? null
+          : `executor stderr: ${result.stderrBytes ?? '?'} bytes at ${result.stderrSnapshot}` +
+            (result.stderrTruncated ? ' (a head+tail sample; a floor, not the set)' : '');
+        const note = [relay, discarded, verdict, merge, attestation, overlap, transcript]
           .filter((part) => part != null)
           .join('; ');
         // Say how `last` landed. Recency now only survives when nothing

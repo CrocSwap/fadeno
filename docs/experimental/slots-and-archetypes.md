@@ -1028,6 +1028,32 @@ condition, not a second subsystem, and its third branch — `restart_required`
 when there is no command lane — already exists and is already the honest
 answer.
 
+**One condition, two questions — and that is where it went wrong.** The line
+above conflates them. `hostCandidateOf` asks *is there a host lane for this
+dial at all?* — a fact about the catalog and the ambient host. `cascade.source
+=== 'base' || hostExecutor === refString` asks *is the caller the agent that
+could take it?* — a fact about who is asking. Only `steering resolve` ever
+computed the second, and it `&&`-ed the two into `hostModel`, so a resolve run
+from a shell (no `--host-executor`, therefore no proof of anything) answered
+`lane: command, lane_reason: model not deliverable in-host` for models the
+session hosts perfectly well. A director read that preflight, concluded no
+native delegate existed, and put a five-lane campaign on the command lane.
+Meanwhile `fadeno dispatch` computed only the *first* half and printed a note
+asserting the host lane — two surfaces contradicting each other in the same
+minute, each correct about the question it had silently substituted.
+
+The two halves now travel separately: `hostModel` is the catalog fact alone,
+and the caller fact is `frame: HostFrame` (`held` / `mismatched` / `unstated`),
+which is **required** on `LaneInput` so no call site can omit it and get the
+optimistic answer by default. `hostFrameOf` is the one derivation. A surface
+that has to *explain* a route rather than just take one calls `explainLane`,
+which returns both `decision` (this caller) and `inAgent` (a caller that holds
+the identity) from one evaluation — identical objects when the frame is
+already held. `steering resolve` publishes the pair as `host_frame`, and
+`fadeno dispatch`'s note reads `inAgent` off the same shape. `lane` answers
+*what happens to this caller* and must never be read as a property of the dial;
+`host_frame.in_agent_lane` is the field for that question.
+
 **The rule, in three states.** Effort is optional on a `DialRef`, so "the user
 declined to state an opinion" is already representable and must stay that way:
 

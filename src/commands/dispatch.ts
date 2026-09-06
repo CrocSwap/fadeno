@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   ConstraintError,
@@ -44,7 +44,7 @@ import {
   shadowAttachmentRef,
   shadowSampleRoll,
 } from '../lib/executors.ts';
-import { decideLane, readSessionEffort } from '../lib/lane.ts';
+import { explainLane, readSessionEffort } from '../lib/lane.ts';
 import { spawnMarkerIsFresh, spawnMarkerLines, spawnMarkerRow } from '../lib/spawn-markers.ts';
 import { readUserDials } from '../lib/user-paths.ts';
 import {
@@ -106,7 +106,11 @@ import {
   DIAGNOSTICS_MAX_LINES,
   diagnosticsTruncationMarker,
   truncateDiagnostics,
+  truncateTranscript,
+  executorTranscriptNotice,
   isDiagnosticsEnabled,
+  NO_EXECUTOR_TRANSCRIPT,
+  type ExecutorTranscript,
 } from '../lib/diagnostics.ts';
 
 export class DispatchCommandError extends Error {}
@@ -537,6 +541,47 @@ export {
   truncateDiagnostics,
   isDiagnosticsEnabled,
 };
+
+/**
+ * Retain an executor's stderr beside its stdout snapshot, always.
+ *
+ * The `.err` sibling of the `.md` output snapshot, and the same naming idiom
+ * the engine already uses for a command attempt (`drive.ts`'s
+ * `<run>-<actorCallId>-a<attempt>.err`). Under `.fadeno/local`, so
+ * `fadeno clean` is the reaper — nothing here outlives a reclaim.
+ *
+ * Written atomically, and it never gates: a dispatch that produced a report
+ * does not become a failure because a log file could not be placed. The
+ * failure is REPORTED instead — `note` carries it to the caller, who then
+ * prints the bounded excerpt rather than nothing, because a transcript that
+ * does not exist cannot be the place the rest of it went.
+ */
+function retainExecutorStderr(opts: {
+  repoRoot: string;
+  /** Repo-relative destination, e.g. `.fadeno/local/outputs/worker-1a2b3c4d.err`. */
+  rel: string;
+  stderr: string;
+}): ExecutorTranscript {
+  const bytes = Buffer.byteLength(opts.stderr, 'utf8');
+  if (bytes === 0) return NO_EXECUTOR_TRANSCRIPT;
+  const body = truncateTranscript(opts.stderr);
+  const truncated = body !== opts.stderr;
+  const abs = join(opts.repoRoot, ...opts.rel.split('/'));
+  try {
+    mkdirSync(dirname(abs), { recursive: true });
+    const tmp = `${abs}.tmp-${process.pid}-${randomUUID()}`;
+    writeFileSync(tmp, body, 'utf8');
+    try {
+      renameSync(tmp, abs);
+    } catch (err) {
+      try { rmSync(tmp, { force: true }); } catch { /* nothing to drop */ }
+      throw err;
+    }
+  } catch (err) {
+    return { path: null, bytes, truncated: false, note: (err as Error).message };
+  }
+  return { path: opts.rel, bytes, truncated, note: null };
+}
 
 /** Predicate name recorded on a `dispatch_refused` row. */
 export type DispatchRefusalPredicate =
@@ -986,7 +1031,16 @@ export interface AdHocDispatchResult {
   signal: string | null;
   /** The executor's report — cli.ts relays it verbatim to stdout. */
   stdout: string;
+  /**
+   * The executor's raw stderr, complete. Deliberately NOT bounded here:
+   * `supervisedSpawnError` scans it for the supervisor's spawn marker, and a
+   * library caller that wants all of it should get all of it. What changed is
+   * that `cli.ts` no longer RELAYS it — see `transcript`, and
+   * `renderExecutorStderr` for the excerpt it prints instead.
+   */
   stderr: string;
+  /** Where those bytes were retained, and whether all of them got there. */
+  transcript: ExecutorTranscript;
   durationMs: number;
   promptSha256: string;
   outputSha256: string;
@@ -1018,7 +1072,16 @@ export interface DispatchFallbackResult {
   model: string;
   exitCode: number;
   stdout: string;
+  /**
+   * Two different things wear this field, and a caller must not treat them
+   * alike. On the live spawn it is the executor's raw transcript, unbounded,
+   * and `transcript` says where it was retained. On an idempotent replay it is
+   * the KERNEL's own recorded `failure_reason` — one sentence, decision-
+   * changing, and never excerpted. `transcript.bytes > 0` is the discriminator.
+   */
   stderr: string;
+  /** Set only when an executor actually ran; `NO_EXECUTOR_TRANSCRIPT` otherwise. */
+  transcript: ExecutorTranscript;
   idempotent: boolean;
 }
 
@@ -1409,8 +1472,20 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const executorName = delivery.refString;
   /**
    * The lane the RESOLVER would have chosen for this archetype — the same
-   * `decideLane` the Claude hook and `fadeno dial resolve` route on, asked
-   * with the same inputs so the three cannot disagree.
+   * `explainLane` `fadeno steering resolve` answers with, asked with the same
+   * inputs so the two cannot disagree.
+   *
+   * They DID disagree, and this is where. `fadeno dispatch` names no host
+   * executor — the flag does not exist here — so its frame is `unstated`,
+   * exactly like a shell preflight. Until 2026-09-06 it passed no frame at all
+   * and read `lane === 'host'`, which answers "is there a host lane for this
+   * dial?"; `steering resolve` folded the caller's identity into the same
+   * field and answered "can this caller take it?". Dispatch `782b7751` printed
+   * a NOTE asserting the reviewer resolved to HOST and recommending a native
+   * spawn, in the same minute the resolver said `delegate_to: null` and host
+   * baseline `(none)`. Both surfaces now read BOTH answers off one call:
+   * `decision` for what happens to this dispatch, `inAgent` for whether the
+   * work is host-lane work at all.
    *
    * The kernel does not route on this and must not: `fadeno dispatch` is an
    * explicit request for command delivery, and legitimate machine callers ask
@@ -1426,7 +1501,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
    * out of the session permanently — the opposite of what the resolver
    * decided, produced by the message rather than by any gate.
    */
-  const laneDecision = decideLane({
+  const laneExplanation = explainLane({
     pinnedEffort: delivery.pinnedEffort,
     effectiveEffort: delivery.effectiveEffort,
     sessionEffort: readSessionEffort(opts.userPathOptions?.env ?? process.env),
@@ -1436,8 +1511,23 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // a different host — where this note used to say "spawn the in-session
     // agent and you are done" while `dial resolve` said restart_required.
     hostModel: delivery.hostCandidate,
+    // `fadeno dispatch` takes no `--host-executor`, so it cannot claim to be
+    // the agent that would deliver in-host, and it must not assume it is. That
+    // is what `inAgent` below is for.
+    frame: 'unstated',
     commandLane: commandRoutable(spec),
   });
+  /**
+   * Is this HOST-LANE WORK — the question the note is actually asking?
+   *
+   * `inAgent`, not `decision`. `decision` answers for the caller, which is
+   * never a host agent here (see `frame` above), so reading it would silence
+   * the note on every dispatch and lose the whole point of it. `inAgent` is the
+   * same field `steering resolve` publishes as `host_frame.in_agent_lane`, from
+   * the same `explainLane` call shape — so the note and the resolver make one
+   * claim, not two that happen to be worded compatibly.
+   */
+  const laneDecision = laneExplanation.inAgent;
   const hostLanePreferred = laneDecision.lane === 'host';
   const shape = archetype ?? role ?? 'role';
   /**
@@ -1463,9 +1553,17 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
    * command-lane-only is named instead.
    */
   const hostLaneNote = hostLanePreferred
-    ? `NOTE: ${shape} resolves to the HOST lane here (${laneDecision.lane_reason}), so the resolver's own ` +
-      `choice for this task is the in-session ${shape} agent — spawn it and you are done; it is not a ` +
-      'downgrade, it is the delivery every other caller gets. If you need a dispatch id, an isolated ' +
+    ? `NOTE: ${shape} resolves to the HOST lane here for an agent that can take it (${laneDecision.lane_reason}), ` +
+      `so the resolver's own choice for this task is the in-session ${shape} agent — spawn it and you are done; it is not a ` +
+      'downgrade, it is the delivery every other caller gets. ' +
+      // Said out loud, because the resolver a caller runs next will say
+      // `lane: command` for ITSELF and the two answers have to be reconcilable
+      // on sight. `fadeno steering resolve --archetype <shape>` from a shell
+      // publishes exactly this sentence as `host_frame.in_agent_lane`.
+      'A `fadeno steering resolve` run from a shell names no `--host-executor`, so it answers `lane: command` about ' +
+      'ITS OWN caller while reporting this same host lane under `host_frame.in_agent_lane` — read that field, not ' +
+      '`lane`, when the question is which lane the work belongs on. ' +
+      'If you need a dispatch id, an isolated ' +
       'worktree and a terminal receipt, the host lane gives all three with no playbook run: `fadeno ' +
       'dispatch-open` cuts the worktree and mints the id, you spawn the in-session agent against it, and ' +
       '`fadeno dispatch-close` merges the diff back and writes the receipt (inside an engine run the same ' +
@@ -1695,6 +1793,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   );
   const outputAbs = join(repoRoot, outputRel);
   const outputSnapshot = outputRel.split('\\').join('/');
+  // The stderr transcript is the `.err` sibling of that snapshot — the
+  // executor's two streams, side by side, under one reaper.
+  const stderrSnapshot = outputSnapshot.replace(/\.md$/, '.err');
 
   const promptSha256 = sha256Hex(prompt);
 
@@ -3180,6 +3281,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
 
   const stdout = readFileSync(outputAbs, 'utf8');
   const stderr = spawned.stderr ?? '';
+  // Retained BEFORE anything can decide not to print it. The echo is the
+  // substitute for the bytes `cli.ts` no longer relays, so it fires on every
+  // outcome — a dispatch that worked still has a transcript, and a caller who
+  // wants it should not have to make it fail first to be told where it is.
+  const transcript = retainExecutorStderr({ repoRoot, rel: stderrSnapshot, stderr });
+  const transcriptNotice = executorTranscriptNotice(transcript);
+  if (transcriptNotice != null) opts.onEcho?.(transcriptNotice);
   const outputSha256 = sha256Hex(stdout);
   const workspaceAfter = effectiveWorkspaceMode === 'isolated' ? null : workspaceFingerprint(repoRoot);
 
@@ -3246,6 +3354,21 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     duration_ms: durationMs,
     output_sha256: outputSha256,
     output_bytes: outputBytes,
+    // Where the executor's stderr went, on the row rather than only on the
+    // terminal. The echo naming this path travels on stderr, and stderr is
+    // what a killed Bash call discards — the exact caller who then recovers
+    // by tag, and the exact reason 7c7a0f6 exists. A pointer that only ever
+    // appears on the channel it is compensating for is no pointer at all.
+    // `stderr_bytes` is what the executor wrote, not what the file holds:
+    // `stderr_truncated` says when those differ.
+    ...(transcript.bytes > 0
+      ? {
+          stderr_bytes: transcript.bytes,
+          ...(transcript.path != null ? { stderr_snapshot: transcript.path } : {}),
+          ...(transcript.truncated ? { stderr_truncated: true } : {}),
+          ...(transcript.note != null ? { stderr_retention_failed: transcript.note } : {}),
+        }
+      : {}),
     // Stated next to the event name so a row read on its own cannot pass as
     // success on the strength of `dispatch_completed` alone.
     ...(outcome != null ? { outcome } : {}),
@@ -3418,6 +3541,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     signal: spawned.signal ?? null,
     stdout,
     stderr: spawned.stderr ?? '',
+    transcript,
     durationMs,
     promptSha256,
     outputSha256,
@@ -3474,6 +3598,7 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
         exitCode: 0,
         stdout,
         stderr: '',
+        transcript: NO_EXECUTOR_TRANSCRIPT,
         idempotent: true,
       };
     }
@@ -3484,6 +3609,9 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
       exitCode: 1,
       stdout: '',
       stderr: String(lookup.terminal.extra.failure_reason ?? 'fallback dispatch already failed'),
+      // No executor ran on this path: the line above is the kernel's, and it
+      // is relayed whole.
+      transcript: NO_EXECUTOR_TRANSCRIPT,
       idempotent: true,
     };
   }
@@ -3530,6 +3658,17 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
   })();
   const stdout = spawned.stdout ?? '';
   const stderr = spawned.stderr ?? '';
+  // Same rule as the ad-hoc lane: an executor's transcript is retained, not
+  // relayed. The fallback lane had the identical unbounded write in `cli.ts`,
+  // so fixing only the ad-hoc one would have left the flood reachable by
+  // another door.
+  const transcript = retainExecutorStderr({
+    repoRoot,
+    rel: `.fadeno/local/outputs/fallback-${request.dispatchId.slice(0, 8)}.err`,
+    stderr,
+  });
+  const fallbackNotice = executorTranscriptNotice(transcript);
+  if (fallbackNotice != null) opts.onEcho?.(fallbackNotice);
   const fallbackSpawnFailure = spawned.error?.message ?? supervisedSpawnError(spawned.status, stderr);
   if (fallbackSpawnFailure != null || spawned.status !== 0 || spawned.signal != null) {
     const reason = fallbackSpawnFailure ?? (spawned.signal != null
@@ -3543,6 +3682,7 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
       exitCode: spawned.status ?? 1,
       stdout,
       stderr,
+      transcript,
       idempotent: false,
     };
   }
@@ -3561,6 +3701,7 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
     exitCode: 0,
     stdout,
     stderr,
+    transcript,
     idempotent: false,
   };
 }

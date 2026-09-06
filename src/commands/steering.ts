@@ -99,14 +99,17 @@ export type SteeringMode = 'host' | 'command' | 'restart_required' | 'write_conf
 // these names from this module keep working.
 import {
   decideLane,
+  explainLane,
+  hostFrameOf,
   readSessionEffort,
   type DeliveryLane,
+  type HostFrame,
   type LaneDecision,
   type LaneInput,
   type LaneReason,
 } from '../lib/lane.ts';
-export { decideLane, readSessionEffort };
-export type { DeliveryLane, LaneDecision, LaneInput, LaneReason };
+export { decideLane, explainLane, hostFrameOf, readSessionEffort };
+export type { DeliveryLane, HostFrame, LaneDecision, LaneInput, LaneReason };
 
 export interface SteeringResolution extends LaneDecision {
   /**
@@ -142,6 +145,34 @@ export interface SteeringResolution extends LaneDecision {
   source: RoleResolutionSource | 'host-request';
   dial: DialRef;
   hostExecutor: string | null;
+  /**
+   * WHO ASKED, and what the answer would be for a caller that holds the host
+   * identity. Always present, so a machine reader never has to infer the frame
+   * from the absence of `host_executor`.
+   *
+   * This exists because `lane` alone cannot be read as a property of the dial.
+   * A `steering resolve` run from a shell names no host executor, so its
+   * `lane` is `command` — correctly, for that caller — and a director who read
+   * it as "this model has no host lane" routed a five-lane campaign out of
+   * process and lost every report. `identity` says which question was actually
+   * answered; `in_agent_lane` answers the other one.
+   *
+   * `in_agent_lane` is `decideLane` with the frame held and nothing else
+   * changed (`explainLane`), so it cannot drift from `lane`: where the frame
+   * is already held the two are the same object.
+   */
+  host_frame: {
+    identity: HostFrame;
+    /**
+     * The lane a caller HOLDING this dial's host identity would get.
+     *
+     * `null` only on a locked engine request, whose lane the run snapshot
+     * froze rather than the predicate deciding it — there is no counterfactual
+     * to report, and inventing one would be a third answer.
+     */
+    in_agent_lane: DeliveryLane | null;
+    in_agent_lane_reason: LaneReason | null;
+  };
   detail: string;
   /** The shared refusal, present only on a `write_conflict` resolution. */
   writeConflict?: string;
@@ -155,22 +186,31 @@ export interface SteeringResolution extends LaneDecision {
   /** Advisory-only write-forbidden instruction for host delivery. */
   advisory?: string;
   /**
-   * A native spawn that would deliver this locked request in-host, present
-   * only when the CALLER could not prove a host identity of its own.
+   * A native spawn that would deliver this request in-host, present only when
+   * the CALLER could not prove a host identity of its own
+   * (`host_frame.identity === 'unstated'`).
+   *
+   * Emitted on BOTH resolve paths since 2026-09-06. It was locked-request-only,
+   * which meant the surface a director actually preflights — the ambient
+   * `steering resolve --archetype worker` — answered `command` and
+   * `delegate_to: null`, and the honest reading of that pair is "there is no
+   * native delegate", which is how a campaign that had one went out of process
+   * anyway. `host_frame.in_agent_lane` says the host lane exists; this field
+   * names the agent file that takes it.
    *
    * Present ONLY when `agent_file` already carries exactly this identity. On
    * Codex a custom agent file's `model` / `model_reasoning_effort` take
    * precedence over the values passed at spawn time (see
-   * `findSpawnableCodexAgent`), so the file is what delivers the locked
+   * `findSpawnableCodexAgent`), so the file is what delivers the requested
    * identity. Passing `model` and `reasoning_effort` at spawn is harmless and
    * overrides nothing. When the managed agent for this archetype is stale,
    * this field is absent and `detail` names it instead.
    */
   delegate_to?: {
     archetype: string;
-    /** The locked model, which this agent's file already carries. */
+    /** The resolved model, which this agent's file already carries. */
     model: string;
-    /** The locked effort, which this agent's file already carries. */
+    /** The resolved effort, which this agent's file already carries. */
     reasoning_effort: string;
     executor: string;
     /** The managed agent file whose baked identity delivers this request. */
@@ -553,6 +593,18 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     session_effort: readSessionEffort(opts.env ?? process.env),
     lane: lockedLane,
     lane_reason: 'locked to the run snapshot',
+    // Reported here too, so the field is on every resolution and a reader
+    // never has to branch on the path to know whether it may trust `lane` as a
+    // property of the dial. `in_agent_*` is null on purpose: the lane above
+    // came from the snapshot, not from the predicate, so there is no
+    // counterfactual to run and a fabricated one would be the third answer
+    // this whole change exists to remove. `detail` and `delegate_to` already
+    // carry the "a native agent could deliver this" story on this path.
+    host_frame: {
+      identity: hostFrameOf({ hostExecutor, executor: request.executor, neutralIdentity: neutral }),
+      in_agent_lane: null,
+      in_agent_lane_reason: null,
+    },
     archetype,
     role,
     executor: request.executor,
@@ -752,7 +804,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     };
   }
 
-  // --- The lane: model AND effort ---
+  // --- The lane: model, FRAME, and effort ---
   //
   // `pinnedEffort` is `ref.effort ?? null` and nothing else. Reading
   // `compiled.effectiveEffort` here instead would route every casual
@@ -768,24 +820,121 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     // effort at all and that `resolveDelivery` could not compile.
     'default';
   // `hostCandidateOf`, not `spec.adapter`: a host spec is also how a delivery
-  // with no argv is represented, and the two disagree exactly there.
-  const hostModel = hostCandidateOf(compiled, spec) && (cascade.source === 'base' || hostExecutor === refString);
+  // with no argv is represented, and the two disagree exactly there. This is
+  // the CATALOG fact only — until 2026-09-06 the caller-identity clause was
+  // `&&`-ed on here, which is what made a shell preflight report every
+  // host-deliverable model as `model not deliverable in-host`.
+  const hostModel = hostCandidateOf(compiled, spec);
   /** The reference-frame-neutral sentinel, whose agent file states no identity at all. */
   const neutralModel = spec.adapter === 'host' && spec.model === NEUTRAL_HOST_EXECUTOR;
-  const lane = decideLane({
+  // WHO ASKED. Same three-way answer `fadeno dispatch` gets, from the same
+  // function.
+  //
+  // `neutralIdentity` is the sentinel MODEL, not the layer the dial came from.
+  // This clause used to read `cascade.source === 'base'` alone, which is the
+  // same disease one level down: it is a proxy for "the dial is
+  // `current-host`" that happens to hold for the fall-through base ref and is
+  // strictly narrower than the thing it stands for. An explicit `fadeno dial
+  // judge current-host` means exactly what the base ref means — "whatever
+  // session is running" — but arrives on the `user` layer, so a preflight for
+  // it answered `restart_required` (which `cli.ts` exits 2 on) and advised
+  // "apply the dial and start a fresh session" for a dial no session can fail
+  // to satisfy. The layer a dial was written on cannot change what
+  // `current-host` names. `isReferenceFrameNeutralHostRequest` on the locked
+  // path has always keyed on the identity for this reason.
+  //
+  // The `base` disjunct is kept: it is the one shape that survives a profile
+  // too old for `resolveDelivery` to compile, where `spec` may not carry the
+  // sentinel at all.
+  const frame = hostFrameOf({
+    hostExecutor,
+    executor: refString,
+    neutralIdentity: cascade.source === 'base' || neutralModel,
+  });
+  // The agent FILE's own pin, read once and used twice: as proof for THIS
+  // caller only when it is that agent (`hostExecutor === refString` —
+  // unchanged), and as proof for the counterfactual regardless of who asked.
+  // A preflight must not answer "session effort unobserved" about an effort
+  // baked into a file sitting in `~/.codex/agents/`.
+  const agentFilePinsEffort =
+    pinnedEffort != null &&
+    codexAgentFilePinsEffort(repoRoot, archetype, refString, pinnedEffort, opts.userPathOptions);
+  const explained = explainLane({
     pinnedEffort,
     effectiveEffort,
     sessionEffort: readSessionEffort(opts.env ?? process.env),
     hostModel,
+    frame,
     // `refString` carries the pin (`formatDialRef` renders `luna@xhigh`), so a
     // host executor that matches it identifies WHICH agent is asking. The
     // proof is its file — see `codexAgentFilePinsEffort`.
-    hostEffortProven:
-      pinnedEffort != null &&
-      hostExecutor === refString &&
-      codexAgentFilePinsEffort(repoRoot, archetype, refString, pinnedEffort, opts.userPathOptions),
+    hostEffortProven: hostExecutor === refString && agentFilePinsEffort,
+    inAgentEffortProven: agentFilePinsEffort,
     commandLane: commandRoutable(spec),
   });
+  const lane = explained.decision;
+  /**
+   * What a caller holding this dial's host identity gets — the SAME predicate,
+   * one call, so the answer this resolution hands a preflight cannot disagree
+   * with the answer `fadeno dispatch`'s host-lane note gives for the same dial.
+   */
+  const hostFrame: SteeringResolution['host_frame'] = {
+    identity: frame,
+    in_agent_lane: explained.inAgent.lane,
+    in_agent_lane_reason: explained.inAgent.lane_reason,
+  };
+
+  // --- The delegate an unidentified caller could spawn ---
+  //
+  // Same search, same gating rules and the same reason as the locked path
+  // above, on the surface a coordinator actually preflights. The locked path
+  // has had this since 2026-08-20; the ambient one answered `delegate_to: null`
+  // to every question, and "command lane, no delegate" is exactly the pair a
+  // director reads as "there is no native option here".
+  //
+  // Gated on `frame === 'unstated'`: a caller that named a host executor is a
+  // managed agent and is being told about ITSELF, and one whose ref matches
+  // needs no delegate at all. Gated on the counterfactual being `host`, so this
+  // never advertises a spawn that would land right back on the command lane.
+  // Gated on `lane.lane === 'command'` for the reason the locked path records:
+  // `cli.ts` exits 2 on `restart_required`, and advice that contradicts the
+  // process's own exit status is worse than none.
+  //
+  // The identity clause is what makes it safe to act on. On Codex the agent
+  // file's `model` / `model_reasoning_effort` beat any spawn value, so only a
+  // file already carrying this dial's identity delivers this dial; anything
+  // else is named as stale in `detail` instead. `findSpawnableCodexAgent` also
+  // matches the file's baked `--host-executor`, which is what keeps a COMMAND
+  // BROKER — a managed file that bakes no host executor at all — from ever
+  // being offered here. That case is genuinely command-lane and must stay so.
+  let delegateTo: SteeringResolution['delegate_to'];
+  let staleDelegate: { path: string; identity: string } | null = null;
+  if (
+    frame === 'unstated' && explained.inAgent.lane === 'host' && lane.lane === 'command'
+    && spec.adapter === 'host' && !neutralModel && (spec as any).model != null
+  ) {
+    const candidates = effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions);
+    const identity = {
+      model: (spec as any).model as string,
+      reasoningEffort: (spec as any).reasoningEffort as string,
+    };
+    const target = findSpawnableCodexAgent(candidates, archetype, refString, identity);
+    if (target != null) {
+      delegateTo = {
+        archetype: target.state.name ?? target.archetype,
+        model: identity.model,
+        reasoning_effort: identity.reasoningEffort,
+        executor: refString,
+        agent_file: target.path,
+        scope: target.scope,
+      };
+    } else {
+      const installed = findSpawnableCodexAgent(candidates, archetype, refString);
+      if (installed != null) {
+        staleDelegate = { path: installed.path, identity: describeCodexAgentFileIdentity(installed.state) };
+      }
+    }
+  }
 
   // Every branch below funnels through `finish`, so attaching `shadow` and the
   // lane fields here once — rather than at each call site — is what keeps them
@@ -793,10 +942,14 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   // wins on conflict, so a branch that genuinely overrides the lane (the
   // shadow pair) says so in its own literal.
   const finish = (
-    base: Omit<SteeringResolution, 'resolved_via' | 'surface_archetype' | 'advisory' | keyof LaneDecision>
+    base: Omit<SteeringResolution, 'resolved_via' | 'surface_archetype' | 'advisory' | 'host_frame' | keyof LaneDecision>
       & Partial<LaneDecision>,
   ): SteeringResolution =>
-    decorateSteering({ ...lane, ...(shadow != null ? { shadow } : {}), ...base } as any, profile, cascade.resolvedVia);
+    decorateSteering(
+      { ...lane, host_frame: hostFrame, ...(shadow != null ? { shadow } : {}), ...base } as any,
+      profile,
+      cascade.resolvedVia,
+    );
 
 
   if (spec.adapter === 'command') {
@@ -855,11 +1008,32 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
       harness: (spec as { harness?: string }).harness ?? compiled?.harness ?? null,
       variant: (spec as { variant?: string }).variant ?? compiled?.variant ?? null,
       source: cascade.source, dial: cascade.ref, hostExecutor,
-      // Two ways to be here now, and the agent is told which: the model this
-      // session cannot host, or an effort it is not running at.
-      detail: hostModel
-        ? `host executor ${refString} matches this session's host baseline, but ${lane.lane_reason}; use its declared command fallback immediately${detailNote}`
-        : `host executor ${refString} differs from this session's host baseline ${hostExecutor ?? '(none)'}; use its declared command fallback immediately${detailNote}`,
+      ...(delegateTo != null ? { delegate_to: delegateTo } : {}),
+      // FOUR ways to be here, and the agent is told which. The first three are
+      // the three halves of the predicate — catalog, frame, effort — and the
+      // frame half used to be reported as the catalog half, in the sentence
+      // `... differs from this session's host baseline (none)`, which reads as
+      // a fact about the dial and is a fact about the asker. That sentence is
+      // why a director concluded there was no native delegate and moved a
+      // whole campaign out of process.
+      detail:
+        !hostModel
+          ? `host executor ${refString} resolves onto harness ${(spec as { harness?: string }).harness ?? compiled?.harness ?? 'unknown'}, ` +
+            `which is not this session's host, so there is no host lane for it here; use its declared command fallback immediately${detailNote}`
+          : frame === 'unstated'
+            ? `this resolve named no --host-executor, so it answers for a caller that is not a managed ${archetype} agent; ` +
+              `${refString} IS host-deliverable here and a managed ${archetype} agent cut for it resolves to the HOST lane ` +
+              `(${explained.inAgent.lane_reason}). ` +
+              (delegateTo != null
+                ? `Spawn the ${delegateTo.archetype} agent (${delegateTo.agent_file}) and hand it this assignment — its file carries exactly this identity, ${delegateTo.model} at effort ${delegateTo.reasoning_effort}, so it delivers in-host. `
+                : staleDelegate != null
+                  ? `The managed ${archetype} agent (${staleDelegate.path}) is stale: its file carries ${staleDelegate.identity}, and on Codex the file wins over any spawn value — run \`fadeno steering apply --codex\` and start a fresh session to re-cut it. `
+                  : `No managed ${archetype} agent carries this identity, so there is nothing to spawn. `) +
+              `Otherwise use its declared command fallback${detailNote}`
+            : frame === 'mismatched'
+              ? `host executor ${refString} differs from the executor this agent was materialized for, ${hostExecutor}; ` +
+                `use its declared command fallback immediately${detailNote}`
+              : `host executor ${refString} matches this session's host baseline, but ${lane.lane_reason}; use its declared command fallback immediately${detailNote}`,
     } as any);
   }
   return finish({
@@ -871,23 +1045,31 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     source: cascade.source, dial: cascade.ref, hostExecutor,
     // Restart reason 2 of the two that survive: a host slot naming an
     // identity with neither a session that can deliver it nor a command
-    // fallback. It now has three shapes — the model, as always; an effort the
-    // session is running at something else; and an effort nothing here can
-    // ever prove, which needs its own remediation because the ordinary one
-    // ("start a session at <effort>") is unsatisfiable in that shape.
+    // fallback. It now has FOUR shapes — the model, as always; who asked,
+    // which used to be reported as the model; an effort the session is running
+    // at something else; and an effort nothing here can ever prove, which
+    // needs its own remediation because the ordinary one ("start a session at
+    // <effort>") is unsatisfiable in that shape.
     detail: !hostModel
-      ? `dial ${refString} requests host executor ${refString}, but this session was materialized for ${hostExecutor ?? 'no host executor'}; apply the dial and start a fresh session${detailNote}`
-      // A pinned `current-host` on a harness that publishes no session effort.
-      // `renderCodexHostAgent` omits `model_reasoning_effort` for the neutral
-      // sentinel by construction, so no agent file can ever carry this pin and
-      // no session can be started that would observe it: both proofs are
-      // closed off permanently, and only changing the dial reopens one.
-      : neutralModel && lane.session_effort == null
-        ? `dial ${refString} pins effort ${pinnedEffort}, but a ${NEUTRAL_HOST_EXECUTOR} agent file carries no model_reasoning_effort by construction ` +
-          `and this session publishes no effort to observe, so nothing can prove the pin — and ${refString} declares no command fallback; ` +
-          `drop the pin (dial ${NEUTRAL_HOST_EXECUTOR}) or dial a concrete model, whose agent file can bake the effort${detailNote}`
-        : `dial ${refString} pins effort ${pinnedEffort} but this session runs at ${lane.session_effort ?? 'no observable effort'}, ` +
-          `and ${refString} declares no command fallback; start a session at ${pinnedEffort}, drop the pin, or declare one${detailNote}`,
+      ? `dial ${refString} requests host executor ${refString}, but its harness is not this session's host and ${refString} declares no command fallback; apply the dial and start a fresh session${detailNote}`
+      : frame === 'unstated'
+        ? `dial ${refString} IS host-deliverable here, but this resolve named no --host-executor, so it answers for a caller that is not a ` +
+          `managed ${archetype} agent — and ${refString} declares no command fallback. A managed ${archetype} agent cut for ${refString} ` +
+          `resolves to lane ${explained.inAgent.lane} (${explained.inAgent.lane_reason}); spawn one, or apply the dial and start a fresh session${detailNote}`
+        : frame === 'mismatched'
+          ? `dial ${refString} requests host executor ${refString}, but this agent was materialized for ${hostExecutor}, and ${refString} declares no command fallback; apply the dial and start a fresh session${detailNote}`
+          // A pinned `current-host` on a harness that publishes no session
+          // effort. `renderCodexHostAgent` omits `model_reasoning_effort` for
+          // the neutral sentinel by construction, so no agent file can ever
+          // carry this pin and no session can be started that would observe
+          // it: both proofs are closed off permanently, and only changing the
+          // dial reopens one.
+          : neutralModel && lane.session_effort == null
+            ? `dial ${refString} pins effort ${pinnedEffort}, but a ${NEUTRAL_HOST_EXECUTOR} agent file carries no model_reasoning_effort by construction ` +
+              `and this session publishes no effort to observe, so nothing can prove the pin — and ${refString} declares no command fallback; ` +
+              `drop the pin (dial ${NEUTRAL_HOST_EXECUTOR}) or dial a concrete model, whose agent file can bake the effort${detailNote}`
+            : `dial ${refString} pins effort ${pinnedEffort} but this session runs at ${lane.session_effort ?? 'no observable effort'}, ` +
+              `and ${refString} declares no command fallback; start a session at ${pinnedEffort}, drop the pin, or declare one${detailNote}`,
   } as any);
 }
 

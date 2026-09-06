@@ -104,6 +104,23 @@ export interface EffectiveRow {
   dial: DialRef;
   refString: string;
   adapter: 'command' | 'host';
+  /**
+   * The lane this dial's delivery takes, and why — from the same `decideLane`
+   * `offHostLanes` and `dial resolve` answer with, on this row's own compiled
+   * delivery.
+   *
+   * A table that prints model, effort and harness but not the lane is where the
+   * routing mistake actually gets made: a director preflighting a campaign has
+   * to INFER the lane from three columns that do not determine it (effort
+   * decides it, but only when pinned; the harness decides it, but only against
+   * the ambient host), and a wrong inference sends the whole campaign out of
+   * process. Shown rather than left to be derived.
+   *
+   * Asked with `frame: 'held'` for the same reason `offHostLanes` is: this
+   * describes a DIAL, not whoever is running `fadeno dial`.
+   */
+  lane: DeliveryLane;
+  lane_reason: LaneReason;
 
   eligibility?: string;
   shadow?: ShadowAttachmentView;
@@ -1418,6 +1435,14 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
     }
     const adapter = compiled.spec.adapter;
     const effort = compiled.effectiveEffort;
+    const rowLane = decideLane({
+      pinnedEffort: compiled.pinnedEffort,
+      effectiveEffort: compiled.effectiveEffort,
+      sessionEffort: readSessionEffort(opts.env ?? process.env),
+      hostModel: compiled.hostCandidate,
+      frame: 'held',
+      commandLane: commandRoutable(compiled.spec),
+    });
     // Model display: canonical name, plus `@ effort` exactly when the user
     // pinned one. Keying on the PIN rather than on "differs from the registry
     // standard" is what makes `opus@xhigh` legible even where xhigh is also
@@ -1448,6 +1473,13 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
       dial: cascade.ref,
       refString: compiled.refString,
       adapter,
+      // One derivation with `offHostLanes`, which annotates the resolution
+      // echo from the same inputs — so the table and the echo cannot name
+      // different lanes for the same dial in the same session. Only the two
+      // lane fields are lifted: the rest of `LaneDecision` already has its own
+      // (differently named, deliberately) homes on this row.
+      lane: rowLane.lane,
+      lane_reason: rowLane.lane_reason,
       modelDisplay,
     };
     // Eligibility mark
@@ -1791,6 +1823,22 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
       effectiveEffort: resolved.delivery.effectiveEffort,
       sessionEffort: readSessionEffort(opts.env ?? process.env),
       hostModel: resolved.delivery.hostCandidate,
+      // `held`, deliberately, and this is the surface where that is the honest
+      // answer rather than an optimistic default.
+      //
+      // `dial resolve` answers for THE DIAL, not for a caller: it takes no
+      // `--host-executor` because its consumers are the harness's own steering
+      // hooks, which sit inside the session that would deliver the spawn. On
+      // Claude that session holds every identity by construction —
+      // `runSteeringApplyClaude` writes no per-dial agent file at all, the hook
+      // stamps the resolved model onto each spawn — so there is nothing for a
+      // caller to prove and `unstated` would be a false negative that routed
+      // every Claude host spawn out of process.
+      //
+      // The frame belongs to `steering resolve`, which is the surface that
+      // takes `--host-executor` because Codex's agent FILE wins over any spawn
+      // value and the caller therefore must say which agent it is.
+      frame: 'held',
       commandLane: commandRoutable(spec),
     }),
     harness: resolved.delivery.harness,
@@ -1898,6 +1946,11 @@ export function offHostLanes(
         effectiveEffort: compiled.effectiveEffort,
         sessionEffort: session,
         hostModel,
+        // Same reason as `runDialResolve`: this annotates a DIAL in a table, not
+        // a caller. Labelling every row "the caller named no host executor"
+        // would be true of the shell printing the table and useless about the
+        // dial it is printing.
+        frame: 'held',
         commandLane: commandRoutable(compiled.spec),
       });
       // Only an off-host answer is worth annotating: a host-lane delivery is

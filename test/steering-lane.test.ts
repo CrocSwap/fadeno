@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { decideLane, runSteeringApply, runSteeringResolve } from '../src/commands/steering.ts';
+import { decideLane, explainLane, runSteeringApply, runSteeringResolve } from '../src/commands/steering.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -275,15 +275,38 @@ test('a pinned current-host agent proves no effort, and the refusal names an exi
 });
 
 test('the model half of the predicate still decides first, and says so', (t) => {
-  // Model AND effort both disagree. The model is the older, coarser reason
-  // and the one the user must fix first, so it is the one named.
+  // The CATALOG half, on a dial that genuinely has no host lane here: `opus`
+  // lives on the claude harness and this session's host is codex, so there is
+  // nothing in-session to deliver it — whoever is asking. That is the one
+  // shape `model not deliverable in-host` is now allowed to describe.
+  const { root, user } = seed(t, { worker: 'opus@high' });
+  const result = resolve(root, user, 'luna', 'medium');
+
+  assert.equal(result.mode, 'command');
+  assert.equal(result.lane, 'command');
+  assert.equal(result.lane_reason, 'model not deliverable in-host');
+  // And the counterfactual agrees: a managed agent would not rescue this
+  // either, so nothing here invites a caller to go looking for one.
+  assert.equal(result.host_frame.in_agent_lane, 'command');
+  assert.equal(result.host_frame.in_agent_lane_reason, 'model not deliverable in-host');
+  assert.equal(result.delegate_to, undefined);
+});
+
+test('a caller cut for another executor is told THAT, not that the model is undeliverable', (t) => {
+  // Regression, and the half of the old conflation that was always wrong even
+  // with a `--host-executor` in hand. `luna` IS host-deliverable in a codex
+  // session; what disagrees is the asker — a `terra` agent cannot deliver a
+  // `luna` dial, because on Codex the agent FILE's model wins. Reporting that
+  // as a property of the model sent the reader hunting for a model change that
+  // never happened.
   const { root, user } = seed(t, { worker: 'luna@xhigh' });
   const result = resolve(root, user, 'terra', 'medium');
 
   assert.equal(result.mode, 'command');
   assert.equal(result.lane, 'command');
-  assert.equal(result.lane_reason, 'model not deliverable in-host');
-  assert.match(result.detail, /differs from this session's host baseline terra/);
+  assert.equal(result.lane_reason, 'the caller holds another host executor');
+  assert.equal(result.host_frame.identity, 'mismatched');
+  assert.match(result.detail, /differs from the executor this agent was materialized for, terra/);
 });
 
 test('a command-adapter dial reports the command lane without consulting the session at all', (t) => {
@@ -328,7 +351,13 @@ test('the session effort is injectable, so nothing here reads the developer\'s r
 });
 
 test('decideLane: the three states, and the one comparison that must never happen', () => {
-  const registryDefault = { effectiveEffort: 'xhigh', sessionEffort: 'medium', hostModel: true, commandLane: true };
+  const registryDefault = {
+    effectiveEffort: 'xhigh', sessionEffort: 'medium', hostModel: true, commandLane: true,
+    // The effort states are what this test is about, so the frame is pinned
+    // held throughout — an unstated frame short-circuits before effort is even
+    // consulted, which is a different test (below).
+    frame: 'held' as const,
+  };
 
   // No opinion stated: the common path, and it is cheap.
   assert.equal(decideLane({ ...registryDefault, pinnedEffort: null }).lane, 'host');
@@ -360,12 +389,43 @@ test('CONTRACT: decideLane never answers "command" without a command lane, on an
     for (const sessionEffort of [null, 'medium', 'xhigh']) {
       for (const hostModel of [true, false]) {
         for (const hostEffortProven of [true, false]) {
-          const decision = decideLane({
-            pinnedEffort, sessionEffort, hostModel, hostEffortProven,
-            effectiveEffort: 'xhigh', commandLane: false,
-          });
-          assert.notEqual(decision.lane, 'command', JSON.stringify({ pinnedEffort, sessionEffort, hostModel, hostEffortProven }));
-          if (decision.lane !== 'host') assert.equal(decision.lane_reason, 'no command fallback');
+          // The frame is in the grid too: it is a new way to leave the host
+          // lane, so it is a new way the guarantee could be broken.
+          for (const frame of ['held', 'mismatched', 'unstated'] as const) {
+            const decision = decideLane({
+              pinnedEffort, sessionEffort, hostModel, hostEffortProven, frame,
+              effectiveEffort: 'xhigh', commandLane: false,
+            });
+            assert.notEqual(decision.lane, 'command', JSON.stringify({ pinnedEffort, sessionEffort, hostModel, hostEffortProven, frame }));
+            if (decision.lane !== 'host') assert.equal(decision.lane_reason, 'no command fallback');
+          }
+        }
+      }
+    }
+  }
+});
+
+test('CONTRACT: explainLane cannot contradict itself — a held frame answers once', () => {
+  // The whole mechanism. `inAgent` is `decision` by IDENTITY when the frame is
+  // already held, so no wording, no ordering and no future edit can make the
+  // two disagree in the case where they describe the same caller.
+  for (const pinnedEffort of [null, 'xhigh']) {
+    for (const sessionEffort of [null, 'medium', 'xhigh']) {
+      for (const hostModel of [true, false]) {
+        for (const commandLane of [true, false]) {
+          const input = { pinnedEffort, sessionEffort, hostModel, commandLane, effectiveEffort: 'xhigh' };
+          const held = explainLane({ ...input, frame: 'held' as const });
+          assert.equal(held.inAgent, held.decision);
+
+          // And for the other two frames the counterfactual is exactly the
+          // held answer — never something a third computation invented.
+          for (const frame of ['mismatched', 'unstated'] as const) {
+            const explained = explainLane({ ...input, frame });
+            assert.deepEqual(explained.inAgent, held.decision, JSON.stringify({ ...input, frame }));
+            // The caller's own answer is never HOST once the frame is not held:
+            // the frame is a refusal, not a preference.
+            assert.notEqual(explained.decision.lane, 'host');
+          }
         }
       }
     }
@@ -382,14 +442,16 @@ test('lane_reason stays a spliceable fragment across the closed vocabulary', () 
       for (const hostModel of [true, false]) {
         for (const commandLane of [true, false]) {
           for (const hostEffortProven of [true, false]) {
-            const { lane_reason } = decideLane({
-              pinnedEffort, sessionEffort, hostModel, commandLane, hostEffortProven,
-              effectiveEffort: 'xhigh',
-            });
-            seen.add(lane_reason);
-            assert.doesNotMatch(lane_reason, /\.$/, lane_reason);
-            assert.equal(lane_reason, lane_reason.trim());
-            assert.notEqual(lane_reason[0], lane_reason[0]!.toUpperCase());
+            for (const frame of ['held', 'mismatched', 'unstated'] as const) {
+              const { lane_reason } = decideLane({
+                pinnedEffort, sessionEffort, hostModel, commandLane, hostEffortProven, frame,
+                effectiveEffort: 'xhigh',
+              });
+              seen.add(lane_reason);
+              assert.doesNotMatch(lane_reason, /\.$/, lane_reason);
+              assert.equal(lane_reason, lane_reason.trim());
+              assert.notEqual(lane_reason[0], lane_reason[0]!.toUpperCase());
+            }
           }
         }
       }
@@ -406,5 +468,123 @@ test('lane_reason stays a spliceable fragment across the closed vocabulary', () 
     'session effort is xhigh, dial pins medium',
     'session effort matches the pin',
     'session effort unobserved',
+    'the caller holds another host executor',
+    'the caller named no host executor',
   ]);
+});
+
+// --- One authoritative route explanation ---
+//
+// `lane` answers "what happens to THIS caller"; it was being read as "what
+// lane does this work belong on", which is a different question with a
+// different answer whenever the caller is not a managed host agent. Both
+// answers now travel together and come from one `explainLane` call.
+
+test('a resolve with no --host-executor does not claim the model is undeliverable in-host', (t) => {
+  // THE REGRESSION. A director preflighting a campaign from a shell got
+  // `lane: command`, `lane_reason: model not deliverable in-host` for a dial
+  // that a managed worker agent delivers in-session, concluded no native
+  // delegate existed, and routed five lanes onto the command lane — where the
+  // reports were lost. Host delegation was available the whole time; the
+  // PREFLIGHT is what rigged the decision.
+  const { root, user } = seed(t, { worker: 'luna' });
+  const outside = runSteeringResolve({
+    repoRoot: root, userPathOptions: user, archetype: 'worker', env: { CLAUDE_EFFORT: 'medium' },
+  });
+
+  // What it must NOT say: the model half is about the dial and the ambient
+  // host, and both of those are fine here.
+  assert.notEqual(outside.lane_reason, 'model not deliverable in-host');
+  // What it says instead — a fact about the question, not about the model.
+  assert.equal(outside.lane_reason, 'the caller named no host executor');
+  assert.equal(outside.host_frame.identity, 'unstated');
+  // And it names what a managed agent would get, which is the answer the
+  // director was actually looking for.
+  assert.equal(outside.host_frame.in_agent_lane, 'host');
+  assert.equal(outside.host_frame.in_agent_lane_reason, 'effort unpinned');
+  assert.match(outside.detail, /named no --host-executor/);
+  assert.match(outside.detail, /resolves to the HOST lane/);
+
+  // The managed agent asking the same question gets the host lane, and its
+  // answer is the one this resolve just predicted.
+  const inAgent = resolve(root, user, 'luna', 'medium');
+  assert.equal(inAgent.lane, 'host');
+  assert.equal(inAgent.lane, outside.host_frame.in_agent_lane);
+  assert.equal(inAgent.lane_reason, outside.host_frame.in_agent_lane_reason);
+});
+
+test('a genuinely command-lane archetype is not talked onto the host lane by the frame', (t) => {
+  // The guard on the fix. `reviewer` here is dialed to a model whose harness
+  // is not this session's host and which is a command broker's business — the
+  // shape that is CORRECTLY command-lane. Reporting "host available" for it
+  // would be a new wrong answer in place of the old one, and a preflight that
+  // cried host for everything is no more usable than one that cried command.
+  const { root, user } = seed(t, { worker: 'luna', reviewer: 'opus' });
+  const result = runSteeringResolve({
+    repoRoot: root, userPathOptions: user, archetype: 'reviewer', env: { CLAUDE_EFFORT: 'medium' },
+  });
+
+  assert.equal(result.lane, 'command');
+  assert.equal(result.lane_reason, 'model not deliverable in-host');
+  assert.equal(result.host_frame.identity, 'unstated');
+  // The counterfactual is command too: no agent, managed or otherwise, gets a
+  // host lane that does not exist.
+  assert.equal(result.host_frame.in_agent_lane, 'command');
+  assert.equal(result.delegate_to, undefined);
+});
+
+test('the preflight names the managed agent file that would take the host lane', (t) => {
+  // `delegate_to` was locked-request-only, so the ambient surface answered
+  // `command` + `delegate_to: null` — a pair whose honest reading is "there is
+  // no native option", even with the agent sitting on disk. The file is really
+  // materialized here, because the file is what the search reads.
+  const { root, user } = seed(t, { worker: 'luna@xhigh' });
+  runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
+
+  const outside = runSteeringResolve({
+    repoRoot: root, userPathOptions: user, archetype: 'worker', env: {},
+  });
+  assert.equal(outside.lane, 'command');
+  assert.equal(outside.host_frame.identity, 'unstated');
+  // The agent file carries the pin, so the counterfactual is the host lane
+  // even though nothing in THIS session observes an effort.
+  assert.equal(outside.host_frame.in_agent_lane, 'host');
+  assert.equal(outside.host_frame.in_agent_lane_reason, 'host agent pins the same effort');
+  assert.equal(outside.delegate_to?.archetype, 'worker');
+  assert.equal(outside.delegate_to?.executor, 'luna@xhigh');
+  assert.equal(outside.delegate_to?.model, 'gpt-5.6-luna');
+  assert.equal(outside.delegate_to?.reasoning_effort, 'xhigh');
+  assert.match(outside.delegate_to?.agent_file ?? '', /worker\.toml$/);
+  assert.match(outside.detail, /Spawn the worker agent/);
+});
+
+test('the neutral sentinel is neutral on every layer, not only when the cascade falls through to it', (t) => {
+  // The same disease one level down, and it was answering wrong in the
+  // reporter's own repo. `neutralIdentity` used to be spelled `cascade.source
+  // === 'base'` — a proxy for "the dial is current-host" that holds for the
+  // fall-through base ref and is strictly narrower than what it stands for.
+  // A dial WRITTEN as current-host arrives on the repo/user layer and got the
+  // unstated frame, so the preflight answered restart_required — which
+  // `cli.ts` exits 2 on — and advised "apply the dial and start a fresh
+  // session" for the one dial no session can fail to satisfy.
+  const { root, user } = seed(t, { worker: 'current-host' });
+  const outside = runSteeringResolve({
+    repoRoot: root, userPathOptions: user, archetype: 'worker', env: { CLAUDE_EFFORT: 'medium' },
+  });
+
+  assert.equal(outside.source, 'repo', 'the dial is written, not fallen through to — that is the point');
+  assert.equal(outside.mode, 'host');
+  assert.equal(outside.lane, 'host');
+  assert.equal(outside.host_frame.identity, 'held');
+  assert.equal(outside.lane_reason, 'effort unpinned');
+
+  // The PIN is still honored: neutral identity is not neutral effort, and a
+  // `current-host` agent file bakes no effort to prove one with.
+  const { root: pinnedRoot, user: pinnedUser } = seed(t, { worker: 'current-host@xhigh' });
+  const pinned = runSteeringResolve({
+    repoRoot: pinnedRoot, userPathOptions: pinnedUser, archetype: 'worker', env: { CLAUDE_EFFORT: 'medium' },
+  });
+  assert.equal(pinned.host_frame.identity, 'held');
+  assert.notEqual(pinned.lane, 'host');
+  assert.equal(pinned.lane_reason, 'no command fallback');
 });
