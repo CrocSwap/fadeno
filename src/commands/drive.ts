@@ -84,6 +84,7 @@ import {
   collectIsolatedDiff,
   createIsolatedWorktree,
   removeIsolatedWorktree,
+  ignoredOutputRetentionEcho,
   ignoredOutputStamp,
   scanIgnoredOutput,
   type IgnoredOutputStamp,
@@ -1847,11 +1848,10 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
       if (mergeStamp?.status !== 'unresolved' && mergeIgnored == null) {
         try { removeIsolatedWorktree(ctx.repoRoot, wt.abs); } catch {}
       } else if (mergeIgnored != null && mergeStamp?.status !== 'unresolved') {
-        ctx.act(
-          `gitignored output KEPT — ${mergeIgnored.paths.slice(0, 6).join(', ') || 'content the listing could not enumerate'} ` +
-            `is gitignored, so no diff carried it out of ${wt.rel}. That worktree is RETAINED: it is the only copy. ` +
-            'Copy what you need out of it before `fadeno clean --force` reclaims it.',
-        );
+        // Shared with the dispatch lanes: one message, and one that says
+        // whether what it kept is a build directory or something nothing can
+        // make again. See `ignoredOutputRetentionEcho`.
+        ctx.act(ignoredOutputRetentionEcho(mergeIgnored, wt.rel));
       }
     }
   };

@@ -67,6 +67,7 @@ import {
   carryDeclaredPaths,
   carryMutationStamp,
   ignoredOutputClean,
+  ignoredOutputRetentionEcho,
   ignoredOutputStamp,
   scanIgnoredOutput,
   verifyCarriedPaths,
@@ -1993,6 +1994,51 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       'this dispatch declares `ignored_output: kept`, and an isolated worktree merges back through ' +
       '`git add -A`, which respects .gitignore — so gitignored output would not survive it';
   }
+  /**
+   * `--isolate` and `ignored_output: kept`, together.
+   *
+   * The withholding above only ever fires when NOBODY asked for isolation, so
+   * this pairing sailed straight through it: the dispatch ran isolated and the
+   * `kept` policy was dropped without a word — the caller asking for the one
+   * thing that used to destroy what the policy exists to protect, and not
+   * being told. That silence is what is fixed here.
+   *
+   * ## Honoured, not refused — and why that is the right way round now
+   *
+   * The tempting fix is to refuse the combination as a contradiction, because
+   * the comment on the refusal below says an explicit `--isolate` is "refused,
+   * never downgraded". But it is no longer a contradiction. Since the teardown
+   * veto (`retainIf`) landed, an isolated worktree holding gitignored output is
+   * RETAINED rather than removed, on both origins — so `kept` content in a
+   * `--isolate` run is not destroyed, it is left in a directory the receipt
+   * names. "Contain this work AND do not lose its gitignored output" is a
+   * coherent request that the kernel already satisfies; refusing it would turn
+   * a dispatch that works today into a hard error for no gain, which is the
+   * exact trade the isolation design note tells us not to make.
+   *
+   * What `kept` cannot do here is its OTHER job — steering the workspace mode
+   * back to the caller's tree, so the ignored output lands where they work.
+   * That is what `--isolate` overrides, deliberately and by the caller's own
+   * instruction, and that is what this says out loud and puts on the row.
+   *
+   * A prediction, not a reading: no scan has run, so this states what the
+   * kernel will do, never what is on disk. The reading arrives later, from
+   * `retainIf`, and only the reading gets to say a path exists.
+   *
+   * `gitAvailable` is part of the condition because without it the explicit
+   * `--isolate` below REFUSES: no worktree is cut, the policy steers nothing,
+   * and there is no collision to report. Echoing one first would be a
+   * prediction the very next statement falsifies.
+   */
+  const ignoredOutputPolicyConflict =
+    opts.shared !== true && opts.isolate === true && gitAvailable && ignoredOutputPolicy === 'kept'
+    ? '`--isolate` was passed with `ignored_output: kept`, so the policy did not steer the workspace: this ' +
+      'dispatch runs in an isolated worktree and its work is never merged back. Gitignored output is not ' +
+      'destroyed — a worktree holding any is retained and named on the receipt — but it lands in that ' +
+      'worktree rather than in your tree. Drop `--isolate` (or pass `--shared`) to have `ignored_output: ' +
+      'kept` run the dispatch in your tree instead.'
+    : null;
+  if (ignoredOutputPolicyConflict != null) opts.onEcho?.(`ignored_output: kept vs --isolate — ${ignoredOutputPolicyConflict}`);
   // An explicit `--isolate` that cannot be honoured is refused, never
   // downgraded. The caller asked for containment; running in their tree
   // instead is the opposite of what they asked for, and doing it quietly is
@@ -2071,6 +2117,34 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...(delivery.provider != null ? { provider: delivery.provider } : {}),
     transport,
     workspace_mode: workspaceMode,
+    /**
+     * The resolved `ignored_output` policy this dispatch ran under.
+     *
+     * On `identity`, so it lands on the `dispatch_requested` row, the
+     * `dispatch_completed` row and any `dispatch_refused` row from one
+     * expression — the request states the intent and the completion states it
+     * beside the outcome, and neither can drift from the other because there
+     * is one writer.
+     *
+     * It is here because it was NOWHERE. A director launched dispatches with
+     * `--ignored-output kept`, `fadeno dispatches` printed DISCARDED at them,
+     * and no row carried a policy field to check that against — so the policy
+     * had to be reconstructed from memory of the command line, and the
+     * artifacts verified by hand. A tool whose report cannot be checked
+     * against what was asked for is the worst failure available here.
+     *
+     * Always written, both values, so ABSENCE keeps a meaning of its own: a
+     * row from a kernel that predates this field. `parseIgnoredOutputPolicy`
+     * reads absence as "not stated" and never as the `discardable` default,
+     * which is the one reading that would put a claim nobody made on screen.
+     */
+    ignored_output_policy: ignoredOutputPolicy,
+    // Written only when `--isolate` and `ignored_output: kept` collided, in
+    // the kernel's own words. Absent otherwise, exactly as
+    // `workspace_mode_degraded` is absent when nothing degraded — the same
+    // shape for the same kind of fact: what happened when a stated intent
+    // could not be delivered whole.
+    ...(ignoredOutputPolicyConflict != null ? { ignored_output_policy_conflict: ignoredOutputPolicyConflict } : {}),
     ...(briefApplied != null ? { brief: briefApplied } : {}),
     delivery_transport: deliveryTransport,
     prompt_source: promptSource,
@@ -2466,13 +2540,25 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // "no pair, and here is why" is the entire value. The primary stays
     // shared exactly as an unpaired dispatch's does.
     if (ignoredOutputPolicy === 'kept') {
+      // The second half of this sentence is about the PRIMARY's workspace, and
+      // it was a flat assertion that the dispatch runs shared. That is only
+      // true where the kernel chose isolation and withheld it; an explicit
+      // `--isolate` overrides the policy on that axis, so the row said the
+      // opposite of what the run did — a refusal reason that misreports the
+      // very thing it is explaining. It is read off the resolved mode now,
+      // which is the fact the request row also carries.
+      const primaryFate = workspaceMode === 'shared'
+        ? 'No pair was formed, and for the same reason this dispatch also runs in the shared tree rather than ' +
+          'the isolated worktree that is otherwise the default. This is a trade, not a fault: a comparison AND ' +
+          'containment were given up to protect the work.'
+        : 'No pair was formed. The primary still runs isolated, because `--isolate` was asked for explicitly and ' +
+          'overrides the policy on that axis: its gitignored output is not destroyed — a worktree holding any is ' +
+          'retained and named on the receipt — but it lands in that worktree rather than in your tree.';
       writeShadowRefusal(
         'ignored_output_kept',
         `this dispatch declares \`ignored_output: kept\`, and a pair cannot preserve it: both arms run in ` +
           `worktrees and the primary is merged back through \`git add -A\`, which respects .gitignore — so any ` +
-          `gitignored output would be discarded. No pair was formed, and for the same reason this dispatch ` +
-          `also runs in the shared tree rather than the isolated worktree that is otherwise the default. ` +
-          `This is a trade, not a fault: a comparison AND containment were given up to protect the work. Set ` +
+          `gitignored output would be discarded. ${primaryFate} Set ` +
           `\`ignored_output: discardable\` on the archetype, or pass \`--ignored-output discardable\`, if this ` +
           `task's gitignored output is intermediate and safe to lose.`,
         { model: shadowDelivery.model, model_id: shadowDelivery.modelId, harness: shadowDelivery.harness, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' },
@@ -3044,26 +3130,21 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
           // to name. That is the case where retention matters MOST: the
           // alternative is deleting a directory on a listing that just said
           // it could not tell what was in it. See `ignoredOutputClean`.
-          const listed = scan.paths.length > 0
-            ? `${scan.truncated ? 'at least ' : ''}${scan.paths.slice(0, 6).join(', ')}` +
-              `${scan.paths.length > 6 ? ` (+${scan.paths.length - 6} more)` : ''}`
-            : 'content the listing could not enumerate';
-          // The policy stops being silent exactly here — where it cost
-          // something — and nowhere else. A dispatch that produced no ignored
-          // output never sees this line, and neither does a caller who just
-          // passed `--ignored-output` and does not need telling what they
-          // chose a second ago.
+          //
+          // The message itself is `ignoredOutputRetentionEcho`, shared with
+          // the host lane and `drive`, and it is what tells a `dist/` apart
+          // from a `data/research/` tree. Retention does not split on that —
+          // the directory is kept either way, because a filename is not a
+          // reading of what is in it — but the REPORT does, and it has to:
+          // this line fired on every dispatch that ran `npm run build`, and a
+          // warning that routine is one a director stops reading.
           const why = ignoredOutputChosenAtCall
             ? ''
             : ' This dispatch resolved `ignored_output: discardable`, which now decides only the workspace ' +
               'mode and no longer means the content may be destroyed; declare `ignored_output: kept` on the ' +
               'archetype (or pass `--ignored-output kept`) to run in your tree instead and skip the worktree ' +
               'entirely.';
-          opts.onEcho?.(
-            `gitignored output KEPT — ${listed} is gitignored, so \`git add -A\` staged none of it and no diff ` +
-              `carried it out. The worktree is RETAINED at ${worktreeRel} rather than removed: that directory is ` +
-              `the only copy. Copy what you need out of it, then \`fadeno clean --force\` reclaims it.${why}`,
-          );
+          opts.onEcho?.(ignoredOutputRetentionEcho(scan, worktreeRel, { advice: why }));
           return `gitignored output would not survive the teardown (${worktreeRel})`;
         },
         // ---- Merge-back, inside the worktree's lifetime -------------------

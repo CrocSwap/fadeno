@@ -47,9 +47,13 @@ import {
   describeConcurrentWrite,
   UNREADABLE_WINDOW_LOG_ID,
   describeIgnoredOutput,
+  ignoredOutputSignalOrder,
+  ignoredOutputVerdict,
   parseConcurrentWriteStamps,
   parseIgnoredOutputDiscarded,
+  parseIgnoredOutputPolicy,
   type ConcurrentWriteRecord,
+  type IgnoredOutputPolicyRecord,
 } from '../lib/receipt-attestations.ts';
 import { mergeBackReapplyCommand, settleIsolatedWork, type MergeBackResult } from '../lib/workspace-baseline.ts';
 
@@ -464,6 +468,25 @@ export interface DispatchEntry {
    */
   ignoredOutputDiscarded: DispatchIgnoredOutputDiscarded | null;
   /**
+   * The resolved `ignored_output` policy this dispatch ran under, from the
+   * REQUEST row — where the caller's intent is recorded, before anything has
+   * happened to test it.
+   *
+   * Null means the row did not say, which is a row written before the kernel
+   * recorded this at all. Never defaulted to `discardable` here: the whole
+   * reason the field exists is that a director who launched with
+   * `--ignored-output kept` had nothing on any row to check the tool's
+   * "DISCARDED" verdict against, and answering that with a synthesized
+   * default would put a second unfounded claim beside the first.
+   */
+  ignoredOutputPolicy: IgnoredOutputPolicyRecord | null;
+  /**
+   * What the kernel said when `--isolate` and `ignored_output: kept` were
+   * asked for together, in its own words. Null when they were not — the
+   * ordinary case.
+   */
+  ignoredOutputPolicyConflict: string | null;
+  /**
    * Other deliveries that wrote the same paths while this one ran
    * (`concurrent_write` on the completion row). Null when the row says
    * nothing — the ordinary case, and the only spelling of "nothing
@@ -646,6 +669,12 @@ export interface DispatchesOutputResult {
   ignoredOutputNotice: string | null;
   /** The stamp behind that banner, for a caller that would rather not parse prose. */
   ignoredOutputDiscarded: DispatchIgnoredOutputDiscarded | null;
+  /**
+   * The resolved `ignored_output` policy the dispatch ran under, so the same
+   * caller can check the verdict against what was asked for without going
+   * back to the ledger. Null when no row stated one.
+   */
+  ignoredOutputPolicy: IgnoredOutputPolicyRecord | null;
   /**
    * Other deliveries that wrote the same paths while this one ran. Reported
    * beside the bytes rather than prefixed onto them: an overlap does not make
@@ -984,6 +1013,11 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     // knowable once it has finished building it. Folded in by
     // `applyCompletion`.
     ignoredOutputDiscarded: null,
+    // The POLICY, unlike the finding, is an intent and is stated up front —
+    // it is read here, from the request row, so a dispatch that never
+    // completed still says what it was launched under.
+    ignoredOutputPolicy: parseIgnoredOutputPolicy(row.ignored_output_policy),
+    ignoredOutputPolicyConflict: str(row.ignored_output_policy_conflict),
     concurrentWrite: null,
     workspaceModeDegraded: null,
     command: null,
@@ -1079,8 +1113,12 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     primaryMerge: null,
     // And with no worktree there is nothing to discard on the way out of one:
     // a host subagent writes into the caller's own tree, where a gitignored
-    // build directory stays exactly where it was written.
+    // build directory stays exactly where it was written. No policy either:
+    // this lane takes no `--ignored-output`, so claiming one would be an
+    // invention rather than a record.
     ignoredOutputDiscarded: null,
+    ignoredOutputPolicy: null,
+    ignoredOutputPolicyConflict: null,
     concurrentWrite: null,
     workspaceModeDegraded: null,
     command: null,
@@ -1284,6 +1322,13 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   // moment and for the same reason as the merge result above.
   entry.ignoredOutputDiscarded =
     entry.ignoredOutputDiscarded ?? ignoredOutputDiscardedOf(row.ignored_output_discarded);
+  // The policy rides BOTH rows (it is on the kernel's `identity`), so a
+  // completion recovered without its request — the recover-by-tag path — still
+  // carries it. `??` keeps the request row authoritative when both are present;
+  // they cannot disagree, because one expression writes both.
+  entry.ignoredOutputPolicy = entry.ignoredOutputPolicy ?? parseIgnoredOutputPolicy(row.ignored_output_policy);
+  entry.ignoredOutputPolicyConflict =
+    entry.ignoredOutputPolicyConflict ?? str(row.ignored_output_policy_conflict);
   // Who else wrote the tree while this one ran. Same moment, same row, and
   // the same reason it has to be read here: nothing prevents a concurrent
   // writer any more, so a stamp nobody projects is a lost write nobody sees.
@@ -1733,15 +1778,26 @@ export function renderDispatchLine(entry: DispatchEntry): string {
   // that is the whole reason this field exists.
   const ignored = entry.ignoredOutputDiscarded;
   if (ignored != null && (ignored.paths.length > 0 || ignored.truncated || ignored.note != null)) {
-    const shown = ignored.paths.slice(0, IGNORED_PATHS_SHOWN).map(flatPath);
-    const rest = ignored.paths.length - shown.length;
+    // KEPT or DISCARDED, from `ignoredOutputVerdict` — the writer's own
+    // `retained_at`, read in the one place that decides. This line said
+    // DISCARDED unconditionally and added "still on disk at …" as a
+    // footnote several clauses later, so a director who launched with
+    // `--ignored-output kept` read a loss report about work that was sitting
+    // on disk, and went and checked the artifacts by hand.
+    const verdict = ignoredOutputVerdict(ignored);
+    // Anything not recognisable as build output first, because this sample is
+    // capped: an entry whose only interesting path is a `data/research/` tree
+    // beside four build directories must not have it counted away.
+    const ordered = ignoredOutputSignalOrder(ignored.paths);
+    const shown = ordered.slice(0, IGNORED_PATHS_SHOWN).map(flatPath);
+    const rest = ordered.length - shown.length;
     const listed = `${shown.join(', ')}${rest > 0 ? ` (+${rest} more)` : ''}`;
     if (shown.length === 0) {
       parts.push(
         ignored.truncated
-          ? '[ignored output DISCARDED — gitignored, and the listing could not be taken: ' +
+          ? `[ignored output ${verdict} — gitignored, and the listing could not be taken: ` +
             'what was left behind is unknown, not nothing]'
-          : '[ignored output DISCARDED — gitignored; the row names no paths]',
+          : `[ignored output ${verdict} — gitignored; the row names no paths]`,
       );
     } else if (ignored.truncated) {
       // `at least` carries the floor claim on its own, so the note below adds
@@ -1749,12 +1805,22 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       // writer's note today ends "a floor, not the set" and saying it twice
       // reads like two findings.
       parts.push(
-        `[ignored output DISCARDED: at least ${listed} — gitignored, so no diff carried it out of the worktree` +
+        `[ignored output ${verdict}: at least ${listed} — gitignored, so no diff carried it out of the worktree` +
           `${ignored.note != null ? '' : '; the listing is a floor, not the set'}]`,
       );
     } else {
       parts.push(
-        `[ignored output DISCARDED: ${listed} — gitignored, so no diff carried it out of the worktree]`,
+        `[ignored output ${verdict}: ${listed} — gitignored, so no diff carried it out of the worktree]`,
+      );
+    }
+    // What the caller asked for, beside what happened to it. Rendered only
+    // when the row states it — an older row says nothing, and nothing is what
+    // it gets to say.
+    if (entry.ignoredOutputPolicy != null) {
+      parts.push(
+        entry.ignoredOutputPolicy === 'kept' && verdict === 'DISCARDED'
+          ? '[ignored_output: kept — and it did not survive: a defect, not a policy outcome]'
+          : `[ignored_output: ${entry.ignoredOutputPolicy}]`,
       );
     }
     // Why the listing is short, in the writer's words: a git failure and a
@@ -1772,6 +1838,14 @@ export function renderDispatchLine(entry: DispatchEntry): string {
     if (ignored.retainedAt != null) {
       parts.push(`[still on disk at ${flatPath(ignored.retainedAt)} until \`fadeno clean\`]`);
     }
+  }
+  // `--isolate` and `ignored_output: kept` asked for together. OUTSIDE the
+  // block above on purpose: the combination is worth reporting on a dispatch
+  // that produced no ignored output at all, because what it changed is where
+  // any such output WOULD have landed — and a caller who reads this only on
+  // the runs that happened to produce some learns the wrong rule.
+  if (entry.ignoredOutputPolicyConflict != null) {
+    parts.push(`[ignored_output: kept + --isolate: ${excerpt(entry.ignoredOutputPolicyConflict, NOTE_EXCERPT)}]`);
   }
 
   // Who else was writing while this ran. The lease that used to make this
@@ -2173,6 +2247,12 @@ interface OutputRecord {
   /** `--allow-relay-mismatch` is why a `relay_attested: false` dispatch ran. */
   relayMismatchAllowed: boolean;
   /**
+   * The resolved `ignored_output` policy, from whichever of this dispatch's
+   * rows states it. Null when none does — never the `discardable` default,
+   * which is exactly the invention the in-band banner must not make.
+   */
+  ignoredOutputPolicy: IgnoredOutputPolicyRecord | null;
+  /**
    * Gitignored output this dispatch produced that no diff carried out of its
    * worktree, from the completion row.
    *
@@ -2305,6 +2385,13 @@ function loadOutputRecords(absolute: string): {
     }
     if (event !== 'dispatch_requested' && terminal == null) continue;
 
+    // Read before the terminal branch below and from any row that states it:
+    // the policy rides the kernel's `identity`, so the request row carries it
+    // and a dispatch recovered while still open can still say what it asked
+    // for. `??` keeps the first statement, and no two rows of one dispatch can
+    // disagree — one expression writes them all.
+    const rowPolicy = parseIgnoredOutputPolicy(row.ignored_output_policy);
+
     let rec = byId.get(dispatchId);
     if (rec == null) {
       rec = {
@@ -2327,6 +2414,7 @@ function loadOutputRecords(absolute: string): {
         merged: false,
         relayAttested: null,
         relayMismatchAllowed: false,
+        ignoredOutputPolicy: null,
         ignoredOutputDiscarded: null,
         worktreeCarry: [],
         concurrentWrite: null,
@@ -2337,6 +2425,7 @@ function loadOutputRecords(absolute: string): {
       };
       byId.set(dispatchId, rec);
     }
+    rec.ignoredOutputPolicy = rec.ignoredOutputPolicy ?? rowPolicy;
     if (row.shadow === true) rec.shadow = true;
     // Read off BOTH rows: the request row carries the verdict (it is decided
     // before the spawn), and the completion row repeats it. Taking the first
@@ -2611,8 +2700,15 @@ export function relayQuarantineNotice(
 export function discardedOutputNotice(
   dispatchId: string,
   ignored: DispatchIgnoredOutputDiscarded | null,
+  policy: IgnoredOutputPolicyRecord | null = null,
 ): string | null {
   if (ignored == null) return null;
+  // The headline word, from `ignoredOutputVerdict` rather than from the
+  // function's own name. This banner is prefixed onto the bytes a caller
+  // acts on, and it announced GITIGNORED OUTPUT DISCARDED over a worktree
+  // that was retained and named three clauses further down — the loudest
+  // possible place to get the verb wrong.
+  const verdict = ignoredOutputVerdict(ignored);
   // The remedy splits on whether the content survived, because the two cases
   // ask for entirely different next actions: one is "go and get it", the
   // other is "it is gone, re-run differently". Collapsing them into a single
@@ -2625,8 +2721,8 @@ export function discardedOutputNotice(
       're-run with `--shared` (or set `ignored_output: kept` on the archetype) if this output is a ' +
       'deliverable rather than a build artifact.';
   return (
-    `!! GITIGNORED OUTPUT DISCARDED for dispatch ${dispatchId.slice(0, 8)}. ` +
-    `${describeIgnoredOutput(ignored)} ` +
+    `!! GITIGNORED OUTPUT ${verdict} for dispatch ${dispatchId.slice(0, 8)}. ` +
+    `${describeIgnoredOutput(ignored, policy)} ` +
     'An isolated dispatch reaches your tree as a patch from `git add -A`, which respects .gitignore, so ' +
     `nothing at these paths was ever staged, diffed, or applied. ${remedy} ` +
     '---- report follows ----'
@@ -2714,7 +2810,11 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
   // so "this was destroyed" would be a claim about a teardown that has not
   // happened; the same rule the verdict fields below follow.
   const ignoredOutputDiscarded = rec.completed ? rec.ignoredOutputDiscarded : null;
-  const ignoredOutputNotice = discardedOutputNotice(rec.dispatchId, ignoredOutputDiscarded);
+  // The policy is NOT gated on `completed`: it is an intent stated on the
+  // request row, true from the moment the dispatch was launched, and the
+  // banner is where a caller checks the tool's verdict against what they
+  // asked for.
+  const ignoredOutputNotice = discardedOutputNotice(rec.dispatchId, ignoredOutputDiscarded, rec.ignoredOutputPolicy);
   // Relay first: it says the whole report answers the wrong prompt, which
   // subsumes any question about what the work left behind.
   const banners = [relayNotice, ignoredOutputNotice].filter((part): part is string => part != null);
@@ -2727,6 +2827,7 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
     relayMismatchAllowed: rec.relayMismatchAllowed,
     ignoredOutputNotice,
     ignoredOutputDiscarded,
+    ignoredOutputPolicy: rec.ignoredOutputPolicy,
     concurrentWrite: rec.completed ? rec.concurrentWrite : null,
     snapshotBytes,
     attested,

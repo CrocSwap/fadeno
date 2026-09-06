@@ -24,6 +24,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync
 import { randomUUID } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { classifyIgnoredOutput, ignoredOutputSignalOrder } from './receipt-attestations.ts';
 
 /**
  * Exactly the two workspace modes the contract allows.
@@ -774,6 +775,81 @@ export function ignoredOutputStamp(
     ...(scan.note != null ? { note: scan.note } : {}),
     ...(retainedAt != null ? { retained_at: retainedAt } : {}),
   };
+}
+
+/** How many entries one retention echo names before it starts counting. */
+const RETENTION_ECHO_PATHS_SHOWN = 6;
+
+/**
+ * The line a caller sees when a worktree is kept because it holds gitignored
+ * output — written ONCE, for all three lanes that keep one.
+ *
+ * ## Why it is one function
+ *
+ * The command lane (`dispatch.ts`'s `retainIf`), the host lane
+ * (`dispatch-adhoc.ts`) and `fadeno drive` each had their own copy of this
+ * paragraph. Three copies of a message is the same defect as three copies of
+ * a predicate: they drifted (one said "RETAINED at <path>", one said "That
+ * worktree is RETAINED"), and improving the wording on one lane silently left
+ * the other two saying the old thing.
+ *
+ * ## Why it distinguishes a build directory from a deliverable
+ *
+ * Retention is correct and it works, but it fired on every dispatch that ran
+ * `npm run build`, because `dist/` is gitignored — three of four agent
+ * dispatches in Fadeno's own tree, each telling the director "that directory
+ * is the only copy. Copy what you need out of it." A warning that fires on
+ * routine build output is a warning people learn to scroll past, and scrolling
+ * past this warning is exactly how a `data/research/` deliverable went missing
+ * for two dispatches.
+ *
+ * So the entries are ordered and worded by `classifyIgnoredOutput`, which
+ * recognises rebuildable output BY NAME. What it never does is DECIDE: the
+ * worktree is retained either way. A name is not a reading of what is inside a
+ * directory, git collapses a whole directory to one entry, and destroying
+ * bytes on the strength of a filename is the class of silent wrong answer this
+ * codebase exists to stop shipping. The complaint was about signal, and the
+ * answer is signal.
+ *
+ * `advice` is appended verbatim when the caller has something to be told about
+ * the policy that chose this — see `dispatch.ts`, which suppresses it for a
+ * caller who passed `--ignored-output` on the same command line.
+ */
+export function ignoredOutputRetentionEcho(
+  found: { paths: readonly string[]; truncated?: boolean },
+  worktreeRel: string,
+  opts: { advice?: string | null } = {},
+): string {
+  const { build, unclassified } = classifyIgnoredOutput(found.paths);
+  const ordered = ignoredOutputSignalOrder(found.paths);
+  const shown = ordered.slice(0, RETENTION_ECHO_PATHS_SHOWN);
+  const rest = ordered.length - shown.length;
+  const listed = shown.length > 0
+    ? `${found.truncated === true ? 'at least ' : ''}${shown.join(', ')}${rest > 0 ? ` (+${rest} more)` : ''}`
+    : 'content the listing could not enumerate';
+  // Build output only, and at least one entry to say so about. The quiet
+  // form: no imperative, no policy advice, and the parenthetical in the first
+  // four words so a director can classify the line without reading it.
+  if (found.paths.length > 0 && unclassified.length === 0) {
+    return (
+      `gitignored output KEPT (build output only) — ${listed} is gitignored, so \`git add -A\` staged none of it ` +
+      `and no diff carried it out. Recognised as build or dependency output by NAME alone, so this is most ` +
+      `likely a rebuild rather than a loss — but nothing was opened to confirm it, and a filename is not a ` +
+      `reading, so the worktree is RETAINED at ${worktreeRel} rather than destroyed on that guess. ` +
+      '`fadeno clean --force` reclaims it.'
+    );
+  }
+  // Anything unrecognised — including a scan that could not enumerate at all,
+  // which is the case retention matters most for. The loud form.
+  const alsoBuild = build.length > 0
+    ? ` Also in there, and recognised as build or dependency output by name: ${build.slice(0, RETENTION_ECHO_PATHS_SHOWN).join(', ')}` +
+      `${build.length > RETENTION_ECHO_PATHS_SHOWN ? ` (+${build.length - RETENTION_ECHO_PATHS_SHOWN} more)` : ''}.`
+    : '';
+  return (
+    `gitignored output KEPT — ${listed} is gitignored, so \`git add -A\` staged none of it and no diff carried ` +
+    `it out. The worktree is RETAINED at ${worktreeRel} rather than removed: that directory is the only copy. ` +
+    `Copy what you need out of it, then \`fadeno clean --force\` reclaims it.${alsoBuild}${opts.advice ?? ''}`
+  );
 }
 
 /** Normalize one path for comparison: forward slashes, no `./` prefix, no

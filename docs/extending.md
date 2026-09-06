@@ -725,12 +725,29 @@ What replaced it:
   `ignored_output_discarded: { paths, truncated?, note?, retained_at? }` —
   absent when nothing was discarded, and `truncated` meaning the listing is a
   FLOOR, never the set. `fadeno verify` reports a `discarded-output` warning,
-  `fadeno show` renders a `DISCARDED OUTPUT` section ABOVE the artifact list
-  (a reader who meets the artifacts first concludes they are the whole
-  product), and `fadeno dispatches --output` prefixes a banner onto the
+  `fadeno show` renders a `DISCARDED OUTPUT` / `KEPT OUTPUT` section ABOVE the
+  artifact list (a reader who meets the artifacts first concludes they are the
+  whole product), and `fadeno dispatches --output` prefixes a banner onto the
   returned bytes: unlike an overlap, this one changes what the report means,
   because a report describing files at those paths is describing files that
   are not where it says.
+  Every one of those surfaces takes the headline word — `KEPT` or `DISCARDED` —
+  from `ignoredOutputVerdict`, which reads the writer's own `retained_at` and
+  nothing else. They each used to spell "DISCARDED" from the mere presence of
+  the field, so a retained worktree read as a loss everywhere.
+  The resolved policy rides beside it as `ignored_output_policy`
+  (`kept` | `discardable`) on the kernel's request row, completion row and any
+  refusal row, with `ignored_output_policy_conflict` present only when
+  `--isolate` and `ignored_output: kept` were asked for together. Absent means a
+  row that predates the field; readers never synthesize the `discardable`
+  default for it.
+  What is retained is also *classified* — `classifyIgnoredOutput` recognises
+  rebuildable output (`dist/`, `node_modules/`, `coverage/`, `target/`,
+  `__pycache__/`, …) by NAME, orders the unrecognised entries first in every
+  capped sample, and drops the "this is the only copy, copy it out" imperative
+  when nothing unrecognised was found. It changes wording only: the retention
+  decision never splits on a filename, because a name is not a reading of what
+  is inside a directory.
   The worktree is **not torn down** while it holds that content — on any lane
   (ad-hoc kernel, `--isolate`, `fadeno drive`, `dispatches --merge`, and both
   host lanes) — so `retained_at` names where the content still is, and

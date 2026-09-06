@@ -18201,6 +18201,55 @@ var import_node_child_process2 = require("node:child_process");
 
 // src/lib/receipt-attestations.ts
 var UNREADABLE_WINDOW_LOG_ID = "(window log unreadable)";
+function parseIgnoredOutputPolicy(value) {
+  return value === "kept" || value === "discardable" ? value : null;
+}
+function ignoredOutputVerdict(record2) {
+  return record2.retainedAt != null ? "KEPT" : "DISCARDED";
+}
+var BUILD_OUTPUT_DIR_NAMES = /* @__PURE__ */ new Set([
+  "dist",
+  "build",
+  "target",
+  "coverage",
+  "node_modules",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+  ".astro",
+  ".parcel-cache",
+  ".turbo",
+  ".cache",
+  ".gradle",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".tox",
+  ".nyc_output"
+]);
+var BUILD_OUTPUT_SUFFIXES = [".tsbuildinfo", ".pyc", ".class"];
+function looksLikeBuildOutput(path) {
+  let rel = path.split("\\").join("/");
+  while (rel.startsWith("./")) rel = rel.slice(2);
+  while (rel.length > 1 && rel.endsWith("/")) rel = rel.slice(0, -1);
+  const last = rel.slice(rel.lastIndexOf("/") + 1);
+  if (last.length === 0) return false;
+  if (BUILD_OUTPUT_DIR_NAMES.has(last)) return true;
+  return BUILD_OUTPUT_SUFFIXES.some((suffix) => last.length > suffix.length && last.endsWith(suffix));
+}
+function classifyIgnoredOutput(paths) {
+  const build = [];
+  const unclassified = [];
+  for (const path of paths) (looksLikeBuildOutput(path) ? build : unclassified).push(path);
+  return { build, unclassified };
+}
+function ignoredOutputSignalOrder(paths) {
+  const { build, unclassified } = classifyIgnoredOutput(paths);
+  return [...unclassified, ...build];
+}
 function text(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -18287,13 +18336,17 @@ function describeConcurrentWrite(record2) {
   const incomplete = record2.degraded ? " At least one listing was incomplete, so this is a floor, not the set." : "";
   return `${head}  ${floor}${count} ${noun} changed in both windows \u2014 ${strength}: ${samplePaths(record2.paths, record2.pathsIntersecting)}.${incomplete}`;
 }
-function describeIgnoredOutput(record2) {
-  const listed = samplePaths(record2.paths, null);
+function describeIgnoredOutput(record2, policy = null) {
+  const verdict = ignoredOutputVerdict(record2);
+  const { build, unclassified } = classifyIgnoredOutput(record2.paths);
+  const listed = samplePaths(ignoredOutputSignalOrder(record2.paths), null);
   const fate = record2.retainedAt != null ? `still on disk at ${record2.retainedAt} until \`fadeno clean\` removes it` : "the worktree is gone, so this content is not recoverable from it";
-  const head = record2.paths.length === 0 ? record2.truncated ? "gitignored output was DISCARDED and the listing could not be taken \u2014 what was destroyed is unknown, not nothing" : "gitignored output was DISCARDED; the row names no paths" : `${record2.truncated ? "at least " : ""}${listed} \u2014 gitignored, so \`git add -A\` staged none of it and no diff carried it out of the worktree`;
+  const head = record2.paths.length === 0 ? record2.truncated ? `gitignored output was ${verdict} and the listing could not be taken \u2014 what was in that worktree is unknown, not nothing` : `gitignored output was ${verdict}; the row names no paths` : `${record2.truncated ? "at least " : ""}${listed} \u2014 gitignored, so \`git add -A\` staged none of it and no diff carried it out of the worktree`;
   const floor = record2.truncated && record2.paths.length > 0 ? " The listing is a floor, not the set." : "";
+  const kinds = build.length === 0 ? "" : unclassified.length === 0 ? ` Every entry is recognised as build or dependency output by NAME (${samplePaths(build, null)}); nothing was opened to confirm that, which is why it was kept rather than destroyed.` : ` Recognised as build or dependency output by name, and listed last: ${samplePaths(build, null)}.`;
+  const policyClause = policy == null ? "" : policy === "kept" && verdict === "DISCARDED" ? " This dispatch declared `ignored_output: kept` and the content did not survive \u2014 a defect, not a policy outcome." : ` Declared policy: \`ignored_output: ${policy}\`.`;
   const why = record2.note != null ? ` (${record2.note})` : "";
-  return `${head}. ${fate}.${floor}${why}`;
+  return `${head}. ${fate}.${floor}${kinds}${policyClause}${why}`;
 }
 
 // src/lib/workspace-overlap.ts
@@ -19463,6 +19516,19 @@ function ignoredOutputStamp(scan, retainedAt) {
     ...scan.note != null ? { note: scan.note } : {},
     ...retainedAt != null ? { retained_at: retainedAt } : {}
   };
+}
+var RETENTION_ECHO_PATHS_SHOWN = 6;
+function ignoredOutputRetentionEcho(found, worktreeRel, opts = {}) {
+  const { build, unclassified } = classifyIgnoredOutput(found.paths);
+  const ordered = ignoredOutputSignalOrder(found.paths);
+  const shown = ordered.slice(0, RETENTION_ECHO_PATHS_SHOWN);
+  const rest = ordered.length - shown.length;
+  const listed = shown.length > 0 ? `${found.truncated === true ? "at least " : ""}${shown.join(", ")}${rest > 0 ? ` (+${rest} more)` : ""}` : "content the listing could not enumerate";
+  if (found.paths.length > 0 && unclassified.length === 0) {
+    return `gitignored output KEPT (build output only) \u2014 ${listed} is gitignored, so \`git add -A\` staged none of it and no diff carried it out. Recognised as build or dependency output by NAME alone, so this is most likely a rebuild rather than a loss \u2014 but nothing was opened to confirm it, and a filename is not a reading, so the worktree is RETAINED at ${worktreeRel} rather than destroyed on that guess. \`fadeno clean --force\` reclaims it.`;
+  }
+  const alsoBuild = build.length > 0 ? ` Also in there, and recognised as build or dependency output by name: ${build.slice(0, RETENTION_ECHO_PATHS_SHOWN).join(", ")}${build.length > RETENTION_ECHO_PATHS_SHOWN ? ` (+${build.length - RETENTION_ECHO_PATHS_SHOWN} more)` : ""}.` : "";
+  return `gitignored output KEPT \u2014 ${listed} is gitignored, so \`git add -A\` staged none of it and no diff carried it out. The worktree is RETAINED at ${worktreeRel} rather than removed: that directory is the only copy. Copy what you need out of it, then \`fadeno clean --force\` reclaims it.${alsoBuild}${opts.advice ?? ""}`;
 }
 function normalizeScanPath(raw) {
   let out = raw.split("\\").join("/");
@@ -23277,6 +23343,8 @@ ${DISPATCH_RESULT_FOOTER}`;
   if (opts.shared !== true && opts.isolate !== true && ignoredOutputPolicy === "kept") {
     isolationWithheld = "this dispatch declares `ignored_output: kept`, and an isolated worktree merges back through `git add -A`, which respects .gitignore \u2014 so gitignored output would not survive it";
   }
+  const ignoredOutputPolicyConflict = opts.shared !== true && opts.isolate === true && gitAvailable && ignoredOutputPolicy === "kept" ? "`--isolate` was passed with `ignored_output: kept`, so the policy did not steer the workspace: this dispatch runs in an isolated worktree and its work is never merged back. Gitignored output is not destroyed \u2014 a worktree holding any is retained and named on the receipt \u2014 but it lands in that worktree rather than in your tree. Drop `--isolate` (or pass `--shared`) to have `ignored_output: kept` run the dispatch in your tree instead." : null;
+  if (ignoredOutputPolicyConflict != null) opts.onEcho?.(`ignored_output: kept vs --isolate \u2014 ${ignoredOutputPolicyConflict}`);
   if (opts.isolate === true && opts.shared !== true && !gitAvailable) {
     throw new DispatchCommandError(
       "--isolate needs a git repository: an isolated worktree is cut with `git worktree add`, and this directory is not one. Refusing rather than running in your tree, which is what --isolate exists to prevent. Run `git init` first, or drop --isolate to accept a shared-tree dispatch."
@@ -23314,6 +23382,34 @@ ${DISPATCH_RESULT_FOOTER}`;
     ...delivery.provider != null ? { provider: delivery.provider } : {},
     transport,
     workspace_mode: workspaceMode,
+    /**
+     * The resolved `ignored_output` policy this dispatch ran under.
+     *
+     * On `identity`, so it lands on the `dispatch_requested` row, the
+     * `dispatch_completed` row and any `dispatch_refused` row from one
+     * expression — the request states the intent and the completion states it
+     * beside the outcome, and neither can drift from the other because there
+     * is one writer.
+     *
+     * It is here because it was NOWHERE. A director launched dispatches with
+     * `--ignored-output kept`, `fadeno dispatches` printed DISCARDED at them,
+     * and no row carried a policy field to check that against — so the policy
+     * had to be reconstructed from memory of the command line, and the
+     * artifacts verified by hand. A tool whose report cannot be checked
+     * against what was asked for is the worst failure available here.
+     *
+     * Always written, both values, so ABSENCE keeps a meaning of its own: a
+     * row from a kernel that predates this field. `parseIgnoredOutputPolicy`
+     * reads absence as "not stated" and never as the `discardable` default,
+     * which is the one reading that would put a claim nobody made on screen.
+     */
+    ignored_output_policy: ignoredOutputPolicy,
+    // Written only when `--isolate` and `ignored_output: kept` collided, in
+    // the kernel's own words. Absent otherwise, exactly as
+    // `workspace_mode_degraded` is absent when nothing degraded — the same
+    // shape for the same kind of fact: what happened when a stated intent
+    // could not be delivered whole.
+    ...ignoredOutputPolicyConflict != null ? { ignored_output_policy_conflict: ignoredOutputPolicyConflict } : {},
     ...briefApplied != null ? { brief: briefApplied } : {},
     delivery_transport: deliveryTransport,
     prompt_source: promptSource,
@@ -23551,9 +23647,10 @@ ${DISPATCH_RESULT_FOOTER}`;
       return null;
     }
     if (ignoredOutputPolicy === "kept") {
+      const primaryFate = workspaceMode === "shared" ? "No pair was formed, and for the same reason this dispatch also runs in the shared tree rather than the isolated worktree that is otherwise the default. This is a trade, not a fault: a comparison AND containment were given up to protect the work." : "No pair was formed. The primary still runs isolated, because `--isolate` was asked for explicitly and overrides the policy on that axis: its gitignored output is not destroyed \u2014 a worktree holding any is retained and named on the receipt \u2014 but it lands in that worktree rather than in your tree.";
       writeShadowRefusal(
         "ignored_output_kept",
-        `this dispatch declares \`ignored_output: kept\`, and a pair cannot preserve it: both arms run in worktrees and the primary is merged back through \`git add -A\`, which respects .gitignore \u2014 so any gitignored output would be discarded. No pair was formed, and for the same reason this dispatch also runs in the shared tree rather than the isolated worktree that is otherwise the default. This is a trade, not a fault: a comparison AND containment were given up to protect the work. Set \`ignored_output: discardable\` on the archetype, or pass \`--ignored-output discardable\`, if this task's gitignored output is intermediate and safe to lose.`,
+        `this dispatch declares \`ignored_output: kept\`, and a pair cannot preserve it: both arms run in worktrees and the primary is merged back through \`git add -A\`, which respects .gitignore \u2014 so any gitignored output would be discarded. ${primaryFate} Set \`ignored_output: discardable\` on the archetype, or pass \`--ignored-output discardable\`, if this task's gitignored output is intermediate and safe to lose.`,
         { model: shadowDelivery.model, model_id: shadowDelivery.modelId, harness: shadowDelivery.harness, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" }
       );
       return null;
@@ -23981,11 +24078,8 @@ ${DISPATCH_RESULT_FOOTER}`;
           retainIf: (_worktreeAbs, worktreeRel) => {
             const scan = takeIsolatedIgnoredOutput();
             if (ignoredOutputClean(scan) || scan == null) return null;
-            const listed = scan.paths.length > 0 ? `${scan.truncated ? "at least " : ""}${scan.paths.slice(0, 6).join(", ")}${scan.paths.length > 6 ? ` (+${scan.paths.length - 6} more)` : ""}` : "content the listing could not enumerate";
             const why = ignoredOutputChosenAtCall ? "" : " This dispatch resolved `ignored_output: discardable`, which now decides only the workspace mode and no longer means the content may be destroyed; declare `ignored_output: kept` on the archetype (or pass `--ignored-output kept`) to run in your tree instead and skip the worktree entirely.";
-            opts.onEcho?.(
-              `gitignored output KEPT \u2014 ${listed} is gitignored, so \`git add -A\` staged none of it and no diff carried it out. The worktree is RETAINED at ${worktreeRel} rather than removed: that directory is the only copy. Copy what you need out of it, then \`fadeno clean --force\` reclaims it.${why}`
-            );
+            opts.onEcho?.(ignoredOutputRetentionEcho(scan, worktreeRel, { advice: why }));
             return `gitignored output would not survive the teardown (${worktreeRel})`;
           },
           // ---- Merge-back, inside the worktree's lifetime -------------------
@@ -25045,9 +25139,7 @@ function runDispatchClose(opts = {}) {
   }
   const workspaceRetained = workspaceRemoved ? null : workspaceRel;
   if (ignoredOutput != null && workspaceRetained != null) {
-    opts.onEcho?.(
-      `gitignored output KEPT \u2014 ${ignoredOutput.paths.slice(0, 6).join(", ") || "content the listing could not enumerate"} is gitignored, so \`git add -A\` staged none of it and no diff carried it out. The worktree is RETAINED at ${workspaceRetained}: that directory is the only copy. Copy what you need out of it before \`fadeno clean --force\` reclaims it.`
-    );
+    opts.onEcho?.(ignoredOutputRetentionEcho(ignoredOutput, workspaceRetained));
   }
   let concurrentWrites = null;
   {
@@ -25331,6 +25423,11 @@ function requestedEntry(row) {
     // knowable once it has finished building it. Folded in by
     // `applyCompletion`.
     ignoredOutputDiscarded: null,
+    // The POLICY, unlike the finding, is an intent and is stated up front —
+    // it is read here, from the request row, so a dispatch that never
+    // completed still says what it was launched under.
+    ignoredOutputPolicy: parseIgnoredOutputPolicy(row.ignored_output_policy),
+    ignoredOutputPolicyConflict: str2(row.ignored_output_policy_conflict),
     concurrentWrite: null,
     workspaceModeDegraded: null,
     command: null,
@@ -25426,8 +25523,12 @@ function hostEntry(row) {
     primaryMerge: null,
     // And with no worktree there is nothing to discard on the way out of one:
     // a host subagent writes into the caller's own tree, where a gitignored
-    // build directory stays exactly where it was written.
+    // build directory stays exactly where it was written. No policy either:
+    // this lane takes no `--ignored-output`, so claiming one would be an
+    // invention rather than a record.
     ignoredOutputDiscarded: null,
+    ignoredOutputPolicy: null,
+    ignoredOutputPolicyConflict: null,
     concurrentWrite: null,
     workspaceModeDegraded: null,
     command: null,
@@ -25529,6 +25630,8 @@ function applyCompletion(entry, row) {
   if (db != null) entry.diffBytes = db;
   entry.primaryMerge = entry.primaryMerge ?? primaryMergeOf(row.primary_merge);
   entry.ignoredOutputDiscarded = entry.ignoredOutputDiscarded ?? ignoredOutputDiscardedOf(row.ignored_output_discarded);
+  entry.ignoredOutputPolicy = entry.ignoredOutputPolicy ?? parseIgnoredOutputPolicy(row.ignored_output_policy);
+  entry.ignoredOutputPolicyConflict = entry.ignoredOutputPolicyConflict ?? str2(row.ignored_output_policy_conflict);
   entry.concurrentWrite = entry.concurrentWrite ?? parseConcurrentWriteStamps(row.concurrent_write);
   entry.workspaceModeDegraded = entry.workspaceModeDegraded ?? str2(row.workspace_mode_degraded);
   if (Array.isArray(row.command) && row.command.every((c) => typeof c === "string")) {
@@ -25730,26 +25833,36 @@ function renderDispatchLine(entry) {
   );
   const ignored = entry.ignoredOutputDiscarded;
   if (ignored != null && (ignored.paths.length > 0 || ignored.truncated || ignored.note != null)) {
-    const shown = ignored.paths.slice(0, IGNORED_PATHS_SHOWN).map(flatPath);
-    const rest = ignored.paths.length - shown.length;
+    const verdict = ignoredOutputVerdict(ignored);
+    const ordered = ignoredOutputSignalOrder(ignored.paths);
+    const shown = ordered.slice(0, IGNORED_PATHS_SHOWN).map(flatPath);
+    const rest = ordered.length - shown.length;
     const listed = `${shown.join(", ")}${rest > 0 ? ` (+${rest} more)` : ""}`;
     if (shown.length === 0) {
       parts.push(
-        ignored.truncated ? "[ignored output DISCARDED \u2014 gitignored, and the listing could not be taken: what was left behind is unknown, not nothing]" : "[ignored output DISCARDED \u2014 gitignored; the row names no paths]"
+        ignored.truncated ? `[ignored output ${verdict} \u2014 gitignored, and the listing could not be taken: what was left behind is unknown, not nothing]` : `[ignored output ${verdict} \u2014 gitignored; the row names no paths]`
       );
     } else if (ignored.truncated) {
       parts.push(
-        `[ignored output DISCARDED: at least ${listed} \u2014 gitignored, so no diff carried it out of the worktree${ignored.note != null ? "" : "; the listing is a floor, not the set"}]`
+        `[ignored output ${verdict}: at least ${listed} \u2014 gitignored, so no diff carried it out of the worktree${ignored.note != null ? "" : "; the listing is a floor, not the set"}]`
       );
     } else {
       parts.push(
-        `[ignored output DISCARDED: ${listed} \u2014 gitignored, so no diff carried it out of the worktree]`
+        `[ignored output ${verdict}: ${listed} \u2014 gitignored, so no diff carried it out of the worktree]`
+      );
+    }
+    if (entry.ignoredOutputPolicy != null) {
+      parts.push(
+        entry.ignoredOutputPolicy === "kept" && verdict === "DISCARDED" ? "[ignored_output: kept \u2014 and it did not survive: a defect, not a policy outcome]" : `[ignored_output: ${entry.ignoredOutputPolicy}]`
       );
     }
     if (ignored.note != null) parts.push(`[ignored output note: ${excerpt(ignored.note, NOTE_EXCERPT)}]`);
     if (ignored.retainedAt != null) {
       parts.push(`[still on disk at ${flatPath(ignored.retainedAt)} until \`fadeno clean\`]`);
     }
+  }
+  if (entry.ignoredOutputPolicyConflict != null) {
+    parts.push(`[ignored_output: kept + --isolate: ${excerpt(entry.ignoredOutputPolicyConflict, NOTE_EXCERPT)}]`);
   }
   const overlaps2 = entry.concurrentWrite;
   if (overlaps2 != null && overlaps2.length > 0) {
@@ -25977,6 +26090,7 @@ function loadOutputRecords(absolute) {
       continue;
     }
     if (event !== "dispatch_requested" && terminal2 == null) continue;
+    const rowPolicy = parseIgnoredOutputPolicy(row.ignored_output_policy);
     let rec = byId.get(dispatchId);
     if (rec == null) {
       rec = {
@@ -25999,6 +26113,7 @@ function loadOutputRecords(absolute) {
         merged: false,
         relayAttested: null,
         relayMismatchAllowed: false,
+        ignoredOutputPolicy: null,
         ignoredOutputDiscarded: null,
         worktreeCarry: [],
         concurrentWrite: null,
@@ -26009,6 +26124,7 @@ function loadOutputRecords(absolute) {
       };
       byId.set(dispatchId, rec);
     }
+    rec.ignoredOutputPolicy = rec.ignoredOutputPolicy ?? rowPolicy;
     if (row.shadow === true) rec.shadow = true;
     if (typeof row.relay_attested === "boolean") rec.relayAttested = rec.relayAttested ?? row.relay_attested;
     if (row.relay_mismatch_allowed === true) rec.relayMismatchAllowed = true;
@@ -26134,10 +26250,11 @@ function relayQuarantineNotice(dispatchId, relayAttested, relayMismatchAllowed) 
   const provenance = relayMismatchAllowed ? "It was dispatched anyway under --allow-relay-mismatch" : "It predates the `relay_fidelity` refusal, which now stops this before the executor spawns";
   return `!! RELAY FIDELITY FAILED for dispatch ${id8} (relay_attested: false). A dispatch proxy sent the executor bytes that did not match what it was handed, so the report below answers a prompt the caller never wrote. ${provenance}. QUARANTINE IT: do not relay this as an answer and do not act on it unread \u2014 re-dispatch without the defecting relay, or verify every claim in it by hand first. ---- report follows ----`;
 }
-function discardedOutputNotice(dispatchId, ignored) {
+function discardedOutputNotice(dispatchId, ignored, policy = null) {
   if (ignored == null) return null;
+  const verdict = ignoredOutputVerdict(ignored);
   const remedy = ignored.retainedAt != null ? "The report below may describe files that are not in your tree \u2014 they are in that worktree instead. Copy what you need out of it before `fadeno clean --force` reclaims it, or re-run with `--shared` (or set `ignored_output: kept` on the archetype) so this output lands in your tree directly." : "The report below may describe files that are not in your tree: check before acting on it, and re-run with `--shared` (or set `ignored_output: kept` on the archetype) if this output is a deliverable rather than a build artifact.";
-  return `!! GITIGNORED OUTPUT DISCARDED for dispatch ${dispatchId.slice(0, 8)}. ${describeIgnoredOutput(ignored)} An isolated dispatch reaches your tree as a patch from \`git add -A\`, which respects .gitignore, so nothing at these paths was ever staged, diffed, or applied. ${remedy} ---- report follows ----`;
+  return `!! GITIGNORED OUTPUT ${verdict} for dispatch ${dispatchId.slice(0, 8)}. ${describeIgnoredOutput(ignored, policy)} An isolated dispatch reaches your tree as a patch from \`git add -A\`, which respects .gitignore, so nothing at these paths was ever staged, diffed, or applied. ${remedy} ---- report follows ----`;
 }
 function runDispatchesOutput(opts) {
   const tag = opts.tag?.trim() ? opts.tag.trim() : null;
@@ -26190,7 +26307,7 @@ function runDispatchesOutput(opts) {
   const attested = !rec.completed ? "incomplete" : sha256Hex(snapshotBytes) === rec.outputSha256 ? "match" : "mismatch";
   const relayNotice = relayQuarantineNotice(rec.dispatchId, rec.relayAttested, rec.relayMismatchAllowed);
   const ignoredOutputDiscarded = rec.completed ? rec.ignoredOutputDiscarded : null;
-  const ignoredOutputNotice = discardedOutputNotice(rec.dispatchId, ignoredOutputDiscarded);
+  const ignoredOutputNotice = discardedOutputNotice(rec.dispatchId, ignoredOutputDiscarded, rec.ignoredOutputPolicy);
   const banners = [relayNotice, ignoredOutputNotice].filter((part) => part != null);
   return {
     dispatchId: rec.dispatchId,
@@ -26203,6 +26320,7 @@ ${snapshotBytes}`,
     relayMismatchAllowed: rec.relayMismatchAllowed,
     ignoredOutputNotice,
     ignoredOutputDiscarded,
+    ignoredOutputPolicy: rec.ignoredOutputPolicy,
     concurrentWrite: rec.completed ? rec.concurrentWrite : null,
     snapshotBytes,
     attested,
@@ -31096,9 +31214,7 @@ function collectCommandAttempt(ctx, pending) {
         } catch {
         }
       } else if (mergeIgnored != null && mergeStamp?.status !== "unresolved") {
-        ctx.act(
-          `gitignored output KEPT \u2014 ${mergeIgnored.paths.slice(0, 6).join(", ") || "content the listing could not enumerate"} is gitignored, so no diff carried it out of ${wt.rel}. That worktree is RETAINED: it is the only copy. Copy what you need out of it before \`fadeno clean --force\` reclaims it.`
-        );
+        ctx.act(ignoredOutputRetentionEcho(mergeIgnored, wt.rel));
       }
     }
   };
@@ -38616,13 +38732,16 @@ function collectWorkspaceAttestations(events) {
     }
     const ignored = parseIgnoredOutputDiscarded(event.extra.ignored_output_discarded);
     if (ignored != null) {
+      const policy = parseIgnoredOutputPolicy(event.extra.ignored_output_policy);
       discardedOutput.push({
         step: event.step,
         actor,
         paths: ignored.paths,
         truncated: ignored.truncated,
         retainedAt: ignored.retainedAt,
-        detail: describeIgnoredOutput(ignored)
+        verdict: ignoredOutputVerdict(ignored),
+        policy,
+        detail: describeIgnoredOutput(ignored, policy)
       });
     }
   }
@@ -39009,12 +39128,18 @@ function checkDiscardedOutput(events) {
   const lines = [];
   let truncated = 0;
   let named = 0;
+  let kept = 0;
+  let discarded = 0;
   for (const event of events) {
     const record2 = parseIgnoredOutputDiscarded(event.extra.ignored_output_discarded);
     if (record2 == null) continue;
     if (record2.truncated) truncated += 1;
     named += record2.paths.length;
-    lines.push(`${receiptLabel(event)}: ${describeIgnoredOutput(record2)}`);
+    if (ignoredOutputVerdict(record2) === "KEPT") kept += 1;
+    else discarded += 1;
+    lines.push(
+      `${receiptLabel(event)}: ${describeIgnoredOutput(record2, parseIgnoredOutputPolicy(event.extra.ignored_output_policy))}`
+    );
   }
   if (lines.length === 0) {
     return {
@@ -39023,10 +39148,11 @@ function checkDiscardedOutput(events) {
       detail: "no receipt carries an ignored_output_discarded stamp (the ledger records no destroyed output)"
     };
   }
+  const fate = discarded === 0 ? `Every one of them was KEPT: the worktree holding it was retained, and each stamp names where. Nothing here is lost \u2014 it is out of the caller's tree until someone copies it across or \`fadeno clean\` reclaims it.` : kept === 0 ? `This content is not in the caller's tree and was not recovered.` : `${discarded} of them was not recovered; the other ${kept} names a retained worktree that still holds it.`;
   return {
     check,
     status: "warn",
-    detail: `${lines.length} receipt${lines.length === 1 ? "" : "s"} report gitignored output that no diff carried out of its worktree${truncated > 0 ? `, ${truncated} of them from a listing that is a FLOOR rather than the set` : ""} (${named} path${named === 1 ? "" : "s"} named). This content is not in the caller's tree and was not recovered. ${lines.join(" | ")}`
+    detail: `${lines.length} receipt${lines.length === 1 ? "" : "s"} report gitignored output that no diff carried out of its worktree${truncated > 0 ? `, ${truncated} of them from a listing that is a FLOOR rather than the set` : ""} (${named} path${named === 1 ? "" : "s"} named). ${fate} ${lines.join(" | ")}`
   };
 }
 function checkNodeInstances(events) {
@@ -41791,7 +41917,7 @@ function confoundsOf(primary, shadow) {
       push("effort_disagrees_with_dial", arm, `dial asked ${entry.reasoningEffort}, the process measured ${entry.attestedEffort}.`);
     }
     if (entry.ignoredOutputDiscarded != null) {
-      push("ignored_output_discarded", arm, describeIgnoredOutput(entry.ignoredOutputDiscarded));
+      push("ignored_output_discarded", arm, describeIgnoredOutput(entry.ignoredOutputDiscarded, entry.ignoredOutputPolicy));
     }
     if (entry.workspaceModeDegraded != null) {
       push("workspace_mode_degraded", arm, String(entry.workspaceModeDegraded));
@@ -46399,9 +46525,12 @@ workflow${projection.playbook ? ` \xB7 ${projection.playbook}` : ""}${total ? ` 
   }
   if (projection.discardedOutput.length > 0) {
     const truncated = projection.discardedOutput.some((item) => item.truncated);
+    const anyLost = projection.discardedOutput.some((item) => item.verdict === "DISCARDED");
+    const anyKept = projection.discardedOutput.some((item) => item.verdict === "KEPT");
+    const heading = anyLost && anyKept ? "DISCARDED / KEPT OUTPUT" : anyLost ? "DISCARDED OUTPUT" : "KEPT OUTPUT";
     console.log(
       `
-DISCARDED OUTPUT \u2014 gitignored content no diff carried out of its worktree${truncated ? " (at least: a listing was a FLOOR, not the set)" : ""}`
+${heading} \u2014 gitignored content no diff carried out of its worktree${truncated ? " (at least: a listing was a FLOOR, not the set)" : ""}`
     );
     for (const item of projection.discardedOutput) {
       const where = `${item.step ?? "(run)"}${item.actor != null ? `/${item.actor}` : ""}`;
@@ -48078,8 +48207,10 @@ Or advance manually with the playbook cursor:`);
           `  worktree RETAINED at ${result.workspaceRetained}` + (result.diffSnapshot != null ? ` \u2014 apply it with \`${mergeBackReapplyCommand(result.diffSnapshot)}\`` : "")
         );
         if (result.ignoredOutput != null) {
+          const ordered = ignoredOutputSignalOrder(result.ignoredOutput.paths);
+          const onlyBuild = ordered.length > 0 && classifyIgnoredOutput(ordered).unclassified.length === 0;
           console.log(
-            `  it holds gitignored output the diff could not carry: ${result.ignoredOutput.paths.slice(0, 6).join(", ") || "content the listing could not enumerate"}${result.ignoredOutput.truncated ? " (a FLOOR, not the set)" : ""}. Copy what you need out before \`fadeno clean --force\` reclaims it.`
+            `  it holds gitignored output the diff could not carry: ${ordered.slice(0, 6).join(", ") || "content the listing could not enumerate"}${result.ignoredOutput.truncated ? " (a FLOOR, not the set)" : ""}. ` + (onlyBuild ? "All of it is recognised as build or dependency output by NAME alone \u2014 most likely a rebuild rather than a loss, but nothing was opened to check, so it was kept rather than destroyed." : "Copy what you need out before `fadeno clean --force` reclaims it.")
           );
         }
       } else if (result.workspaceRemoved) {
@@ -48253,7 +48384,7 @@ Or advance manually with the playbook cursor:`);
         const merge = result2.primaryMerge == null ? null : result2.primaryMerge.status === "unresolved" ? `merge-back UNRESOLVED: the work conflicts with the workspace and did NOT land; the worktree is retained with conflict markers${result2.workspace != null ? ` at ${result2.workspace}` : ""}${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}. Resolve them there, then \`fadeno dispatches --merge ${result2.dispatchId.slice(0, 8)}\`` : result2.primaryMerge.status === "conflicted" ? `merge-back CONFLICTED: the tree MAY be partly applied \u2014 inspect \`git status\`${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}` : result2.primaryMerge.status === "blocked" ? `merge-back BLOCKED: nothing was applied, the workspace is untouched${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}` : result2.primaryMerge.detail != null ? `merge-back clean: ${result2.primaryMerge.detail}` : null;
         const attestation = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : result2.withdrawn ? `WITHDRAWN: an operator retired this dispatch${result2.withdrawnReason != null ? ` (${result2.withdrawnReason})` : ""}; these are all the bytes it ever produced and no completion row is coming. Do not wait on it.` : waitMs > 0 ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1e3)}s. The executor has not exited; this is its output so far. Not a failure \u2014 re-run this command to check again.` : "no completion row recorded YET: the executor may still be running, and the kernel writes that row only when it exits. This is its output so far, not a failure. Re-run with --wait <seconds> to wait for the real answer.";
         const relay = result2.relayAttested === false ? `RELAY FIDELITY FAILED (relay_attested: false${result2.relayMismatchAllowed ? ", dispatched under --allow-relay-mismatch" : ""}) \u2014 the report above answers a prompt the caller never wrote; do not relay it as an answer` : null;
-        const discarded = result2.ignoredOutputDiscarded == null ? null : `GITIGNORED OUTPUT DISCARDED \u2014 ${describeIgnoredOutput(result2.ignoredOutputDiscarded)}`;
+        const discarded = result2.ignoredOutputDiscarded == null ? null : `GITIGNORED OUTPUT ${ignoredOutputVerdict(result2.ignoredOutputDiscarded)} \u2014 ` + describeIgnoredOutput(result2.ignoredOutputDiscarded, result2.ignoredOutputPolicy);
         const overlapNamed = (result2.concurrentWrite ?? []).filter((stamp) => stamp.dispatchId !== UNREADABLE_WINDOW_LOG_ID);
         const overlap = overlapNamed.length === 0 ? null : `concurrent_write: ${overlapNamed.length} other ${overlapNamed.length === 1 ? "delivery" : "deliveries"} overlapped this one (${overlapNamed.map((stamp) => stamp.dispatchId.slice(0, 8)).join(", ")}) \u2014 an attestation, not proof of damage; \`fadeno dispatches\` names the intersecting paths`;
         const transcript = result2.stderrSnapshot == null ? null : `executor stderr: ${result2.stderrBytes ?? "?"} bytes at ${result2.stderrSnapshot}` + (result2.stderrTruncated ? " (a head+tail sample; a floor, not the set)" : "");

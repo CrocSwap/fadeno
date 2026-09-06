@@ -63,7 +63,12 @@ import {
   removeHostWorkspaceByPath,
 } from '../lib/host-workspace.ts';
 import { settleIsolatedWork, type MergeBackResult } from '../lib/workspace-baseline.ts';
-import { isRegisteredWorktree, type IgnoredOutputStamp, type IsolatedDiffResult } from '../lib/workspace-isolation.ts';
+import {
+  ignoredOutputRetentionEcho,
+  isRegisteredWorktree,
+  type IgnoredOutputStamp,
+  type IsolatedDiffResult,
+} from '../lib/workspace-isolation.ts';
 import { UNREADABLE_WINDOW_LOG_ID } from '../lib/receipt-attestations.ts';
 import {
   closeDispatchWindow,
@@ -642,11 +647,11 @@ export function runDispatchClose(opts: DispatchCloseOptions = {}): DispatchClose
   }
   const workspaceRetained = workspaceRemoved ? null : workspaceRel;
   if (ignoredOutput != null && workspaceRetained != null) {
-    opts.onEcho?.(
-      `gitignored output KEPT — ${ignoredOutput.paths.slice(0, 6).join(', ') || 'content the listing could not enumerate'} ` +
-        `is gitignored, so \`git add -A\` staged none of it and no diff carried it out. The worktree is RETAINED at ` +
-        `${workspaceRetained}: that directory is the only copy. Copy what you need out of it before \`fadeno clean --force\` reclaims it.`,
-    );
+    // One message for all three lanes that keep a worktree for this reason —
+    // this one had already drifted from the command lane's phrasing, and it
+    // reported a `dist/` in the same register as an irreplaceable deliverable.
+    // See `ignoredOutputRetentionEcho`.
+    opts.onEcho?.(ignoredOutputRetentionEcho(ignoredOutput, workspaceRetained));
   }
 
   // The overlap window closes with this delivery's own path set — from its

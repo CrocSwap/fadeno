@@ -69,7 +69,12 @@ import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
 import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
 import { runDispatchClose, runDispatchOpen } from './commands/dispatch-adhoc.ts';
 import { mergeBackReapplyCommand } from './lib/workspace-baseline.ts';
-import { describeIgnoredOutput } from './lib/receipt-attestations.ts';
+import {
+  classifyIgnoredOutput,
+  describeIgnoredOutput,
+  ignoredOutputSignalOrder,
+  ignoredOutputVerdict,
+} from './lib/receipt-attestations.ts';
 import { runDispatchWithdraw } from './commands/dispatch-withdraw.ts';
 import { runToolComplete } from './commands/tool-complete.ts';
 import { runToolRun } from './commands/tool-run.ts';
@@ -479,8 +484,14 @@ function printProjection(projection: ShowProjection): void {
   // `failures` at the bottom of this projection is the other end of the page.
   if (projection.discardedOutput.length > 0) {
     const truncated = projection.discardedOutput.some((item) => item.truncated);
+    // The heading names both fates when both are present. It said DISCARDED
+    // over every row, retained ones included, and a heading is what a reader
+    // takes away from a section they skim.
+    const anyLost = projection.discardedOutput.some((item) => item.verdict === 'DISCARDED');
+    const anyKept = projection.discardedOutput.some((item) => item.verdict === 'KEPT');
+    const heading = anyLost && anyKept ? 'DISCARDED / KEPT OUTPUT' : anyLost ? 'DISCARDED OUTPUT' : 'KEPT OUTPUT';
     console.log(
-      `\nDISCARDED OUTPUT — gitignored content no diff carried out of its worktree${truncated ? ' (at least: a listing was a FLOOR, not the set)' : ''}`,
+      `\n${heading} — gitignored content no diff carried out of its worktree${truncated ? ' (at least: a listing was a FLOOR, not the set)' : ''}`,
     );
     for (const item of projection.discardedOutput) {
       const where = `${item.step ?? '(run)'}${item.actor != null ? `/${item.actor}` : ''}`;
@@ -2509,11 +2520,21 @@ function main(argv: string[]): number {
         // still the only copy of something. Without this the retention reads
         // as a merge that did not finish.
         if (result.ignoredOutput != null) {
+          // Ordered so anything NOT recognisable as build output is named
+          // first: this sample is capped at six, and a `data/research/` tree
+          // beside four build directories must not be the entry that gets
+          // counted away. The imperative is dropped when every entry is
+          // build-shaped — that is the line directors learned to skip.
+          const ordered = ignoredOutputSignalOrder(result.ignoredOutput.paths);
+          const onlyBuild = ordered.length > 0 && classifyIgnoredOutput(ordered).unclassified.length === 0;
           console.log(
             `  it holds gitignored output the diff could not carry: ` +
-              `${result.ignoredOutput.paths.slice(0, 6).join(', ') || 'content the listing could not enumerate'}` +
+              `${ordered.slice(0, 6).join(', ') || 'content the listing could not enumerate'}` +
               `${result.ignoredOutput.truncated ? ' (a FLOOR, not the set)' : ''}. ` +
-              'Copy what you need out before `fadeno clean --force` reclaims it.',
+              (onlyBuild
+                ? 'All of it is recognised as build or dependency output by NAME alone — most likely a rebuild ' +
+                  'rather than a loss, but nothing was opened to check, so it was kept rather than destroyed.'
+                : 'Copy what you need out before `fadeno clean --force` reclaims it.'),
           );
         }
       } else if (result.workspaceRemoved) {
@@ -2781,7 +2802,8 @@ function main(argv: string[]): number {
         // content — the one thing a reader can act on.
         const discarded = result.ignoredOutputDiscarded == null
           ? null
-          : `GITIGNORED OUTPUT DISCARDED — ${describeIgnoredOutput(result.ignoredOutputDiscarded)}`;
+          : `GITIGNORED OUTPUT ${ignoredOutputVerdict(result.ignoredOutputDiscarded)} — ` +
+            describeIgnoredOutput(result.ignoredOutputDiscarded, result.ignoredOutputPolicy);
         // Not prefixed onto the bytes: an overlap does not make the report
         // false. It is still stated, because nothing prevents a concurrent
         // writer any more and this is one of the two places it can be read.

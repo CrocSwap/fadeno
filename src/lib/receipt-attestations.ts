@@ -114,6 +114,166 @@ export interface IgnoredOutputRecord {
   retainedAt: string | null;
 }
 
+/**
+ * The resolved `ignored_output` policy a dispatch ran under, as a reader sees
+ * it. `null` is a row that did not say — never a defaulted `discardable`.
+ *
+ * The default is `discardable`, so synthesizing one for silence would be the
+ * easiest possible mistake and the worst: a row written by a kernel that
+ * predates this field would then RENDER a policy claim nobody made, on the
+ * exact surface a director consults to check what they asked for.
+ */
+export type IgnoredOutputPolicyRecord = 'kept' | 'discardable';
+
+/** Parse a receipt's `ignored_output_policy`. Anything else is "not stated". */
+export function parseIgnoredOutputPolicy(value: unknown): IgnoredOutputPolicyRecord | null {
+  return value === 'kept' || value === 'discardable' ? value : null;
+}
+
+/**
+ * What actually became of the content the stamp names, in the ONE place that
+ * decides.
+ *
+ * ## The defect this exists to close
+ *
+ * `ignored_output_discarded` is named for the only outcome that existed when
+ * it was written. Since the teardown veto landed, the kernel KEEPS the
+ * worktree whenever the scan is not a positive claim of nothing, so the same
+ * field now records two opposite fates — and every surface spelled the
+ * headline "DISCARDED" from the field's mere presence, adding "still on disk
+ * at …" as a footnote several clauses later. A director launched a dispatch
+ * with `--ignored-output kept`, read `DISCARDED` on `fadeno dispatches`, and
+ * went and verified the artifacts by hand. The tool's report was not wrong
+ * about the paths; it was wrong about the verb, which is the part a reader
+ * acts on.
+ *
+ * `retainedAt` is the writer's own reading of the disk at teardown — it is
+ * only ever set by a writer that just saw the directory — so it, and nothing
+ * else, decides the word. Absence means the writer stated no surviving copy,
+ * which for every writer that exists means the worktree went away.
+ */
+export function ignoredOutputVerdict(record: IgnoredOutputRecord): 'KEPT' | 'DISCARDED' {
+  return record.retainedAt != null ? 'KEPT' : 'DISCARDED';
+}
+
+/**
+ * Path names that identify REBUILDABLE output: a compiler's, a bundler's, a
+ * package manager's, or a test runner's, reproduced by re-running the tool
+ * that made it.
+ *
+ * ## Why this list is short, and why it is names rather than content
+ *
+ * Retention found the gitignored work the diff could not carry, and then
+ * reported a `dist/` in exactly the register it reports a `data/research/`
+ * tree: "that directory is the only copy. Copy what you need out of it." In
+ * this repo, three of four agent dispatches retained a worktree solely
+ * because they ran `npm run build`. A warning that fires on every build is a
+ * warning people stop reading, and not reading that warning is precisely how
+ * a research deliverable went missing for two dispatches without anyone
+ * noticing.
+ *
+ * So the split is about SIGNAL, not about deletion. Nothing here lowers a
+ * retention decision (see `dispatch.ts`'s `retainIf`): a name is not a
+ * reading of what is inside a directory, and destroying bytes on the strength
+ * of a filename is the class of silent wrong answer this codebase keeps
+ * paying for. `dist/` is `tsc` output in one repo and a committed-then-ignored
+ * vendor bundle in the next, and git collapses a whole directory to one entry
+ * so even a correctly-named `dist/` may hold something else beside the build.
+ *
+ * That is also why the list excludes every ambiguous name a first draft
+ * reaches for. `out/`, `bin/`, `obj/`, `tmp/`, `vendor/`, `logs/` are all
+ * plausible build directories AND plausible places to put a deliverable; a
+ * wrong `build` label costs a demoted warning on real work, which is the
+ * failure this whole section exists to end. Every name below is one whose
+ * contents a project's own toolchain regenerates from committed sources.
+ */
+const BUILD_OUTPUT_DIR_NAMES: ReadonlySet<string> = new Set([
+  'dist',
+  'build',
+  'target',
+  'coverage',
+  'node_modules',
+  '.next',
+  '.nuxt',
+  '.svelte-kit',
+  '.astro',
+  '.parcel-cache',
+  '.turbo',
+  '.cache',
+  '.gradle',
+  '.venv',
+  'venv',
+  '__pycache__',
+  '.pytest_cache',
+  '.mypy_cache',
+  '.ruff_cache',
+  '.tox',
+  '.nyc_output',
+]);
+
+/** Single files whose extension alone says a tool regenerates them. */
+const BUILD_OUTPUT_SUFFIXES: readonly string[] = ['.tsbuildinfo', '.pyc', '.class'];
+
+/** Is one scanned entry recognisable as rebuildable output BY NAME ALONE? */
+function looksLikeBuildOutput(path: string): boolean {
+  let rel = path.split('\\').join('/');
+  while (rel.startsWith('./')) rel = rel.slice(2);
+  while (rel.length > 1 && rel.endsWith('/')) rel = rel.slice(0, -1);
+  const last = rel.slice(rel.lastIndexOf('/') + 1);
+  if (last.length === 0) return false;
+  if (BUILD_OUTPUT_DIR_NAMES.has(last)) return true;
+  return BUILD_OUTPUT_SUFFIXES.some((suffix) => last.length > suffix.length && last.endsWith(suffix));
+}
+
+/** A scan's entries, split by whether a name says a tool can make them again. */
+export interface IgnoredOutputClasses {
+  /**
+   * Recognised as build, dependency, or cache output by its NAME. Never by
+   * its contents — nothing here opened a single file.
+   */
+  build: string[];
+  /**
+   * Everything else, which is the important half. Not "known to be
+   * irreplaceable": unrecognised. That is the same direction
+   * `ignoredOutputClean` falls in, and for the same reason — the cost of
+   * over-reporting here is a line someone reads, and the cost of
+   * under-reporting is a deliverable nobody looks for.
+   */
+  unclassified: string[];
+}
+
+/**
+ * Split a scan's paths, in the ONE place that decides.
+ *
+ * A pure function of `paths`, which is already on the row, so writer and
+ * reader call the same code and no classification is ever written to the wire
+ * to drift away from the list it describes. That is deliberate: a stored
+ * verdict beside a stored list is two spellings of one fact, and a row
+ * written by an older kernel would carry none — where this way an old row
+ * gets today's reading for free.
+ */
+export function classifyIgnoredOutput(paths: readonly string[]): IgnoredOutputClasses {
+  const build: string[] = [];
+  const unclassified: string[] = [];
+  for (const path of paths) (looksLikeBuildOutput(path) ? build : unclassified).push(path);
+  return { build, unclassified };
+}
+
+/**
+ * The same entries, reordered so anything NOT recognisable as build output
+ * comes first.
+ *
+ * Every rendering of this stamp is capped at `ATTESTATION_PATHS_SHOWN`, and a
+ * worktree that holds `node_modules/`, `dist/`, `.next/`, `coverage/` and one
+ * `data/research/` tree would show the four benign entries and count the
+ * fifth away. `carryPathVerdicts` already sorts hazards first for exactly this
+ * reason; this is the same rule applied to the same kind of truncated sample.
+ */
+export function ignoredOutputSignalOrder(paths: readonly string[]): string[] {
+  const { build, unclassified } = classifyIgnoredOutput(paths);
+  return [...unclassified, ...build];
+}
+
 function text(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
@@ -303,27 +463,65 @@ export function describeConcurrentWrite(record: ConcurrentWriteRecord): string {
 }
 
 /**
- * One line describing destroyed output.
+ * One line describing gitignored output no diff carried out of a worktree.
  *
- * Unlike an overlap, this is not an attestation about who touched what: it
- * is a positive statement that named content existed in a worktree and no
- * diff carried it out before that worktree was removed. The wording says so
- * plainly, and says `at least` whenever the listing is a floor — a truncated
- * discard rendered as though the named paths were all of it would understate
- * a loss, which is the failure mode with no recovery.
+ * Unlike an overlap, this is not an attestation about who touched what: it is
+ * a positive statement that named content existed in a worktree at teardown
+ * and that `git add -A` staged none of it. The wording says so plainly, and
+ * says `at least` whenever the listing is a floor — a truncated finding
+ * rendered as though the named paths were all of it would understate it,
+ * which is the failure mode with no recovery.
+ *
+ * ## Three things this line reports, and none of them are guessed
+ *
+ * 1. **The fate** — `KEPT` or `DISCARDED`, from `ignoredOutputVerdict`, which
+ *    reads the writer's own `retained_at`. This used to be hardcoded to
+ *    "DISCARDED" here and at four other surfaces, so a retained worktree read
+ *    as a loss on every one of them.
+ * 2. **The policy** — the resolved `ignored_output` the dispatch ran under,
+ *    when the row states one. Absent for a row that did not say; never
+ *    defaulted, because the default is one of the two legal values and
+ *    inventing it would put a claim on the screen nobody made.
+ * 3. **What kind of thing it is** — `classifyIgnoredOutput`, by name only,
+ *    and said to be by name only. A `dist/` and a `data/research/` tree are
+ *    not the same discovery, and reporting them identically is what taught
+ *    readers to skip the line.
  */
-export function describeIgnoredOutput(record: IgnoredOutputRecord): string {
-  const listed = samplePaths(record.paths, null);
+export function describeIgnoredOutput(
+  record: IgnoredOutputRecord,
+  policy: IgnoredOutputPolicyRecord | null = null,
+): string {
+  const verdict = ignoredOutputVerdict(record);
+  const { build, unclassified } = classifyIgnoredOutput(record.paths);
+  const listed = samplePaths(ignoredOutputSignalOrder(record.paths), null);
   const fate = record.retainedAt != null
     ? `still on disk at ${record.retainedAt} until \`fadeno clean\` removes it`
     : 'the worktree is gone, so this content is not recoverable from it';
   const head = record.paths.length === 0
     ? record.truncated
-      ? 'gitignored output was DISCARDED and the listing could not be taken — what was destroyed is unknown, not nothing'
-      : 'gitignored output was DISCARDED; the row names no paths'
+      ? `gitignored output was ${verdict} and the listing could not be taken — what was in that worktree is ` +
+        'unknown, not nothing'
+      : `gitignored output was ${verdict}; the row names no paths`
     : `${record.truncated ? 'at least ' : ''}${listed} — gitignored, so \`git add -A\` staged none of it and no diff ` +
       'carried it out of the worktree';
   const floor = record.truncated && record.paths.length > 0 ? ' The listing is a floor, not the set.' : '';
+  // The kind clause. Only ever said when a name was actually recognised, and
+  // always attributed to the name rather than to an inspection that never
+  // happened.
+  const kinds = build.length === 0
+    ? ''
+    : unclassified.length === 0
+      ? ` Every entry is recognised as build or dependency output by NAME (${samplePaths(build, null)}); nothing ` +
+        'was opened to confirm that, which is why it was kept rather than destroyed.'
+      : ` Recognised as build or dependency output by name, and listed last: ${samplePaths(build, null)}.`;
+  // A `kept` policy whose content was destroyed anyway is the one combination
+  // that is a defect rather than an outcome, so it does not render as a
+  // neutral policy note.
+  const policyClause = policy == null
+    ? ''
+    : policy === 'kept' && verdict === 'DISCARDED'
+      ? ' This dispatch declared `ignored_output: kept` and the content did not survive — a defect, not a policy outcome.'
+      : ` Declared policy: \`ignored_output: ${policy}\`.`;
   const why = record.note != null ? ` (${record.note})` : '';
-  return `${head}. ${fate}.${floor}${why}`;
+  return `${head}. ${fate}.${floor}${kinds}${policyClause}${why}`;
 }

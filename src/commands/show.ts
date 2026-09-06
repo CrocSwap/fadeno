@@ -19,8 +19,11 @@ import { hostRequestTerminalState } from '../lib/host-dispatch.ts';
 import {
   describeConcurrentWrite,
   describeIgnoredOutput,
+  ignoredOutputVerdict,
   parseConcurrentWriteStamps,
   parseIgnoredOutputDiscarded,
+  parseIgnoredOutputPolicy,
+  type IgnoredOutputPolicyRecord,
   type OverlapAttribution,
 } from '../lib/receipt-attestations.ts';
 import { INFLIGHT_DIR, readInflightClaim, readSupervisorStatus } from '../lib/supervisor.ts';
@@ -226,6 +229,14 @@ export interface DiscardedOutputView {
   truncated: boolean;
   /** A worktree still holding it, when the writer said so. */
   retainedAt: string | null;
+  /**
+   * What actually became of it, from `ignoredOutputVerdict` — the ONE reader
+   * of `retained_at`. The section heading used to say DISCARDED over every
+   * row including the retained ones, which is the verb a reader acts on.
+   */
+  verdict: 'KEPT' | 'DISCARDED';
+  /** The `ignored_output` policy the receipt states, or null when it states none. */
+  policy: IgnoredOutputPolicyRecord | null;
   detail: string;
 }
 
@@ -1030,13 +1041,16 @@ function collectWorkspaceAttestations(
     }
     const ignored = parseIgnoredOutputDiscarded(event.extra.ignored_output_discarded);
     if (ignored != null) {
+      const policy = parseIgnoredOutputPolicy(event.extra.ignored_output_policy);
       discardedOutput.push({
         step: event.step,
         actor,
         paths: ignored.paths,
         truncated: ignored.truncated,
         retainedAt: ignored.retainedAt,
-        detail: describeIgnoredOutput(ignored),
+        verdict: ignoredOutputVerdict(ignored),
+        policy,
+        detail: describeIgnoredOutput(ignored, policy),
       });
     }
   }

@@ -275,9 +275,17 @@ Four consequences worth stating, because each was a decision:
   codebase keeps paying for.
 - **`ignored_output: kept` now withholds the worktree, not just the pair.** A
   merge-back is built by `git add -A`, which respects `.gitignore`. Isolating a
-  `kept` dispatch would destroy exactly the output the policy exists to
-  protect, so the dispatch stays shared and the refusal row says both things
-  were given up.
+  `kept` dispatch puts exactly the output the policy exists to protect outside
+  the caller's tree, so a dispatch nobody asked to isolate stays shared and the
+  refusal row says both things were given up.
+- **`--isolate --ignored-output kept` is honoured, and said out loud.** The
+  withholding above only fires when nobody asked for isolation, so this pairing
+  used to sail through it in silence. It is not refused: since the teardown veto
+  a worktree holding gitignored output is RETAINED on both origins, so nothing
+  is destroyed and "contain this work AND keep its gitignored output" is a
+  request the kernel already satisfies. What `kept` cannot do here is steer the
+  work back into the caller's tree, and that is what the echo says and what
+  `ignored_output_policy_conflict` records on the request row.
 - **`--isolate` outside a git repository refuses instead of degrading.** Kernel
   isolation may fall back to shared — nobody asked for it, and hard-failing
   would break dispatches that work today. An explicit containment request that

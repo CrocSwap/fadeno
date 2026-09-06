@@ -19,8 +19,10 @@ import {
   concurrentWriteStrength,
   describeConcurrentWrite,
   describeIgnoredOutput,
+  ignoredOutputVerdict,
   parseConcurrentWriteStamps,
   parseIgnoredOutputDiscarded,
+  parseIgnoredOutputPolicy,
 } from '../lib/receipt-attestations.ts';
 import {
   ledgerMode,
@@ -549,12 +551,23 @@ function checkDiscardedOutput(events: RunEvent[]): Finding {
   const lines: string[] = [];
   let truncated = 0;
   let named = 0;
+  // Split by what actually became of the content, through the one predicate
+  // that decides. The summary sentence used to end "This content is not in the
+  // caller's tree and was not recovered" over EVERY stamp — including the ones
+  // whose own `retained_at` names the directory holding it. A verify finding
+  // that overstates is one an operator learns to wave through, which costs the
+  // same as not raising it.
+  let kept = 0;
+  let discarded = 0;
   for (const event of events) {
     const record = parseIgnoredOutputDiscarded(event.extra.ignored_output_discarded);
     if (record == null) continue;
     if (record.truncated) truncated += 1;
     named += record.paths.length;
-    lines.push(`${receiptLabel(event)}: ${describeIgnoredOutput(record)}`);
+    if (ignoredOutputVerdict(record) === 'KEPT') kept += 1; else discarded += 1;
+    lines.push(
+      `${receiptLabel(event)}: ${describeIgnoredOutput(record, parseIgnoredOutputPolicy(event.extra.ignored_output_policy))}`,
+    );
   }
   if (lines.length === 0) {
     return {
@@ -563,14 +576,19 @@ function checkDiscardedOutput(events: RunEvent[]): Finding {
       detail: 'no receipt carries an ignored_output_discarded stamp (the ledger records no destroyed output)',
     };
   }
+  const fate = discarded === 0
+    ? `Every one of them was KEPT: the worktree holding it was retained, and each stamp names where. Nothing ` +
+      `here is lost — it is out of the caller's tree until someone copies it across or \`fadeno clean\` reclaims it.`
+    : kept === 0
+      ? `This content is not in the caller's tree and was not recovered.`
+      : `${discarded} of them was not recovered; the other ${kept} names a retained worktree that still holds it.`;
   return {
     check,
     status: 'warn',
     detail:
       `${lines.length} receipt${lines.length === 1 ? '' : 's'} report gitignored output that no diff carried out of ` +
       `its worktree${truncated > 0 ? `, ${truncated} of them from a listing that is a FLOOR rather than the set` : ''} ` +
-      `(${named} path${named === 1 ? '' : 's'} named). This content is not in the caller's tree and was not ` +
-      `recovered. ${lines.join(' | ')}`,
+      `(${named} path${named === 1 ? '' : 's'} named). ${fate} ${lines.join(' | ')}`,
   };
 }
 

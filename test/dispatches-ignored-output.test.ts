@@ -453,3 +453,132 @@ test('a challenger says its output is still on disk; a primary says nothing of t
   assert.doesNotMatch(primaryLine, /still on disk/, 'a torn-down worktree must not promise recovery');
   assert.match(challengerLine, /still on disk at \.fadeno\/local\/pair\/aaaaaaaa\/bbbbbbbb until `fadeno clean`/);
 });
+
+// --- group 3: the verdict, the policy, and what KIND of thing was kept ----
+//
+// Three field-reported defects, all of the same class — the tool's own report
+// could not be trusted:
+//
+//  1. Every surface spelled the headline "DISCARDED" from the mere presence of
+//     an `ignored_output_discarded` stamp, adding "still on disk at …" as a
+//     footnote several clauses later. A director who launched with
+//     `--ignored-output kept` read a loss report about work sitting on disk
+//     and went and verified the artifacts by hand.
+//  2. No row carried the policy at all, so that verdict could not be checked
+//     against what was asked for.
+//  3. Retention reported a `dist/` in exactly the register it reports a
+//     `data/research/` tree. In this repo three of four agent dispatches
+//     retained a worktree solely because they ran `npm run build`, and a
+//     warning that routine is one people stop reading — which is precisely how
+//     the original loss stayed invisible for two dispatches.
+
+test('a retained worktree reads as KEPT, never as DISCARDED', (t) => {
+  const root = seed(t, [
+    primaryRequested({ ignored_output_policy: 'kept' }),
+    primaryCompleted({
+      ignored_output_policy: 'kept',
+      ignored_output_discarded: {
+        paths: ['data/research/'],
+        retained_at: '.fadeno/local/isolated/prim0123',
+      },
+    }),
+  ]);
+  const { entries, lines } = runDispatches({ repoRoot: root });
+
+  assert.equal(entries[0]!.ignoredOutputPolicy, 'kept');
+  assert.match(lines[0]!, /\[ignored output KEPT: data\/research\//);
+  assert.doesNotMatch(lines[0]!, /ignored output DISCARDED/);
+  // What was asked for, beside what happened to it — the fact the director
+  // could not find anywhere.
+  assert.match(lines[0]!, /\[ignored_output: kept\]/);
+  assert.match(lines[0]!, /still on disk at \.fadeno\/local\/isolated\/prim0123/);
+});
+
+test('a torn-down worktree still reads as DISCARDED — the word tracks the disk, not the policy', (t) => {
+  const root = seed(t, [
+    primaryRequested({ ignored_output_policy: 'discardable' }),
+    primaryCompleted({
+      ignored_output_policy: 'discardable',
+      ignored_output_discarded: { paths: ['data/research/'] },
+    }),
+  ]);
+  const { lines } = runDispatches({ repoRoot: root });
+  assert.match(lines[0]!, /\[ignored output DISCARDED: data\/research\//);
+  assert.match(lines[0]!, /\[ignored_output: discardable\]/);
+});
+
+test('a `kept` policy whose content did NOT survive is called a defect, not an outcome', (t) => {
+  // The one combination that is a bug rather than a trade. Rendering it as a
+  // neutral policy note would bury the only row that says the kernel failed
+  // to do what it was told.
+  const root = seed(t, [
+    primaryRequested({ ignored_output_policy: 'kept' }),
+    primaryCompleted({ ignored_output_policy: 'kept', ignored_output_discarded: { paths: ['data/'] } }),
+  ]);
+  const { lines } = runDispatches({ repoRoot: root });
+  assert.match(lines[0]!, /\[ignored_output: kept — and it did not survive: a defect, not a policy outcome\]/);
+});
+
+test('a row that states no policy claims none — the default is never synthesized', (t) => {
+  // `discardable` is the default, so inventing it for silence is the easiest
+  // possible mistake and the worst: it would put a policy claim on the exact
+  // surface a director consults to check what they asked for.
+  const root = seed(t, [
+    primaryRequested(),
+    primaryCompleted({ ignored_output_discarded: { paths: ['dist/'] } }),
+  ]);
+  const { entries, lines } = runDispatches({ repoRoot: root });
+  assert.equal(entries[0]!.ignoredOutputPolicy, null);
+  assert.doesNotMatch(lines[0]!, /\[ignored_output: /);
+});
+
+test('a capped sample names the unrecognised path first, never counts it away', (t) => {
+  // The listing shows at most a handful of entries. A `data/research/` tree
+  // beside four build directories must not be the one that lands in
+  // "(+N more)".
+  const root = seed(t, [
+    primaryRequested(),
+    primaryCompleted({
+      ignored_output_discarded: {
+        paths: ['node_modules/', 'dist/', 'coverage/', '.next/', 'data/research/'],
+        retained_at: '.fadeno/local/isolated/prim0123',
+      },
+    }),
+  ]);
+  const { lines } = runDispatches({ repoRoot: root });
+  assert.match(lines[0]!, /\[ignored output KEPT: data\/research\/, node_modules\//);
+});
+
+test('the --isolate + kept collision is on the row, and on a run that produced nothing ignored', (t) => {
+  // The combination changes WHERE any gitignored output would land, so it is
+  // worth saying on a dispatch that happened to produce none. A caller who
+  // only ever sees it on the runs that did learns the wrong rule.
+  const root = seed(t, [
+    primaryRequested({
+      ignored_output_policy: 'kept',
+      ignored_output_policy_conflict: '`--isolate` was passed with `ignored_output: kept`, so the policy did not steer the workspace.',
+    }),
+    primaryCompleted({ ignored_output_policy: 'kept' }),
+  ]);
+  const { entries, lines } = runDispatches({ repoRoot: root });
+  assert.equal(entries[0]!.ignoredOutputDiscarded, null, 'this run produced no ignored output at all');
+  assert.match(entries[0]!.ignoredOutputPolicyConflict!, /did not steer the workspace/);
+  assert.match(lines[0]!, /\[ignored_output: kept \+ --isolate: /);
+});
+
+test('fadeno dispatches --json carries the policy and the collision', (t) => {
+  const root = seed(t, [
+    primaryRequested({
+      ignored_output_policy: 'kept',
+      ignored_output_policy_conflict: 'the policy did not steer the workspace',
+    }),
+    primaryCompleted({
+      ignored_output_policy: 'kept',
+      ignored_output_discarded: { paths: ['data/'], retained_at: '.fadeno/local/isolated/prim0123' },
+    }),
+  ]);
+  const entry = cliJson(root).entries[0]!;
+  assert.equal(entry.ignoredOutputPolicy, 'kept');
+  assert.equal(entry.ignoredOutputPolicyConflict, 'the policy did not steer the workspace');
+  assert.equal(entry.ignoredOutputDiscarded!.retainedAt, '.fadeno/local/isolated/prim0123');
+});

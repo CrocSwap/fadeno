@@ -21,10 +21,16 @@ import { DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
 import {
   IGNORED_OUTPUT_MAX_ENTRIES,
   ignoredOutputClean,
+  ignoredOutputRetentionEcho,
   ignoredOutputStamp,
   scanIgnoredOutput,
   withIsolatedWorktree,
 } from '../src/lib/workspace-isolation.ts';
+import {
+  classifyIgnoredOutput,
+  ignoredOutputSignalOrder,
+  ignoredOutputVerdict,
+} from '../src/lib/receipt-attestations.ts';
 import { tempRepo } from './helpers.ts';
 
 const GIT_ENV = {
@@ -371,10 +377,15 @@ function seedIgnoringRepo(t: TestContext, patterns: string[], cmd: string[]): st
 }
 
 function completionRow(root: string): Record<string, unknown> {
+  return eventRow(root, 'dispatch_completed');
+}
+
+/** The first row of one event kind, from the real ledger this dispatch wrote. */
+function eventRow(root: string, event: string): Record<string, unknown> {
   const rows = readFileSync(join(root, DISPATCHES_FILE), 'utf8')
     .split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
-  const row = rows.find((r) => r.event === 'dispatch_completed');
-  assert.ok(row != null, 'no completion row was written');
+  const row = rows.find((r) => r.event === event);
+  assert.ok(row != null, `no ${event} row was written`);
   return row;
 }
 
@@ -538,4 +549,241 @@ test('withIsolatedWorktree: retainIf keeps the worktree and hands back its reaso
   assert.equal(kept.retained, true);
   assert.match(String(kept.retainedReason), /holds output/);
   assert.equal(readFileSync(join(base, 'kept', 'dist', 'bundle.js'), 'utf8'), 'x\n');
+});
+
+// --------------------------------------------------------------------------
+// What KIND of thing was kept
+// --------------------------------------------------------------------------
+//
+// Retention works: the worktree survives and the receipt names it. What it
+// could not do was tell a build directory from an irreplaceable one. In this
+// repo three of four agent dispatches retained their worktree solely because
+// they ran `npm run build` and `dist/` is gitignored, each one told "that
+// directory is the only copy. Copy what you need out of it." A warning that
+// fires on routine build output is a warning directors stop reading, and not
+// reading that warning is exactly how a `data/research/` deliverable stayed
+// missing for two dispatches.
+//
+// The split is about SIGNAL and never about deletion. Nothing below lowers a
+// retention decision: a filename is not a reading of what is in a directory,
+// and destroying bytes on the strength of one is the silent-wrong-answer class
+// this codebase keeps paying for.
+
+test('classifyIgnoredOutput recognises rebuildable output by name, at any depth', () => {
+  const { build, unclassified } = classifyIgnoredOutput([
+    'dist/', 'node_modules/', 'coverage/', '.next/', '__pycache__/', 'target/',
+    'packages/api/dist/', 'tsconfig.tsbuildinfo',
+    'data/research/', 'notes.md', 'out/', 'vendor/', 'bin/',
+  ]);
+  assert.deepEqual(build, [
+    'dist/', 'node_modules/', 'coverage/', '.next/', '__pycache__/', 'target/',
+    'packages/api/dist/', 'tsconfig.tsbuildinfo',
+  ]);
+  // `out/`, `vendor/` and `bin/` are all plausible build directories AND
+  // plausible places to put a deliverable. A wrong `build` label costs a
+  // demoted warning on real work, which is the failure this exists to end —
+  // so an ambiguous name stays in the loud half.
+  assert.deepEqual(unclassified, ['data/research/', 'notes.md', 'out/', 'vendor/', 'bin/']);
+});
+
+test('classifyIgnoredOutput matches a path segment, never a string prefix', () => {
+  // The `node_modules_backup` bug one level down: a substring match would
+  // label a real finding as routine build output and quiet the line about it.
+  const { build, unclassified } = classifyIgnoredOutput([
+    'dist-notes/', 'my-dist/', 'distillery/', 'builder/', 'coverage-report.md',
+  ]);
+  assert.deepEqual(build, []);
+  assert.equal(unclassified.length, 5);
+});
+
+test('ignoredOutputSignalOrder puts the unrecognised entries first', () => {
+  // Every rendering of this stamp is capped, so ordering is what keeps a
+  // deliverable from being counted away behind four build directories.
+  assert.deepEqual(
+    ignoredOutputSignalOrder(['node_modules/', 'data/research/', 'dist/', 'notes.md']),
+    ['data/research/', 'notes.md', 'node_modules/', 'dist/'],
+  );
+});
+
+test('the retention message tells a build directory from a data directory', () => {
+  const buildOnly = ignoredOutputRetentionEcho({ paths: ['dist/', 'node_modules/'] }, '.fadeno/local/isolated/aa');
+  const deliverable = ignoredOutputRetentionEcho({ paths: ['data/research/'] }, '.fadeno/local/isolated/bb');
+
+  // Both still start the same way, so one grep finds either.
+  assert.ok(buildOnly.startsWith('gitignored output KEPT'), buildOnly);
+  assert.ok(deliverable.startsWith('gitignored output KEPT'), deliverable);
+  // The discriminator is in the first four words, where a director skimming
+  // sees it without reading the sentence.
+  assert.match(buildOnly, /^gitignored output KEPT \(build output only\)/);
+  assert.doesNotMatch(deliverable, /build output only/);
+
+  // The imperative — the line people learned to skip — appears only where
+  // something might actually be irreplaceable.
+  assert.doesNotMatch(buildOnly, /Copy what you need out/);
+  assert.match(deliverable, /Copy what you need out of it/);
+  assert.match(deliverable, /the only copy/);
+  assert.doesNotMatch(buildOnly, /the only copy/);
+
+  // And the claim is attributed to the only evidence there is: the name.
+  assert.match(buildOnly, /by NAME alone/);
+  assert.match(buildOnly, /RETAINED at \.fadeno\/local\/isolated\/aa/);
+});
+
+test('one unrecognised path is enough for the loud form, and it is named first', () => {
+  const echo = ignoredOutputRetentionEcho(
+    { paths: ['node_modules/', 'dist/', 'coverage/', '.next/', '.cache/', 'target/', 'data/research/'] },
+    '.fadeno/local/isolated/cc',
+  );
+  assert.doesNotMatch(echo, /build output only/);
+  assert.match(echo, /gitignored output KEPT — data\/research\//, 'the one thing that matters leads');
+  assert.match(echo, /Copy what you need out of it/);
+  // The build entries are still reported — nothing is hidden, it is demoted.
+  assert.match(echo, /Also in there, and recognised as build or dependency output by name: node_modules\//);
+});
+
+test('a scan that could not enumerate takes the loud form, never the quiet one', () => {
+  // The case retention matters MOST for: the alternative is a message that
+  // reassures a reader about a directory nothing could look inside.
+  const echo = ignoredOutputRetentionEcho({ paths: [], truncated: true }, '.fadeno/local/isolated/dd');
+  assert.doesNotMatch(echo, /build output only/);
+  assert.match(echo, /content the listing could not enumerate/);
+  assert.match(echo, /the only copy/);
+});
+
+test('a dispatch whose only gitignored output is a build directory says so quietly', (t) => {
+  // The dogfooding case, end to end: `npm run build` into a gitignored
+  // `dist/`. The worktree is still RETAINED — the decision does not move —
+  // and the receipt still names it. Only the register changes.
+  const root = seedIgnoringRepo(t, ['dist/'], ['node', '-e',
+    "const fs=require('fs');fs.mkdirSync('dist',{recursive:true});" +
+    "fs.writeFileSync('dist/app.js','built\\n');" +
+    "fs.writeFileSync('src/app.ts','export const a = 4;\\n');process.stdout.write('built')"]);
+  const echoes: string[] = [];
+  runDispatch({
+    archetype: 'worker', prompt: 'build', tag: 'build', repoRoot: root,
+    userPathOptions: { env: { FADENO_HARNESS: 'standalone' } },
+    onEcho: (l) => echoes.push(l),
+  });
+  const row = completionRow(root);
+  // Unchanged: failing safe is the standing preference, and a name is not a
+  // reading of what is inside.
+  assert.equal(row.workspace_retained, true, 'the retention decision does not move on a filename');
+  assert.deepEqual((row.ignored_output_discarded as { paths: string[] }).paths, ['dist/']);
+  assert.equal(
+    readFileSync(join(root, row.workspace as string, 'dist', 'app.js'), 'utf8'),
+    'built\n',
+    'the build output is still on disk in the retained worktree',
+  );
+  const echo = echoes.find((l) => l.startsWith('gitignored output KEPT'))!;
+  assert.ok(echo, echoes.join('\n'));
+  assert.match(echo, /\(build output only\)/);
+  assert.doesNotMatch(echo, /Copy what you need out/);
+  // And no policy lecture on a run where nothing irreplaceable was found.
+  assert.doesNotMatch(echo, /declare `ignored_output: kept`/);
+});
+
+// --------------------------------------------------------------------------
+// The policy on the row, and `--isolate` + `kept`
+// --------------------------------------------------------------------------
+
+test('the resolved policy is on the request row and the completion row', (t) => {
+  // A director launched dispatches with `--ignored-output kept`, `fadeno
+  // dispatches` printed DISCARDED at them, and NO row carried a policy field
+  // to check that verdict against — so the artifacts had to be verified by
+  // hand. One expression on the kernel's `identity` writes both rows, so they
+  // cannot drift.
+  const root = seedIgnoringRepo(t, ['data*/'], WRITES_IGNORED_DELIVERABLE);
+  runDispatch({
+    archetype: 'worker', prompt: 'research', tag: 'policy', repoRoot: root, ignoredOutput: 'kept',
+    userPathOptions: { env: { FADENO_HARNESS: 'standalone' } },
+  });
+  assert.equal(eventRow(root, 'dispatch_requested').ignored_output_policy, 'kept');
+  assert.equal(completionRow(root).ignored_output_policy, 'kept');
+});
+
+test('an unflagged dispatch records the policy it actually resolved', (t) => {
+  const root = seedIgnoringRepo(t, ['data*/'], WRITES_IGNORED_DELIVERABLE);
+  runDispatch({
+    archetype: 'worker', prompt: 'research', tag: 'default-policy', repoRoot: root,
+    userPathOptions: { env: { FADENO_HARNESS: 'standalone' } },
+  });
+  assert.equal(eventRow(root, 'dispatch_requested').ignored_output_policy, 'discardable');
+  assert.equal(completionRow(root).ignored_output_policy, 'discardable');
+});
+
+test('--isolate with ignored_output: kept is honoured, and never passes silently', (t) => {
+  // The contradiction the kernel used to accept without a word: the withhold
+  // that keeps a `kept` dispatch in the caller's tree only ever fires when
+  // NOBODY asked for isolation, so `--isolate --ignored-output kept` ran
+  // isolated and the policy was dropped in silence.
+  //
+  // Honoured rather than refused, because it is no longer a contradiction:
+  // since the teardown veto, an isolated worktree holding gitignored output is
+  // RETAINED, so nothing is destroyed. What `kept` cannot do here is its other
+  // job — steering the work back into the caller's tree — and that is what is
+  // now said out loud and put on the row.
+  const root = seedIgnoringRepo(t, ['data*/'], WRITES_IGNORED_DELIVERABLE);
+  const echoes: string[] = [];
+  const result = runDispatch({
+    archetype: 'worker', prompt: 'research', tag: 'collide', repoRoot: root,
+    isolate: true, ignoredOutput: 'kept',
+    userPathOptions: { env: { FADENO_HARNESS: 'standalone' } },
+    onEcho: (l) => echoes.push(l),
+  });
+  // Honoured, not refused: a working dispatch must not become a hard error.
+  assert.equal(result.outcome, 'ok');
+
+  const echo = echoes.find((l) => l.startsWith('ignored_output: kept vs --isolate'));
+  assert.ok(echo, `nothing was said about the collision:\n${echoes.join('\n')}`);
+  assert.match(echo!, /did not steer the workspace/);
+  assert.match(echo!, /Drop `--isolate`/);
+
+  const requested = eventRow(root, 'dispatch_requested');
+  assert.equal(requested.ignored_output_policy, 'kept');
+  assert.match(String(requested.ignored_output_policy_conflict), /did not steer the workspace/);
+  assert.equal(requested.workspace_mode, 'isolated', 'the caller asked for containment and got it');
+
+  // And the work is not lost: it is in the retained worktree the row names.
+  const row = completionRow(root);
+  assert.equal(row.ignored_output_policy, 'kept');
+  assert.equal(row.workspace_retained, true);
+  assert.equal(row.primary_merge, undefined, 'an explicit --isolate is never merged back');
+  assert.equal(
+    readFileSync(join(root, row.workspace as string, 'data', 'research', '2026', 'findings.md'), 'utf8'),
+    'the deliverable\n',
+  );
+});
+
+test('a dispatch with no --isolate records no collision at all', (t) => {
+  // The withhold still does its job: a `kept` dispatch nobody asked to
+  // isolate runs in the caller's tree, where the ignored output simply stays
+  // put — and a note about a collision that did not happen would be the kind
+  // of line that makes people stop reading the ones that did.
+  const root = seedIgnoringRepo(t, ['data*/'], WRITES_IGNORED_DELIVERABLE);
+  const echoes: string[] = [];
+  runDispatch({
+    archetype: 'worker', prompt: 'research', tag: 'no-collide', repoRoot: root, ignoredOutput: 'kept',
+    userPathOptions: { env: { FADENO_HARNESS: 'standalone' } },
+    onEcho: (l) => echoes.push(l),
+  });
+  const requested = eventRow(root, 'dispatch_requested');
+  assert.equal(requested.workspace_mode, 'shared', 'the policy still steers an unforced dispatch');
+  assert.equal(requested.ignored_output_policy_conflict, undefined);
+  assert.equal(echoes.filter((l) => l.startsWith('ignored_output: kept vs --isolate')).length, 0);
+  // Shared means the deliverable is right where the executor wrote it.
+  assert.equal(
+    readFileSync(join(root, 'data', 'research', '2026', 'findings.md'), 'utf8'),
+    'the deliverable\n',
+  );
+});
+
+test('ignoredOutputVerdict reads the writer’s retained_at and nothing else', () => {
+  assert.equal(ignoredOutputVerdict({ paths: ['data/'], truncated: false, retainedAt: null }), 'DISCARDED');
+  assert.equal(
+    ignoredOutputVerdict({ paths: ['data/'], truncated: false, retainedAt: '.fadeno/local/isolated/aa' }),
+    'KEPT',
+  );
+  // Not from the paths, not from the policy, not from whether the listing was
+  // complete: only from the one field a writer sets after looking at the disk.
+  assert.equal(ignoredOutputVerdict({ paths: [], truncated: true, retainedAt: '.x' }), 'KEPT');
 });

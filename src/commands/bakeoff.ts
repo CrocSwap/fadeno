@@ -608,7 +608,7 @@ function confoundsOf(primary: DispatchEntry | null, shadow: DispatchEntry | null
       // decides how much a stamp gets to claim, and it also carries
       // `retained_at`: whether the missing content is still on disk changes
       // what a judge should do about the arm, not just what it should think.
-      push('ignored_output_discarded', arm, describeIgnoredOutput(entry.ignoredOutputDiscarded));
+      push('ignored_output_discarded', arm, describeIgnoredOutput(entry.ignoredOutputDiscarded, entry.ignoredOutputPolicy));
     }
     if (entry.workspaceModeDegraded != null) {
       push('workspace_mode_degraded', arm, String(entry.workspaceModeDegraded));
