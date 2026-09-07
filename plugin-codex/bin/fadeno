@@ -7419,11 +7419,7 @@ function readLedger(repoRoot) {
       reading.unreadable += 1;
       continue;
     }
-    if (!isRecord(parsed) || typeof parsed.id !== "string" || typeof parsed.row !== "string") {
-      reading.unreadable += 1;
-      continue;
-    }
-    if (!KNOWN_ROWS.has(parsed.row)) {
+    if (!isRecord(parsed) || typeof parsed.id !== "string" || typeof parsed.row !== "string" || !KNOWN_ROWS.has(parsed.row)) {
       reading.unknown += 1;
       continue;
     }
@@ -7524,6 +7520,11 @@ function closeDispatch(repoRoot, record, verb, note, now = /* @__PURE__ */ new D
   const row = { row: "closed", id: record.id, at: nowIso(now), verb, note: note?.trim() || null };
   appendRow(repoRoot, row);
   return { ok: true, row, replayed: false };
+}
+function modelAgrees(asked, observed) {
+  if (asked == null || observed == null) return true;
+  if (asked === "current-host" || asked === observed) return true;
+  return observed.toLowerCase().includes(asked.toLowerCase());
 }
 function ageMinutes(record, now = /* @__PURE__ */ new Date()) {
   const at = record.opened?.at;
@@ -10591,7 +10592,7 @@ function renderDispatches(result) {
     lines.push("", `${result.unclosed} unclosed of ${result.total} recorded.`);
   }
   if (result.unreadable > 0) lines.push(`${result.unreadable} unreadable row(s) skipped \u2014 the ledger has damage; the rows above are the readable ones.`);
-  if (result.unknown > 0) lines.push(`${result.unknown} row(s) of a kind this version does not know were skipped.`);
+  if (result.unknown > 0) lines.push(`${result.unknown} row(s) in another format skipped (an older Fadeno's, or a newer one's).`);
   return lines;
 }
 function runDispatchShow(opts) {
@@ -10623,8 +10624,7 @@ function renderDispatchDetail(d) {
     lines.push(`  stopped:   ${s.at}${s.exit ? ` \u2014 ${s.exit.signal ? `killed by ${s.exit.signal}` : `exit ${s.exit.code}`}` : ""}; tree ${dirty}`);
     if (s.model_observed != null) {
       const asked = d.record.opened?.model ?? null;
-      const agrees = asked != null && (asked === s.model_observed || asked === "current-host");
-      lines.push(`  ran on:    ${s.model_observed}${agrees ? "" : asked != null ? `  (the dial asked for ${asked})` : ""}`);
+      lines.push(`  ran on:    ${s.model_observed}${modelAgrees(asked, s.model_observed) ? "" : `  (the dial asked for ${asked})`}`);
     }
     if (s.final_message != null) lines.push("", "--- final message ---", s.final_message.trimEnd());
     else lines.push("  final message: none recorded");
@@ -14936,12 +14936,22 @@ async function main(argv) {
       const name = stopped.record.opened?.name ?? stopped.record.id;
       const dirty = stopped.row.dirty === "unavailable" ? "unreadable" : stopped.row.dirty.paths.length === 0 ? "clean" : `${stopped.row.dirty.paths.length} dirty path(s)`;
       if (values.json) {
-        console.log(JSON.stringify({ ok: true, id: stopped.record.id, name, replayed: stopped.replayed, dirty: stopped.row.dirty, mismatchedCwd: stopped.mismatchedCwd, modelObserved: stopped.row.model_observed ?? null, model: stopped.record.opened?.model ?? null }));
+        console.log(JSON.stringify({
+          ok: true,
+          id: stopped.record.id,
+          name,
+          replayed: stopped.replayed,
+          dirty: stopped.row.dirty,
+          mismatchedCwd: stopped.mismatchedCwd,
+          model: stopped.record.opened?.model ?? null,
+          modelObserved: stopped.row.model_observed ?? null,
+          modelMismatch: !modelAgrees(stopped.record.opened?.model, stopped.row.model_observed)
+        }));
         return 0;
       }
       const asked = stopped.record.opened?.model ?? null;
       const ran = stopped.row.model_observed ?? null;
-      const modelNote = ran != null && asked != null && asked !== "current-host" && asked !== ran ? `; WARNING: ran on ${ran}, the dial asked for ${asked}` : "";
+      const modelNote = !modelAgrees(asked, ran) ? `; WARNING: ran on ${ran}, the dial asked for ${asked}` : "";
       console.log(
         `${name} stopped${stopped.replayed ? " (already recorded)" : ""}; tree ${dirty}` + (stopped.mismatchedCwd != null ? `; WARNING: the agent worked in ${stopped.mismatchedCwd}, not its assigned worktree` : "") + modelNote + `. Close it: fadeno dispatch-close ${name} --merged|--kept|--discarded|--failed`
       );

@@ -19,8 +19,7 @@ import {
   unclosedDispatches,
   writePrompt,
   type OpenedRow,
-  type StoppedRow,
-} from '../src/lib/ledger.ts';
+  type StoppedRow, modelAgrees } from '../src/lib/ledger.ts';
 import { tempRepo } from './helpers.ts';
 
 function opened(id: string, overrides: Partial<OpenedRow> = {}): OpenedRow {
@@ -69,15 +68,15 @@ test('a missing ledger is an empty answer, not an error', (t) => {
   assert.deepEqual(unclosedDispatches(root), []);
 });
 
-test('a malformed line is counted and skipped, never fatal; an unknown row kind is counted apart', (t) => {
+test('a malformed line is counted and skipped, never fatal; a row in another format is counted apart', (t) => {
   const root = tempRepo(t);
   const id = newDispatchId();
   appendRow(root, opened(id));
   appendFileSync(join(root, LEDGER_FILE), 'this is not json\n{"row":"opened"}\n{"row":"annotated","id":"x"}\n\n');
   const reading = readLedger(root);
   assert.equal(reading.rows.length, 1);
-  assert.equal(reading.unreadable, 2, 'a torn line and a row with no id are both unreadable');
-  assert.equal(reading.unknown, 1, 'a well-formed row of a kind this reader does not know is not damage');
+  assert.equal(reading.unreadable, 1, 'a torn line is damage');
+  assert.equal(reading.unknown, 2, 'a row with no id and a row of a kind this reader does not know are another format, not damage');
 });
 
 test('an opened row with no terminal is open, never dropped; a stop makes it stopped; a close makes it closed', (t) => {
@@ -200,4 +199,14 @@ test('appendRow creates .fadeno on first use and only ever appends', (t) => {
   assert.ok(after.startsWith(before), 'earlier bytes are untouched');
   writeFileSync(join(root, LEDGER_FILE), after); // no-op sanity: still two lines
   assert.equal(after.trim().split('\n').length, 2);
+});
+
+test('modelAgrees reads an alias inside the harness\'s reported id as the dial applied, and current-host as anything', () => {
+  assert.equal(modelAgrees('opus', 'claude-opus-5'), true);
+  assert.equal(modelAgrees('opus', 'opus'), true);
+  assert.equal(modelAgrees('current-host', 'gpt-6-astra'), true);
+  assert.equal(modelAgrees('opus', 'claude-sonnet-4-7'), false);
+  assert.equal(modelAgrees('echo', 'claude-haiku-4-5'), false);
+  assert.equal(modelAgrees(null, 'x'), true, 'nothing asked, nothing to disagree with');
+  assert.equal(modelAgrees('opus', null), true, 'nothing observed is not a mismatch');
 });

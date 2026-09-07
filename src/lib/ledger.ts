@@ -115,9 +115,9 @@ export interface DispatchRecord {
 
 export interface LedgerReading {
   rows: LedgerRow[];
-  /** Lines that were not JSON objects with a string `id` and `row`. */
+  /** Lines that are not JSON at all: damage. */
   unreadable: number;
-  /** Well-formed rows of a kind this reader does not know. */
+  /** JSON lines that are not a row this version reads: another format's, never damage. */
   unknown: number;
 }
 
@@ -168,11 +168,10 @@ export function readLedger(repoRoot: string): LedgerReading {
       reading.unreadable += 1;
       continue;
     }
-    if (!isRecord(parsed) || typeof parsed.id !== 'string' || typeof parsed.row !== 'string') {
-      reading.unreadable += 1;
-      continue;
-    }
-    if (!KNOWN_ROWS.has(parsed.row)) {
+    // A line that is JSON but not a row this version reads — no `row` kind,
+    // or one it does not know — is another format, not damage: a repository
+    // upgraded from the 0.6 line carries hundreds of its old event rows here.
+    if (!isRecord(parsed) || typeof parsed.id !== 'string' || typeof parsed.row !== 'string' || !KNOWN_ROWS.has(parsed.row)) {
       reading.unknown += 1;
       continue;
     }
@@ -323,6 +322,19 @@ export function closeDispatch(
 }
 
 /** Age of a dispatch in whole minutes, for the nag and the listing. */
+/**
+ * Whether the model an agent's transcript reports is the one the dial asked
+ * for. The dial names a registry alias (`opus`) and the harness reports its
+ * own id (`claude-opus-5`), so equality is too strict; an alias that appears
+ * inside the reported id is taken as agreement, and `current-host` agrees
+ * with anything, since it names whatever the session runs on.
+ */
+export function modelAgrees(asked: string | null | undefined, observed: string | null | undefined): boolean {
+  if (asked == null || observed == null) return true;
+  if (asked === 'current-host' || asked === observed) return true;
+  return observed.toLowerCase().includes(asked.toLowerCase());
+}
+
 export function ageMinutes(record: DispatchRecord, now: Date = new Date()): number | null {
   const at = record.opened?.at;
   if (at == null) return null;

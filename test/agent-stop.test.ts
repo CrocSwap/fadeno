@@ -30,13 +30,13 @@ test('a dispatched agent\'s stop is recorded from its transcript, with the messa
   const transcript = join(plugin.root, 'agent-a1.jsonl');
   writeFileSync(transcript,
     record({ type: 'user', message: { role: 'user', content: opened.prompt } }) +
-    record({ type: 'assistant', message: { role: 'assistant', model: 'claude-opus-4-7', content: [{ type: 'text', text: 'Looks fine; merge it.' }] } }));
+    record({ type: 'assistant', message: { role: 'assistant', model: 'claude-sonnet-4-7', content: [{ type: 'text', text: 'Looks fine; merge it.' }] } }));
   const run = plugin.run(HOOK, stopEvent(root, transcript, { last_assistant_message: 'Looks fine; merge it.' }));
   assert.equal(run.status, 0, run.stderr);
-  assert.match(run.out!.systemMessage, /fadeno: dispatch rev stopped; 1 uncommitted path\(s\); ran on claude-opus-4-7, not the dialed opus\. Close it: fadeno dispatch-close rev --merged\|--kept\|--discarded\|--failed/);
+  assert.match(run.out!.systemMessage, /fadeno: dispatch rev stopped; 1 uncommitted path\(s\); ran on claude-sonnet-4-7, not the dialed opus\. Close it: fadeno dispatch-close rev --merged\|--kept\|--discarded\|--failed/);
   const stopped = readDispatches(root).records[0]!.stopped!;
   assert.equal(stopped.final_message, 'Looks fine; merge it.');
-  assert.equal(stopped.model_observed, 'claude-opus-4-7');
+  assert.equal(stopped.model_observed, 'claude-sonnet-4-7');
   assert.deepEqual(stopped.dirty, { paths: ['notes.md'], truncated: false });
   // A second stop for the same agent is a replay, said so.
   assert.match(plugin.run(HOOK, stopEvent(root, transcript, { last_assistant_message: 'again' })).out!.systemMessage, /already recorded/);

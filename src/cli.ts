@@ -40,6 +40,7 @@ import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
 import { knownFlagsFor, retiredFlagFor, runCompletion, runCompletionCandidates, suggestFlag, TOP_LEVEL_COMMANDS, unknownFlagsFor } from './commands/completion.ts';
 import { runSetup } from './commands/setup.ts';
 import { runStatus } from './commands/status.ts';
+import { modelAgrees } from './lib/ledger.ts';
 import { packageVersion } from './lib/paths.ts';
 import { readInstallationManifest, syncManagedRuntime } from './lib/installations.ts';
 import { userPaths } from './lib/user-paths.ts';
@@ -1049,12 +1050,22 @@ async function main(argv: string[]): Promise<number> {
       const name = stopped.record.opened?.name ?? stopped.record.id;
       const dirty = stopped.row.dirty === 'unavailable' ? 'unreadable' : stopped.row.dirty.paths.length === 0 ? 'clean' : `${stopped.row.dirty.paths.length} dirty path(s)`;
       if (values.json) {
-        console.log(JSON.stringify({ ok: true, id: stopped.record.id, name, replayed: stopped.replayed, dirty: stopped.row.dirty, mismatchedCwd: stopped.mismatchedCwd, modelObserved: stopped.row.model_observed ?? null, model: stopped.record.opened?.model ?? null }));
+        console.log(JSON.stringify({
+          ok: true,
+          id: stopped.record.id,
+          name,
+          replayed: stopped.replayed,
+          dirty: stopped.row.dirty,
+          mismatchedCwd: stopped.mismatchedCwd,
+          model: stopped.record.opened?.model ?? null,
+          modelObserved: stopped.row.model_observed ?? null,
+          modelMismatch: !modelAgrees(stopped.record.opened?.model, stopped.row.model_observed),
+        }));
         return 0;
       }
       const asked = stopped.record.opened?.model ?? null;
       const ran = stopped.row.model_observed ?? null;
-      const modelNote = ran != null && asked != null && asked !== 'current-host' && asked !== ran ? `; WARNING: ran on ${ran}, the dial asked for ${asked}` : '';
+      const modelNote = !modelAgrees(asked, ran) ? `; WARNING: ran on ${ran}, the dial asked for ${asked}` : '';
       console.log(
         `${name} stopped${stopped.replayed ? ' (already recorded)' : ''}; tree ${dirty}` +
           (stopped.mismatchedCwd != null ? `; WARNING: the agent worked in ${stopped.mismatchedCwd}, not its assigned worktree` : '') +

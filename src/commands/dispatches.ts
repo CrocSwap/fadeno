@@ -17,6 +17,7 @@ import {
   closeDispatch,
   findDispatch,
   isCloseVerb,
+  modelAgrees,
   readDispatches,
   readPrompt,
   unclosedDispatches,
@@ -474,7 +475,7 @@ export function renderDispatches(result: DispatchesResult): string[] {
     lines.push('', `${result.unclosed} unclosed of ${result.total} recorded.`);
   }
   if (result.unreadable > 0) lines.push(`${result.unreadable} unreadable row(s) skipped — the ledger has damage; the rows above are the readable ones.`);
-  if (result.unknown > 0) lines.push(`${result.unknown} row(s) of a kind this version does not know were skipped.`);
+  if (result.unknown > 0) lines.push(`${result.unknown} row(s) in another format skipped (an older Fadeno's, or a newer one's).`);
   return lines;
 }
 
@@ -517,8 +518,7 @@ export function renderDispatchDetail(d: DispatchDetail): string[] {
     lines.push(`  stopped:   ${s.at}${s.exit ? ` — ${s.exit.signal ? `killed by ${s.exit.signal}` : `exit ${s.exit.code}`}` : ''}; tree ${dirty}`);
     if (s.model_observed != null) {
       const asked = d.record.opened?.model ?? null;
-      const agrees = asked != null && (asked === s.model_observed || asked === 'current-host');
-      lines.push(`  ran on:    ${s.model_observed}${agrees ? '' : asked != null ? `  (the dial asked for ${asked})` : ''}`);
+      lines.push(`  ran on:    ${s.model_observed}${modelAgrees(asked, s.model_observed) ? '' : `  (the dial asked for ${asked})`}`);
     }
     if (s.final_message != null) lines.push('', '--- final message ---', s.final_message.trimEnd());
     else lines.push('  final message: none recorded');

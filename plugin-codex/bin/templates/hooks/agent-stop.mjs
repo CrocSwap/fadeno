@@ -50,9 +50,8 @@ const dirty = stopped.dirty === 'unavailable'
   : stopped.dirty?.paths?.length > 0
     ? `${stopped.dirty.paths.length}${stopped.dirty.truncated ? '+' : ''} uncommitted path(s)`
     : 'tree clean';
-const model = str(stopped.modelObserved) != null && str(stopped.model) != null && stopped.model !== 'current-host' && stopped.model !== stopped.modelObserved
-  ? `; ran on ${stopped.modelObserved}, not the dialed ${stopped.model}`
-  : '';
+// The CLI compares alias against reported id; the hook only relays its verdict.
+const model = stopped.modelMismatch === true ? `; ran on ${stopped.modelObserved}, not the dialed ${stopped.model}` : '';
 finish({
   systemMessage:
     `fadeno: dispatch ${stopped.name} stopped${stopped.replayed ? ' (already recorded)' : ''}; ${dirty}${model}. ` +
