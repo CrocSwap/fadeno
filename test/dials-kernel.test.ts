@@ -33,7 +33,7 @@ function parseDoc(doc: Record<string, unknown>, harness: 'standalone' | 'codex' 
 test('pre-dials catalogs are rejected with schema_version 3 message', () => {
   assert.throws(
     () => parseDoc({ schema_version: 2, targets: { opus: { provider: 'anthropic', model: 'opus' } }, harnesses: { claude: { provider: 'anthropic', command: ['claude', '-p'] } }, loadouts: { main: { worker: 'opus' } } }),
-    (err: unknown) => err instanceof ExecutorProfileError && /schema_version 4 required/.test(err.message) && /pre-dials catalogs are not supported/.test(err.message) && /targets:→models:/.test(err.message) && /loadouts:→dials:/.test(err.message) && /harness-neutral-dials/.test(err.message),
+    (err: unknown) => err instanceof ExecutorProfileError && /schema_version 4 required/.test(err.message) && /pre-dials catalogs are not supported/.test(err.message) && /targets:→models:/.test(err.message) && /loadouts:→dials:/.test(err.message) && /routes:→harnesses:/.test(err.message),
   );
   assert.throws(
     () => parseDoc({ targets: { opus: { provider: 'anthropic', model: 'opus' } }, harnesses: { claude: { provider: 'anthropic', command: ['claude', '-p'] } }, bindings: { '*': 'opus' } }),
@@ -227,7 +227,7 @@ test('user dials: force_write_posture is refused there too, not just in the cata
     (err: unknown) =>
       err instanceof UserDialsError &&
       /"force_write_posture", which is no longer supported/.test((err as Error).message) &&
-      /permissions-and-isolation\.md/.test((err as Error).message),
+      /no write-posture guard left to override/.test((err as Error).message),
   );
 
   // An unreadable dials file still degrades to {}. That is deliberate and must

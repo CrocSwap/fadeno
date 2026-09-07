@@ -88,12 +88,13 @@ pre .c { color: var(--faint); }
 <div class="wrap">
 
 <header class="masthead">
-  <div class="eyebrow"><span>Specification</span><span>Draft 2</span><span>2026-09-07</span><span>derives from decisions 01–34</span><span>accepted</span></div>
+  <div class="eyebrow"><span>Specification</span><span>Draft 3</span><span>2026-09-07</span><span>derives from decisions 01–34</span><span>built</span></div>
   <h1>Fadeno</h1>
   <p class="standfirst">A meta-harness for common subagent workflow patterns, neutral across harnesses and models. It routes work to models by role, wraps the spawn with deterministic scaffolding, and keeps a record nobody has to think about. Everything else is the intelligence's job.</p>
 </header>
 
 <p class="lede" style="margin-top:26px;">This document specifies behaviour, not implementation. Every call in it has been made and reviewed; nothing is left open.</p>
+<p style="color:var(--muted);">Draft 3 amends §07 and §08 to match what was built: the ledger's <code>stopped</code> row gained <code>model_observed</code>, and the command surface gained the four verbs the hooks and the command lane actually call. Nothing in the design changed — these are facts the draft-2 surface implied and did not name.</p>
 
 <h2><span class="sn">01</span>What Fadeno is for</h2>
 <p>The user is someone constantly splitting and routing work between different models on different harnesses, who needs structure without ceremony. Fadeno gives them four things and deliberately nothing else:</p>
@@ -218,7 +219,7 @@ id · name · at · session · <b>parent</b> · archetype · model · effort
 explicit_model · lane · harness · workspace{path,branch,base} · task · prompt · process_group
 
 <span class="c"># stopped — by the stop hook, an outside observation</span>
-id · at · final_message · dirty
+id · at · final_message · dirty · <b>model_observed</b>
 
 <span class="c"># closed — when the host decides</span>
 id · at · verb · note</pre>
@@ -229,6 +230,7 @@ id · at · verb · note</pre>
   <li>Prompts live <b>outside <code>local/</code></b> so <code>clean</code> cannot orphan the rows that reference them. They are evidence of what was asked, not scratch. Unbounded by design.</li>
   <li>The log records <b>what was asked, never what Fadeno injected</b> — injected text is identical every time, so storing it would make the log describe Fadeno instead of the work.</li>
   <li><code>final_message</code> records <b>presence, never completeness</b>. On Claude's interrupted path the harness supplies no message at all, so its absence says nothing about whether work finished.</li>
+  <li><code>model_observed</code> is the model the agent <b>reported running on</b>, read from its transcript at stop and recorded beside the one the dial asked for. It is the only way to catch a harness that ignored the model a spawn passed — the failure mode that has no other symptom. Absent when the harness reports none; <b>never inferred from the dial</b>, which would make it agree by construction.</li>
   <li><code>process_group</code> is <b>command lane only</b>: the process group Fadeno launched, recorded so <code>cancel</code> has something to signal. Absent on the host lane, where the subagent belongs to the harness.</li>
 </ul>
 
@@ -239,10 +241,14 @@ id · at · verb · note</pre>
     <tbody>
       <tr><td class="m">dial</td><td>Show, set and resolve archetype bindings. With no arguments, lists archetypes with descriptions and resolved models — the director's reference.</td></tr>
       <tr><td class="m">models</td><td>Inspect the registry; verify an alias actually resolves against its backend.</td></tr>
+      <tr><td class="m">dispatch</td><td>Run one dispatch on the command lane, start to finish: resolve, cut the worktree, run the executor, record it. The whole wrapper as a process — what a driver harness, a shell, and the dispatch proxy all call.</td></tr>
+      <tr><td class="m">dispatch-open</td><td>The spawn wrapper for a spawn the host is <i>about to</i> make. Resolves, decides the lane, and either <b>opens</b> it on the host lane — worktree cut, row written, the contract-bearing prompt returned — or <b>relays</b> it: nothing opened, the prompt staged, and the <code>dispatch</code> call the proxy should run handed back. The hook calls this and writes nothing itself.</td></tr>
+      <tr><td class="m">dispatch-stop</td><td>Record that a host-lane agent stopped. Given the agent's transcript it finds the dispatch from the contract header in its prompt, takes the last assistant turn as the final message when the harness passed none, and records the model the agent ran on. A transcript with no contract is not a dispatch, and nothing is recorded.</td></tr>
       <tr><td class="m">dispatches</td><td>List dispatches; show one; find output by UUID or name.</td></tr>
       <tr><td class="m">dispatch-close</td><td>Record the terminal decision for a dispatch.</td></tr>
       <tr><td class="m">cancel</td><td>Stop a running command-lane dispatch by signalling its process group. Writes a <code>stopped</code> row; the dispatch still needs closing. On a host-lane dispatch it refuses and says the subagent is the harness's to stop.</td></tr>
       <tr><td class="m">worktrees</td><td>Report worktrees holding unmerged work. The cross-session safety net.</td></tr>
+      <tr><td class="m">context</td><td>Print what a host session is told: the archetype vocabulary with live routing, the rules, and every unclosed dispatch. One source for the host-mode hook, a spawned director's prompt, and a person who wants to read it (§06).</td></tr>
       <tr><td class="m">status</td><td>Effective routing, harness integration, and whether anything needs attention.</td></tr>
       <tr><td class="m">clean</td><td>Remove machine-local scratch — worktrees and outputs, never prompts or the ledger.</td></tr>
       <tr><td class="m">plugin</td><td>Generate the harness plugin from this checkout.</td></tr>
@@ -251,6 +257,8 @@ id · at · verb · note</pre>
     </tbody>
   </table>
 </div>
+
+<p><b>The lane is decided in one place and by one bit.</b> <code>dispatch-open</code> resolves the archetype and asks whether this session can deliver the resolved model itself; everything else follows. A host-lane answer opens the dispatch there and then, because the hook that asked is about to spawn the agent. A command-lane answer opens nothing — the prompt is staged and the caller is handed the <code>dispatch</code> command — so a proxy that never runs leaves no row behind. <code>--lane host</code> and <code>--lane command</code> force the answer for a caller that already knows; they are for the hooks, not for people.</p>
 
 <p><code>worktrees</code> is its own verb rather than a section of <code>status</code>. It is the report someone runs deliberately when they suspect work was forgotten, and burying that in a status wall makes it easy to skim past — which is the exact failure it exists to catch.</p>
 

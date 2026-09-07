@@ -239,7 +239,7 @@ async function main(argv: string[]): Promise<number> {
     throw new Error(
       '`--via` was removed with catalog v4 — use `--harness <id>`. A dial names a model and, optionally, ' +
         'the harness that executes it; the driver names it took (claude-exec, opencode-direct, muse-code) ' +
-        'were harnesses all along. See docs/experimental/harness-neutral-dials.md.',
+        'were harnesses all along.',
     );
   }
   let parsed;

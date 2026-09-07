@@ -1,768 +1,270 @@
 # Fadeno
 
-**The playbook layer for AI coding agents.**
+**A meta-harness for subagent work — neutral across harnesses and models.**
 
 > **Fadeno** /fah-DEH-no/ — Esperanto for *"thread."* The thread that runs through every agent task.
 
-When an agent cuts a PR it shows you the diff, not the process that produced it. There's no evidence for what workflow produced the change or how it was reviewed or tested. Fadeno is agent workflows as code.
+You delegate constantly: a worker to implement, a reviewer to check it, a scout
+to go read something. Across two or three harnesses, on models you pick per job.
+Fadeno makes that routine instead of fiddly. It does four things and nothing
+else:
 
-Stop re-typing *"be careful, plan, review, test"* every run. Define your workflow once as a repo-native YAML playbook, and any agent runs it the same way. No daemon, no cloud service, no lock-in.
+- **Routing.** Name a model once, point roles at it, change the binding at user,
+  repo, or session scope with one command.
+- **Spawning.** Launch a subagent from inside your session on the right model,
+  in its own git worktree, with a contract it has to answer.
+- **Logging.** A durable record of what was delegated, on what, and how it
+  ended — written without anyone asking for it.
+- **Context.** Your session knows which archetypes exist, where they route, and
+  what is still open.
+
+It is not a workflow engine. It has no daemon, no cloud service, no scheduler,
+and no opinion about what your work should look like. Composing a sequence of
+dispatches is the intelligence's job; Fadeno wraps each one and keeps the books.
+
+---
 
 ## Quickstart
 
-Install the Fadeno plugin for your harness, start a fresh session, and ask the
-agent to set up Fadeno. The plugin's private CLI installs a stable user runtime
-and safe native defaults; no separate global `fadeno` install or repository
-initialization is required. Then ask for a normal task—the runner can use the
-built-in playbooks in any Git repository.
+Install the plugin for your harness, start a fresh session, and delegate
+normally.
 
 ```text
-Set up Fadeno for Codex.
-Use Fadeno to add CSV export for reports, including review and tests.
+/fadeno:setup                       # Claude Code — links the CLI onto your PATH
+Add CSV export to the reports module, then have it reviewed.
 ```
 
-Terminal use is optional. Install the standalone npm CLI only when humans or CI
-need to invoke `fadeno` directly.
+That is the whole workflow. When the session spawns a subagent named after an
+archetype, Fadeno resolves the model, cuts a worktree, injects the contract, and
+records the dispatch. When the agent stops, the stop hook records that too. You
+close it when you have decided what to do with the work:
+
+```bash
+fadeno dispatches                   # what is still open
+fadeno dispatches csv-export        # the detail, including the report
+fadeno dispatch-close csv-export --merged
+```
+
+Requires **Node.js ≥ 20**.
 
 ---
 
-## Why Fadeno
+## Archetypes and dials
 
-Fadeno makes complex AI-agent work **repeatable, inspectable, portable, and easy
-to customize**. It isn't intended to make the agent smarter, it makes the work verifiable and controllable. 
+An **archetype** is a role. Five ship, and the set is open:
 
-It is intentionally **not** a background scheduler, a daemon, a cloud service, a
-visual graph editor, a real parallel execution engine, or a model-provider
-integration.
+| Archetype | What it is for |
+|-----------|----------------|
+| `worker` | Implements a described change in its own worktree, commits it, and reports what the tree holds. |
+| `reviewer` | Reviews a change for correctness, edge cases, safety, and tests. Reports findings, changes nothing. |
+| `judge` | Evaluates candidate attempts against stated criteria and picks a winner. |
+| `scout` | Explores and reports. Searches, gathers facts, summarizes, changes nothing. |
+| `director` | Coordinates a whole task: decomposes it, spawns the others, integrates, reports. Never does the work itself. |
 
-## The problem
+A **dial** binds an archetype to a model:
 
-Coding agents produce unverifiable work. They are powerful but inconsistent. Every nontrivial task, you re-explain the same discipline:
+```bash
+fadeno dial                          # every archetype, what it is for, where it goes
+fadeno dial worker sol@high          # bind one
+fadeno dial reviewer opus --session  # this checkout only, until cleared
+fadeno dial worker+reviewer grok     # several at once, atomically
+fadeno dial clear reviewer
+```
 
-> *"Codex, please be careful. Make a plan first, then implement it. Review your own code for edge cases. Run the tests. If something's broken, fix it. Don't install new dependencies or run anything destructive without checking with me."*
+Dials cascade **binding → session dial → repo pin → user dial → base**, most
+specific wins. An archetype with no dial anywhere runs on your session's own
+model, which is the sensible default and needs no configuration.
 
-### The fix
+Routing is invisible by default: you name an archetype and Fadeno applies the
+model. Two escape hatches exist and are not encouraged — `fadeno dial resolve
+--archetype worker` to inspect one, and an explicit model on a spawn to escalate
+a task that keeps failing.
 
-Define the workflow **once**, commit it to your repo, and then just say:
+## Lanes
 
-> *"Use the code-change-review playbook."*
+Every dispatch takes one of two lanes, and **which one is Fadeno's business, not
+yours**:
 
-Same discipline — plan → implement → review → test → bounded revision — every time. Inspectable. Shareable. Portable across the agents your team actually uses.
+- **Host lane** — the model is one your session can deliver, so the dispatch is
+  a subagent inside your session. The spawn hook rewrites the call in place.
+- **Command lane** — the model lives somewhere else, so Fadeno spawns that
+  harness's CLI as a process. On Claude the spawn is retargeted to a minimal
+  **dispatch proxy** whose only job is to invoke it, so the session still sees
+  an ordinary subagent.
 
-Fadeno is **harness-neutral**: the same playbooks run on Codex, Claude Code, Grok Build, OpenCode, and omp today. Its repo-local runtime records durable execution evidence; only a thin per-target adapter differs, while richer compiled orchestration remains future work.
+Both lanes do the same four things: resolve the model, choose the lane, cut a
+worktree, and record the dispatch.
 
-Run `fadeno --help` for a compact command overview, then `fadeno <command> --help`
-for exact usage and only that command's options (including nested paths such as
-`fadeno dial shadow --help`).
+## The worktree contract
 
-> **Honest about enforcement, up front:** in instruction-only hosts, approval policies are *advisory* — the model is asked to honor them, with no hard guarantee. For real guarantees, wire gates to your git/CI/pre-commit layer (or Claude Code hooks). See [Enforcement](#enforcement-advisory-vs-enforced). We'd rather you trust the tool because it's honest than because it overclaims.
+Every dispatch gets its own git worktree under `.fadeno/local/worktrees/`, on a
+branch named `fadeno/<name>`, cut from HEAD. The agent is told where it is, what
+branch it owns, and that its final message must say what it did and where the
+work lives. Two agents never share a tree.
+
+If a task needs uncommitted work, commit it first — or ask for the live tree
+explicitly (`--shared` on the command lane), and the agent is told it is sharing
+and given the git rules that protect other people's work.
+
+**Fadeno performs no merge.** It never touches your branches, never rebases,
+never resolves a conflict. Merging is judgment, and judgment is yours.
+
+## The ledger
+
+`.fadeno/dispatches.jsonl` is append-only and holds three row types, because
+"started", "the agent stopped", and "the host decided" are three facts recorded
+by three parties at three times:
+
+```
+opened   id · name · at · session · parent · archetype · model · effort
+         explicit_model · lane · harness · workspace{path,branch,base}
+         task · prompt · process_group
+
+stopped  id · at · final_message · dirty · model_observed
+
+closed   id · at · verb · note
+```
+
+`task` holds the first ~300 characters of what you asked; the full prompt lives
+at `.fadeno/prompts/<id>.md`. The log records **what was asked, never what
+Fadeno injected** — the injected text is identical every time.
+
+`model_observed` is the model the agent reported running on, read from its
+transcript. It is the only way to catch a harness that quietly ignored the model
+the spawn passed.
+
+### Closing, and the nag
+
+Closing takes exactly one verb — `--merged`, `--kept`, `--discarded`,
+`--failed` — with an optional note. At every spawn your session is reminded of
+every unclosed dispatch **in this repository**, by name. At five unclosed, the
+next spawn is refused until you deal with some.
+
+The scope is deliberate. A director that spawns three workers and exits leaves
+dispatches with no owner; session scope would hide them forever, which is
+exactly where nesting happens. Grandparents inherit orphans.
+
+`fadeno worktrees` is the cross-session safety net: every Fadeno worktree
+holding uncommitted paths or unmerged commits, joined to the dispatch that owns
+it. A tree it cannot read is reported as unreadable, never as clean.
 
 ---
 
-## Install & initialize
+## Commands
 
-Requires Node.js ≥ 20.
+| Command | Does |
+|---------|------|
+| `dial` | Show, set, clear and resolve archetype bindings. With no arguments, the reference to read before delegating. |
+| `models` | Inspect the model registry; verify an alias resolves against its backend. |
+| `dispatch` | Run one dispatch on the command lane, start to finish. |
+| `dispatches` | List dispatches, show one, print a report. |
+| `dispatch-close` | Record the terminal decision. |
+| `cancel` | Stop a running command-lane dispatch by signalling its process group. |
+| `worktrees` | Every worktree holding work that is not on HEAD. |
+| `context` | What a host session is told: archetypes, rules, open dispatches. |
+| `status` | Effective routing, harness integration, and whatever needs a person. |
+| `clean` | Remove machine-local scratch — never prompts, never the ledger. |
+| `setup` | Link the CLI onto PATH. A symlink, never a copy. |
+| `plugin` | Generate the harness plugin from this checkout. |
+| `completion` | Shell completion. |
 
-Installing the Codex or Claude plugin supplies skills, a private bundled CLI,
-schemas, starter playbooks, and a safe native base (current-host). On first setup that CLI
-copies itself to a stable user data path, records the harness integration, and
-materializes user-scoped agents where the host requires them. A repository does
-not need `.fadeno/` definitions to run a built-in playbook.
+`dispatch-open` and `dispatch-stop` also exist; they are the hooks' entry
+points, and nothing else should need them.
 
-| User | First-run path | Separate global CLI? |
-|------|----------------|----------------------|
-| Codex | Install plugin → fresh session → ask to “set up Fadeno for Codex” | No |
-| Claude Code | Install plugin → reload plugins → `/fadeno:setup` | No |
-| Terminal / CI / Grok | Install the npm package, then use `fadeno` or `npx fadeno` | Yes |
+Run `fadeno <command> --help` for exact usage and only that command's options.
 
-`setup` is user-only: it does not write `.gitignore`, `.fadeno/`, or any other
-project file. Codex needs one fresh session after setup or a native-base
-change because its custom-agent definitions are session-static. Claude plugin
-skills and commands become active after `/reload-plugins` or a restart.
+## The catalog
 
-Project installation is a separate, deliberate choice:
-
-```bash
-# Codex target  → .agents/skills/, AGENTS.md, $-style invocation
-npx fadeno init --codex
-
-# Claude Code target → .claude/skills/, CLAUDE.md, /-style invocation
-npx fadeno init --claude
-
-# Grok Build target → .grok/skills/, AGENTS.md, /-style invocation
-npx fadeno init --grok
-
-# OpenCode target → .agents/skills/, AGENTS.md, description-invoked skills
-npx fadeno init --opencode
-
-# omp target → .agents/skills/, AGENTS.md, .omp/agents/ task agents
-npx fadeno init --omp
-```
-
-`init` remains the explicit project-vendoring path and is safe to re-run: existing files are left untouched (and your
-`AGENTS.md`/`CLAUDE.md` content is preserved — Fadeno only appends a marked
-section). Use `--force` to overwrite. Add `--with-hooks` to also scaffold the
-tier-2 [enforcement](#enforcement-advisory-vs-enforced) layer (a pre-commit
-guard + a CI workflow). Steering is installed by default for Codex and Claude.
-Use `--no-steering` for the legacy unsteered project surface;
-`--with-steering` remains an accepted compatibility alias. Selecting a command
-lane is still explicit and always announces the external sandbox boundary.
-
-### What gets created
-
-```
-.fadeno/
-  vocabulary.md                 # the small, orthogonal term set
-  enforcement.md                # advisory vs. enforced (tier-1 vs tier-2)
-  playbooks/
-    code-change-review.yaml
-    research-synthesis.yaml
-    pr-review.yaml
-    compositional-review.yaml
-  schemas/
-    playbook.schema.json        # the source of truth for the vocabulary
-    run.schema.json
-    review-report.schema.json
-  runs/                         # created lazily; ignored execution traces
-
-# Codex (--codex):                      # Claude Code (--claude):
-AGENTS.md                                CLAUDE.md
-.agents/skills/                          .claude/skills/
-  fadeno-runner/  (SKILL.md, refs,         fadeno-runner/  (SKILL.md, refs)
-                  agents/openai.yaml)      fadeno-builder/ (SKILL.md, refs)
-  fadeno-builder/ (SKILL.md, refs,       .claude/agents/  (worker/reviewer/judge.md)
-                  agents/openai.yaml)
-  fadeno-driver/  (SKILL.md, refs,
-                  agents/openai.yaml)
-.codex/agents/  (worker/reviewer/judge.toml)
-
-# Grok Build (--grok):
-AGENTS.md
-.grok/skills/                         # shared SKILL.md bodies + references
-.grok/agents/                         # worker/reviewer/judge.md
-# OpenCode (--opencode):
-AGENTS.md
-.agents/skills/                       # shared SKILL.md bodies + references (shared with Codex)
-.opencode/agents/                     # worker/reviewer/judge.md + the read-only executor lane
-
-# omp (--omp):
-AGENTS.md
-.agents/skills/                       # shared SKILL.md bodies + references (shared with Codex and OpenCode)
-.omp/agents/                          # role agents + dispatch proxies in omp's task-agent format
-```
-
-The playbooks, schemas, vocabulary, and SKILL.md *bodies* are **identical** on
-all targets. Only the install dir, bootstrap file + invocation sigil, invocation
-policy, and subagent format differ. Grok uses `.grok/skills/`, `.grok/agents/`,
-and `AGENTS.md`; it does not create `.grok/config.toml` or change Claude settings.
-OpenCode reads the cross-harness `.agents/skills/` directory and `AGENTS.md`
-natively; its role subagents land in `.opencode/agents/`. omp shares the same
-`.agents/skills/` tree and `AGENTS.md`; its task agents — role agents plus the
-bash-only `dispatch-*` proxies that relay archetype-shaped subtasks through
-Fadeno dials — land in `.omp/agents/`.
-
-### Plugin-first installation
-
-`init` copies capabilities into one repo. Codex and Claude Code users can instead
-install Fadeno once as a plugin for every project. Each plugin carries the
-bundled CLI and immutable built-in definitions, so starter playbooks work
-without a project data seed. Use
-`init --data-only` when you want project-owned definitions plus the read-only
-OpenCode executor policy (host capability still comes from the plugin). `vendor` is the
-deliberate full-capability path (skills, bootstrap, agents, definitions, and a
-lock); do not use it merely to make plugin built-ins available.
-
-```bash
-# Codex: the Fadeno repo contains the marketplace pointer and plugin payload
-codex plugin marketplace add CrocSwap/fadeno
-codex plugin add fadeno@fadeno
-
-# Claude Code: the same repo doubles as a Claude plugin marketplace
-/plugin marketplace add <owner>/fadeno      # or a local path for testing
-/plugin install fadeno@fadeno               # provides /fadeno:runner and /fadeno:builder
-
-# omp: the repo ships an .omp-plugin/marketplace.json catalog
-omp plugin marketplace add <owner>/fadeno   # or a local path for testing
-omp plugin install fadeno@fadeno            # provides /skill:fadeno-runner and the task agents
-
-# built-in playbooks work immediately; optional project-data customization:
-npx fadeno init --claude --data-only
-```
-
-> **After installing, run `/reload-plugins`** (or restart Claude Code). The
-> skills, `/fadeno:*` slash commands, and bundled CLI are available immediately,
-> but the role subagents (`worker`, `reviewer`, `judge`) register only at a
-> session boundary. Until they do, a run still completes — it just falls back to
-> simulated role-passes instead of dedicated subagents, and says so in the
-> ledger (a `roles_degraded` event).
-
-A full run makes many `fadeno` CLI calls, so `init --claude` pre-approves
-`Bash(fadeno:*)` in `.claude/settings.local.json` (local, git-ignored) — the CLI
-then stops prompting on every call. It's a per-user convenience, never committed;
-delete that allow rule to restore prompts. (Plugins can't grant Bash permissions
-to themselves; the explicit plugin setup instead adds a user-scoped rule for
-the stable managed-runtime path and records that exact rule for uninstall.)
-
-To test the plugin locally before publishing: `claude --plugin-dir ./plugin`.
-The `plugin/` directory is generated from the same templates as the CLI
-(`npm run build:plugin`), so the skills never drift.
-
-The Claude plugin is **self-contained**: every skill carries a private launcher
-for the bundled CLI in `plugin/bin/`. Skills do not depend on shell `PATH`.
-First setup copies that bundle to a stable user runtime so managed agents remain
-valid across plugin cache/version changes. A plugin install therefore gives the
-harness a working Fadeno runtime without claiming to install a global shell
-command.
-
-The Codex plugin carries the skills, invocation metadata, a self-contained
-`bin/fadeno`, and adjacent built-in definitions. `$fadeno-setup` installs the
-stable user runtime and user-scoped managed host agents; a fresh session is
-required after those agents change. Project overrides remain available through
-`fadeno vendor` or `fadeno steering apply ... --scope project`.
-
-Grok Build has native repo-local support through `npx fadeno init --grok`; this
-release does not add a separate Grok plugin generator or mutate Grok permission
-files. Use `--data-only` when the Grok session already has the shared skills from
-another compatible installation.
-
-omp has both surfaces: `npx fadeno init --omp` seeds a repo (shared
-`.agents/skills/` tree, `AGENTS.md`, task agents under `.omp/agents/`), and the
-generated `plugin-omp/` installs through omp's marketplace (`omp plugin install
-fadeno@fadeno`). The plugin carries full-named skills — omp registers a native
-`/skill:<name>` command for each, so no separate commands ship — plus the role
-agents, dispatch proxies, steering extension, and bundled CLI. OMP 18.0.1's
-native `task` lifecycle remains authoritative: Fadeno rewrites only the selected
-agent in flat or batched calls, preserving background, continuation, and other
-task fields while recording local routing evidence. `fadeno status --omp` and
-`fadeno doctor --omp` report missing, foreign, stale, malformed, and digest-drifted
-materialization; restart omp after changing agents or the extension.
-
-OpenCode likewise has native repo-local support through `npx fadeno init --opencode`
-— no plugin generator. It shares Codex's `.agents/skills/` tree and reads
-`AGENTS.md`; role subagents install to `.opencode/agents/`.
-
-### Ownership and removal
-
-Fadeno records plugin-created user integrations in
-`~/.local/state/fadeno/installations.json` (respecting XDG paths). Removal is
-ownership-aware: managed or byte-identical files are removed, while edited files
-are reported and preserved.
-
-```bash
-fadeno uninstall --codex               # remove one harness integration
-fadeno uninstall --all                 # remove all recorded integrations/runtime
-fadeno uninstall --purge-user-data --force
-fadeno clean                            # preview removal of repo-local runtime output
-fadeno clean --force                    # remove runs/progress/local dispatch state
-fadeno unvendor                         # remove digest-matching files from fadeno.lock
-```
-
-Global uninstall never walks repositories. `clean` preserves project definitions
-and promoted evidence. `unvendor` preserves locally edited vendored files unless
-explicitly forced.
-
----
-
-## Running a playbook
-
-Fadeno ships workflow skills plus a plugin-only, session-scoped host mode. Point
-your agent at the **runner**:
-
-| Host | How |
-|------|-----|
-| Codex | `$fadeno-runner`, or `/skills` to browse, or just describe a complex task (implicit). |
-| Claude Code | `/fadeno:runner` (plugin command), or describe a complex task (implicit). |
-| Grok Build | `/fadeno-runner`, or describe a complex task (implicit). |
-| OpenCode | Describe a complex task (skills are description-invoked), or `@fadeno-runner` where supported. |
-| omp | `/skill:fadeno-runner`, or describe a complex task (implicit). |
-
-`/fadeno:runner` is the namespaced Claude plugin command. Native Grok projects
-use the repo-local `/fadeno-runner` skill emitted by `init --grok`.
-
-Plugin users can explicitly enable Fadeno's coordinator policy for only the
-current harness session with `/fadeno:host` in Claude Code or `$fadeno-host` in
-Codex. Use the same command with `off` to disable it. The mode stores its marker
-in plugin-private session data and does not modify `AGENTS.md` or `CLAUDE.md`.
-
-The runner will:
-
-1. pick the best playbook from the bundled-plus-project catalog (using each
-   playbook's `when_to_use`; project names shadow bundled names),
-2. create a run directory under `.fadeno/runs/`,
-3. execute each step — delegating roles to host subagents when available, or
-   simulating them with separate passes otherwise (depth-1; a subagent never
-   spawns its own subagents),
-4. apply gates from **structured judgment artifacts** (not vibes),
-5. respect loop bounds, versioning each iteration's artifacts,
-6. report what changed, what was checked, which gates passed, and the run path.
-
-You can also drive the ledger from the CLI — useful for scripts, hooks, and so
-the agent doesn't hand-edit JSONL:
-
-```bash
-fadeno new-run code-change-review "Add CSV export for reports"
-fadeno new-run code-change-review "Review the supplied specs" \
-  --input Agent1Spec=specs/agent-1.md --input Agent3Spec=specs/agent-3.md
-fadeno run <run-id> --step implement            # set current_step + log step_started
-fadeno run <run-id> --status completed           # finalize: status + ended_at + run_completed
-fadeno gate <run-id> all_reviews_approved \
-  --artifact artifacts/review-report.json       # exit 0/1; --report is deprecated
-fadeno gate <run-id> tests_pass \
-  --artifact artifacts/test-result.json         # status passed + exit_code 0
-fadeno runs                                     # list run ledgers (newest first)
-fadeno show <run-id-or-prefix>                  # logical-step projection (--events for the raw timeline)
-fadeno verify <run-id>                          # recompute the ledger's checkable claims; exit 0/1 (--latest for newest)
-fadeno drive <run-id>                           # engine: advance until terminal or a human pause (uses .fadeno/executors.yaml)
-fadeno cancel <run-id>                          # cancel the active engine attempt (SIGTERM to its executor group)
-fadeno decide <run-id> <option>                 # resolve a paused human decision, then re-drive
-fadeno dispatch-prepare <run-id> <dispatch-id> --isolate  # opt-in worktree with the caller's dirty state replayed as its baseline
-fadeno dispatch-start <run-id> <dispatch-id> --agent-id <host-agent-id>
-fadeno dispatch-prompt <run-id> <dispatch-id> # exact immutable engine assignment envelope (isolated header includes workspace_mode: isolated when prepared)
-fadeno dispatch-progress <run-id> <dispatch-id> --file <status.json> --source agent
-fadeno dispatch-complete <run-id> <dispatch-id> --output <temporary-file>
-fadeno dispatch-complete <run-id> <dispatch-id> --output - < result.json
-fadeno dispatch-fail <run-id> <dispatch-id> --reason "blocked"
-fadeno dispatch-fallback <run-id> <dispatch-id> # exact snapshotted command fallback
-
-# The same three things — worktree, dispatch id, terminal receipt — with NO run:
-fadeno dispatch-open --archetype worker --tag lane-a   # cuts the worktree, mints the id, prints both
-#   ... spawn your in-session agent against the printed workspace ...
-fadeno dispatch-close tag:lane-a                       # collect the diff, merge it back, write the receipt
-fadeno dispatch-close tag:lane-a --reason "it 429'd"   # terminal FAILED receipt; nothing merges, the tree is kept
-
-
-# Engine-delivered Codex steering resolves the immutable request envelope:
-fadeno steering resolve --archetype worker --host-executor luna \
-  --run <run-id> --dispatch-id <dispatch-id>
-
-fadeno prompt <run-id> <step> --actor <role> \
-  --no-record                                   # assemble a step's actor prompt (pipe to codex/claude)
-```
-
-`fadeno prompt` deterministically assembles the exact prompt a step's actor
-receives — from the validated playbook, the ledger, and the referenced artifact
-bytes — and records it as an immutable snapshot (`artifacts/prompts/…`) plus a
-`prompt_assembled` manifest event, unless `--no-record`. A driver runs a role
-with `fadeno prompt <run> <step> --actor <role> | codex exec -`.
-
-When a role binds to a host executor, `fadeno drive` plans all pending
-calls and returns `awaiting_host_dispatch` with stable request ids. The host
-starts each host agent and submits the receipts above; model, reasoning
-effort, and host agent identity are recorded as explicit host attestations.
-If that host executor declares `fallback_command` and the current Codex agent
-does not match, `dispatch-fallback` invokes the exact snapshotted argv and owns
-the receipts. The ledger labels this `command-fallback` and does not claim
-host attestation.
-The immutable prompt names an ephemeral progress sidecar. Agents or harnesses
-update that JSON at meaningful checkpoints; the host records provenance-labelled
-observations with `dispatch-progress`. Progress is attested observability, never
-a gate input. `dispatch-prompt` emits the complete immutable host assignment
-without manual envelope reconstruction, and `dispatch-complete --output -`
-atomically validates and places stdin bytes through the same path as a file.
-An earlier failed host attempt is accepted in a completed trace only when a
-higher-ordinal successful retry for the same actor call is recorded; final or
-unresolved failures remain verification failures.
-
-Compositional maps add `body`: Fadeno instantiates that child graph once per
-literal member. A body may contain a bounded loop, and a loop body may contain a
-map. Each leaf has a canonical path such as
-`complete_items[member=item_3]/revision_cycle[generation=2]/review`, allowing
-members to advance independently while artifacts, progress, `show`, and
-verification remain aligned. The first executable slice supports `host`
-adapters and linear container bodies; dynamic maps, branchy bodies, and command
-adapter leaves remain follow-up scope.
-
-`fadeno show` projects the ledger onto the original playbook graph, including
-nodes that have not started. Every step, literal map actor, and compositional
-map member appears as
-pending, running, waiting, blocked, completed, or failed, with actor/step
-elapsed time and total run time. When progress exists, the view includes its
-phase and current action; it never infers internal state from busy/idle alone.
-Machine-local command facts are shown separately as harness-observed,
-non-gating state: process group and child PIDs, liveness, heartbeat/output age,
-byte counts, and terminal exit or signal where available. Executors run under **no deadline at all**: a clock cannot tell slow from
-stuck, and killing a print-at-exit executor destroys its report while its work
-survives in the diff. `--timeout` is gone from `dispatch`, `drive` and
-`tool-run`, and a `timeout_ms` left in a catalog is read, ignored, and reported
-by `fadeno doctor`. Ending a long attempt is a decision: `fadeno cancel <run>`
-stops the active engine attempt (`SIGTERM` to its executor group, escalating to
-`SIGKILL` after a 5s grace, preserving the claim until `close`), and `fadeno
-dispatches --cancel` does the same for an ad-hoc dispatch. Ledgers written
-before the removal still read: an `executor_timeout` or `outcome: "timeout"`
-row renders as it always did. `fadeno show` surfaces a prominent
-but non-gating `WARNING: no output observed for <duration> (non-gating)` after
-five minutes (`OUTPUT_IDLE_WARNING_MS`).
-
-`fadeno gate` is the **advisory→enforced bridge**: it computes a gate condition
-from a structured judgment artifact on disk (same check the runner applies), so
-the identical condition can run in CI, a pre-commit/pre-push hook, or a Claude
-Code `Stop` hook. Exits non-zero when the gate fails.
-
-### Dials: switch who does the work
-
-If you rotate metered subscriptions across providers — one model as the worker
-until that quota runs low, then another — the unit you think in is *"who is my
-worker / reviewer / judge right now,"* not a dozen per-role YAML edits.
-`.fadeno/executors.yaml` declares a harness-neutral **model registry** (provider,
-id, effort), one **harness table** saying how each harness is run, and
-per-archetype **dials** that select the model. A dial names *who* — and
-optionally *which harness* — never a lane or an argv: the harness you are
-sitting in is discovered at dispatch time, so the same dial stays portable.
-Claude runs an Anthropic model in-session; from Codex that same dial spawns
-`claude -p`.
+`.fadeno/executors.yaml` holds the model registry and the harness table. A
+shipped catalog covers the common models and every harness below, so a repo
+needs no catalog at all; a project or user file extends or overrides it under
+the same layering rules.
 
 ```yaml
 schema_version: 4
 models:
-  opus: { provider: anthropic, id: opus, effort: high }
   sol: { provider: openai, id: gpt-5.6-sol, effort: high }
-  grok: { provider: xai, id: grok-4.6, effort: high }
 harnesses:
-  # `provider:` claims a provider as home, so its models default here.
-  # `host:` = Fadeno can run inside it. `command:` = Fadeno can spawn it.
   codex:
-    provider: openai
-    host: { effort_channel: agent-file }
-    command: [codex, exec, --model, "{model}", "-"]
-  claude:
-    provider: anthropic
-    host: { effort_channel: none }
-    command: [claude, -p, --model, "{model}"]
-  grok:
-    provider: xai
-    command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
-# per-repo pins (optional):
+    provider: openai                 # models of this provider come home here
+    host: { effort_channel: agent-file, relay: luna@high }
+    command: [ codex, exec, --model, "{model}", "-" ]
 dials:
-  judge: sol
+  worker: sol                        # a repo pin, committed
+archetypes:
+  auditor:
+    description: Checks a change against the compliance checklist.
+unclosed_limit: 5
 ```
 
-Put shared personal overrides in `~/.config/fadeno/executors.yaml`; use a
-project `.fadeno/executors.yaml` only when the repository truly needs different
-models or policy.
+A harness is a **host** when Fadeno can run inside it (`host:`) and an
+**executor** when Fadeno can spawn it (`command:`). Most are both. A harness has
+exactly one command lane — an argv and nothing more. Every shipped lane carries
+its vendor's headless-approval flag and no restricting one; to run something
+restricted, declare your own harness entry with its own flags, where a reader
+can see them.
 
-```bash
-fadeno dial worker grok --user             # user default — applies across repos
-fadeno dial worker grok --repo             # repo pin — committed
-fadeno dial worker grok --session          # local override — this checkout only
-fadeno dial worker grok                    # update active dial; create user default if none
-fadeno dial clear worker --session         # explicitly clear the local override
-echo "task…" | fadeno dispatch --archetype worker   # ad-hoc: resolve → invoke → evidence row
-echo "task…" | fadeno dispatch --archetype worker --isolate # detached worktree + binary diff, no merge
-fadeno setup --codex                        # one-time user-scoped host integration
-# or: npx fadeno init --claude --no-steering
-```
+## Harness support
 
-The registry itself is editable from the CLI, user scope only — a project or
-bundled catalog is policy someone commits, not personal state:
+| Harness | Host | Driver | Note |
+|---------|------|--------|------|
+| Claude Code | yes | yes | Ships Node; hooks work out of the box |
+| Codex | yes | yes | Hook trust is a prerequisite for host use |
+| omp | yes | — | Reuses Claude-style hook manifests |
+| Grok, OpenCode, Muse, Antigravity | — | yes | Driver-only |
 
-```bash
-fadeno model add moonshot stealth/ox-alpha  # promote a listed upstream model to an alias
-fadeno model remove moonshot                # take it back out; refuses while a dial names it
-fadeno models verify                        # re-probe every dialed model against its harness
-fadeno models verify opus --harness opencode --strict
-```
+A **host** harness is one where Fadeno can observe a spawn, which in practice
+means Claude- or Codex-compatible hooks. Everything else is reached through the
+command lane, which loses nothing: that is where Fadeno controls the process
+outright.
 
-`fadeno model remove` edits `~/.config/fadeno/executors.yaml` in place, keeping
-its comments, and drops the alias's rows from the verification cache. It
-refuses while any dial or shadow attachment still names the alias; `--force`
-removes anyway and prints every reference it stranded.
-
-`fadeno models verify` re-probes the models your dials actually point at
-against each harness's `models_command`, **ignoring the cache** — dial-time
-verification is existence-only, so a model a backend has since retired would
-otherwise stay "verified" until a dispatch failed. A listing that still names
-the model refreshes its row; a listing that definitively omits it **deletes**
-the row and exits non-zero. A listing that cannot be reached says nothing about
-the model, so its rows are left alone and the command still exits 0 unless you
-pass `--strict`.
-
-Roles resolve at dispatch time through the dial cascade — explicit binding pin, else session dial, else repo pin, else user dial, else host-native base (`current-host`) —
-and every run start and dispatch echoes where each role landed
-(`implementer → sol @ high via codex (command) [user dial]`). Runs
-record the resolution in their ledger and ad-hoc dispatches append to
-`.fadeno/dispatches.jsonl`, so which provider produced an artifact stays
-auditable after the fact.
-
-Write-capable command and host deliveries take one repo-wide machine-local
-writer lease. A retry cannot start while the prior writer or its durable host
-receipt is still active, including across separate runs. Explicitly read-only
-lanes bypass it. `dispatch --isolate` also bypasses the shared-worktree lease
-because it runs from committed `HEAD` in a detached worktree and returns a
-binary diff artifact without merging it. Write-capable host map members are
-serialized even within one run; logical fan-out does not permit concurrent
-mutation of the shared worktree. PID-less host reservations do not silently
-expire when optional progress observations are quiet. Contention is reported as
-```
-shared workspace is already held by <kind> "<id>" (supervisor_pid <pid>, started <iso>); holder "<requester>" must wait or retry. Inspect it with `fadeno show <run>`; recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove .fadeno/local/workspace-lease.json as a last resort.
-```
-For isolated host deliveries, `dispatch-fail` degrades to a terminal receipt without diff keys whenever the isolated evidence is absent, unverifiable, or unrecoverable — including a missing or malformed machine-local state file — and records `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven registered worktree. A collection failure while the machine-local state is present still refuses, preserving the worktree for retry. `dispatch-complete` may recover and collect from a verified ledger-named worktree when the state file vanished, but still refuses success when evidence cannot be collected. Neither command stages or removes a directory it has not proven to be this dispatch's registered worktree, and nothing is ever auto-merged. `fadeno doctor` reports lease state as a `workspace-lease` finding and never acquires or deletes. `dispatch --isolate` conflicts with `--shadow` and never auto-merges. Bounded opt-in diagnostics (`--diagnostics` or `FADENO_DIAGNOSTICS=1`) persist at most 32 KiB / 500 lines per stream with head+tail sampling and a single marker `…[fadeno diagnostics truncated: <stdout|stderr> exceeded 32 KiB / 500 lines]…`, stored machine-local under `.fadeno/local/outputs/diagnostics/` (`dispatch-<id>.log` or `<run>-<actorCallId>-a<attempt>.log`), never ledger-committed, never gating.
-
-With steering enabled by default, expensive role-shaped subagent work follows
-that same resolver. `fadeno setup --codex` records the Codex installation in the manifest, so later
-`fadeno dial` switches materialize each worker/reviewer/judge slot as
-either a host agent or a command broker according to whether the dial's
-harness is the one you are sitting in.
-The Claude hook performs the same resolution for Claude rather than relying on
-stored labels: host slots select the requested Claude
-model, while command slots use dispatch proxies.
-Start a fresh Codex session after definitions change only to make the new model
-session-resident; fallback-capable switches work on the next invocation. Before
-each task, host agents resolve again: command slots switch immediately,
-matching host slots execute in-session, a different fallback-capable host slot
-runs out-of-process, and only a host slot without a fallback reports
-`restart_required`. Claude installs a
-local `PreToolUse` rewrite that redirects role launches to bundled dispatch
-proxies. Explore/Plan-style scouting is never rewritten: outside host mode it
-passes through and is recorded as an unsteered spawn, while host mode refuses
-generic subagents outright (`/fadeno:host off` lifts that). Existing files retain the
-normal non-destructive rule; `steering apply` needs `--force` to replace them.
-
-### What `.fadeno/runs/` contains
-
-Each run is a directory — the file-backed "degraded runtime" that makes a run
-inspectable (and is the seam a future compiled runtime reads/writes):
-
-```
-.fadeno/runs/2026-05-30-1132-csv-export/
-  run.yaml        # metadata: schema_version, playbook, status, task, started_at, host, current_step
-  events.jsonl    # append-only lifecycle log, one JSON object per line, contiguous seq
-  artifacts/      # every durable output: plans, patches, reviews, test results…
-```
-
-Since run-ledger format 0.3, every recorded artifact also gets an immutable
-manifest (sha256 digest, size, media type, validation verdict) in the event
-log — the evidence `fadeno verify` recomputes. Artifacts are immutable:
-revision writes a new generation, never overwrites.
-
-`runs/` is execution-trace output, **not source code**. It is safe to delete old
-runs. Fadeno's managed ignore block keeps `.fadeno/runs/`, `.fadeno/progress/`,
-`.fadeno/local/`, ad-hoc dispatch evidence, local Claude settings, and
-materialized steering brokers (the managed role, dispatch, and refusal files
-under `.codex/agents/` and `.opencode/agent/`, plus the exact
-`.opencode/plugin/fadeno-steering.js` file) out of commits. Unmanaged OpenCode
-agents and plugins remain trackable. Commit project-owned playbooks,
-schemas, policy, hooks, and `fadeno.lock`. To retain a run as source-controlled
-evidence, use `fadeno evidence promote <run>`; it first verifies the receipt and
-copies its immutable ledger plus snapshotted definitions to `.fadeno/evidence/`.
+One asymmetry worth knowing: a Codex `PreToolUse` hook can **refuse** a spawn
+and nothing else — it cannot rewrite one. So under Codex host mode an archetype
+spawn is refused *with the exact command that runs it*, staged and ready, and
+the director runs it. The record ends up identical; the redirect is visible
+rather than silent.
 
 ---
 
-## Creating a playbook
+## What Fadeno does not do
 
-Use the **builder** skill — it fires when you explicitly want to author or revise
-a playbook (its description is scoped so it won't trigger just because a prompt
-mentions "playbook"). Invoke it with `$fadeno-builder` (Codex) or `/fadeno:builder`
-(Claude plugin command), or simply ask to build or modify a playbook. The builder
-runs a short loop:
+Each of these was in the product and was removed on purpose.
 
-> **describe the flow** (or pick a starter to adapt) → builder **writes the YAML**
-> → shows it back as a **diagram** + summary → you **approve** → it **hands off to
-> the runner**. Built-in playbooks work without a project seed; use
-> `init --data-only` for project-owned definitions and executor policy, or `vendor` only when
-> you deliberately want the complete capability surface committed.
+- **Structure workflows.** No playbooks, gates, run ledgers, or repair loops. A
+  workflow is a sequence of dispatches, and composing it is the intelligence's
+  job.
+- **Adjudicate models.** No shadow pairs, no blinded judging, no bakeoff.
+- **Enforce or attest.** No prompt digests, no tamper detection, no `verify`.
+  The ledger records; it does not police.
+- **Materialize agent files.** Model and effort are set at spawn time, so
+  nothing is written to `~/.codex/agents` or `.claude/agents` and nothing goes
+  stale. Fadeno does *report* a hand-written agent file, because such a file can
+  silently override what a spawn passes.
+- **Police concurrent writes.** No lease, no lock, no overlap stamps. Worktrees
+  and real merges remove the shared-tree world that machinery existed for.
+- **Impose deadlines.** Nothing Fadeno launches is killed on a timer. You may
+  stop it — that is `cancel` — but Fadeno never decides to on its own. A clock
+  cannot tell slow from stuck.
+- **Decide what work is worth keeping.** It never destroys a worktree holding
+  uncommitted work, and never judges whether output matters.
 
-You can render any playbook's flow yourself:
+## Honest limits
 
-```bash
-fadeno playbooks                              # effective bundled + project catalog
-fadeno playbooks code-change-review           # metadata + annotated ASCII workflow
-fadeno diagram code-change-review              # annotated ASCII
-fadeno diagram code-change-review --format mermaid   # graph for GitHub/docs
-```
+- **Containment is the worktree, and the worktree contains file writes only.** A
+  spawned agent can still reach the network, a package registry, and any
+  credential in your environment. No shipped lane runs an OS sandbox; every one
+  carries its vendor's headless-approval flag, because a command lane stricter
+  than the host that spawned it converts a permitted action into a
+  mid-assignment denial. Declare your own restricted harness entry if you want
+  otherwise.
+- **`final_message` records presence, never completeness.** On an interrupted
+  Claude subagent the harness supplies no message at all, so its absence says
+  nothing about whether the work finished.
+- **Under Codex, the redirect goes through the model.** See the note above.
 
-`fadeno playbooks` is the quickest catalog view: project definitions shadow
-bundled names, and every entry reports its `when_to_use` cues and source. Add
-`--json` for the resolved path and structured metadata.
+## Contributing
 
-```
-┌─ review ───────────────────────────── map ─┐
-│ over [substance_reviewer, style_reviewer]  │
-└──────────────────────┬─────────────────────┘
-                       ▼
-┌─ review_gate ─────────────────────── gate ─┐
-│ all_reviews_approved                       │
-│ ✓ pass ▶ test                              │
-│ ✗ fail ▶ revise                            │
-└────────────────────────────────────────────┘
-                       ⋮
-┌─ revise ──────────────────────────── loop ─┐
-│ max 2 · until all_reviews_approved         │
-│ body: implement_revision ▶ review_revision │
-│ ✓ success ▶ test                           │
-│ ⤓ exhausted ▶ unresolved_review            │
-└────────────────────────────────────────────┘
-```
-
-Each step is a card; `▼` is sequential fall-through and `⋮` marks a step reached
-only via a labelled `▶` arrow (a gate branch, loop exit, or jump). Verbose
-primitive kinds are abbreviated in the diagram (`actor_call` → `actor`,
-`tool_call` → `tool`, `evaluator` → `eval`, `human_gate` → `ask`); the schema
-keeps the full names.
-
-A playbook is a small YAML file validated by `playbook.schema.json`. The key
-design rule:
-
-> A gate must **not** "ask an LLM." Instead:
-> `evaluator actor → structured judgment artifact → deterministic gate condition.`
-
-Judgment lives in an artifact (which models produce well); control flow is a
-deterministic check on it (which is verifiable — by the agent now, by a hook/CI
-or a runtime later).
-
-```yaml
-- id: review
-  kind: map
-  over: [substance_reviewer, style_reviewer]
-  input: [ImplementationResult]
-  output: ReviewReport[]            # conforms to review-report.schema.json
-
-- id: review_gate
-  kind: gate
-  input:
-    - ReviewReport[]
-  condition: all_reviews_approved     # = every verdict is approve and zero blocking issues
-  on_pass: test
-  on_fail: revise
-
-- id: revise
-  kind: loop
-  input:
-    - ReviewReport[]
-  max_iterations: 2                 # loops are always bounded
-  body: [implement_revision, review_revision]
-  until: all_reviews_approved
-  on_success: test
-  on_exhausted: unresolved_review
-
-- id: test_gate
-  kind: gate
-  input:
-    - TestResult
-  condition: tests_pass
-  on_pass: final
-  on_fail: tests_failed
-```
-
-The vocabulary is intentionally small and orthogonal:
-`actor_call`, `tool_call`, `evaluator`, `gate`, `human_gate`, `router`, `map`,
-`replicate`, `join`, `reduce`, `loop`, `artifact_op`, `subworkflow`. See
-`.fadeno/vocabulary.md` and the runner's `references/playbook-format.md`.
-
-### Validate
-
-```bash
-fadeno validate                                       # all playbooks
-fadeno validate .fadeno/playbooks/code-change-review.yaml
-fadeno validate .fadeno/runs/<id>/run.yaml            # run ledgers and artifacts too
-fadeno validate report.json --schema review-report    # force the document kind
-fadeno validate test-result.json --schema test-result
-```
-
-`validate` runs three passes on a playbook:
-
-1. **Schema** — structure against `playbook.schema.json` (unknown fields, bad
-   `kind`, missing required fields…).
-2. **Reference integrity** *(error)* — every step id referenced by `on_pass`,
-   `on_fail`, `next`, `on_approve`, `on_reject`, `on_exhausted`, `default`, a
-   loop `body`, or a `routes` map must resolve to a defined step; duplicate ids
-   are flagged.
-3. **Semantics** — every `actor` must be a declared role *(error)*; an `input`
-   artifact never produced upstream, or a declared-but-unused role, are
-   *warnings*.
-
-It also validates `run.yaml` and `review-report.json` documents (auto-detected,
-or forced with `--schema playbook|run|review-report`). Exits non-zero on any
-error; warnings are reported but don't fail.
-
-### Bash completion
-
-The CLI can emit its own sourceable Bash completion script:
-
-```bash
-source <(fadeno completion bash)
-```
-
-Add that line to `~/.bashrc` to enable it in future shells. Completion covers
-commands, their relevant flags, finite option values, paths, and (when the
-current directory is a Fadeno repository) playbook names, run ids, steps,
-dials, models, and declared archetypes. It is a read-only best-effort
-query: malformed or partially initialized repository data simply contributes
-no dynamic candidates, and ordinary Bash file completion remains available.
-
-The generated function asks `fadeno completion candidates` for one candidate
-per line, preserving paths containing spaces. No optional `bash-completion`
-package or extra command-line dependencies are required.
-
----
-
-## Enforcement: advisory vs. enforced
-
-Fadeno targets three tiers of host capability. The **same playbooks** run on all
-three; only the host adapter changes.
-
-| Tier | Hosts | Gate / approval enforcement |
-|------|-------|------------------------------|
-| **1. Instruction-only** | Codex, Claude Code, Grok Build | **Advisory** — the model is *asked* to honor `require_user_approval_for`. No hard guarantee. |
-| **2. Hook-enabled** | CI, pre-commit, Claude Code hooks | **Enforced** — deterministic checks run regardless of model compliance. |
-| **3. Compiled runtime** *(future)* | purpose-built orchestrator | **Enforced** at the runtime level. |
-
-In tier 1, `require_user_approval_for` and gate conditions are *advisory data the
-model is asked to follow* — not guarantees. The portable place for **real**
-enforcement is your git/CI/pre-commit layer, because it is harness-agnostic and
-also protects against human mistakes, not just agent ones.
-
-Fadeno is designed so the same conditions are deterministically checkable: gate
-conditions are computable from schema-valid structured artifacts
-(`review-report.schema.json` and `test-result.schema.json`), and approval
-categories map to concrete, detectable actions. Two ways to make that real:
-
-- **`fadeno gate <run> <condition> --artifact <path>`** computes a condition
-  from its named artifact and exits 0/1 — drop it into CI, a git hook, or a
-  Claude Code `Stop` hook.
-- **`fadeno verify <run>`** (or `--latest`) re-audits a whole run ledger
-  read-only against 37 checks — artifact digests recomputed from bytes,
-  typed-artifact schemas, artifact immutability, prompt-snapshot integrity,
-  event-sequence contiguity, every deterministic gate result recomputed from
-  its artifact, attempt ordinals with allowed retry reasons, executor
-  bindings against the run's snapshotted profile, human-decision integrity
-  (declared options, at-most-once), supersede references, harness-session
-  continuity, host-dispatch lifecycle/request consistency, and a receipt
-  behind every artifact (collectives recomputed from their parts) — so a trace
-  can't claim what its evidence doesn't support. The "no valid trace, no
-  merge" check; anything unrecomputable is reported as skipped, never
-  silently treated as valid.
-- **`fadeno init --with-hooks`** scaffolds runnable enforcement: an executable
-  `.fadeno/hooks/pre-commit` (dependency/secret guard), a
-  `.github/workflows/fadeno-guard.yml` CI guard, a
-  `.github/workflows/fadeno-verify.yml` trace-verification workflow, and (on
-  Claude) a `settings.example.json` hook config. Activate them per
-  `.fadeno/hooks/README.md`.
-
-`.fadeno/enforcement.md` documents the patterns. Fadeno still doesn't *force*
-enforcement on you — but the data shapes support it and the scaffold is one flag
-away.
-
----
-
-### Development
-
-```bash
-npm install
-npm test            # node --test over test/**/*.test.ts (no test framework dep)
-npm run build       # tsc → dist/ (rewrites .ts imports to .js); sets the bin executable
-npm run build:plugin   # regenerate ./plugin from the templates (keeps it in sync)
-node src/cli.ts --help # run from source (Node ≥ 22.6 strips types natively)
-```
-
-The CLI has only two runtime dependencies (`ajv`, `yaml`) and uses Node's
-built-in argument parser and test runner. TypeScript source is written in
-erasable syntax so it runs directly under Node and compiles cleanly to ESM.
-
-**Contributing?** Start with [`AGENTS.md`](AGENTS.md) for the repo map and
-invariants, then [`docs/architecture.md`](docs/architecture.md) (how the code is
-built) and [`docs/extending.md`](docs/extending.md) (file-by-file recipes for
-common changes).
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+`AGENTS.md` orients a contributor in sixty seconds; `docs/architecture.md`
+explains how the code is built and `docs/extending.md` how to change it. The
+design is specified in `docs/redesign/spec.html`, with the reasoning for each
+call in `docs/redesign/decisions.html`.

@@ -239,8 +239,7 @@ function interpretUserDials(doc: Record<string, unknown>, path: string): UserDia
         const message =
           `user dial "${k}" in ${path} carries "force_write_posture", which is no longer supported — there ` +
           'is no write-posture guard left to override. Remove the key (the dial\'s model/effort/harness are ' +
-          'still valid) or re-set the dial with `fadeno dial`. ' +
-          'See docs/experimental/permissions-and-isolation.md.';
+          'still valid) or re-set the dial with `fadeno dial`.';
         problems.push(message);
         fatal ??= message;
         continue;

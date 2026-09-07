@@ -158,7 +158,7 @@ export interface ModelDiscoveryPath {
  * write an entry that silently resolves onto the OpenRouter lane with a
  * direct id — the exact silent-wrong-answer shape this catalog keeps closing —
  * so the step is gone rather than wrong. See the "Known gap" section of
- * docs/experimental/harness-neutral-dials.md.
+ * the harness table.
  */
 export const DEFAULT_MODEL_DISCOVERY_PATH: readonly ModelDiscoveryPath[] = [
   {
@@ -534,10 +534,10 @@ export function runModelsAdd(opts: ModelAddOptions): ModelAddResult {
     const directlyListed = [...listings.values()].some((ids) => ids.includes(`${provider}/${id}`));
     if (directlyListed) {
       throw new ModelsError(
-        `model "${provider}/${id}" IS listed by OpenCode, but only as a direct (non-OpenRouter) identity, and ` +
-          'catalog v4 cannot register that yet: the direct lane is the `direct` VARIANT of the `opencode` ' +
-          'harness, variants are chosen by policy, and no model entry can name one. See the "Known gap" ' +
-          'section of docs/experimental/harness-neutral-dials.md.',
+        `model "${provider}/${id}" IS listed by OpenCode, but only as a direct (non-OpenRouter) identity, ` +
+          'and the shipped `opencode` harness prefixes every id with `openrouter/`. Declare a harness entry ' +
+          'of your own whose command omits the prefix, then register the model against it with ' +
+          '`--harness <id>`.',
       );
     }
     throw new ModelsError(`model "${provider}/${id}" was not found on the discovery path (tried exact identities: ${attempted}).`);

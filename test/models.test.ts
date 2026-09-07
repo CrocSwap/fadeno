@@ -355,13 +355,12 @@ test('fadeno model runs the models handler end to end', (t) => {
   assert.deepEqual(singular.models, plural.models);
 });
 
-test('model add: a directly-served identity is no longer registrable — v4 has no way to name a variant', (t) => {
-  // The `opencode-direct` ROUTE became the `direct` VARIANT of the `opencode`
-  // harness, and a variant is chosen by policy: neither a dial nor a model
-  // entry can name one. So an identity OpenCode lists WITHOUT the
-  // `openrouter/` prefix has no v4 spelling to record, and discovery must fail
-  // loudly rather than write an entry that silently resolves onto the
-  // OpenRouter lane carrying a direct id.
+test('model add: a directly-served identity is not registrable against the shipped opencode lane', (t) => {
+  // The shipped `opencode` command prefixes every id with `openrouter/`, so an
+  // identity OpenCode lists WITHOUT that prefix has no spelling to record
+  // against it. Discovery fails loudly and names the way out — declare a
+  // harness entry whose argv omits the prefix — rather than writing an entry
+  // that silently resolves onto the OpenRouter lane carrying a direct id.
   const root = tempRepo(t);
   const user = isolated(root);
   const userCatalog = join(user.env!.FADENO_CONFIG_HOME!, 'fadeno', 'executors.yaml');
@@ -381,7 +380,7 @@ test('model add: a directly-served identity is no longer registrable — v4 has 
     // that is right in front of them.
     (err: unknown) => err instanceof ModelsError
       && /IS listed by OpenCode, but only as a direct \(non-OpenRouter\) identity/.test(err.message)
-      && /Known gap/.test(err.message),
+      && /Declare a harness entry of your own/.test(err.message),
   );
   assert.equal(readFileSync(userCatalog, 'utf8'), before, 'a failed discovery writes nothing');
   // An identity that is on NEITHER listing still gets the plain not-found.

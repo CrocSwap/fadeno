@@ -351,7 +351,7 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
     if (map.force_write_posture !== undefined) {
       throw new ExecutorProfileError(
         `${label} "force_write_posture" is no longer supported — there is no write-posture guard left to ` +
-          'override. See docs/experimental/permissions-and-isolation.md.',
+          'override.',
       );
     }
     const unknown = Object.keys(map).filter((k) => k !== 'model' && k !== 'effort' && k !== 'harness' && k !== 'via');
@@ -708,8 +708,7 @@ export const V4_REMOVED_CATALOG_KEYS: Readonly<Record<string, string>> = {
 export function v4MigrationError(source: string, key: string, detail?: string): ExecutorProfileError {
   const replacement = V4_REMOVED_CATALOG_KEYS[key] ?? detail ?? '';
   return new ExecutorProfileError(
-    `${source}: \`${key}\` was removed in catalog v4 — use ${replacement}. ` +
-      'See docs/experimental/harness-neutral-dials.md.',
+    `${source}: \`${key}\` was removed in catalog v4 — use ${replacement}.`,
   );
 }
 
@@ -723,7 +722,7 @@ export const PRE_DIALS_CATALOG_KEYS = ['executors', 'targets', 'loadouts', 'defa
 /** The one migration message a pre-dials catalog gets, wherever it is noticed. */
 export function preDialsCatalogError(source: string): ExecutorProfileError {
   return new ExecutorProfileError(
-    `${source}: schema_version 4 required — pre-dials catalogs are not supported; migrate: targets:→models:, loadouts:→dials:, default_loadout: delete; routes:→harnesses:; see docs/experimental/harness-neutral-dials.md`,
+    `${source}: schema_version 4 required — pre-dials catalogs are not supported; migrate: targets:→models:, loadouts:→dials:, default_loadout: delete; routes:→harnesses:\``,
   );
 }
 
@@ -989,9 +988,9 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
         const key = rawHarness.write_variant !== undefined ? 'write_variant' : 'write_access';
         throw new ExecutorProfileError(
           `${source}: ${label}.${key} is no longer supported. A harness lane is an argv and nothing more: declare ` +
-            'the command you want to run, and express any restriction as a SEPARATE named variant so it is visible ' +
-            'in the argv rather than in metadata. Containment is isolated worktrees, now the default for command ' +
-            'dispatches — see docs/experimental/permissions-and-isolation.md.',
+            'the command you want to run, and express any restriction as a SEPARATE harness entry so it is ' +
+            'visible in the argv rather than in metadata. Containment is the isolated worktree every dispatch ' +
+            'already gets.',
         );
       }
       if (rawHarness.models_command !== undefined) {

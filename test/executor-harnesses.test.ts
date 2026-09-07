@@ -127,7 +127,7 @@ test('no harness lane carries an empty argv element', () => {
 // Replaces the three route-posture tests deleted with the permissions cut.
 // The shipped catalog now carries the PERMISSIVE argv for each vendor, and a
 // restriction is expressed as a separate named variant rather than as metadata
-// beside the command. See docs/experimental/permissions-and-isolation.md.
+// beside the command.
 test('no shipped harness lane declares a removed permissions key', () => {
   const raw = readFileSync(CATALOG, 'utf8');
   const doc = parseYaml(raw) as { harnesses: Record<string, Record<string, unknown>> };

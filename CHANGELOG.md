@@ -6,6 +6,110 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] — the rewrite
+
+Fadeno was a playbook engine that had grown a dispatch layer. It is now the
+dispatch layer, and nothing else. Sixty thousand lines across eighty files
+became ten thousand across twenty-one; the surviving behaviour is specified in
+`docs/redesign/spec.html` and every call in it is argued in
+`docs/redesign/decisions.html`.
+
+**This is a clean break.** There is no migration path from 0.6, by decision:
+0.6.0 is published and two repositories run it, and designing around that past
+would have cost more than fixing those projects when it bites.
+
+### Added
+
+- **The spawn wrapper.** Every delegated spawn is resolved, given a git worktree
+  on `fadeno/<name>`, handed a contract, and recorded — on the host lane by a
+  hook rewriting the spawn in place, on the command lane by `fadeno dispatch`
+  running the executor as a process. The host is never told which lane it got.
+- **The three-row ledger** at `.fadeno/dispatches.jsonl`: `opened` by the
+  wrapper, `stopped` by the stop hook as an outside observation, `closed` when
+  the host decides. Append-only. Prompts live at `.fadeno/prompts/<id>.md`,
+  outside the scratch `clean` may remove.
+- **`dispatch-open` and `dispatch-stop`** — the hooks' entry points.
+  `dispatch-open` decides the lane and either opens the dispatch or stages a
+  relay; `dispatch-stop` reads the agent's transcript, finds the dispatch by the
+  contract header in its prompt, and records the last message and the model the
+  agent actually ran on.
+- **`model_observed`** on the stopped row: what the agent reported running on,
+  beside what the dial asked for. The only way to catch a harness that ignored
+  the model a spawn passed.
+- **`context`** — one source for the host vocabulary, delivered both to a host
+  session's hook and into a spawned director's prompt, so the two cannot drift.
+- **The nag.** At every spawn the session is reminded of every unclosed dispatch
+  in the repository; at five, the next spawn is refused. Repository-wide, not
+  session-wide, so grandparents inherit orphans.
+- **`worktrees`** as its own verb: the cross-session safety net, listing every
+  Fadeno worktree holding uncommitted paths or unmerged commits.
+- **`status` reports a hand-written agent file** whose name Fadeno also routes.
+  Fadeno materializes none itself, so such a file is the user's — and on Codex
+  it silently overrides the dial.
+
+### Changed — BREAKING
+
+- **`setup` links the CLI rather than copying it.** A symlink at
+  `~/.local/bin/fadeno` (or `$FADENO_BIN_DIR`) pointing at the plugin's bundled
+  binary, so it follows the plugin and version skew becomes structurally
+  impossible. The installation manifest, the managed runtime directory, version
+  comparison, the sync preflight and `status`'s `use:` line are gone; setup
+  sweeps what the old era left on disk.
+- **`fadeno dial` with no arguments** is the director's reference: every
+  archetype with its description under its routing, lane included.
+- **A harness has one command lane.** Named `variants:` and per-archetype
+  `eligibility:` are removed — Fadeno does not decide which archetypes a model
+  may serve, and with no selector a variant had nothing to choose it. Declare a
+  second harness entry and reach it with `--harness`.
+- **The catalog loses `tools:`, `constraints:`, `worktree_carry:`,
+  `surfaces:`, `resume:`, `session_id_pattern:` and `timeout_ms:`**, along with
+  the archetype fields `ignored_output`, `brief` and
+  `distinct_provider_from_inputs`. Each belonged to something removed.
+- **`.fadeno/local/dials` loses its `shadows` half**, and a file this Fadeno
+  cannot read is now an error naming the file and the fix rather than a silent
+  fall-through to zero dials.
+
+### Removed
+
+- **Playbooks, gates, run ledgers, repair loops, `drive`, `init`, `vendor`,
+  `doctor`, `verify`, `attest`, `bakeoff`.** A workflow is a sequence of
+  dispatches, which the intelligence composes; they may return one day as a
+  plugin above this layer, which is the correct dependency direction.
+- **Shadow pairs** entire: the sampling roll, trigger budgets, the pair
+  routability predicate, blinded judging, and the `mkdir` lock in
+  `.fadeno/local/dials` that existed only so two processes could not
+  oversubscribe an attachment. No locks anywhere now.
+- **Steering apply.** Nothing is written to `~/.codex/agents` or
+  `.claude/agents`, so nothing goes stale. Model and effort are applied at spawn
+  time.
+- **Run snapshots**, the caller-prompt digest and relay attestation, the writer
+  lease and the concurrent-write window log, deadlines, and the
+  `FADENO_IN_DISPATCH` provenance family.
+- **The effort-decides-the-lane rule**, and with it `restart_required`,
+  `HostFrame` and `decideLane`. The lane is one bit — can this session deliver
+  the resolved model — computed in one place and read by every surface.
+
+### Fixed
+
+- The host vocabulary called a repo pin a "repo dial"; one list now names every
+  resolution layer for the dial table and the vocabulary alike.
+- `dispatches` reported an older Fadeno's rows as ledger damage. A non-JSON line
+  is damage; a JSON line that is not a row Fadeno knows is another format, and
+  is skipped with a count.
+- A model-agreement warning fired for `opus` against `claude-opus-5`. Alias
+  containment now counts as agreement.
+
+---
+
+### Earlier unreleased work, kept for the record
+
+Everything below this line was written against the 0.6 codebase between 0.6.1
+and the rewrite. Some of it survives verbatim — the permissive command lanes,
+the deleted lease and deadlines, the isolated worktrees — and some describes
+machinery the rewrite then removed. Where the two disagree, the sections above
+govern. It is kept because the receipts in it are why the calls above were
+made.
+
 ### Changed — BREAKING
 
 - **Every command lane is maximally permissioned.** `harnesses.codex.command`
@@ -43,7 +147,7 @@ All notable changes to Fadeno are documented here. The format follows
   `sandbox_mode = "danger-full-access"` and `approval_policy = "never"` (both
   keys and the value verified against codex 0.153.4's own vocabulary), so the
   role agents Codex loads in-session match the lane that spawns them.
-  Design record: `docs/experimental/permissions-and-isolation.md`, which gains
+  Design record: `docs/history/experimental/permissions-and-isolation.md`, which gains
   the change as a dated development rather than a rewrite — the posture makes
   its central claim ("Fadeno does not enforce permissions; it selects an argv
   and records what ran") *more* true, not less.
@@ -397,8 +501,8 @@ All notable changes to Fadeno are documented here. The format follows
 - **`worktree_carry:` is no longer silent when a repo declares none.** The key
   that carries a repo's gitignored build environment into a freshly-cut
   worktree has existed, been parse-validated, and been refused outside project
-  scope for several releases — documented only in `docs/experimental/` and
-  `docs/roadmap.md`, in no skill and no agent body. So it was loud in exactly
+  scope for several releases — documented only in `docs/history/experimental/` and
+  `docs/history/roadmap.md`, in no skill and no agent body. So it was loud in exactly
   one direction: a DECLARED path that cannot be carried refuses the dispatch,
   and a repo that declared nothing got a worktree with no environment in it and
   no line anywhere saying so. Two directors reported the consequence
@@ -834,7 +938,7 @@ All notable changes to Fadeno are documented here. The format follows
   near-identical copies whose only real difference was which entry carried
   `host: true`, and that bit is a property of the call. Migration table, the
   resolution algorithm and the known gap:
-  `docs/experimental/harness-neutral-dials.md`.
+  `docs/history/experimental/harness-neutral-dials.md`.
 
   Removed and **refused rather than ignored**, each with a migration note
   naming its v4 spelling: `routes:`, `driver:`, `host: true`, top-level
@@ -1253,7 +1357,7 @@ All notable changes to Fadeno are documented here. The format follows
   spawns one listing per pair and must never run on a hook path.
 - `removeVerifiedModels(options, predicate)` in `src/lib/user-paths.ts` — the
   verification cache could only ever grow before this.
-- `docs/experimental/harness-neutral-dials.md` — the catalog v4 design record:
+- `docs/history/experimental/harness-neutral-dials.md` — the catalog v4 design record:
   the principle, the schema, the resolution algorithm, the shadow-pair
   consequence, the rename table, and the one known gap.
 - `harnesses.<id>.variants.<name>`: named alternative argvs of a harness's
@@ -1740,7 +1844,7 @@ All four now say the same thing: in a git repo each member runs in its own detac
 
 ### Removed — the write-permission system (0.6.0-rc.50)
 
-**Fadeno no longer models write permissions.** It selects an argv and records what ran; enforcement belongs to the vendor flags you can read in the command (`--sandbox`, `--permission-mode`, `--disable-shell`), and containment belongs to isolated worktrees. Every Fadeno-level "permission" was a claim in YAML that nothing checked — and in one day that layer produced four distinct silent-wrong-answer defects. The design record is `docs/experimental/permissions-and-isolation.md`, written before the change and kept as the anti-drift artifact.
+**Fadeno no longer models write permissions.** It selects an argv and records what ran; enforcement belongs to the vendor flags you can read in the command (`--sandbox`, `--permission-mode`, `--disable-shell`), and containment belongs to isolated worktrees. Every Fadeno-level "permission" was a claim in YAML that nothing checked — and in one day that layer produced four distinct silent-wrong-answer defects. The design record is `docs/history/experimental/permissions-and-isolation.md`, written before the change and kept as the anti-drift artifact.
 
 - **Gone:** `requires_write` on archetypes, `write_access` and `write_variant` on routes, `--force`/`force_write_posture` on dials, `applyWritePosture`, `explainWriteConflict`, the `shadow_write_posture` refusal, and the write half of `explainPairRoutability`. Net −2,200 lines.
 - **The inversion:** routes are argvs, permissive by default. A restriction is now a *separate route with its own name*, visible by reading its command rather than carried in metadata beside it. 21 write-variants were promoted to be their route's own command.
@@ -1865,7 +1969,7 @@ All four found by the blinded adversarial judge pass on pairs `49a1f92a` and `89
 
 - **Opt-in isolated host workspace (`fadeno dispatch-prepare --isolate`).** Pre-spawn for a pending nonterminal host request that has not started: creates an idempotent detached worktree from `HEAD` at `.fadeno/local/host-worktrees/<run>/<dispatch-id>` (guarded against traversal/symlink escape), atomically records `workspace_mode: isolated` state at `.fadeno/local/host-workspaces/<run>/<dispatch-id>.json` (`schema_version: 1.0`, `run`, `dispatch_id`, `workspace` repo-relative, `base_commit` 40-hex, `prepared_at` ISO, plus `diff_snapshot`/`diff_bytes`/`finalized_at` after collection), serialized by `.fadeno/local/.host-workspace.lock` (`WORKSPACE_LEASE_LOCK_STALE_MS`). `dispatch-prompt` then includes `workspace_mode: isolated` plus absolute workspace path and instruction `All repository reads and writes for this assignment must occur in the workspace above; do not read or modify the shared checkout.` (prompt bytes and `prompt_sha256` unchanged, header not hashed, not ledger-written). `dispatch-start` discovers prepared state, stamps `workspace_mode: isolated`/`workspace`/`base_commit` on `actor_dispatched`, enforces `--workspace` match and rejects `command-fallback` with prepared isolated workspace, bypasses shared writer lease (read-only `writeAccess === false` also bypasses), and checks idempotent re-start `workspace_mode` equality; `dispatch-complete`/`dispatch-fail` collect a binary staged diff (`git add -A` → `git diff --binary --cached`) atomically at `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff` before the terminal receipt, stamp `workspace_mode`/`workspace`/`base_commit` plus `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven registered worktree, proving the worktree is the registered linked worktree before any `git add`/`diff` or removal. The worktree is removed only after durable append and only when proven registered (idempotent terminals reuse receipt and retry cleanup only when verified). `dispatch-fail` degrades to a terminal receipt without diff keys whenever the isolated evidence is absent, unverifiable, or unrecoverable — including a missing or malformed machine-local state file — and records `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven registered worktree; a collection failure while the machine-local state is present still refuses, preserving the worktree for retry; `dispatch-complete` may recover and collect from a verified ledger-named worktree when the state file vanished, but still refuses success when evidence cannot be collected. Neither command stages or removes a directory it has not proven to be this dispatch's registered worktree, and nothing is ever auto-merged. `HostRequestView` on `fadeno show` projects ledger-first `workspaceMode`/`workspace`/`baseCommit`/`diffSnapshot`/`diffBytes` (prepared-but-not-started degrades to isolated via machine-local read, missing state → `shared`/null, never throws, non-gating); `verify` never requires machine-local state.
 
-### Changed — dials replace named loadout presets (0.6.0, `docs/experimental/dials-and-registry.md`)
+### Changed — dials replace named loadout presets (0.6.0, `docs/history/experimental/dials-and-registry.md`)
 
 - **Named loadouts retired; per-archetype dials via a layered cascade.** `loadouts:`,
   `default_loadout:`, `targets:`, `--loadout` / `FADENO_LOADOUT`, `fadeno use`,
@@ -2009,7 +2113,7 @@ All four found by the blinded adversarial judge pass on pairs `49a1f92a` and `89
   primary's result, and shadow refusal rows keep their predicates.
 
 The engine slices of the next protocol (capabilities 1, 2, 4 + 5 of
-`docs/experimental/next-protocol.md`, plus the explicit supersede event and
+`docs/history/experimental/next-protocol.md`, plus the explicit supersede event and
 native host dispatch): Fadeno gains a small deterministic, repo-local engine.
 Native dispatch advances the run ledger to format 0.3; format 0.2 and
 unversioned traces remain explicitly readable through `--legacy`, while
@@ -2041,7 +2145,7 @@ writers accept only 0.3.
   requests and command receipts in canonical order; unresolved host requests
   still block terminal state. Compositional command leaves remain an explicit
   documented deferral (shared-role `latestSessionForRole` leakage and frontier
-  ambiguity, see `docs/experimental/compositional-runtime.md`). `fadeno cancel
+  ambiguity, see `docs/history/experimental/compositional-runtime.md`). `fadeno cancel
   --actor-call <id>` disambiguates when multiple command claims are live.
 
 ### Fixed
@@ -2324,7 +2428,7 @@ writers accept only 0.3.
   (`suppressedCanonArchetypes` in the JSON), leaving adoption an explicit
   choice.
 - **Constraint tiers at the dispatch boundary** (phase 3 of
-  `docs/experimental/slots-and-archetypes.md`) — policy the kernel can
+  `docs/history/experimental/slots-and-archetypes.md`) — policy the kernel can
   enforce, in two tiers. Tier 1 is declarative vocabulary:
   `distinct_provider_from_inputs: advisory | required` on archetypes,
   enforced against input provenance (`fadeno dispatch --produced-by
@@ -2347,7 +2451,7 @@ writers accept only 0.3.
   across layers.
 
 - **Archetype schema pass** (phase 2 of
-  `docs/experimental/slots-and-archetypes.md`) — the archetype vocabulary
+  `docs/history/experimental/slots-and-archetypes.md`) — the archetype vocabulary
   opens up while staying kernel-enforced. `requires_write` becomes
   three-valued (`required` / `forbidden` / `none`; booleans alias for
   compatibility), and `forbidden` refuses dispatch onto a command route
@@ -2368,7 +2472,7 @@ writers accept only 0.3.
   identifier-validated.
 
 - **Session slot overrides** (phase 1 of
-  `docs/experimental/slots-and-archetypes.md`) — switch one archetype at a
+  `docs/history/experimental/slots-and-archetypes.md`) — switch one archetype at a
   time instead of authoring a loadout per combination:
   `fadeno loadout set worker grok-default` dials a single slot over the
   active loadout, `fadeno loadout clear worker` reverts it, and switching
@@ -2447,7 +2551,7 @@ writers accept only 0.3.
   dedicated integration phase that owns cross-cutting files, the plugin
   rebuild, the changelog, and the first full-suite run. Drawn from two live
   fan-outs on 2026-08-12; rationale in
-  `docs/experimental/loadouts-and-dispatch.md` → *Parallel dispatch fan-out*.
+  `docs/history/experimental/loadouts-and-dispatch.md` → *Parallel dispatch fan-out*.
 
 - **Route write-access policy** — a schema v2 route entry may declare
   `write_access: <bool>` (whether that route's *command* delivery can mutate
@@ -2955,7 +3059,7 @@ writers accept only 0.3.
 ### Documentation
 
 - **Schema v2 is now the primary form in the design spec.**
-  `docs/experimental/loadouts-and-dispatch.md` → *Schema* presented v1
+  `docs/history/experimental/loadouts-and-dispatch.md` → *Schema* presented v1
   `executors:` entries as the shape to write while the shipped catalog had been
   v2 for two releases. It now specifies v2 fully — `targets:`, per-harness
   `routes:` (`native` / `command` / `resume` / `session_id_pattern` /
@@ -2979,7 +3083,7 @@ writers accept only 0.3.
 ## [0.5.0] — 2026-08-02
 
 The provenance slice of the next protocol (capabilities 3 + 6 of
-`docs/experimental/next-protocol.md`): artifact manifests with sha256 digests,
+`docs/history/experimental/next-protocol.md`): artifact manifests with sha256 digests,
 a much stricter `fadeno verify`, and a legible step projection as the default
 `fadeno show`. **Breaking: run-ledger format 0.2** — new ledgers carry
 `schema_version: "0.2"` and per-event `seq`; readers refuse unversioned
