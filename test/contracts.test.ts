@@ -69,14 +69,14 @@ test('the host vocabulary carries the archetype list with live routing, the spaw
   const unclosed = correlate([opened('a', { name: 'fix-login' })]);
   const text = hostVocabulary({
     archetypes: [
-      { name: 'worker', description: 'Implements.', model: 'luna', effort: 'xhigh', source: 'repo dial' },
+      { name: 'worker', description: 'Implements.', model: 'luna', effort: 'xhigh', source: 'repo pin' },
       { name: 'reviewer', description: 'Reviews.', model: 'current-host', effort: null, source: 'base' },
     ],
     unclosed,
     unclosedLimit: 5,
     now: new Date('2026-09-07T10:30:00Z'),
   });
-  assert.match(text, /\*\*worker\*\* — Implements\. _\(routes to luna@xhigh; repo dial\)_/);
+  assert.match(text, /\*\*worker\*\* — Implements\. _\(routes to luna@xhigh; repo pin\)_/);
   assert.match(text, /\*\*reviewer\*\* — Reviews\. _\(routes to this session's own model; base\)_/);
   assert.match(text, /`fadeno:worker` on Claude Code; `worker` on Codex/);
   assert.match(text, /fadeno dispatch --archetype <name> --prompt-file <file>/, 'a director with no hook still knows the command lane');

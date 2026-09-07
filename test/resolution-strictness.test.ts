@@ -98,33 +98,19 @@ test('dial resolve: a malformed v3 pin throws the same message dispatch would', 
 });
 
 
-test('dial show: a legacy pin is surfaced gracefully, not thrown', (t) => {
-  const { root, paths } = seedProject(t, V3_BASE);
-  writeLegacyPin(root);
-  const shown = runDialShow({ repoRoot: root, userPathOptions: paths });
-  assert.match(shown.legacy_pin_note ?? '', /pre-0.6 loadout pin ignored/);
-  assert.equal(shown.legacyPinNote, shown.legacy_pin_note);
-  // Resolution fell through to repo pin (worker -> sol) or base; but legacy note is present
-  assert.ok(shown.dials.session == null || Object.keys(shown.dials.session).length === 0);
-
-  // Also legacy JSON shape
-  const { root: root2, paths: paths2 } = seedProject(t, V3_BASE);
-  writeLegacyJsonPin(root2);
-  const shown2 = runDialShow({ repoRoot: root2, userPathOptions: paths2 });
-  assert.match(shown2.legacy_pin_note ?? '', /pre-0.6 loadout pin ignored/);
-});
-
-test('dial resolve: legacy pin does NOT block strict resolve (note only)', (t) => {
-  const { root, paths } = seedProject(t, V3_BASE);
-  writeLegacyPin(root);
-  // Resolve should succeed, returning repo pin or base, not throw
-  const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker' });
-  assert.equal(resolved.model, 'sol');
-  assert.equal(resolved.source, 'repo');
-  // Dispatch also succeeds
-  const disp = resolveArchetype({ archetype: 'worker', repoRoot: root, userPathOptions: paths });
-  assert.equal(disp.model, 'sol');
-  assert.equal(disp.source, 'repo');
+test('a pin file this fadeno cannot read stops every reader of it, in one voice', (t) => {
+  // Both shapes a pre-0.7 checkout can be holding: the bare loadout name, and
+  // the JSON one. Neither is readable as dials, and the danger is not the
+  // error — it is the alternative, where `dial` prints a table and `dispatch`
+  // routes work with the user's dials silently missing.
+  for (const write of [writeLegacyPin, writeLegacyJsonPin]) {
+    const { root, paths } = seedProject(t, V3_BASE);
+    write(root);
+    const fix = /\.fadeno\/local\/dials .*Fix: delete it/s;
+    assert.throws(() => runDialShow({ repoRoot: root, userPathOptions: paths }), fix);
+    assert.throws(() => runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker' }), fix);
+    assert.throws(() => resolveArchetype({ archetype: 'worker', repoRoot: root, userPathOptions: paths }), fix);
+  }
 });
 
 test('suppressedCanonArchetypes: computed only when a self-contained project suppresses layering', (t) => {

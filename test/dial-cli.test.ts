@@ -4,19 +4,9 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import {
-  offHostLanes,
-  DialError,
-  formatShadowLine,
-  runDialResolve,
-  runDialSet,
-  runDialShadow,
-  runDialShow,
-  sessionEffort,
-} from '../src/commands/dial.ts';
+import { runDialResolve, runDialSet, runDialShow } from '../src/commands/dial.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
-import { DIALS_LOCAL_FILE } from '../src/lib/executors.ts';
-import { read, tempRepo } from './helpers.ts';
+import { tempRepo } from './helpers.ts';
 
 // Isolated per-repo user state: these tests must never read the developer's
 // real user dials (a non-empty real user layer flips `base` rows to `user`).
@@ -26,6 +16,16 @@ const isolated = (root: string): UserPathOptions => ({
     FADENO_CONFIG_HOME: join(root, 'user-config'),
     FADENO_STATE_HOME: join(root, 'user-state'),
     FADENO_HARNESS: 'standalone',
+  },
+});
+
+/** The same catalog seen from inside a host session, where `codex` is the host. */
+const inCodex = (root: string): UserPathOptions => ({
+  home: join(root, 'home-codex'),
+  env: {
+    FADENO_CONFIG_HOME: join(root, 'cfg-codex'),
+    FADENO_STATE_HOME: join(root, 'state-codex'),
+    FADENO_HARNESS: 'codex',
   },
 });
 
@@ -51,21 +51,33 @@ function seedCatalog(t: TestContext, extra: Record<string, unknown> = {}): strin
   return root;
 }
 
-test('dial show: effective table with triad and source base', (t) => {
+function cliRun(root: string, paths: UserPathOptions, args: string[]): string {
+  return execFileSync(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.ts'), ...args], {
+    cwd: root,
+    env: { ...process.env, ...paths.env, HOME: paths.home! },
+    encoding: 'utf8',
+    stdio: 'pipe',
+  });
+}
+
+test('dial show: every archetype, what it is for, and where it goes', (t) => {
   const root = seedCatalog(t);
   const result = runDialShow({ repoRoot: root, userPathOptions: isolated(root) });
   assert.equal(result.host, 'standalone');
-  // All three triad rows present with base source
-  const workers = result.rows.find((r) => r.archetype === 'worker');
-  assert.ok(workers);
-  assert.equal(workers!.source, 'base');
-  assert.equal(workers!.model, 'current-host');
-  assert.equal(result.legacy_pin_note, null);
+  const worker = result.rows.find((r) => r.archetype === 'worker')!;
+  assert.ok(worker);
+  assert.equal(worker.source, 'base');
+  assert.equal(worker.model, 'current-host');
+  // The description is part of the row, not decoration the renderer invents:
+  // this table is the reference a coordinator reads before delegating, and
+  // "which archetype" is the question it answers first.
+  assert.match(worker.description, /Implements a described change in its own worktree/);
+  // From a bare shell the base dial names a session that is not there, so it
+  // is off the host lane with nothing to invoke.
+  assert.equal(worker.lane, 'command');
+  assert.equal(worker.deliverable, false);
   assert.ok(Array.isArray(result.suppressed_canon_archetypes));
-  // snake_case fields present
-  const json = JSON.stringify(result);
-  assert.match(json, /"legacy_pin_note"/);
-  assert.match(json, /"suppressed_canon_archetypes"/);
+  assert.match(JSON.stringify(result), /"suppressed_canon_archetypes"/);
 });
 
 test('dial show: rows follow the canon power order, extras alphabetical after', (t) => {
@@ -86,42 +98,33 @@ test('dial show: rows follow the canon power order, extras alphabetical after', 
   );
 });
 
-test('dial show: legacy pin note surfaces', (t) => {
-  const root = seedCatalog(t);
-  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
-  writeFileSync(join(root, DIALS_LOCAL_FILE), 'anthropic-primary\n', 'utf8');
-  const result = runDialShow({ repoRoot: root, userPathOptions: isolated(root) });
-  assert.match(result.legacy_pin_note ?? '', /pre-0\.6 loadout pin ignored/);
-  // Rows still render base
-  assert.ok(result.rows.length > 0);
-});
-
-test('dial resolve: hook fields stable', (t) => {
-  const root = seedCatalog(t);
+test('dial resolve: the inspection contract', (t) => {
+  const root = seedCatalog(t, { dials: { worker: 'grok' } });
   const result = runDialResolve({ repoRoot: root, archetype: 'worker', userPathOptions: isolated(root) });
-  assert.equal(result.archetype, 'worker');
-  assert.equal(result.model, 'current-host');
-  assert.equal(result.adapter, 'host');
-  assert.equal(result.source, 'base');
-  assert.ok('executor' in result);
-  assert.ok('model_id' in result);
-  assert.ok('harness' in result);
-  assert.ok('host' in result);
-  assert.ok('variant' in result);
-  assert.ok(!('driver' in result), 'the driver vocabulary is gone, not deprecated');
-  assert.ok('delivery' in result);
-  assert.equal(typeof result.delivery.dispatchable, 'boolean');
-  assert.equal(typeof result.delivery.action, 'string');
-  // Keys exact
-  const keys = Object.keys(result);
-  assert.ok(keys.includes('executor'));
-  assert.ok(keys.includes('model'));
-  assert.ok(!keys.includes('active')); // active is gone
+  assert.deepEqual(Object.keys(result).sort(), [
+    'archetype', 'command', 'dial', 'effective_effort', 'executor', 'harness',
+    'host', 'lane', 'model', 'model_id', 'pinned_effort', 'source',
+  ]);
+  assert.equal(result.model, 'grok');
+  assert.equal(result.model_id, 'grok-4.6');
+  assert.equal(result.harness, 'grok');
+  assert.equal(result.host, 'standalone');
+  assert.equal(result.source, 'repo');
+  // The argv a dispatch would run, so a reader can see what "command lane"
+  // actually means here rather than being told a lane name.
+  assert.equal(result.lane, 'command');
+  assert.deepEqual(result.command, ['node', '-e', '0']);
 });
 
-test('dial show: luna stays on codex while adapter selection follows the caller', (t) => {
-  const root = tempRepo(t);
-  const rows = new Map<string, ReturnType<typeof runDialShow>['rows'][number]>();
+test('dial show: the model keeps its home harness while the LANE follows the caller', (t) => {
+  const root = seedCatalog(t, {
+    harnesses: {
+      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: ['node', '-e', '0'] },
+      grok: { provider: 'xai', command: ['node', '-e', '0'] },
+    },
+    dials: { reviewer: 'sol' },
+  });
+  const lanes = new Map<string, ReturnType<typeof runDialShow>['rows'][number]>();
   for (const harness of ['codex', 'claude', 'grok', 'standalone']) {
     const userPathOptions: UserPathOptions = {
       home: join(root, `home-${harness}`),
@@ -131,33 +134,28 @@ test('dial show: luna stays on codex while adapter selection follows the caller'
         FADENO_HARNESS: harness,
       },
     };
-    runDialSet({ repoRoot: root, userPathOptions, archetype: 'reviewer', model: 'luna', user: true });
-    rows.set(harness, runDialShow({ repoRoot: root, userPathOptions }).rows.find((row) => row.archetype === 'reviewer')!);
+    lanes.set(harness, runDialShow({ repoRoot: root, userPathOptions }).rows.find((row) => row.archetype === 'reviewer')!);
   }
-  for (const row of rows.values()) {
-    // `harness`, the EXECUTOR — printed as the `harness` column. Not `host`,
-    // which means the agent asking and is what the loop above varies. Under
-    // v4 those are two keys with two names; they used to be one word.
+  for (const row of lanes.values()) {
+    // `harness` is the EXECUTOR — who runs it. Not the host, which is what the
+    // loop varies. Two keys with two names; they used to be one word.
     assert.equal(row.harness, 'codex');
     assert.equal(row.harness_explicit, false, 'no `--harness` was given; this is the model\'s home');
+    assert.equal(row.model, 'sol');
   }
-  assert.equal(rows.get('codex')!.adapter, 'host');
-  assert.equal(rows.get('claude')!.adapter, 'command');
-  assert.equal(rows.get('grok')!.adapter, 'command');
-  assert.equal(rows.get('standalone')!.adapter, 'command');
+  // The lane, and only the lane, moves with the caller: `sol` lives on codex,
+  // so a codex session delivers it in-session and everyone else spawns it.
+  assert.equal(lanes.get('codex')!.lane, 'host');
+  assert.equal(lanes.get('claude')!.lane, 'command');
+  assert.equal(lanes.get('grok')!.lane, 'command');
+  assert.equal(lanes.get('standalone')!.lane, 'command');
+  for (const row of lanes.values()) assert.equal(row.deliverable, true, 'codex declares a command');
 });
 
 test('dial CLI: --session creates a local dial and a later unscoped set updates it', (t) => {
   const root = seedCatalog(t);
   const paths = isolated(root);
-  const env = { ...process.env, ...paths.env, HOME: paths.home! };
-  const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
-  const run = (args: string[]) => JSON.parse(execFileSync(process.execPath, [cli, ...args, '--json'], {
-    cwd: root,
-    env,
-    encoding: 'utf8',
-    stdio: 'pipe',
-  })) as Record<string, any>;
+  const run = (args: string[]) => JSON.parse(cliRun(root, paths, [...args, '--json'])) as Record<string, any>;
 
   const created = run(['dial', 'judge', 'grok', '--session']);
   assert.equal(created.layer, 'session');
@@ -178,7 +176,8 @@ test('dial show: a registry default never renders as a pin', (t) => {
   const paths = isolated(root);
   // `sol` declares effort: high in the registry. Three dials on the same
   // model: no opinion, a pin that differs from the default, and a pin that
-  // happens to equal it — the third is the one the old rendering erased.
+  // happens to equal it — the third is the one a display keyed on "differs
+  // from the default" erases.
   runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'worker', model: 'sol', session: true });
   runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer', model: 'sol@low', session: true });
   runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'judge', model: 'sol@high', session: true });
@@ -187,17 +186,10 @@ test('dial show: a registry default never renders as a pin', (t) => {
 
   assert.equal(row('worker').pinned_effort, null);
   assert.equal(row('worker').effective_effort, 'high');
-  assert.equal(row('worker').modelDisplay, 'sol');
   assert.equal(row('reviewer').pinned_effort, 'low');
   assert.equal(row('reviewer').effective_effort, 'low');
-  assert.equal(row('reviewer').modelDisplay, 'sol @ low');
   assert.equal(row('judge').pinned_effort, 'high');
   assert.equal(row('judge').effective_effort, 'high');
-  assert.equal(row('judge').modelDisplay, 'sol @ high');
-
-  // The legacy `effort` field keeps its old meaning for scripts reading it.
-  assert.equal(row('worker').effort, 'high');
-  assert.equal(row('judge').effort, 'high');
 });
 
 test('dial set/resolve JSON carries the pin separately from the resolved effort', (t) => {
@@ -206,7 +198,6 @@ test('dial set/resolve JSON carries the pin separately from the resolved effort'
   const unpinned = runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'worker', model: 'sol', session: true });
   assert.equal(unpinned.pinned_effort, null);
   assert.equal(unpinned.effective_effort, 'high');
-  assert.equal(unpinned.effort, 'high');
   const resolvedUnpinned = runDialResolve({ repoRoot: root, archetype: 'worker', userPathOptions: paths });
   assert.equal(resolvedUnpinned.pinned_effort, null);
   assert.equal(resolvedUnpinned.effective_effort, 'high');
@@ -219,117 +210,28 @@ test('dial set/resolve JSON carries the pin separately from the resolved effort'
   assert.equal(resolvedPinned.effective_effort, 'low');
 });
 
-test('dial shadow: the attachment line shows a pin and only a pin', (t) => {
-  // Both primaries dialed onto a command-capable harness: an undialed
-  // archetype falls through to `current-host`, which in a bare shell can carry
-  // no pair at all, and an explicit attach onto it is refused (see
-  // test/dial-set.test.ts). This test is about the rendered line.
-  const root = seedCatalog(t, { dials: { reviewer: 'sol', judge: 'sol' } });
-  const paths = isolated(root);
-  const unpinned = runDialShadow({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer', model: 'grok' });
-  assert.equal(unpinned.pinned_effort, null);
-  assert.equal(unpinned.effective_effort, 'high');
-  assert.equal(
-    formatShadowLine(unpinned.shadow_attachments.reviewer!, ''),
-    '  ~ shadow: grok [command]',
-  );
-  const pinned = runDialShadow({ repoRoot: root, userPathOptions: paths, archetype: 'judge', model: 'grok@low' });
-  assert.equal(pinned.pinned_effort, 'low');
-  assert.equal(
-    formatShadowLine(pinned.shadow_attachments.judge!, ''),
-    '  ~ shadow: grok @ low [command]',
-  );
-});
-
-test('sessionEffort reads the harness channel, never a resolved default', () => {
-  assert.equal(sessionEffort({}), null);
-  assert.equal(sessionEffort({ CLAUDE_EFFORT: '' }), null);
-  assert.equal(sessionEffort({ CLAUDE_EFFORT: '  ' }), null);
-  assert.equal(sessionEffort({ CLAUDE_EFFORT: ' xhigh ' }), 'xhigh');
-});
-
-test('offHostLanes: only a pin that differs from the session leaves it', (t) => {
-  // Inside a HOST, because under v4 that is what makes `current-host` a host
-  // lane at all: it names whatever session is running, and a bare shell is not
-  // one. The `standalone` case is its own assertion at the bottom.
-  const root = seedCatalog(t, {
-    harnesses: {
-      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: ['node', '-e', '0'] },
-      grok: { provider: 'xai', command: ['node', '-e', '0'] },
-    },
-  });
-  const inHost: UserPathOptions = {
-    home: join(root, 'home-codex'),
-    env: { FADENO_CONFIG_HOME: join(root, 'cfg-codex'), FADENO_STATE_HOME: join(root, 'state-codex'), FADENO_HARNESS: 'codex' },
-  };
-  const shape = (refs: Array<string | null>, session: string | null, paths: UserPathOptions = inHost) =>
-    offHostLanes(refs, session, { repoRoot: root, userPathOptions: paths })
-      .map((d) => (d == null ? null : [d.lane, d.lane_reason]));
-
-  // The implementation trap: an unpinned host dial resolves to a registry
-  // default, and must NOT be read as an opinion that leaves the session.
-  assert.deepEqual(shape(['current-host'], 'medium'), [null]);
-  assert.deepEqual(shape(['current-host@xhigh'], 'xhigh'), [null]);
-  // A pin the session cannot serve leaves it. `current-host` declares no
-  // command fallback — the base dial is the session, and there is no argv for
-  // "the session" — so there is nowhere to go and the honest answer is
-  // restart_required, NOT `command`, which would name a lane that does not
-  // exist.
-  assert.deepEqual(shape(['current-host@xhigh'], 'medium'), [['restart_required', 'no command fallback']]);
-  // Unmeasurable session effort is the absence of proof, and a pin loses on
-  // it: we cannot show the host lane delivers xhigh, so we do not claim it.
-  assert.deepEqual(shape(['current-host@xhigh'], null), [['restart_required', 'no command fallback']]);
-  // A command executor is already off-session for reasons that are not
-  // effort, so it is suppressed rather than mislabeled. `grok` is not this
-  // session's harness, so it was never a host candidate.
-  assert.deepEqual(shape(['grok@low'], 'medium'), [null]);
-  // Unresolved roles and unknown harnesses stay silent, positionally aligned.
-  assert.deepEqual(
-    shape([null, 'current-host@xhigh', 'nope@low:no-such-harness'], 'medium'),
-    [null, ['restart_required', 'no command fallback'], null],
-  );
-
-  // From a bare shell there is no session to deliver in, so even an UNPINNED
-  // `current-host` goes nowhere — and that is never suppressed, because
-  // `restart_required` is the one answer a reader cannot infer from the rest
-  // of the line.
-  const bare = isolated(root);
-  assert.deepEqual(shape(['current-host'], 'medium', bare), [['restart_required', 'no command fallback']]);
-});
-
 test('dial CLI: the effort column shows the pin, and `inherit` where there is none', (t) => {
   const root = seedCatalog(t);
   const paths = isolated(root);
-  const env = { ...process.env, ...paths.env, HOME: paths.home! };
-  const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
-  const run = (args: string[]) => execFileSync(process.execPath, [cli, ...args], {
-    cwd: root,
-    env,
-    encoding: 'utf8',
-    stdio: 'pipe',
-  });
-
-  run(['dial', 'worker', 'sol', '--session']);
-  run(['dial', 'reviewer', 'sol@low', '--session']);
-  const table = run(['dial']);
+  cliRun(root, paths, ['dial', 'worker', 'sol', '--session']);
+  cliRun(root, paths, ['dial', 'reviewer', 'sol@low', '--session']);
+  const table = cliRun(root, paths, ['dial']);
   const rowFor = (archetype: string) => table.split('\n').find((line) => line.startsWith(archetype))!;
   assert.match(rowFor('worker'), /sol\s+inherit\s/);
-  assert.match(rowFor('reviewer'), /sol @ low\s+low\s/);
+  assert.match(rowFor('reviewer'), /sol\s+low\s/);
   // The single-archetype view is the same renderer, so it must agree.
-  assert.match(rowFor('worker'), /sol\s+inherit\s/);
-  assert.match(run(['dial', 'worker']), /sol\s+inherit\s/);
+  assert.match(cliRun(root, paths, ['dial', 'worker']), /sol\s+inherit\s/);
 });
-
 
 // --- The lane column ---
 //
-// `fadeno dial` printed model, effort, harness and source, and left the LANE
-// to be inferred from columns that do not determine it. A director's preflight
-// is where that inference gets acted on, and one wrong inference put a
-// five-lane campaign on the command lane. Shown, and derived from the same
-// `decideLane` every other surface answers with — not a fourth opinion.
+// The table prints model, effort, harness and source; the LANE is what those
+// columns decide together and none of them shows. A director's preflight is
+// where a wrong inference gets acted on — one put a five-lane campaign on the
+// command lane — so it is printed, from `laneOf`, the same one bit the spawn
+// wrapper routes on.
 
-test('dial show: every row carries the lane it would take, from the shared predicate', (t) => {
+test('dial CLI: the table prints the lane, the description, and names a row with no lane at all', (t) => {
   const root = seedCatalog(t, {
     harnesses: {
       // The host: `sol` is deliverable in-session here, and has a command lane.
@@ -337,77 +239,29 @@ test('dial show: every row carries the lane it would take, from the shared predi
       // Not the host, so `grok` can only be spawned.
       grok: { provider: 'xai', command: ['node', '-e', '0'] },
     },
-    dials: { worker: 'sol', reviewer: 'grok', judge: 'sol@low' },
-  });
-  const paths: UserPathOptions = {
-    home: join(root, 'home-codex'),
-    env: {
-      FADENO_CONFIG_HOME: join(root, 'cfg-codex'),
-      FADENO_STATE_HOME: join(root, 'state-codex'),
-      FADENO_HARNESS: 'codex',
-      CLAUDE_EFFORT: 'high',
-    },
-  };
-  const result = runDialShow({ repoRoot: root, userPathOptions: paths, env: paths.env });
-  const row = (archetype: string) => result.rows.find((r) => r.archetype === archetype)!;
-
-  // Unpinned on the host harness: in-session, the common path.
-  assert.equal(row('worker').lane, 'host');
-  assert.equal(row('worker').lane_reason, 'effort unpinned');
-  // A harness this session is not inside: the catalog decides, and says so.
-  assert.equal(row('reviewer').lane, 'command');
-  assert.equal(row('reviewer').lane_reason, 'model not deliverable in-host');
-  // Host harness, but a pin the session contradicts — the case the effort and
-  // harness columns cannot show together, which is the whole reason for this
-  // column.
-  assert.equal(row('judge').lane, 'command');
-  assert.equal(row('judge').lane_reason, 'session effort is high, dial pins low');
-
-  // The same answer `offHostLanes` gives for the same refs in the same
-  // session, because it is the same call — the table and the resolution echo
-  // cannot name different lanes for one dial.
-  //
-  // `worker` and `reviewer` come back null there, and that is the echo's
-  // RENDERING filter, not a second predicate: a host-lane row needs no label,
-  // and a row that was never a host candidate leaves the session because of a
-  // model the reader can already see. The column has no such filter — a table
-  // cell has to print something — which is exactly why it must be derived and
-  // not re-decided.
-  const [worker, reviewer, judge] = offHostLanes(
-    [row('worker').refString, row('reviewer').refString, row('judge').refString],
-    'high',
-    { repoRoot: root, userPathOptions: paths },
-  );
-  assert.equal(worker, null);
-  assert.equal(reviewer, null);
-  assert.equal(judge!.lane, row('judge').lane);
-  assert.equal(judge!.lane_reason, row('judge').lane_reason);
-});
-
-test('dial CLI: the table prints the lane between harness and source', (t) => {
-  const root = seedCatalog(t, {
-    harnesses: {
-      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: ['node', '-e', '0'] },
-      grok: { provider: 'xai', command: ['node', '-e', '0'] },
-    },
     dials: { worker: 'sol', reviewer: 'grok' },
   });
-  const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
-  const table = execFileSync(process.execPath, [cli, 'dial'], {
-    cwd: root,
-    env: {
-      ...process.env,
-      FADENO_CONFIG_HOME: join(root, 'cfg-codex'),
-      FADENO_STATE_HOME: join(root, 'state-codex'),
-      FADENO_HARNESS: 'codex',
-      HOME: join(root, 'home-codex'),
-      CLAUDE_EFFORT: 'high',
-    },
-    encoding: 'utf8',
-    stdio: 'pipe',
-  });
+  const paths = inCodex(root);
+  const rows = runDialShow({ repoRoot: root, userPathOptions: paths }).rows;
+  const row = (archetype: string) => rows.find((r) => r.archetype === archetype)!;
+  assert.equal(row('worker').lane, 'host');
+  assert.equal(row('reviewer').lane, 'command');
+  // Undialed inside a host session: `current-host` IS the session, so it is a
+  // host candidate here — the same dial that had no lane from a bare shell.
+  assert.equal(row('judge').model, 'current-host');
+  assert.equal(row('judge').lane, 'host');
+
+  const table = cliRun(root, paths, ['dial']);
   const rowFor = (archetype: string) => table.split('\n').find((line) => line.startsWith(archetype))!;
   assert.match(table.split('\n')[0]!, /harness\s+lane\s+source/);
   assert.match(rowFor('worker'), /codex \(home\)\s+host\s+repo pin/);
   assert.match(rowFor('reviewer'), /grok \(home\)\s+command\s+repo pin/);
+  assert.match(table, /Implements a described change in its own worktree/);
+
+  // The same catalog from a bare shell: the undialed row has no lane at all,
+  // and the table says `none` rather than naming a command lane that has
+  // nothing to invoke.
+  const bare = cliRun(root, isolated(root), ['dial']);
+  assert.match(bare.split('\n').find((line) => line.startsWith('judge'))!, /current-host\s+inherit\s+—\s+none\s/);
+  assert.match(bare, /none: no lane from here/);
 });

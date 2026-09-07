@@ -7963,10 +7963,6 @@ function removeVerifiedModels(options, predicate) {
 var ExecutorProfileError = class extends Error {
 };
 var BARE_IDENTIFIER_RE = /^[a-z][a-z0-9_-]*$/;
-function shadowSampleRoll(promptSha256, archetype, challenger) {
-  const digest = (0, import_node_crypto2.createHash)("sha256").update(`${promptSha256}:${archetype}:${challenger}`).digest("hex");
-  return Number.parseInt(digest.slice(0, 8), 16) / 4294967296;
-}
 var SESSION_ID_PLACEHOLDER = "{session_id}";
 var PROMPT_FILE_PLACEHOLDER = "{prompt_file}";
 function substitutePromptFile(argv, promptPath2) {
@@ -8140,9 +8136,6 @@ function qualifyListedModelId(harness, modelId) {
   const prefix = harness?.modelsPrefix;
   if (prefix == null || modelId.startsWith(prefix)) return modelId;
   return `${prefix}${modelId}`;
-}
-function deliveryIsHost(compiled) {
-  return compiled.spec.adapter === "host";
 }
 function hostCandidateOf(compiled, spec) {
   return compiled != null ? compiled.hostCandidate : spec.adapter === "host";
@@ -8869,243 +8862,61 @@ function localDialPinError(detail) {
     `${DIALS_LOCAL_FILE} ${detail} Fix: delete it (machine-local state, never committed), then re-dial with \`fadeno dial <archetype> <model>\`.`
   );
 }
-var LOCAL_DIALS_LOCK = `${DIALS_LOCAL_FILE}.lock`;
-var LOCAL_DIALS_LOCK_WAIT_MS = 10;
-var LOCAL_DIALS_LOCK_TIMEOUT_MS = 3e4;
-var LOCAL_DIALS_LOCK_STALE_MS = 12e4;
-var heldLocalDialLocks = /* @__PURE__ */ new Map();
-function waitSync(milliseconds) {
-  const signal = new Int32Array(new SharedArrayBuffer(4));
-  Atomics.wait(signal, 0, 0, milliseconds);
-}
-function withLocalDialStateLock(repoRoot, action) {
-  const lockPath = (0, import_node_path4.join)(repoRoot, LOCAL_DIALS_LOCK);
-  const depth = heldLocalDialLocks.get(lockPath) ?? 0;
-  if (depth > 0) {
-    heldLocalDialLocks.set(lockPath, depth + 1);
-    try {
-      return action();
-    } finally {
-      heldLocalDialLocks.set(lockPath, depth);
-    }
-  }
-  (0, import_node_fs4.mkdirSync)((0, import_node_path4.dirname)(lockPath), { recursive: true });
-  const started = Date.now();
-  for (; ; ) {
-    try {
-      (0, import_node_fs4.mkdirSync)(lockPath);
-      break;
-    } catch (err) {
-      if (err.code !== "EEXIST") throw err;
-      let stale = false;
-      try {
-        stale = Date.now() - (0, import_node_fs4.statSync)(lockPath).mtimeMs > LOCAL_DIALS_LOCK_STALE_MS;
-      } catch {
-      }
-      if (stale) {
-        (0, import_node_fs4.rmSync)(lockPath, { recursive: true, force: true });
-        continue;
-      }
-      if (Date.now() - started >= LOCAL_DIALS_LOCK_TIMEOUT_MS) {
-        throw new ExecutorProfileError(`timed out waiting for the local dial lock at ${LOCAL_DIALS_LOCK}.`);
-      }
-      waitSync(LOCAL_DIALS_LOCK_WAIT_MS);
-    }
-  }
-  heldLocalDialLocks.set(lockPath, 1);
-  try {
-    return action();
-  } finally {
-    heldLocalDialLocks.delete(lockPath);
-    (0, import_node_fs4.rmSync)(lockPath, { recursive: true, force: true });
-  }
-}
-function shadowAttachmentRef(att) {
-  return {
-    model: att.model,
-    ...att.effort ? { effort: att.effort } : {},
-    ...att.harness ? { harness: att.harness } : {}
-  };
-}
-function shadowAttachmentExpired(attachment) {
-  return attachment.n != null && attachment.remaining === 0;
-}
 function readLocalDialState(repoRoot) {
   const path = (0, import_node_path4.join)(repoRoot, DIALS_LOCAL_FILE);
-  if (!(0, import_node_fs4.existsSync)(path)) return { dials: {}, shadows: {}, legacyNote: null };
+  if (!(0, import_node_fs4.existsSync)(path)) return { dials: {} };
   const text = (0, import_node_fs4.readFileSync)(path, "utf8");
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return { dials: {}, shadows: {}, legacyNote: null };
-  if (!trimmed.startsWith("{")) {
-    return {
-      dials: {},
-      shadows: {},
-      legacyNote: "pre-0.6 loadout pin ignored (named loadouts retired) \u2014 re-dial with `fadeno dial <archetype> <model>`"
-    };
-  }
+  if (text.trim().length === 0) return { dials: {} };
   let doc;
   try {
     doc = JSON.parse(text);
   } catch (err) {
     throw localDialPinError(`did not parse as JSON: ${err.message}.`);
   }
-  if (!isMapping(doc)) {
-    throw localDialPinError("is JSON, but not an object (`{dials, shadows}`).");
-  }
-  return interpretLocalDialDocument(doc);
-}
-function interpretLocalDialDocument(doc) {
-  if (doc.loadout !== void 0 || doc.overrides !== void 0) {
-    return {
-      dials: {},
-      shadows: {},
-      legacyNote: "pre-0.6 loadout pin ignored (named loadouts retired) \u2014 re-dial with `fadeno dial <archetype> <model>`"
-    };
-  }
+  if (!isMapping(doc)) throw localDialPinError("is JSON, but not an object (`{dials}`).");
   if (doc.schema_version !== void 0) {
     if (typeof doc.schema_version !== "number" || !Number.isSafeInteger(doc.schema_version) || doc.schema_version < 0) {
       throw localDialPinError(`has schema_version ${JSON.stringify(doc.schema_version)}, which is not a non-negative integer.`);
     }
     if (doc.schema_version > LOCAL_DIALS_SCHEMA_VERSION) {
-      throw localDialPinError(
-        `is schema_version ${doc.schema_version}; this fadeno reads ${LOCAL_DIALS_SCHEMA_VERSION}.`
-      );
+      throw localDialPinError(`is schema_version ${doc.schema_version}; this fadeno reads ${LOCAL_DIALS_SCHEMA_VERSION}.`);
     }
   }
   const dials = {};
-  const legacyShadowVia = [];
-  const legacyDialVia = [];
   if (doc.dials != null) {
     if (!isMapping(doc.dials)) throw localDialPinError("has a `dials` that is not a mapping (archetype \u2192 dial ref).");
-    for (const [arch, raw] of Object.entries(doc.dials)) {
-      if (!BARE_IDENTIFIER_RE.test(arch)) throw localDialPinError(`has dial key "${arch}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      if (typeof raw === "string" ? raw.includes(VIA_SEPARATOR) : isMapping(raw) && raw.via !== void 0) legacyDialVia.push(arch);
+    for (const [archetype, raw] of Object.entries(doc.dials)) {
+      if (!BARE_IDENTIFIER_RE.test(archetype)) {
+        throw localDialPinError(`has dial key "${archetype}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
+      }
       try {
-        dials[arch] = parseDialRef(raw, `dials.${arch}`);
+        dials[archetype] = parseDialRef(raw, `dials.${archetype}`);
       } catch (err) {
         throw localDialPinError(err.message);
       }
     }
   }
-  const shadows = {};
-  if (doc.shadows != null) {
-    if (!isMapping(doc.shadows)) throw localDialPinError("has a `shadows` that is not a mapping (archetype \u2192 shadow attachment).");
-    for (const [arch, raw] of Object.entries(doc.shadows)) {
-      if (!BARE_IDENTIFIER_RE.test(arch)) throw localDialPinError(`has shadow key "${arch}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      if (!isMapping(raw)) throw localDialPinError(`shadow "${arch}" is not a mapping ({model, effort?, harness?, rate?, n?, remaining?}).`);
-      const model = raw.model;
-      if (typeof model !== "string" || model.trim().length === 0) throw localDialPinError(`shadow "${arch}" needs a non-empty \`model\`.`);
-      let effort;
-      if (raw.effort !== void 0) {
-        if (typeof raw.effort !== "string" || raw.effort.trim().length === 0) throw localDialPinError(`shadow "${arch}" has invalid \`effort\`.`);
-        effort = raw.effort.trim();
-      }
-      let shadowHarness;
-      if (raw.harness !== void 0) {
-        if (typeof raw.harness !== "string" || raw.harness.trim().length === 0) throw localDialPinError(`shadow "${arch}" has invalid \`harness\`.`);
-        shadowHarness = raw.harness.trim();
-      } else if (raw.via !== void 0) {
-        if (typeof raw.via !== "string" || raw.via.trim().length === 0) throw localDialPinError(`shadow "${arch}" has invalid \`via\`.`);
-        shadowHarness = legacyDriverHarness(raw.via.trim());
-        legacyShadowVia.push(arch);
-      }
-      let rate;
-      if (raw.rate !== void 0) {
-        if (typeof raw.rate !== "number" || !Number.isFinite(raw.rate) || raw.rate <= 0 || raw.rate > 1) {
-          throw localDialPinError(`shadow "${arch}" has rate ${JSON.stringify(raw.rate)}, which is not a number in (0, 1].`);
-        }
-        rate = raw.rate;
-      }
-      let n;
-      let remaining;
-      if (raw.n !== void 0) {
-        if (typeof raw.n !== "number" || !Number.isSafeInteger(raw.n) || raw.n <= 0) {
-          throw localDialPinError(`shadow "${arch}" has n ${JSON.stringify(raw.n)}, which is not a positive integer.`);
-        }
-        n = raw.n;
-        if (typeof raw.remaining !== "number" || !Number.isSafeInteger(raw.remaining) || raw.remaining < 0 || raw.remaining > n) {
-          throw localDialPinError(`shadow "${arch}" has remaining ${JSON.stringify(raw.remaining)}, which must be an integer in [0, n].`);
-        }
-        remaining = raw.remaining;
-      } else if (raw.remaining !== void 0) {
-        throw localDialPinError(`shadow "${arch}" has \`remaining\` without a finite \`n\` trigger limit.`);
-      }
-      const unknown = Object.keys(raw).filter((k) => !["model", "effort", "harness", "via", "rate", "n", "remaining"].includes(k));
-      if (unknown.length > 0) throw localDialPinError(`shadow "${arch}" has unknown key(s) ${unknown.join(", ")}; only model, effort, harness, rate, n, remaining are allowed.`);
-      const att = { model: model.trim() };
-      if (effort != null) att.effort = effort;
-      if (shadowHarness != null) att.harness = shadowHarness;
-      if (rate != null) att.rate = rate;
-      if (n != null) {
-        att.n = n;
-        att.remaining = remaining;
-      }
-      shadows[arch] = att;
-    }
+  const unknown = Object.keys(doc).filter((k) => k !== "dials" && k !== "schema_version");
+  if (unknown.length > 0) {
+    throw localDialPinError(`has unknown key(s) ${unknown.join(", ")}; only \`schema_version\` and \`dials\` are allowed.`);
   }
-  const unknownTop = Object.keys(doc).filter((k) => k !== "dials" && k !== "shadows" && k !== "schema_version");
-  if (unknownTop.length > 0) {
-    throw localDialPinError(`has unknown key(s) ${unknownTop.join(", ")}; only \`schema_version\`, \`dials\` and \`shadows\` are allowed.`);
-  }
-  return { dials, shadows, legacyNote: null, legacyViaNote: formatLegacyViaNote(legacyDialVia, legacyShadowVia) };
-}
-function formatLegacyViaNote(dials, shadows) {
-  const parts = [];
-  if (dials.length > 0) parts.push(`dial${dials.length === 1 ? "" : "s"} ${dials.sort().join(", ")}`);
-  if (shadows.length > 0) parts.push(`shadow${shadows.length === 1 ? "" : "s"} ${shadows.sort().join(", ")}`);
-  if (parts.length === 0) return null;
-  return `note: ${DIALS_LOCAL_FILE} still spells ${parts.join(" and ")} with the removed \`via <driver>\` form; read as \`on <harness>\` (claude-exec/claude-cli\u2192claude, opencode-direct\u2192opencode, muse-code\u2192muse). Re-dial to rewrite the file.`;
+  return { dials };
 }
 function writeLocalDialState(repoRoot, state) {
   const path = (0, import_node_path4.join)(repoRoot, DIALS_LOCAL_FILE);
-  const dialKeys = Object.keys(state.dials).sort();
-  const shadowKeys = Object.keys(state.shadows).sort();
-  if (dialKeys.length === 0 && shadowKeys.length === 0) {
+  const keys = Object.keys(state.dials).sort();
+  if (keys.length === 0) {
     if ((0, import_node_fs4.existsSync)(path)) (0, import_node_fs4.unlinkSync)(path);
     return path;
   }
   (0, import_node_fs4.mkdirSync)((0, import_node_path4.dirname)(path), { recursive: true });
-  for (const k of dialKeys) {
-    if (!BARE_IDENTIFIER_RE.test(k)) throw new ExecutorProfileError(`dial key "${k}" is not a bare identifier.`);
+  const dials = {};
+  for (const key of keys) {
+    if (!BARE_IDENTIFIER_RE.test(key)) throw new ExecutorProfileError(`dial key "${key}" is not a bare identifier.`);
+    dials[key] = serializeDialRef(state.dials[key]);
   }
-  for (const [arch, att] of Object.entries(state.shadows)) {
-    if (!BARE_IDENTIFIER_RE.test(arch)) throw new ExecutorProfileError(`shadow key "${arch}" is not a bare identifier.`);
-    if (typeof att.model !== "string" || att.model.trim().length === 0) throw new ExecutorProfileError(`shadow "${arch}" has empty model.`);
-    if (att.rate !== void 0 && (typeof att.rate !== "number" || !Number.isFinite(att.rate) || att.rate <= 0 || att.rate > 1)) throw new ExecutorProfileError(`shadow "${arch}" has invalid rate ${String(att.rate)}.`);
-    if (att.n !== void 0 && (!Number.isSafeInteger(att.n) || att.n <= 0 || !Number.isSafeInteger(att.remaining) || att.remaining < 0 || att.remaining > att.n)) {
-      throw new ExecutorProfileError(`shadow "${arch}" has invalid finite trigger state.`);
-    }
-    if (att.n === void 0 && att.remaining !== void 0) throw new ExecutorProfileError(`shadow "${arch}" has remaining without n.`);
-  }
-  const out = {};
-  if (dialKeys.length > 0) {
-    const sorted = {};
-    for (const k of dialKeys) {
-      const ref = state.dials[k];
-      sorted[k] = serializeDialRef(ref);
-    }
-    out.dials = sorted;
-  }
-  if (shadowKeys.length > 0) {
-    const sortedShadows = {};
-    for (const k of shadowKeys) {
-      const att = state.shadows[k];
-      const entry = { model: att.model };
-      if (att.effort != null) entry.effort = att.effort;
-      if (att.harness != null) entry.harness = att.harness;
-      if (att.rate != null) entry.rate = att.rate;
-      if (att.n != null) {
-        entry.n = att.n;
-        entry.remaining = att.remaining;
-      }
-      sortedShadows[k] = entry;
-    }
-    out.shadows = sortedShadows;
-  }
-  const ordered = { schema_version: LOCAL_DIALS_SCHEMA_VERSION };
-  for (const k of Object.keys(out).sort()) ordered[k] = out[k];
   const tmp = `${path}.tmp-${process.pid}-${(0, import_node_crypto2.randomUUID)()}`;
-  (0, import_node_fs4.writeFileSync)(tmp, `${JSON.stringify(ordered)}
+  (0, import_node_fs4.writeFileSync)(tmp, `${JSON.stringify({ schema_version: LOCAL_DIALS_SCHEMA_VERSION, dials })}
 `, "utf8");
   try {
     (0, import_node_fs4.renameSync)(tmp, path);
@@ -9152,6 +8963,22 @@ function resolveRole(role, archetype, profile, layers) {
   const cascade = resolveDialCascade(role, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, layers);
   const delivery = resolveDelivery(cascade.ref, profile, profile.host ?? "standalone", { archetype });
   return { delivery, source: cascade.source, resolvedVia: cascade.resolvedVia };
+}
+function roleResolutionEchoLabel(source) {
+  switch (source) {
+    case "binding":
+      return "binding";
+    case "session":
+      return "session dial";
+    case "repo":
+      return "repo pin";
+    case "user":
+      return "user dial";
+    case "base":
+      return "no dial";
+    default:
+      return String(source);
+  }
 }
 function resolveRelay(profile, harness) {
   const ref = profile.harnesses?.[harness]?.host?.relay;
@@ -9298,32 +9125,6 @@ function resolveDelivery(ref, profile, host = profile.host ?? "standalone", ctx 
     entry: harnessEntry,
     modelEligibility: entryModel?.eligibility ?? {}
   });
-}
-function eligibilityFor(spec, archetype) {
-  if (typeof archetype !== "string") return "eligible";
-  const map = spec.eligibility;
-  if (map == null || !Object.hasOwn(map, archetype)) return "eligible";
-  const state = map[archetype];
-  return state === "shadow_only" || state === "forbidden" || state === "eligible" ? state : "eligible";
-}
-function commandRoutable(spec) {
-  return spec.adapter === "command" || spec.adapter === "host" && spec.fallbackCommand != null;
-}
-function explainPairRoutability(spec, executorName) {
-  if (!commandRoutable(spec)) {
-    return {
-      routable: false,
-      reason: `executor "${executorName}" has no command lane \u2014 a host delivery with no fallback_command has nothing for a pair to move the primary onto.`
-    };
-  }
-  return { routable: true };
-}
-function pairRoutabilityFields(answer) {
-  return answer.routable ? { routable: true, routable_reason: null } : { routable: false, routable_reason: answer.reason };
-}
-function explainEligibilityConflict(delivery, archetype) {
-  if (eligibilityFor(delivery.spec, archetype) !== "forbidden") return null;
-  return `archetype "${archetype}" is marked \`eligibility: forbidden\` on executor "${delivery.executor}" \u2014 the catalog forbids this pairing. Fix: choose an eligible executor, dial a different target, or change the catalog's eligibility entry.`;
 }
 
 // src/lib/config-layers.ts
@@ -9891,6 +9692,9 @@ var DISPATCH_ID_ENV = "FADENO_DISPATCH_ID";
 var OUTPUTS_DIR = (0, import_node_path7.join)(".fadeno", "local", "outputs");
 var RELAY_DIR = (0, import_node_path7.join)(".fadeno", "local", "relay");
 var CANCEL_GRACE_MS = 5e3;
+function laneOf(delivery) {
+  return delivery.hostCandidate ? "host" : "command";
+}
 function commandOf(delivery) {
   const spec = delivery.spec;
   if (spec.adapter === "command") return spec.command;
@@ -9924,7 +9728,7 @@ function resolveArchetype(input) {
       modelId: delivery.modelId,
       effort: delivery.effectiveEffort || null,
       harness: delivery.harness,
-      lane: delivery.hostCandidate ? "host" : "command",
+      lane: laneOf(delivery),
       command: commandOf(delivery),
       source,
       explicitModel: explicit,
@@ -9960,7 +9764,7 @@ function describeArchetypes(input) {
     const description = describeArchetype(name, profile.archetypes[name]?.description);
     try {
       const r = resolveArchetype({ repoRoot: input.repoRoot, archetype: name, userPathOptions: input.userPathOptions });
-      const source = r.source === "base" ? "no dial" : r.source === "binding" ? "binding" : `${r.source} dial`;
+      const source = r.source === "explicit" ? "explicit model" : roleResolutionEchoLabel(r.source);
       return { name, description, model: r.model, effort: r.effort, source };
     } catch (err) {
       return { name, description, model: "unresolvable", effort: null, source: err.message };
@@ -10728,49 +10532,16 @@ var import_node_child_process3 = require("node:child_process");
 var import_node_fs10 = require("node:fs");
 var import_node_path9 = require("node:path");
 var import_yaml3 = __toESM(require_dist(), 1);
-
-// src/lib/lane.ts
-function readSessionEffort(env = process.env) {
-  const raw = typeof env.CLAUDE_EFFORT === "string" ? env.CLAUDE_EFFORT.trim() : "";
-  return raw !== "" ? raw : null;
-}
-function decideLane(input) {
-  const { pinnedEffort, effectiveEffort, sessionEffort, hostModel, commandLane } = input;
-  const base = {
-    effort_pinned: pinnedEffort != null,
-    effective_effort: effectiveEffort,
-    session_effort: sessionEffort
-  };
-  const offHost = (why) => commandLane ? { ...base, lane: "command", lane_reason: why } : { ...base, lane: "restart_required", lane_reason: "no command fallback" };
-  if (!hostModel) return offHost("model not deliverable in-host");
-  if (input.frame === "mismatched") return offHost("the caller holds another host executor");
-  if (input.frame === "unstated") return offHost("the caller named no host executor");
-  if (pinnedEffort == null) {
-    return { ...base, lane: "host", lane_reason: "effort unpinned" };
-  }
-  if (sessionEffort == null) {
-    return input.hostEffortProven === true ? { ...base, lane: "host", lane_reason: "host agent pins the same effort" } : offHost("session effort unobserved");
-  }
-  if (sessionEffort === pinnedEffort) {
-    return { ...base, lane: "host", lane_reason: "session effort matches the pin" };
-  }
-  return offHost(`session effort is ${sessionEffort}, dial pins ${pinnedEffort}`);
-}
-
-// src/commands/dial.ts
 var DialError = class extends Error {
 };
-function shadowAttachmentView(att, delivery) {
-  return {
-    model: att.model,
-    ...att.effort ? { effort: att.effort } : {},
-    ...att.harness ? { harness: att.harness } : {},
-    ...att.rate != null ? { rate: att.rate } : {},
-    n: att.n ?? null,
-    remaining: att.remaining ?? null,
-    expired: shadowAttachmentExpired(att),
-    ...delivery != null ? { adapter: delivery.spec.adapter, resolved_harness: delivery.harness } : {}
-  };
+var RESERVED_ARCHETYPES = /* @__PURE__ */ new Set(["set", "clear", "resolve"]);
+function assertArchetypeName(archetype) {
+  if (RESERVED_ARCHETYPES.has(archetype)) {
+    throw new DialError(`archetype "${archetype}" is a reserved word \u2014 rename the archetype`);
+  }
+  if (!BARE_IDENTIFIER_RE.test(archetype)) {
+    throw new DialError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
+  }
 }
 function repoRootOf(opts) {
   return opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
@@ -10897,23 +10668,20 @@ function probeModel(profile, harness, modelId, opts = {}) {
 function harnessCanProbe(profile, harness) {
   return harness != null && (profile.harnesses?.[harness]?.models_command ?? null) != null;
 }
+var SET_USAGE = "Usage: fadeno dial <archetype>[+<archetype>\u2026] <model>[@effort] [--harness <id>] [--session|--user|--repo]";
 function runDialSetMany(opts) {
   const archetypes = [];
   for (const raw of opts.archetypes) {
     const name = raw.trim();
     if (name.length > 0 && !archetypes.includes(name)) archetypes.push(name);
   }
-  if (archetypes.length === 0) {
-    throw new DialError("Usage: fadeno dial <archetype>[+<archetype>\u2026] <model>[@effort] [--harness <id>] [--session|--user|--repo] [--force]");
-  }
+  if (archetypes.length === 0) throw new DialError(SET_USAGE);
   if ([opts.session, opts.user, opts.repo].filter(Boolean).length > 1) {
     throw new DialError("--session, --user, and --repo are mutually exclusive.");
   }
   const repoRoot = repoRootOf(opts);
   const modelInput = opts.model.trim();
-  if (modelInput.length === 0) {
-    throw new DialError("Usage: fadeno dial <archetype>[+<archetype>\u2026] <model>[@effort] [--harness <id>] [--session|--user|--repo] [--force]");
-  }
+  if (modelInput.length === 0) throw new DialError(SET_USAGE);
   let dial;
   try {
     dial = buildDialRef(modelInput, opts.harness?.trim() || void 0, `model "${modelInput}"`);
@@ -10932,13 +10700,10 @@ function runDialSetMany(opts) {
   }
   const failures = [];
   for (const archetype of archetypes) {
-    if (archetype === "set" || archetype === "clear" || archetype === "shadow" || archetype === "clear-shadow" || archetype === "resolve") {
-      failures.push(`archetype "${archetype}" is a reserved word \u2014 rename the archetype`);
-      continue;
-    }
-    if (!BARE_IDENTIFIER_RE.test(archetype)) {
-      failures.push(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      continue;
+    try {
+      assertArchetypeName(archetype);
+    } catch (err) {
+      failures.push(err.message);
     }
   }
   if (failures.length > 0) {
@@ -10950,50 +10715,22 @@ function runDialSetMany(opts) {
   return archetypes.map((archetype) => runDialSet({ ...opts, archetype }));
 }
 function providerNoveltyNote(params) {
-  const { profile, layers, shadows, archetype, refString, compiled, kind } = params;
+  const { profile, layers, archetype, refString, compiled } = params;
   const provider = compiled.provider;
   if (provider == null || provider === "current-host") return null;
   const inUse = /* @__PURE__ */ new Set();
-  const archetypes = knownArchetypes(profile.archetypes, layers.session, layers.repo, layers.user);
-  const providerOf = (ref) => {
+  for (const other of knownArchetypes(profile.archetypes, layers.session, layers.repo, layers.user)) {
+    if (other === archetype) continue;
     try {
-      const other = resolveDelivery(ref, profile);
-      if (other.provider != null) inUse.add(other.provider);
+      const resolved = resolveRole(other, other, profile, layers);
+      if (resolved.delivery.provider != null) inUse.add(resolved.delivery.provider);
     } catch {
     }
-  };
-  for (const other of archetypes) {
-    if (kind === "dial" && other === archetype) continue;
-    try {
-      const cascade = resolveDialCascade(other, other, { bindings: profile.bindings, archetypes: profile.archetypes }, layers);
-      providerOf(cascade.ref);
-    } catch {
-    }
-  }
-  for (const [other, attachment] of Object.entries(shadows)) {
-    if (kind === "shadow" && other === archetype) continue;
-    providerOf(shadowAttachmentRef(attachment));
   }
   if (inUse.has(provider)) return null;
-  const arrow = kind === "shadow" ? "~" : "\u2192";
-  const consequence = kind === "shadow" ? "Every sampled dispatch duplicates the prompt to that vendor alongside the primary, and the challenger runs in a worktree of this repo." : "Prompts for this archetype \u2014 and, on a write delivery, the workspace the executor can read \u2014 go to a vendor this repo is not already sending work to.";
-  const undo = kind === "shadow" ? `Detach it with \`fadeno dial clear-shadow ${archetype}\`.` : `Change it with \`fadeno dial ${archetype} <model>\`.`;
-  return `WARNING: NEW PROVIDER \u2014 ${archetype} ${arrow} ${refString} routes to "${provider}", which nothing else dialed in this repo uses.
-${consequence}
-${undo}`;
-}
-function unroutablePrimaryNote(params) {
-  const { profile, layers, archetype } = params;
-  let resolved;
-  try {
-    resolved = resolveRole(archetype, archetype, profile, layers);
-  } catch {
-    return null;
-  }
-  const routability = explainPairRoutability(resolved.delivery.spec, resolved.delivery.refString);
-  if (routability.routable) return null;
-  return `WARNING: NO PAIR POSSIBLE \u2014 ${archetype}'s primary (${resolved.delivery.refString}) cannot carry a pair, so this shadow attachment can never be sampled and every dispatch will silently run unpaired.
-${routability.reason}`;
+  return `WARNING: NEW PROVIDER \u2014 ${archetype} \u2192 ${refString} routes to "${provider}", which nothing else dialed in this repo uses.
+Prompts for this archetype \u2014 and the worktree the executor can read \u2014 go to a vendor this repo is not already sending work to.
+Change it with \`fadeno dial ${archetype} <model>\`.`;
 }
 function runDialSet(opts) {
   const repoRoot = repoRootOf(opts);
@@ -11001,14 +10738,9 @@ function runDialSet(opts) {
     throw new DialError("--session, --user, and --repo are mutually exclusive.");
   }
   const archetype = opts.archetype.trim();
-  if (archetype === "set" || archetype === "clear" || archetype === "shadow" || archetype === "clear-shadow" || archetype === "resolve") {
-    throw new DialError(`archetype "${archetype}" is a reserved word \u2014 rename the archetype`);
-  }
-  if (!BARE_IDENTIFIER_RE.test(archetype)) {
-    throw new DialError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-  }
+  assertArchetypeName(archetype);
   const modelInput = opts.model.trim();
-  if (modelInput.length === 0) throw new DialError("Usage: fadeno dial <archetype> <model>[@effort] [--harness <id>] [--session|--user|--repo] [--force]");
+  if (modelInput.length === 0) throw new DialError(SET_USAGE);
   let dial;
   try {
     dial = buildDialRef(modelInput, opts.harness?.trim() || void 0, `model "${modelInput}"`);
@@ -11061,28 +10793,14 @@ function runDialSet(opts) {
     const novelty = providerNoveltyNote({
       profile,
       layers: { session: localState.dials, repo: profile.dials, user: userDials },
-      shadows: localState.shadows,
       archetype,
       refString,
-      compiled,
-      kind: "dial"
+      compiled
     });
     if (novelty != null) notes.push(novelty);
   }
   const sessionPinned = Object.hasOwn(localState.dials, archetype);
   const repoPinned = Object.hasOwn(profile.dials, archetype) ? profile.dials[archetype] : null;
-  if (localState.shadows != null && Object.hasOwn(localState.shadows, archetype)) {
-    try {
-      const shadowLayers = { session: localState.dials, repo: profile.dials, user: readUserDials(opts.userPathOptions) };
-      const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
-      if (unroutable != null) {
-        console.warn(
-          `fadeno dial warning: archetype "${archetype}" has an existing shadow attachment but its new primary is unroutable for shadow pairs \u2014 the pair degrades to no pair (primary runs solo). To restore pairing, redial to a command delivery for this archetype.`
-        );
-      }
-    } catch {
-    }
-  }
   const userPinned = Object.hasOwn(userDials, archetype);
   let layer;
   let adaptive = false;
@@ -11092,59 +10810,30 @@ function runDialSet(opts) {
   else {
     if (sessionPinned) layer = "session";
     else if (repoPinned != null) layer = "repo";
-    else if (userPinned) layer = "user";
     else layer = "user";
     adaptive = sessionPinned || repoPinned != null || userPinned;
   }
   let previous = null;
-  if (layer === "session" && Object.hasOwn(localState.dials, archetype)) {
+  if (layer === "session" && sessionPinned) {
     previous = { layer: "session", dial: localState.dials[archetype] };
-  } else if (layer === "user" && Object.hasOwn(userDials, archetype)) {
+  } else if (layer === "user" && userPinned) {
     previous = { layer: "user", dial: userDials[archetype] };
   } else if (layer === "repo" && repoPinned != null) {
     previous = { layer: "repo", dial: repoPinned };
   }
-  let narrative = "";
-  const modelDisplay = refString;
-  if (layer === "user") {
-    narrative = `${archetype} \u2192 ${modelDisplay}  [user default \u2014 applies across your repos]`;
-  } else if (layer === "session") {
-    narrative = `${archetype} \u2192 ${modelDisplay}  [session dial \u2014 this checkout only, sticky until cleared]`;
-  } else if (layer === "repo") {
-    narrative = `${archetype} \u2192 ${modelDisplay}  [repo pin \u2014 committed in .fadeno/executors.yaml]`;
-  }
-  if (probeNote) {
-  }
+  const narrative = layer === "user" ? `${archetype} \u2192 ${refString}  [user default \u2014 applies across your repos]` : layer === "session" ? `${archetype} \u2192 ${refString}  [session dial \u2014 this checkout only, sticky until cleared]` : `${archetype} \u2192 ${refString}  [repo pin \u2014 committed in .fadeno/executors.yaml]`;
   if (layer === "session") {
-    withLocalDialStateLock(repoRoot, () => {
-      const current = readLocalDialState(repoRoot);
-      previous = Object.hasOwn(current.dials, archetype) ? { layer: "session", dial: current.dials[archetype] } : null;
-      const nextDials = { ...current.dials, [archetype]: dial };
-      writeLocalDialState(repoRoot, { dials: nextDials, shadows: current.shadows, legacyNote: null });
-    });
+    writeLocalDialState(repoRoot, { dials: { ...localState.dials, [archetype]: dial } });
   } else if (layer === "user") {
-    const next = { ...userDials, [archetype]: dial };
-    writeUserDials(opts.userPathOptions ?? {}, next);
-  } else if (layer === "repo") {
+    writeUserDials(opts.userPathOptions ?? {}, { ...userDials, [archetype]: dial });
+  } else {
     const executorsPath = (0, import_node_path9.join)(repoRoot, ".fadeno", "executors.yaml");
-    let docText = "";
-    let doc;
-    if ((0, import_node_fs10.existsSync)(executorsPath)) {
-      docText = (0, import_node_fs10.readFileSync)(executorsPath, "utf8");
-      doc = (0, import_yaml3.parseDocument)(docText);
-    } else {
-      doc = (0, import_yaml3.parseDocument)("");
-    }
-    if (!doc.has("dials")) {
-      doc.set("dials", doc.createNode({}));
-    }
+    const doc = (0, import_node_fs10.existsSync)(executorsPath) ? (0, import_yaml3.parseDocument)((0, import_node_fs10.readFileSync)(executorsPath, "utf8")) : (0, import_yaml3.parseDocument)("");
+    if (!doc.has("dials")) doc.set("dials", doc.createNode({}));
     doc.setIn(["dials", archetype], serializeDialRef(dial));
-    if (!doc.has("schema_version")) {
-      doc.set("schema_version", 3);
-    }
-    const out = String(doc);
+    if (!doc.has("schema_version")) doc.set("schema_version", 3);
     (0, import_node_fs10.mkdirSync)((0, import_node_path9.join)(repoRoot, ".fadeno"), { recursive: true });
-    (0, import_node_fs10.writeFileSync)(executorsPath, out, "utf8");
+    (0, import_node_fs10.writeFileSync)(executorsPath, String(doc), "utf8");
   }
   return {
     archetype,
@@ -11152,11 +10841,9 @@ function runDialSet(opts) {
     refString,
     model: compiled.model,
     model_id: compiled.modelId,
-    effort: compiled.effectiveEffort,
     pinned_effort: compiled.pinnedEffort,
     effective_effort: compiled.effectiveEffort,
     harness: compiled.harness,
-    variant: compiled.variant,
     layer,
     adaptive,
     repo_pinned: repoPinned,
@@ -11180,26 +10867,18 @@ function runDialClear(opts = {}) {
     throw new DialError("repo pins are committed config \u2014 remove them per archetype with `clear <archetype> --repo`");
   }
   if (archetype == null) {
-    if (opts.session) {
-      return withLocalDialStateLock(repoRoot, () => {
-        const state3 = readLocalDialState(repoRoot);
-        const count2 = Object.keys(state3.dials).length;
-        if (count2 === 0) return { cleared: null, removed: false, archetype: null, layer: "session", remaining: {}, count: 0 };
-        writeLocalDialState(repoRoot, { dials: {}, shadows: state3.shadows, legacyNote: null });
-        return { cleared: null, removed: true, archetype: null, layer: "session", remaining: {}, count: count2 };
-      });
-    }
-    if (opts.user) {
-      const userDials2 = readUserDials(opts.userPathOptions);
-      const count2 = Object.keys(userDials2).length;
-      if (count2 === 0) return { cleared: null, removed: false, archetype: null, layer: "user", remaining: {}, count: 0 };
-      writeUserDials(opts.userPathOptions ?? {}, {});
-      return { cleared: null, removed: true, archetype: null, layer: "user", remaining: {}, count: count2 };
-    }
     const state2 = readLocalDialState(repoRoot);
     const userDials = readUserDials(opts.userPathOptions);
-    const sessionCount = Object.keys(state2.dials).length;
-    const userCount = Object.keys(userDials).length;
+    if (opts.session) {
+      const count2 = Object.keys(state2.dials).length;
+      if (count2 > 0) writeLocalDialState(repoRoot, { dials: {} });
+      return { cleared: null, removed: count2 > 0, archetype: null, layer: "session", remaining: {}, count: count2 };
+    }
+    if (opts.user) {
+      const count2 = Object.keys(userDials).length;
+      if (count2 > 0) writeUserDials(opts.userPathOptions ?? {}, {});
+      return { cleared: null, removed: count2 > 0, archetype: null, layer: "user", remaining: {}, count: count2 };
+    }
     const repoPins = (() => {
       try {
         return archetypeDisplaySort(Object.keys(loadLayered(repoRoot, opts.userPathOptions).profile.dials));
@@ -11207,57 +10886,42 @@ function runDialClear(opts = {}) {
         return [];
       }
     })();
-    const count = sessionCount + userCount;
-    if (count === 0) {
-      return { cleared: null, removed: false, archetype: null, layer: null, remaining: {}, count: 0, cleared_layers: { session: 0, user: 0 }, repo_pins_remaining: repoPins };
-    }
-    const clearedSessionCount = withLocalDialStateLock(repoRoot, () => {
-      const current = readLocalDialState(repoRoot);
-      const count2 = Object.keys(current.dials).length;
-      if (count2 > 0) writeLocalDialState(repoRoot, { dials: {}, shadows: current.shadows, legacyNote: null });
-      return count2;
-    });
+    const sessionCount = Object.keys(state2.dials).length;
+    const userCount = Object.keys(userDials).length;
+    if (sessionCount > 0) writeLocalDialState(repoRoot, { dials: {} });
     if (userCount > 0) writeUserDials(opts.userPathOptions ?? {}, {});
-    return { cleared: null, removed: true, archetype: null, layer: null, remaining: {}, count: clearedSessionCount + userCount, cleared_layers: { session: clearedSessionCount, user: userCount }, repo_pins_remaining: repoPins };
+    const count = sessionCount + userCount;
+    return {
+      cleared: null,
+      removed: count > 0,
+      archetype: null,
+      layer: null,
+      remaining: {},
+      count,
+      cleared_layers: { session: sessionCount, user: userCount },
+      repo_pins_remaining: repoPins
+    };
   }
   if (opts.session) {
-    return withLocalDialStateLock(repoRoot, () => {
-      const state2 = readLocalDialState(repoRoot);
-      if (!Object.hasOwn(state2.dials, archetype)) {
-        return { cleared: null, removed: false, archetype, layer: "session", remaining: state2.dials };
-      }
-      const prev = state2.dials[archetype];
-      const nextDials = { ...state2.dials };
-      delete nextDials[archetype];
-      writeLocalDialState(repoRoot, { dials: nextDials, shadows: state2.shadows, legacyNote: null });
-      return { cleared: formatDialRef(prev), removed: true, archetype, layer: "session", remaining: nextDials };
-    });
+    const state2 = readLocalDialState(repoRoot);
+    if (!Object.hasOwn(state2.dials, archetype)) {
+      return { cleared: null, removed: false, archetype, layer: "session", remaining: state2.dials };
+    }
+    const prev2 = state2.dials[archetype];
+    const nextDials2 = { ...state2.dials };
+    delete nextDials2[archetype];
+    writeLocalDialState(repoRoot, { dials: nextDials2 });
+    return { cleared: formatDialRef(prev2), removed: true, archetype, layer: "session", remaining: nextDials2 };
   }
   if (opts.repo) {
     const executorsPath = (0, import_node_path9.join)(repoRoot, ".fadeno", "executors.yaml");
-    if (!(0, import_node_fs10.existsSync)(executorsPath)) {
-      throw new DialError(`no repo pin for "${archetype}" to clear`);
-    }
-    const text = (0, import_node_fs10.readFileSync)(executorsPath, "utf8");
-    const doc = (0, import_yaml3.parseDocument)(text);
-    const dials = doc.get("dials");
-    if (dials == null || typeof dials !== "object") {
-      throw new DialError(`no repo pin for "${archetype}" to clear`);
-    }
-    if (!doc.hasIn(["dials", archetype])) {
-      throw new DialError(`no repo pin for "${archetype}" to clear`);
-    }
+    if (!(0, import_node_fs10.existsSync)(executorsPath)) throw new DialError(`no repo pin for "${archetype}" to clear`);
+    const doc = (0, import_yaml3.parseDocument)((0, import_node_fs10.readFileSync)(executorsPath, "utf8"));
+    if (!doc.hasIn(["dials", archetype])) throw new DialError(`no repo pin for "${archetype}" to clear`);
     doc.deleteIn(["dials", archetype]);
-    const remainingDials = doc.get("dials");
-    let empty = false;
-    if (remainingDials != null && typeof remainingDials === "object") {
-      void remainingDials;
-      const dialsNode = doc.get("dials", true);
-      if (dialsNode && Array.isArray(dialsNode.items) && dialsNode.items.length === 0) empty = true;
-    }
-    if (empty) doc.delete("dials");
-    const out = String(doc);
-    (0, import_node_fs10.writeFileSync)(executorsPath, out, "utf8");
+    const dialsNode = doc.get("dials", true);
+    if (dialsNode != null && Array.isArray(dialsNode.items) && dialsNode.items.length === 0) doc.delete("dials");
+    (0, import_node_fs10.writeFileSync)(executorsPath, String(doc), "utf8");
     return { cleared: archetype, removed: true, archetype, layer: "repo", remaining: {} };
   }
   if (opts.user) {
@@ -11265,221 +10929,31 @@ function runDialClear(opts = {}) {
     if (!Object.hasOwn(userDials, archetype)) {
       return { cleared: null, removed: false, archetype, layer: "user", remaining: userDials };
     }
-    const prev = userDials[archetype];
+    const prev2 = userDials[archetype];
     const next = { ...userDials };
     delete next[archetype];
     writeUserDials(opts.userPathOptions ?? {}, next);
-    return { cleared: prev ? String(prev.model) : archetype, removed: true, archetype, layer: "user", remaining: next };
+    return { cleared: formatDialRef(prev2), removed: true, archetype, layer: "user", remaining: next };
   }
   const state = readLocalDialState(repoRoot);
   if (!Object.hasOwn(state.dials, archetype)) {
     const layered = loadLayered(repoRoot, opts.userPathOptions);
     const userDials = readUserDials(opts.userPathOptions);
     if (!Object.hasOwn(layered.profile.dials, archetype) && Object.hasOwn(userDials, archetype)) {
-      const prev = userDials[archetype];
+      const prev2 = userDials[archetype];
       const next = { ...userDials };
       delete next[archetype];
       writeUserDials(opts.userPathOptions ?? {}, next);
-      return { cleared: formatDialRef(prev), removed: true, archetype, layer: "user", inferred: true, remaining: next };
+      return { cleared: formatDialRef(prev2), removed: true, archetype, layer: "user", inferred: true, remaining: next };
     }
     const livesAt = Object.hasOwn(layered.profile.dials, archetype) ? "repo" : null;
     return { cleared: null, removed: false, archetype, layer: null, remaining: state.dials, livesAt };
   }
-  return withLocalDialStateLock(repoRoot, () => {
-    const current = readLocalDialState(repoRoot);
-    if (!Object.hasOwn(current.dials, archetype)) {
-      return { cleared: null, removed: false, archetype, layer: "session", remaining: current.dials };
-    }
-    const prev = current.dials[archetype];
-    const nextDials = { ...current.dials };
-    delete nextDials[archetype];
-    writeLocalDialState(repoRoot, { dials: nextDials, shadows: current.shadows, legacyNote: null });
-    return { cleared: formatDialRef(prev), removed: true, archetype, layer: "session", remaining: nextDials };
-  });
-}
-function runDialShadow(opts) {
-  const repoRoot = repoRootOf(opts);
-  const archetype = opts.archetype.trim();
-  if (archetype === "set" || archetype === "clear" || archetype === "shadow" || archetype === "clear-shadow" || archetype === "resolve") {
-    throw new DialError(`archetype "${archetype}" is a reserved word \u2014 rename the archetype`);
-  }
-  if (!BARE_IDENTIFIER_RE.test(archetype)) {
-    throw new DialError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-  }
-  const modelInput = opts.model.trim();
-  if (modelInput.length === 0) throw new DialError("Usage: fadeno dial shadow <archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]");
-  let dial;
-  try {
-    dial = buildDialRef(modelInput, opts.harness?.trim() || void 0, `model "${modelInput}"`);
-  } catch (err) {
-    if (err instanceof ExecutorProfileError) throw new DialError(err.message);
-    throw err;
-  }
-  let rate;
-  if (opts.rate != null && opts.rate !== "") {
-    const raw = opts.rate;
-    const parsed = typeof raw === "string" ? Number(raw) : raw;
-    if (typeof parsed !== "number" || !Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
-      throw new DialError(`rate ${JSON.stringify(raw)} is not a number in (0, 1].`);
-    }
-    rate = parsed;
-  }
-  let n;
-  if (opts.n != null && opts.n !== "") {
-    const raw = opts.n;
-    const parsed = typeof raw === "string" ? Number(raw) : raw;
-    if (typeof parsed !== "number" || !Number.isSafeInteger(parsed) || parsed <= 0) {
-      throw new DialError(`n ${JSON.stringify(raw)} is not a positive integer.`);
-    }
-    n = parsed;
-  }
-  const layered = loadLayered(repoRoot, opts.userPathOptions);
-  const profile = layered.profile;
-  assertHarnessDeclared(profile, dial);
-  let compiled;
-  try {
-    compiled = resolveDelivery(dial, profile, profile.host ?? "standalone", { archetype });
-  } catch (err) {
-    if (err instanceof ExecutorProfileError) throw new DialError(err.message);
-    throw err;
-  }
-  if (deliveryIsHost(compiled)) {
-    throw new DialError(`shadow for "${archetype}" must be a command delivery \u2014 host shadows are not dispatchable`);
-  }
-  const refString = formatDialRef(dial);
-  const eligibility = eligibilityFor(compiled.spec, archetype);
-  if (eligibility === "forbidden") {
-    const conflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
-    throw new DialError(conflict ?? `archetype "${archetype}" is forbidden on model "${compiled.model}"`);
-  }
-  const notes = [];
-  if (!compiled.registered) {
-    notes.push(
-      `note: ${compiled.model} is not in the model registry \u2014 running on ${compiled.harness}, id passed verbatim (declare it under models: to set a home harness or standard effort)`
-    );
-  }
-  const hasModelsCommand = harnessCanProbe(profile, compiled.harness);
-  if (!compiled.registered && !hasModelsCommand) {
-    notes.push(`note: cannot verify ${compiled.modelId} on ${compiled.harness} (no models_command declared) \u2014 attaching unverified`);
-  } else if (hasModelsCommand) {
-    const probe2 = probeModel(profile, compiled.harness, compiled.modelId, { spawn: opts.spawn, userPathOptions: opts.userPathOptions });
-    if (probe2.note != null) notes.push(probe2.note);
-  }
-  const state = readLocalDialState(repoRoot);
-  const shadowLayers = { session: state.dials, repo: profile.dials, user: readUserDials(opts.userPathOptions) };
-  {
-    const novelty = providerNoveltyNote({
-      profile,
-      layers: shadowLayers,
-      shadows: state.shadows,
-      archetype,
-      refString,
-      compiled,
-      kind: "shadow"
-    });
-    if (novelty != null) notes.push(novelty);
-  }
-  {
-    const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
-    if (unroutable != null) {
-      throw new DialError(unroutable);
-    }
-  }
-  const nextAttachment = {
-    model: dial.model,
-    ...dial.effort ? { effort: dial.effort } : {},
-    ...dial.harness ? { harness: dial.harness } : {},
-    ...rate != null ? { rate } : {},
-    ...n != null ? { n, remaining: n } : {}
-  };
-  const written = withLocalDialStateLock(repoRoot, () => {
-    const current = readLocalDialState(repoRoot);
-    const nextShadows2 = { ...current.shadows, [archetype]: nextAttachment };
-    const path2 = writeLocalDialState(repoRoot, { dials: current.dials, shadows: nextShadows2, legacyNote: null });
-    return { previous: current.shadows[archetype] ?? null, nextShadows: nextShadows2, path: path2 };
-  });
-  const { previous, nextShadows, path } = written;
-  const shadow_attachments = {};
-  for (const [key, att] of Object.entries(nextShadows)) {
-    try {
-      const d = shadowAttachmentRef(att);
-      const c = resolveDelivery(d, profile);
-      shadow_attachments[key] = shadowAttachmentView(att, c);
-    } catch {
-      shadow_attachments[key] = shadowAttachmentView(att);
-    }
-  }
-  return {
-    archetype,
-    dial,
-    refString,
-    model: compiled.model,
-    model_id: compiled.modelId,
-    effort: compiled.effectiveEffort,
-    pinned_effort: compiled.pinnedEffort,
-    effective_effort: compiled.effectiveEffort,
-    harness: compiled.harness,
-    variant: compiled.variant,
-    rate: rate ?? null,
-    n: n ?? null,
-    remaining: n ?? null,
-    expired: false,
-    path,
-    previous,
-    shadows: nextShadows,
-    shadow_attachments,
-    notes
-  };
-}
-function runDialClearShadow(opts = {}) {
-  const repoRoot = repoRootOf(opts);
-  const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
-  if (archetype != null && !BARE_IDENTIFIER_RE.test(archetype)) {
-    throw new DialError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-  }
-  const state = readLocalDialState(repoRoot);
-  const path = (0, import_node_path9.join)(repoRoot, ".fadeno", "local", "dials");
-  if (archetype == null) {
-    const count = Object.keys(state.shadows).length;
-    if (count === 0) {
-      return { archetype: null, cleared: null, removed: false, count: 0, shadows: {}, shadow_attachments: {}, path };
-    }
-    const cleared2 = withLocalDialStateLock(repoRoot, () => {
-      const current = readLocalDialState(repoRoot);
-      const currentCount = Object.keys(current.shadows).length;
-      if (currentCount === 0) return null;
-      const path2 = writeLocalDialState(repoRoot, { dials: current.dials, shadows: {}, legacyNote: null });
-      return { count: currentCount, path: path2 };
-    });
-    if (cleared2 == null) return { archetype: null, cleared: null, removed: false, count: 0, shadows: {}, shadow_attachments: {}, path };
-    return { archetype: null, cleared: null, removed: true, count: cleared2.count, shadows: {}, shadow_attachments: {}, path: cleared2.path };
-  }
-  if (!Object.hasOwn(state.shadows, archetype)) {
-    throw new DialError(`no shadow attachment for "${archetype}" to clear (.fadeno/local/dials)`);
-  }
-  const removed = withLocalDialStateLock(repoRoot, () => {
-    const current = readLocalDialState(repoRoot);
-    const cleared2 = current.shadows[archetype];
-    if (cleared2 == null) return null;
-    const nextShadows2 = { ...current.shadows };
-    delete nextShadows2[archetype];
-    const path2 = writeLocalDialState(repoRoot, { dials: current.dials, shadows: nextShadows2, legacyNote: null });
-    return { cleared: cleared2, nextShadows: nextShadows2, path: path2 };
-  });
-  if (removed == null) throw new DialError(`no shadow attachment for "${archetype}" to clear (.fadeno/local/dials)`);
-  const { cleared, nextShadows, path: newPath } = removed;
-  const shadow_attachments = {};
-  const layered = loadLayered(repoRoot, opts.userPathOptions);
-  for (const [key, att] of Object.entries(nextShadows)) {
-    try {
-      const d = shadowAttachmentRef(att);
-      const c = resolveDelivery(d, layered.profile);
-      shadow_attachments[key] = shadowAttachmentView(att, c);
-    } catch {
-      shadow_attachments[key] = shadowAttachmentView(att);
-    }
-  }
-  return { archetype, cleared, removed: true, count: 1, shadows: nextShadows, shadow_attachments, path: newPath };
+  const prev = state.dials[archetype];
+  const nextDials = { ...state.dials };
+  delete nextDials[archetype];
+  writeLocalDialState(repoRoot, { dials: nextDials });
+  return { cleared: formatDialRef(prev), removed: true, archetype, layer: "session", remaining: nextDials };
 }
 function runDialShow(opts = {}) {
   const repoRoot = repoRootOf(opts);
@@ -11494,138 +10968,45 @@ function runDialShow(opts = {}) {
       throw err;
     }
   })();
-  const userDialsRaw = readUserDials(opts.userPathOptions);
-  const userDials = userDialsRaw;
-  const sessionDials = dialState.dials;
-  const repoDials = profile.dials;
-  const shadows = dialState.shadows;
-  const legacy_pin_note = dialState.legacyNote;
+  const userDials = readUserDials(opts.userPathOptions);
+  const layers = { session: dialState.dials, repo: profile.dials, user: userDials };
   const { suppressed_canon_archetypes, note } = canonSurfacing(layered);
-  const archetypesSet = knownArchetypes(profile.archetypes, sessionDials, repoDials, userDials, shadows);
-  const allArchetypes = archetypeDisplaySort(archetypesSet);
-  const layers = { session: sessionDials, repo: repoDials, user: userDials };
   const rows = [];
   const staleDials = [];
-  const staleShadows = [];
-  const shadow_attachments = {};
-  for (const [arch, att] of Object.entries(shadows)) {
+  for (const archetype of archetypeDisplaySort(knownArchetypes(profile.archetypes, layers.session, layers.repo, layers.user))) {
+    let resolved;
     try {
-      const d = shadowAttachmentRef(att);
-      const c = resolveDelivery(d, profile);
-      shadow_attachments[arch] = shadowAttachmentView(att, c);
-    } catch {
-      staleShadows.push({ archetype: arch, target: att.model });
-    }
-  }
-  for (const archetype of allArchetypes) {
-    let cascade;
-    try {
-      cascade = resolveDialCascade(archetype, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, layers);
+      resolved = resolveRole(archetype, archetype, profile, layers);
     } catch (err) {
-      if (err instanceof ExecutorProfileError) throw new DialError(err.message);
-      throw err;
-    }
-    let compiled;
-    try {
-      compiled = resolveDelivery(cascade.ref, profile);
-    } catch {
-      staleDials.push({ archetype, target: formatDialRef(cascade.ref) });
+      if (!(err instanceof ExecutorProfileError)) throw err;
+      staleDials.push({ archetype, reason: err.message });
       continue;
     }
-    const adapter = compiled.spec.adapter;
-    const effort = compiled.effectiveEffort;
-    const rowLane = decideLane({
-      pinnedEffort: compiled.pinnedEffort,
-      effectiveEffort: compiled.effectiveEffort,
-      sessionEffort: readSessionEffort(opts.env ?? process.env),
-      hostModel: compiled.hostCandidate,
-      frame: "held",
-      commandLane: commandRoutable(compiled.spec)
-    });
-    let modelDisplay = compiled.model;
-    if (compiled.pinnedEffort != null) {
-      modelDisplay = `${compiled.model} @ ${compiled.pinnedEffort}`;
-    }
-    if (cascade.resolvedVia != null) {
-      modelDisplay = `\u2192 ${cascade.resolvedVia}`;
-    }
-    const row = {
+    const delivery = resolved.delivery;
+    rows.push({
       archetype,
-      model: compiled.model,
-      model_id: compiled.modelId,
-      effort: cascade.resolvedVia != null ? "\u2014" : effort,
-      pinned_effort: compiled.pinnedEffort,
-      effective_effort: compiled.effectiveEffort,
-      harness: compiled.harness,
-      harness_explicit: cascade.ref.harness != null,
-      variant: compiled.variant,
-      source: cascade.source,
-      resolvedVia: cascade.resolvedVia,
-      dial: cascade.ref,
-      refString: compiled.refString,
-      adapter,
-      // One derivation with `offHostLanes`, which annotates the resolution
-      // echo from the same inputs — so the table and the echo cannot name
-      // different lanes for the same dial in the same session. Only the two
-      // lane fields are lifted: the rest of `LaneDecision` already has its own
-      // (differently named, deliberately) homes on this row.
-      lane: rowLane.lane,
-      lane_reason: rowLane.lane_reason,
-      modelDisplay
-    };
-    const elig = eligibilityFor(compiled.spec, archetype);
-    if (elig !== "eligible") row.eligibility = elig;
-    if (Object.hasOwn(shadows, archetype) && !staleShadows.some((s) => s.archetype === archetype)) {
-      row.shadow = shadow_attachments[archetype];
-    }
-    rows.push(row);
+      description: describeArchetype(archetype, profile.archetypes[archetype]?.description),
+      model: delivery.model,
+      model_id: delivery.modelId,
+      pinned_effort: delivery.pinnedEffort,
+      effective_effort: delivery.effectiveEffort,
+      harness: delivery.harness,
+      harness_explicit: delivery.ref.harness != null,
+      source: resolved.source,
+      resolvedVia: resolved.resolvedVia,
+      dial: delivery.ref,
+      refString: delivery.refString,
+      lane: laneOf(delivery),
+      deliverable: laneOf(delivery) === "host" || commandOf(delivery) != null
+    });
   }
   return {
     rows,
-    dials: { session: sessionDials, repo: repoDials, user: userDials },
-    shadows,
-    shadow_attachments,
-    staleShadows,
+    dials: { session: dialState.dials, repo: profile.dials, user: userDials },
     staleDials,
-    legacy_pin_note,
-    legacy_via_note: dialState.legacyViaNote ?? null,
     suppressed_canon_archetypes,
     note,
-    host,
-    legacyPinNote: legacy_pin_note
-  };
-}
-function runShadowShow(opts = {}) {
-  const result = runDialShow(opts);
-  return { ...result, rows: result.rows.filter((row) => row.shadow != null) };
-}
-function deliveryGuidance(archetype, executorName, spec, conflict) {
-  if (conflict != null) {
-    return {
-      dispatchable: false,
-      dispatch_command: null,
-      // The kernel's exact refusal, verbatim: it already names the remedy,
-      // and rewording it here is how the two drift apart.
-      action: `Do NOT dispatch \u2014 it would be refused. ${conflict}`
-    };
-  }
-  if (commandRoutable(spec)) {
-    const lane = spec.adapter === "host" ? `Host executor "${executorName}" has a command lane (\`fallback_command\`), and the dispatch delivers there rather than in-session \u2014 an isolated worktree, a dispatch id, and a terminal receipt.` : `Executor "${executorName}" runs outside this harness.`;
-    return {
-      dispatchable: true,
-      dispatch_command: `fadeno dispatch --archetype ${archetype}`,
-      action: `Dispatch it: \`fadeno dispatch --archetype ${archetype}\` with the task prompt on stdin. ${lane}`
-    };
-  }
-  return {
-    dispatchable: false,
-    dispatch_command: null,
-    // Same wording discipline as the kernel's refusal: name the remedy that
-    // restores a real dispatch, and never present the in-session agent as an
-    // equal. It writes a host_delivery row, but that row carries no dispatch
-    // id and no terminal receipt, so there is nothing to read back; it also
-    // has no isolated worktree and forms no shadow pair.
-    action: `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has nothing to invoke. Either spawn the in-session ${archetype} agent \u2014 which writes a host_delivery row but no dispatch id or terminal receipt, has no isolated worktree, and forms no shadow pair \u2014 or give it a command lane: \`fadeno dial ${archetype} ${executorName === "current-host" ? "<model>" : executorName} --harness <id>\`.`
+    host
   };
 }
 function runDialResolve(opts) {
@@ -11634,12 +11015,7 @@ function runDialResolve(opts) {
   const profile = layered.profile;
   const host = profile.host ?? "standalone";
   const archetype = opts.archetype.trim();
-  if (archetype === "set" || archetype === "clear" || archetype === "shadow" || archetype === "clear-shadow" || archetype === "resolve") {
-    throw new DialError(`archetype "${archetype}" is a reserved word \u2014 rename the archetype`);
-  }
-  if (!BARE_IDENTIFIER_RE.test(archetype)) {
-    throw new DialError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-  }
+  assertArchetypeName(archetype);
   const dialState = (() => {
     try {
       return readLocalDialState(repoRoot);
@@ -11648,8 +11024,11 @@ function runDialResolve(opts) {
       throw err;
     }
   })();
-  const userDials = readUserDials(opts.userPathOptions);
-  const layers = { session: dialState.dials, repo: profile.dials, user: userDials };
+  const layers = {
+    session: dialState.dials,
+    repo: profile.dials,
+    user: readUserDials(opts.userPathOptions)
+  };
   let resolved;
   try {
     resolved = resolveRole(archetype, archetype, profile, layers);
@@ -11657,102 +11036,23 @@ function runDialResolve(opts) {
     if (err instanceof ExecutorProfileError) throw new DialError(err.message);
     throw err;
   }
-  const spec = resolved.delivery.spec;
-  const eligibility = eligibilityFor(spec, archetype);
-  const attachment = dialState.shadows[archetype];
-  let shadow;
-  if (attachment != null) {
-    const challenger = formatDialRef(shadowAttachmentRef(attachment));
-    const digest = opts.promptSha256?.trim();
-    const rate = attachment.rate ?? null;
-    const expired = shadowAttachmentExpired(attachment);
-    shadow = {
-      attached: true,
-      challenger,
-      rate,
-      n: attachment.n ?? null,
-      remaining: attachment.remaining ?? null,
-      expired,
-      // No rate means every dispatch fires; no digest means the caller cannot
-      // be told, and must not read the silence as a "no".
-      selected: expired ? false : rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
-      // The PRIMARY's own resolved spec — `spec` above, after write-posture —
-      // not the challenger's: this is what a selected pair would have to reuse
-      // to reach the command lane.
-      ...pairRoutabilityFields(explainPairRoutability(spec, resolved.delivery.refString))
-    };
-  }
-  const relay = (() => {
-    try {
-      return resolveRelay(profile, host);
-    } catch (err) {
-      if (err instanceof ExecutorProfileError) {
-        throw new DialError(`harnesses.${host}.host.relay: ${err.message}`);
-      }
-      throw err;
-    }
-  })();
+  const delivery = resolved.delivery;
   return {
     archetype,
-    executor: resolved.delivery.refString,
-    model: resolved.delivery.model,
-    model_id: resolved.delivery.modelId,
-    effort: resolved.delivery.effectiveEffort,
-    pinned_effort: resolved.delivery.pinnedEffort,
-    ...decideLane({
-      pinnedEffort: resolved.delivery.pinnedEffort,
-      effectiveEffort: resolved.delivery.effectiveEffort,
-      sessionEffort: readSessionEffort(opts.env ?? process.env),
-      hostModel: resolved.delivery.hostCandidate,
-      // `held`, deliberately, and this is the surface where that is the honest
-      // answer rather than an optimistic default.
-      //
-      // `dial resolve` answers for THE DIAL, not for a caller: it takes no
-      // `--host-executor` because its consumers are the harness's own steering
-      // hooks, which sit inside the session that would deliver the spawn. On
-      // Claude that session holds every identity by construction —
-      // `runSteeringApplyClaude` writes no per-dial agent file at all, the hook
-      // stamps the resolved model onto each spawn — so there is nothing for a
-      // caller to prove and `unstated` would be a false negative that routed
-      // every Claude host spawn out of process.
-      //
-      // The frame belongs to `steering resolve`, which is the surface that
-      // takes `--host-executor` because Codex's agent FILE wins over any spawn
-      // value and the caller therefore must say which agent it is.
-      frame: "held",
-      commandLane: commandRoutable(spec)
-    }),
-    harness: resolved.delivery.harness,
-    variant: resolved.delivery.variant,
-    adapter: spec.adapter,
+    executor: delivery.refString,
+    model: delivery.model,
+    model_id: delivery.modelId,
+    pinned_effort: delivery.pinnedEffort,
+    effective_effort: delivery.effectiveEffort,
+    harness: delivery.harness,
+    lane: laneOf(delivery),
+    command: commandOf(delivery),
     host,
     source: resolved.source,
     ...resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {},
-    ...layered.selfContained && layered.modelFallback.promoted.includes(resolved.delivery.model) ? { model_fallback: { promoted_from_user: true, note: formatModelFallbackNote(layered.modelFallback) } } : {},
-    ...eligibility !== "eligible" ? { eligibility } : {},
-    dial: resolved.delivery.ref,
-    delivery: deliveryGuidance(
-      archetype,
-      resolved.delivery.refString,
-      spec,
-      // The kernel refuses a forbidden pairing outright, so a resolve that
-      // answers "Dispatch it" here would be guidance walking into that
-      // refusal. Eligibility is the only conflict left that is knowable at
-      // resolve time — permissions are no longer Fadeno's to judge.
-      explainEligibilityConflict({ executor: resolved.delivery.refString, spec }, archetype)
-    ),
-    relay: relay != null ? { ref: relay.refString, model_id: relay.modelId, effort: relay.effort } : null,
-    ...shadow != null ? { shadow } : {}
+    ...layered.selfContained && layered.modelFallback.promoted.includes(delivery.model) ? { model_fallback: { promoted_from_user: true, note: formatModelFallbackNote(layered.modelFallback) } } : {},
+    dial: delivery.ref
   };
-}
-function formatShadowLine(shadow, baseIndent) {
-  const on = shadow.harness ? ` on ${shadow.harness}` : "";
-  const effort = shadow.effort ? ` @ ${shadow.effort}` : "";
-  const model = `${shadow.model}${effort}${on}`;
-  const rate = shadow.rate != null ? ` rate ${shadow.rate}` : "";
-  const budget = shadow.n != null ? shadow.expired ? ` [expired after ${shadow.n} trigger${shadow.n === 1 ? "" : "s"}]` : ` [${shadow.remaining}/${shadow.n} triggers remaining]` : "";
-  const transport = shadow.adapter != null ? ` [${shadow.adapter}]` : "";
-  return `${baseIndent}  ~ shadow: ${model}${transport}${rate}${budget}`;
 }
 
 // src/commands/models.ts
@@ -12137,7 +11437,7 @@ function runModelsRemove(opts) {
   }
   const show = (() => {
     try {
-      return runDialShow({ repoRoot, userPathOptions, ...opts.cwd != null ? { cwd: opts.cwd } : {}, ...opts.env != null ? { env: opts.env } : {} });
+      return runDialShow({ repoRoot, userPathOptions, ...opts.cwd != null ? { cwd: opts.cwd } : {} });
     } catch (err) {
       if (err instanceof DialError) throw new ModelsError(err.message);
       throw err;
@@ -12168,19 +11468,10 @@ function runModelsRemove(opts) {
   for (const row of show.rows) {
     if (row.dial.model === alias || row.model === alias) noteDial(row.archetype, row.source, row.dial);
   }
-  const dangling_shadows = Object.entries(show.shadows).filter(([, att]) => att.model === alias).map(([archetype, att]) => {
-    const ref = shadowAttachmentRef(att);
-    noteRef(ref);
-    return { archetype, ref: formatDialRef(ref) };
-  });
-  if (!opts.force && (dangling_dials.length > 0 || dangling_shadows.length > 0)) {
+  if (!opts.force && dangling_dials.length > 0) {
     const dialed = [...new Set(dangling_dials.map((d) => d.archetype))].sort();
-    const shadowed = [...new Set(dangling_shadows.map((s) => s.archetype))].sort();
-    const parts = [];
-    if (dialed.length > 0) parts.push(`dialed by ${dialed.join(", ")}`);
-    if (shadowed.length > 0) parts.push(`shadowed on ${shadowed.join(", ")}`);
     throw new ModelsError(
-      `model "${alias}" is still ${parts.join(" and ")} \u2014 re-dial first (\`fadeno dial <archetype> <other>\`), or pass --force to remove it anyway and leave those references dangling.`
+      `model "${alias}" is still dialed by ${dialed.join(", ")} \u2014 re-dial first (\`fadeno dial <archetype> <other>\`), or pass --force to remove it anyway and leave those references dangling.`
     );
   }
   const pairs = /* @__PURE__ */ new Set();
@@ -12262,7 +11553,6 @@ function runModelsRemove(opts) {
     path: userCatalogPath,
     removed: true,
     dangling_dials,
-    dangling_shadows,
     verifications_removed
   };
 }
@@ -12632,10 +11922,6 @@ var globalOptions = () => ({ ...GLOBAL_OPTIONS });
 var command = (options, positionals = [], subcommands, repeatLast = false) => ({ options: { ...globalOptions(), ...options }, positionals, subcommands, repeatLast });
 var NONE = { kind: "none" };
 var PATH = { kind: "path" };
-var SHADOW_SPEC = command(
-  { "--harness": { kind: "free" }, "--rate": { kind: "free" }, "--n": { kind: "free" }, "--json": NONE },
-  ["archetype", "free"]
-);
 var MODELS_SPEC = command(
   { "--harness": { kind: "free" }, "--json": NONE },
   ["executor"],
@@ -12655,17 +11941,13 @@ var COMMANDS = {
   // Top-level alias for `models` — same handler in cli.ts, same flags.
   model: MODELS_SPEC,
   dial: command(
-    { "--harness": { kind: "free" }, "--session": NONE, "--user": NONE, "--repo": NONE, "--rate": { kind: "free" }, "--archetype": { kind: "archetype" }, "--json": NONE },
+    { "--harness": { kind: "free" }, "--session": NONE, "--user": NONE, "--repo": NONE, "--archetype": { kind: "archetype" }, "--json": NONE },
     ["archetype", "free"],
     {
       clear: command({ "--session": NONE, "--user": NONE, "--repo": NONE }, ["archetype"]),
-      shadow: SHADOW_SPEC,
-      "clear-shadow": command({}, ["archetype"]),
-      resolve: command({ "--archetype": { kind: "archetype" }, "--prompt-sha256": { kind: "free" } }, [])
+      resolve: command({ "--archetype": { kind: "archetype" } }, [])
     }
   ),
-  // Top-level alias for `dial shadow` — same handler in cli.ts, same flags.
-  shadow: SHADOW_SPEC,
   clean: command({ "--force": NONE }),
   dispatch: command({
     "--archetype": { kind: "archetype" },
@@ -13662,7 +12944,6 @@ function runStatus(opts = {}) {
   const userDials = readUserDials(opts.userPathOptions);
   const sessionDials = dialState.dials;
   const repoDials = profile.dials;
-  const legacy_pin_note = dialState.legacyNote;
   const roles = [];
   const hostSlots = /* @__PURE__ */ new Map();
   const archetypes = archetypeDisplaySort(/* @__PURE__ */ new Set(["worker", "reviewer", "judge", ...Object.keys(profile.archetypes)]));
@@ -13687,7 +12968,7 @@ function runStatus(opts = {}) {
   const installation = readInstallationManifest(opts.userPathOptions);
   const upaths = userPaths(opts.userPathOptions);
   const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim() || (installation.runtime != null && (0, import_node_path16.resolve)(process.argv[1] ?? "") === (0, import_node_path16.resolve)(installation.runtime.path) ? "managed" : "path");
-  const next = legacy_pin_note ? "clear legacy pin with `fadeno dial clear`" : external.length > 0 ? "review the external sandbox boundary before driving" : null;
+  const next = external.length > 0 ? "review the external sandbox boundary before driving" : null;
   const invokingVersion = packageVersion();
   let observedVersion = null;
   let observedSource = null;
@@ -13742,7 +13023,6 @@ function runStatus(opts = {}) {
     version: invokingVersion,
     harness,
     dials: { session: sessionDials, repo: repoDials, user: userDials },
-    legacy_pin_note,
     roles,
     external,
     projectCustomized: (0, import_node_fs17.existsSync)((0, import_node_path16.join)(repoRoot, ".fadeno")),
@@ -13786,16 +13066,12 @@ var MODELS_PAGE = page("Inspect the model registry and backend listings.", [
   "fadeno models remove <alias> [--force]",
   "fadeno models verify [<ref>...] [--harness <id>] [--strict]"
 ]);
-var SHADOW_PAGE = page("Attach or show a sampled shadow challenger.", [
-  "fadeno dial shadow",
-  "fadeno dial shadow <archetype> <model>[@effort] [options]"
-]);
 var MODEL_ADD_PAGE = page("Discover and persist a canonical user model alias.", "fadeno models add <alias> <provider/id>", [
   "Discovery checks direct OpenCode first, then the OpenCode/OpenRouter discovery path."
 ]);
 var MODEL_REMOVE_PAGE = page("Remove a user-catalog model alias.", "fadeno models remove <alias> [--force] [--json]", [
   "Edits the user catalog only; a builtin or project entry names the file to edit instead.",
-  "Refuses while a dial or shadow attachment names the alias; --force removes it and reports each stranded reference.",
+  "Refuses while a dial names the alias; --force removes it anyway and reports each stranded reference.",
   "Cached verification rows for the alias are dropped with it."
 ]);
 var MODEL_VERIFY_PAGE = page(
@@ -13851,22 +13127,19 @@ var TOP_LEVEL = {
     "fadeno model remove <alias> [--force]",
     "fadeno model verify [<ref>...] [--harness <id>] [--strict]"
   ], "`fadeno model` is an alias for `fadeno models`."),
-  dial: page("Show or set per-archetype model selection.", [
+  dial: page("Show, set and resolve archetype bindings.", [
     "fadeno dial",
     "fadeno dial <archetype> [<model>[@effort]]",
     "fadeno dial <a> <b>... <model>[@effort] [options]",
     "fadeno dial <a>+<b>[+...] <model>[@effort] [options]",
     "fadeno dial <a>,<b>[,...] <model>[@effort] [options]",
     "fadeno dial clear [<archetype>] [--session|--user|--repo]",
-    "fadeno dial shadow [<archetype> <model>[@effort]] [options]",
-    "fadeno dial clear-shadow [<archetype>]        (alias: fadeno shadow clear)",
-    "fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]"
+    "fadeno dial resolve --archetype <name>"
   ], [
-    "Cascade: binding \u2192 session dial \u2192 repo pin \u2192 user dial \u2192 base.",
-    "`shadow` attaches a one-shot challenger; `--rate <r>` rolls it on that fraction of dispatches and `--n <count>` caps how many roll. Shadows roll on ad-hoc `fadeno dispatch` only \u2014 `fadeno drive` runs are unpaired.",
-    "`clear-shadow` with an archetype detaches that one and fails if it has none; with NO archetype it detaches EVERY attachment. Shadows live only in `.fadeno/local/dials`, so \u2014 unlike `clear` \u2014 it takes no `--session|--user|--repo` scope flag."
+    "With no arguments: every archetype, what it is for, and where it currently routes \u2014 the reference to read before delegating.",
+    "Cascade: binding \u2192 session dial \u2192 repo pin \u2192 user dial \u2192 base. An archetype with no dial runs on the host session's own model.",
+    "An unscoped set edits the highest layer that already holds a dial, and creates at the user default when none does."
   ]),
-  shadow: aliasPage(SHADOW_PAGE, ["fadeno shadow", "fadeno shadow <archetype> <model>[@effort] [options]", "fadeno shadow clear [<archetype>]"], "`fadeno shadow` is an alias for `fadeno dial shadow`, and `fadeno shadow clear` for `fadeno dial clear-shadow`."),
   plugin: page("Generate a harness plugin from this checkout.", "fadeno plugin [dir] [--codex|--omp] [--force]", ["Claude Code is the default plugin; `--codex` and `--omp` select their generators. OpenCode and Grok use `fadeno init` instead."]),
   completion: page("Emit sourceable Bash completion.", "fadeno completion bash")
 };
@@ -13882,9 +13155,9 @@ var NESTED = {
     "`fadeno model verify` is an alias for `fadeno models verify`."
   ),
   "dial clear": page("Clear one or more dial layers.", "fadeno dial clear [<archetype>] [--session|--user|--repo]"),
-  "dial shadow": aliasPage(SHADOW_PAGE, SHADOW_PAGE.usage, "`fadeno shadow` is the top-level alias."),
-  "dial clear-shadow": page("Remove shadow attachments.", "fadeno dial clear-shadow [<archetype>]"),
-  "dial resolve": page("Emit the stable dial-resolution hook contract.", "fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]"),
+  "dial resolve": page("Print what one archetype resolves to right now.", "fadeno dial resolve --archetype <name>", [
+    "The inspection escape hatch: model, effort, harness and lane, answered by the same resolver a spawn takes."
+  ]),
   "completion bash": page("Emit sourceable Bash completion.", "fadeno completion bash", void 0, ["source <(fadeno completion bash)"])
 };
 var OPTION_HINTS = {
@@ -13906,7 +13179,6 @@ var OPTION_HINTS = {
   "--merged": "Close: the work landed",
   "--message-file": "File holding the agent\u2019s final message",
   "--model": "Direct model reference",
-  "--n": "Maximum shadow pairings",
   "--name": "Semantic dispatch name; also the branch",
   "--non-interactive": "Never prompt during setup",
   "--note": "Free text recorded on the decision",
@@ -13915,8 +13187,6 @@ var OPTION_HINTS = {
   "--output": "Print the report of a dispatch",
   "--parent": "Dispatch id this spawn belongs to",
   "--prompt-file": "Read prompt from file",
-  "--prompt-sha256": "Prompt content SHA-256",
-  "--rate": "Shadow sampling rate",
   "--repo": "Repository scope",
   "--reset-runtime": "Allow runtime downgrade",
   "--scope": "Installation scope",
@@ -13925,7 +13195,6 @@ var OPTION_HINTS = {
   "--lane": "Which lane opens it: auto (the resolution decides), host, or command",
   "--transcript": "The agent's transcript, read for the dispatch id, final message and model",
   "--parent-transcript": "The spawning agent's transcript; its contract header names the parent dispatch",
-  "--shadow": "One-shot challenger reference",
   "--shared": "Work in the live tree instead of a worktree",
   "--strict": "Fail on an unreachable listing too",
   "--tail": "Number of recent entries",
@@ -13947,9 +13216,6 @@ var OPTION_FORMS = {
   "--bind": "--bind <role=executor>",
   "--tool": "--tool <name>",
   "--input": "--input <name=path>",
-  "--rate": "--rate <0..1>",
-  "--n": "--n <count>",
-  "--prompt-sha256": "--prompt-sha256 <hex>",
   "--host-executor": "--host-executor <name>",
   "--native-executor": "--native-executor <name>",
   "--role": "--role <name>",
@@ -13982,7 +13248,6 @@ var OPTION_FORMS = {
   "--cancel": "--cancel <id|tag>",
   "--merge": "--merge <id|tag>",
   "--arm": "--arm <arm>",
-  "--shadow": "--shadow <ref>",
   "--evidence": "--evidence <mode>",
   "--comparison": "--comparison <path>",
   "--adversarial": "--adversarial <path>",
@@ -13999,7 +13264,6 @@ var PAGE_OPTIONS = {
   models: withGlobals("--harness", "--json"),
   model: withGlobals("--harness", "--json"),
   dial: withGlobals("--harness", "--session", "--user", "--repo", "--json"),
-  shadow: withGlobals("--harness", "--rate", "--n", "--json"),
   clean: withGlobals("--force"),
   dispatch: withGlobals("--archetype", "--model", "--name", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--heartbeat"),
   "dispatch-open": withGlobals("--archetype", "--model", "--name", "--lane", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--parent-transcript", "--harness", "--json"),
@@ -14018,9 +13282,7 @@ var PAGE_OPTIONS = {
   "models verify": withGlobals("--harness", "--strict", "--json"),
   "model verify": withGlobals("--harness", "--strict", "--json"),
   "dial clear": withGlobals("--session", "--user", "--repo", "--json"),
-  "dial shadow": withGlobals("--harness", "--rate", "--n", "--json"),
-  "dial clear-shadow": withGlobals("--json"),
-  "dial resolve": withGlobals("--archetype", "--prompt-sha256"),
+  "dial resolve": withGlobals("--archetype"),
   "completion bash": withGlobals()
 };
 var PATH_OPTION_HINTS = {
@@ -14074,12 +13336,12 @@ function optionsFor(path) {
   });
 }
 function renderGlobalHelp() {
-  return `fadeno \u2014 the playbook layer for AI coding agents
+  return `fadeno \u2014 routes delegated work to models by archetype, and keeps the ledger
 
 Usage: fadeno <command> [options]
 
 Routing
-  dial        Show, set and resolve archetype bindings (shadow is its alias)
+  dial        Show, set and resolve archetype bindings
   models (model)  Inspect the model registry
   context     What a host session is told
 
@@ -14097,11 +13359,10 @@ Global options
 Run \`fadeno <command> --help\` for exact usage and command options.
 
 Examples:
-  fadeno init --codex
-  fadeno init --grok
-  fadeno playbooks
-  fadeno new-run code-change-review "Add CSV export"
-  fadeno drive <run>`;
+  fadeno dial
+  fadeno dial worker sol@high
+  fadeno dispatch --archetype worker --name csv-export < task.md
+  fadeno dispatch-close csv-export --merged`;
 }
 function renderFocusedHelp(path) {
   const seed = NESTED[path] ?? TOP_LEVEL[path];
@@ -14200,36 +13461,11 @@ function maybeRunRuntimePreflight(_argv, command2, deps = {}) {
     }
   }
 }
-function clearShadow(archetype, json) {
-  const result = runDialClearShadow({ archetype });
-  if (json) {
-    console.log(JSON.stringify(result, null, 2));
-    return 0;
-  }
-  if (result.archetype == null) {
-    console.log(result.removed ? `cleared ${result.count} shadow attachment(s)` : "no shadow attachments to clear (.fadeno/local/dials)");
-    return 0;
-  }
-  console.log(`cleared shadow attachment: ${result.archetype} (was ${result.cleared.model});`);
-  return 0;
-}
-var DIAL_SOURCE_TEXT = {
-  binding: "binding",
-  session: "session dial",
-  repo: "repo pin",
-  user: "user dial",
-  base: "base"
-};
-function printStaleShadows(stale) {
-  for (const item of stale) {
-    console.error(
-      `warning: shadow attachment ${item.archetype}~${item.target} names a model that is no longer resolvable \u2014 run \`fadeno dial shadow ${item.archetype} <model>\` or \`fadeno dial clear-shadow ${item.archetype}\`; the attachment is ignored below.`
-    );
-  }
-}
 function printStaleDials(stale) {
   for (const item of stale) {
-    console.error(`warning: dial ${item.archetype}\u2192${item.target} is stale \u2014 re-dial with \`fadeno dial ${item.archetype} <model>\``);
+    console.error(
+      `warning: ${item.archetype} does not resolve, so its row is omitted \u2014 ${item.reason} Re-dial it with \`fadeno dial ${item.archetype} <model>\`.`
+    );
   }
 }
 function printModels(result) {
@@ -14297,11 +13533,6 @@ function printModelRemove(result) {
       `warning: dial ${dial.archetype}\u2192${dial.ref} (${dial.layer}) now names a model that is gone \u2014 re-dial with \`fadeno dial ${dial.archetype} <other>\``
     );
   }
-  for (const shadow of result.dangling_shadows) {
-    console.error(
-      `warning: shadow attachment ${shadow.archetype}~${shadow.ref} now names a model that is gone \u2014 \`fadeno dial clear-shadow ${shadow.archetype}\``
-    );
-  }
 }
 function printModelsVerify(result) {
   if (result.rows.length === 0) {
@@ -14328,61 +13559,26 @@ ${result.counts.verified} verified, ${result.counts.not_listed} not listed, ${re
     console.log("cached verification rows for the not-listed models were deleted.");
   }
 }
-function printDialShow(result, emptyMessage) {
-  if (result.legacy_pin_note) console.log(result.legacy_pin_note);
+function printDialShow(result) {
   if (result.staleDials.length > 0) printStaleDials(result.staleDials);
-  if (result.staleShadows.length > 0) printStaleShadows(result.staleShadows);
-  if (result.rows.length === 0 && emptyMessage != null) {
-    console.log(emptyMessage);
-    if (result.note) console.log(result.note);
-    return;
-  }
-  const header = `${"archetype".padEnd(12)}  ${"model".padEnd(18)}  ${"effort".padEnd(8)}  ${"harness".padEnd(22)}  ${"lane".padEnd(9)}  source`;
+  const header = `${"archetype".padEnd(12)}  ${"model".padEnd(18)}  ${"effort".padEnd(8)}  ${"harness".padEnd(22)}  ${"lane".padEnd(8)}  source`;
   console.log(header);
   for (const row of result.rows) {
     const arch = row.archetype.padEnd(12);
-    const model = row.modelDisplay.padEnd(18);
-    const effort = (row.resolvedVia != null ? "\u2014" : row.pinned_effort ?? "inherit").padEnd(8);
+    const model = row.model.padEnd(18);
+    const effort = (row.pinned_effort ?? "inherit").padEnd(8);
     const harness = (row.harness == null ? "\u2014" : `${row.harness}${row.harness_explicit ? "" : " (home)"}`).padEnd(22);
-    const elig = row.eligibility === "shadow_only" ? "  SHADOW-ONLY (never gates)" : row.eligibility === "forbidden" ? "  FORBIDDEN (refused at dispatch)" : "";
     const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : "";
-    const lane = (row.lane === "restart_required" ? "restart" : row.lane).padEnd(9);
-    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${lane}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}`);
-    if (row.shadow) console.log(formatShadowLine(row.shadow, "  "));
+    const lane = (row.deliverable ? row.lane : "none").padEnd(8);
+    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${lane}  ${roleResolutionEchoLabel(row.source)}${inherits}`);
+    console.log(`  ${row.description}`);
   }
-  if (result.rows.some((row) => row.shadow)) {
-    console.log("  (shadows roll on ad-hoc `fadeno dispatch` only; `fadeno drive` runs are unpaired)");
+  if (result.rows.some((row) => !row.deliverable)) {
+    console.log(
+      "none: no lane from here \u2014 `current-host` names the session's own model and this is not a session. Spawn it from a host harness, or dial it onto a model with a command lane."
+    );
   }
   if (result.note) console.log(result.note);
-}
-var SHADOW_EMPTY_MESSAGE = "no active shadow attachments \u2014 attach one with `fadeno shadow <archetype> <model> [--rate <r>] [--n <count>]`";
-function runShadowCommand(archetype, model, opts) {
-  if (archetype == null) {
-    const result2 = runShadowShow({});
-    if (opts.json) {
-      console.log(JSON.stringify(result2, null, 2));
-      return 0;
-    }
-    printDialShow(result2, SHADOW_EMPTY_MESSAGE);
-    return 0;
-  }
-  const result = runDialShadow({ archetype, model, harness: opts.harness, rate: opts.rate, n: opts.n });
-  if (opts.json) {
-    console.log(JSON.stringify(result, null, 2));
-    return 0;
-  }
-  for (const note of result.notes) console.log(note);
-  const rate = result.rate != null ? ` [rate ${result.rate}]` : "";
-  const budget = result.n != null ? ` [${result.remaining}/${result.n} triggers remaining]` : "";
-  console.log(`shadow attached: ${result.archetype} ~ ${result.refString} on ${result.harness}${rate}${budget}`);
-  if (result.previous) {
-    const previousBudget = result.previous.n != null ? result.previous.remaining === 0 ? ` expired after ${result.previous.n} triggers` : ` ${result.previous.remaining}/${result.previous.n} triggers remaining` : "";
-    console.log(`  (was ${result.previous.model}${result.previous.rate ? ` rate ${result.previous.rate}` : ""}${previousBudget})`);
-  }
-  console.log(
-    `  scope: ad-hoc \`fadeno dispatch\` only. Engine runs (\`fadeno drive\`) do not roll shadow pairs, so ${result.archetype} steps inside a playbook run are unpaired.`
-  );
-  return 0;
 }
 function optionalTarget(values) {
   const selected = [];
@@ -14421,123 +13617,53 @@ async function main(argv) {
       args: argv,
       allowPositionals: true,
       options: {
+        help: { type: "boolean", short: "h" },
+        version: { type: "boolean", short: "v" },
+        json: { type: "boolean" },
+        force: { type: "boolean" },
+        verbose: { type: "boolean" },
+        // Harness targets, for `setup`, `status` and `plugin`.
         codex: { type: "boolean" },
         claude: { type: "boolean" },
         grok: { type: "boolean" },
         opencode: { type: "boolean" },
         omp: { type: "boolean" },
-        force: { type: "boolean" },
-        strict: { type: "boolean" },
-        "with-hooks": { type: "boolean" },
-        "with-steering": { type: "boolean" },
-        "no-steering": { type: "boolean" },
-        "data-only": { type: "boolean" },
+        // setup
         "non-interactive": { type: "boolean" },
-        timeout: { type: "string" },
-        // retired: accepted, ignored, warned. See RETIRED_FLAGS.
-        from: { type: "string" },
         "reset-runtime": { type: "boolean" },
-        all: { type: "boolean" },
-        "purge-user-data": { type: "boolean" },
-        project: { type: "boolean" },
-        verbose: { type: "boolean" },
-        scope: { type: "string" },
-        schema: { type: "string" },
-        format: { type: "string" },
-        step: { type: "string" },
-        status: { type: "string" },
-        event: { type: "string" },
-        artifact: { type: "string" },
-        report: { type: "string" },
-        member: { type: "string" },
-        field: { type: "string", multiple: true },
-        actor: { type: "string" },
-        iteration: { type: "string" },
-        inline: { type: "boolean" },
-        "no-record": { type: "boolean" },
-        bind: { type: "string", multiple: true },
-        unbind: { type: "string", multiple: true },
-        "max-transitions": { type: "string" },
-        parallel: { type: "string" },
-        "actor-call": { type: "string" },
-        input: { type: "string", multiple: true },
+        // dial and models
         harness: { type: "string" },
         user: { type: "boolean" },
         session: { type: "boolean" },
         repo: { type: "boolean" },
-        model: { type: "string" },
         archetype: { type: "string" },
-        "prompt-sha256": { type: "string" },
-        role: { type: "string" },
-        "host-executor": { type: "string" },
-        // Pre-0.6 spelling. Kept parseable so a Codex agent TOML materialized
-        // by an older setup keeps resolving until the next one rewrites it.
-        "native-executor": { type: "string" },
-        run: { type: "string" },
-        "dispatch-id": { type: "string" },
-        "prompt-file": { type: "string" },
+        strict: { type: "boolean" },
+        // dispatch and the hooks' entry points
+        model: { type: "string" },
         name: { type: "string" },
+        from: { type: "string" },
+        shared: { type: "boolean" },
+        lane: { type: "string" },
         parent: { type: "string" },
         "session-id": { type: "string" },
+        "prompt-file": { type: "string" },
         "message-file": { type: "string" },
         "agent-cwd": { type: "string" },
         transcript: { type: "string" },
         "parent-transcript": { type: "string" },
-        lane: { type: "string" },
+        heartbeat: { type: "string" },
+        // dispatch-close
         merged: { type: "boolean" },
         kept: { type: "boolean" },
         discarded: { type: "boolean" },
         failed: { type: "boolean" },
-        heartbeat: { type: "string" },
-        "no-brief": { type: "boolean" },
-        isolate: { type: "boolean" },
-        shared: { type: "boolean" },
-        "allow-relay-mismatch": { type: "boolean" },
-        "ignored-output": { type: "string" },
-        diagnostics: { type: "boolean" },
-        tail: { type: "string" },
-        stops: { type: "boolean" },
-        rate: { type: "string" },
-        n: { type: "string" },
-        tag: { type: "string" },
-        shadow: { type: "string" },
-        bakeoffs: { type: "boolean" },
-        wait: { type: "string" },
-        arm: { type: "string" },
-        check: { type: "boolean" },
-        "measure-only": { type: "boolean" },
-        evidence: { type: "string" },
-        prepare: { type: "boolean" },
-        record: { type: "boolean" },
-        comparison: { type: "string" },
-        adversarial: { type: "string" },
-        judge: { type: "string" },
-        json: { type: "boolean" },
-        "probe-models": { type: "boolean" },
-        "agent-id": { type: "string" },
-        windows: { type: "boolean" },
-        workspace: { type: "string" },
-        branch: { type: "string" },
-        file: { type: "string" },
-        source: { type: "string" },
-        output: { type: "string" },
-        cancel: { type: "string" },
-        withdraw: { type: "string" },
-        "work-left": { type: "string" },
-        merge: { type: "string" },
-        "no-merge": { type: "boolean" },
         note: { type: "string" },
-        commit: { type: "string" },
-        reason: { type: "string" },
-        decision: { type: "string" },
-        feedback: { type: "string" },
-        latest: { type: "boolean" },
-        "allow-failed": { type: "boolean" },
-        legacy: { type: "boolean" },
-        events: { type: "boolean" },
-        tool: { type: "string" },
-        help: { type: "boolean", short: "h" },
-        version: { type: "boolean", short: "v" }
+        // dispatches
+        all: { type: "boolean" },
+        tail: { type: "string" },
+        output: { type: "string" },
+        // Retired: accepted, ignored, warned. See RETIRED_FLAGS.
+        timeout: { type: "string" }
       }
     });
   } catch (err) {
@@ -14707,7 +13833,6 @@ async function main(argv) {
       return 0;
     }
     case "dial": {
-      const RESERVED = /* @__PURE__ */ new Set(["clear", "shadow", "clear-shadow", "resolve"]);
       const sub = positionals[1];
       if (sub == null) {
         const result = runDialShow({});
@@ -14747,55 +13872,31 @@ async function main(argv) {
         console.log(`cleared ${result.archetype} (${result.cleared})${result.inferred ? " [user default \u2014 the only layer holding a dial]" : ""}`);
         return 0;
       }
-      if (sub === "clear-shadow") {
-        if (positionals.length > 3) throw new Error("Usage: fadeno dial clear-shadow [<archetype>]");
-        return clearShadow(positionals[2] ?? null, Boolean(values.json));
-      }
-      if (sub === "shadow") {
-        const shadowUsage = "Usage: fadeno dial shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]]";
-        if (positionals.length > 4) throw new Error(shadowUsage);
-        const archetype = positionals[2];
-        const model = positionals[3];
-        if (archetype != null && model == null) throw new Error(shadowUsage);
-        return runShadowCommand(archetype, model, { harness: values.harness ?? null, rate: values.rate, n: values.n, json: Boolean(values.json) });
-      }
       if (sub === "resolve") {
-        if (!values.archetype) {
-          throw new Error(
-            "Usage: fadeno dial resolve --archetype <name> [--prompt-sha256 <hex: the caller's prompt bytes, before any kernel decoration, trailing newlines stripped>]"
-          );
-        }
-        if (positionals.length > 2) throw new Error("Usage: fadeno dial resolve --archetype <name>");
-        const result = runDialResolve({ archetype: values.archetype, promptSha256: values["prompt-sha256"] ?? null });
-        console.log(JSON.stringify(result, null, 2));
+        const usage = "Usage: fadeno dial resolve --archetype <name>";
+        if (!values.archetype) throw new Error(usage);
+        if (positionals.length > 2) throw new Error(usage);
+        console.log(JSON.stringify(runDialResolve({ archetype: values.archetype }), null, 2));
         return 0;
       }
-      if (RESERVED.has(sub) || sub === "set") {
+      if (RESERVED_ARCHETYPES.has(sub)) {
         throw new Error(`archetype "${sub}" is a reserved word \u2014 rename the archetype`);
       }
       if (positionals.length === 2) {
-        const archetype = sub;
         const result = runDialShow({});
-        const row = result.rows.find((r) => r.archetype === archetype);
-        const shadow = result.shadow_attachments[archetype] ?? void 0;
+        const row = result.rows.find((r) => r.archetype === sub);
         const filtered = {
           ...result,
           rows: row ? [row] : [],
-          shadows: shadow ? { [archetype]: result.shadows[archetype] } : {},
-          shadow_attachments: shadow ? { [archetype]: shadow } : {},
-          staleShadows: result.staleShadows.filter((s) => s.archetype === archetype),
-          staleDials: result.staleDials.filter((s) => s.archetype === archetype),
+          staleDials: result.staleDials.filter((stale) => stale.archetype === sub),
           dials: {
-            session: Object.hasOwn(result.dials.session, archetype) ? { [archetype]: result.dials.session[archetype] } : {},
-            repo: Object.hasOwn(result.dials.repo, archetype) ? { [archetype]: result.dials.repo[archetype] } : {},
-            user: Object.hasOwn(result.dials.user, archetype) ? { [archetype]: result.dials.user[archetype] } : {}
+            session: Object.hasOwn(result.dials.session, sub) ? { [sub]: result.dials.session[sub] } : {},
+            repo: Object.hasOwn(result.dials.repo, sub) ? { [sub]: result.dials.repo[sub] } : {},
+            user: Object.hasOwn(result.dials.user, sub) ? { [sub]: result.dials.user[sub] } : {}
           }
         };
-        if (values.json) {
-          console.log(JSON.stringify(filtered, null, 2));
-          return 0;
-        }
-        printDialShow(filtered);
+        if (values.json) console.log(JSON.stringify(filtered, null, 2));
+        else printDialShow(filtered);
         return 0;
       }
       if (positionals.length >= 3) {
@@ -14815,22 +13916,7 @@ async function main(argv) {
         }
         return 0;
       }
-      throw new Error("Usage: fadeno dial [<archetype> [<model>[@effort] [--harness <id>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]] | clear-shadow [<archetype>] | resolve --archetype <name>]");
-    }
-    // Top-level alias for `fadeno dial shadow ...` — same handler
-    // (`runShadowCommand`) as the `dial` subcommand above, so the two
-    // spellings cannot drift apart.
-    case "shadow": {
-      if (positionals[1] === "clear") {
-        if (positionals.length > 3) throw new Error("Usage: fadeno shadow clear [<archetype>]");
-        return clearShadow(positionals[2] ?? null, Boolean(values.json));
-      }
-      const shadowUsage = "Usage: fadeno shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]] | fadeno shadow clear [<archetype>]";
-      if (positionals.length > 3) throw new Error(shadowUsage);
-      const archetype = positionals[1];
-      const model = positionals[2];
-      if (archetype != null && model == null) throw new Error(shadowUsage);
-      return runShadowCommand(archetype, model, { harness: values.harness ?? null, rate: values.rate, n: values.n, json: Boolean(values.json) });
+      throw new Error("Usage: fadeno dial [<archetype> [<model>[@effort] [--harness <id>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | resolve --archetype <name>]");
     }
     case "dispatch": {
       const promptFile = values["prompt-file"];

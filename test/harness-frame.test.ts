@@ -104,14 +104,14 @@ test('status reports host standalone from a bare shell', (t) => {
 test('a bare shell compiles exactly what an explicit standalone compiles', (t) => {
   const { root, user } = bareRepo(t);
   const explicit: UserPathOptions = { ...user, env: { ...user.env, FADENO_HARNESS: 'standalone' } };
-  const before = runDialShow({ repoRoot: root, userPathOptions: user, env: {} });
+  const before = runDialShow({ repoRoot: root, userPathOptions: user });
   assert.equal(before.host, 'standalone');
   assert.ok(before.rows.length > 0, 'the shipped catalog must produce rows');
-  assert.deepEqual(before.rows, runDialShow({ repoRoot: root, userPathOptions: explicit, env: {} }).rows);
+  assert.deepEqual(before.rows, runDialShow({ repoRoot: root, userPathOptions: explicit }).rows);
 
   // The point of the whole change: a file cannot move the frame of reference.
   staleMemo(user);
-  const after = runDialShow({ repoRoot: root, userPathOptions: user, env: {} });
+  const after = runDialShow({ repoRoot: root, userPathOptions: user });
   assert.equal(after.host, 'standalone');
   assert.deepEqual(after.rows, before.rows);
 });
@@ -121,27 +121,21 @@ test('dial resolve from a bare shell resolves standalone and stays memo-independ
   // A dialed model is delivered by the standalone route table, on the command
   // lane — there is no session for a host lane to use.
   runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'grok' });
-  const worker = runDialResolve({ repoRoot: root, userPathOptions: user, env: {}, archetype: 'worker' });
+  const worker = runDialResolve({ repoRoot: root, userPathOptions: user, archetype: 'worker' });
   assert.equal(worker.host, 'standalone');
-  assert.equal(worker.adapter, 'command');
   assert.equal(worker.lane, 'command');
   assert.equal(worker.harness, 'grok');
-  assert.equal(worker.delivery.dispatchable, true);
+  assert.ok(worker.command != null && worker.command.length > 0);
 
   staleMemo(user);
-  for (const row of runDialShow({ repoRoot: root, userPathOptions: user, env: {} }).rows) {
-    const resolved = runDialResolve({ repoRoot: root, userPathOptions: user, env: {}, archetype: row.archetype });
+  for (const row of runDialShow({ repoRoot: root, userPathOptions: user }).rows) {
+    const resolved = runDialResolve({ repoRoot: root, userPathOptions: user, archetype: row.archetype });
     assert.equal(resolved.host, 'standalone', `${row.archetype} must resolve against the standalone host`);
-    // A bare shell can never resolve a HOST LANE under v4: `current-host`
-    // names whatever session is running, and there is none — so the base dial
-    // for an archetype nobody has dialed answers `restart_required`, which is
-    // the honest reading of "start a session, then ask again". The v3 answer
-    // was `lane: host` with `dispatchable: false`, which said the delivery was
-    // in-session AND could not be dispatched: two halves of one contradiction.
-    if (resolved.model === 'current-host') {
-      assert.equal(resolved.lane, 'restart_required', `${row.archetype} must not claim a host lane with no host`);
-      assert.equal(resolved.delivery.dispatchable, false);
-    }
+    // A bare shell can never resolve a HOST LANE: `current-host` names
+    // whatever session is running, and there is none. The undialed archetype
+    // is therefore off the host lane with nothing to invoke — a null command,
+    // never a host lane it cannot take.
+    if (resolved.model === 'current-host') assert.equal(resolved.command, null);
     assert.notEqual(resolved.lane, 'host', `${row.archetype} claims an in-session lane from a bare shell`);
   }
 });

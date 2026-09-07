@@ -30,16 +30,12 @@ const MODELS_PAGE = page('Inspect the model registry and backend listings.', [
   'fadeno models remove <alias> [--force]',
   'fadeno models verify [<ref>...] [--harness <id>] [--strict]',
 ]);
-const SHADOW_PAGE = page('Attach or show a sampled shadow challenger.', [
-  'fadeno dial shadow',
-  'fadeno dial shadow <archetype> <model>[@effort] [options]',
-]);
 const MODEL_ADD_PAGE = page('Discover and persist a canonical user model alias.', 'fadeno models add <alias> <provider/id>', [
   'Discovery checks direct OpenCode first, then the OpenCode/OpenRouter discovery path.',
 ]);
 const MODEL_REMOVE_PAGE = page('Remove a user-catalog model alias.', 'fadeno models remove <alias> [--force] [--json]', [
   'Edits the user catalog only; a builtin or project entry names the file to edit instead.',
-  'Refuses while a dial or shadow attachment names the alias; --force removes it and reports each stranded reference.',
+  'Refuses while a dial names the alias; --force removes it anyway and reports each stranded reference.',
   'Cached verification rows for the alias are dropped with it.',
 ]);
 const MODEL_VERIFY_PAGE = page(
@@ -96,22 +92,19 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     'fadeno model remove <alias> [--force]',
     'fadeno model verify [<ref>...] [--harness <id>] [--strict]',
   ], '`fadeno model` is an alias for `fadeno models`.'),
-  dial: page('Show or set per-archetype model selection.', [
+  dial: page('Show, set and resolve archetype bindings.', [
     'fadeno dial',
     'fadeno dial <archetype> [<model>[@effort]]',
     'fadeno dial <a> <b>... <model>[@effort] [options]',
     'fadeno dial <a>+<b>[+...] <model>[@effort] [options]',
     'fadeno dial <a>,<b>[,...] <model>[@effort] [options]',
     'fadeno dial clear [<archetype>] [--session|--user|--repo]',
-    'fadeno dial shadow [<archetype> <model>[@effort]] [options]',
-    'fadeno dial clear-shadow [<archetype>]        (alias: fadeno shadow clear)',
-    'fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]',
+    'fadeno dial resolve --archetype <name>',
   ], [
-    'Cascade: binding → session dial → repo pin → user dial → base.',
-    '`shadow` attaches a one-shot challenger; `--rate <r>` rolls it on that fraction of dispatches and `--n <count>` caps how many roll. Shadows roll on ad-hoc `fadeno dispatch` only — `fadeno drive` runs are unpaired.',
-    '`clear-shadow` with an archetype detaches that one and fails if it has none; with NO archetype it detaches EVERY attachment. Shadows live only in `.fadeno/local/dials`, so — unlike `clear` — it takes no `--session|--user|--repo` scope flag.',
+    'With no arguments: every archetype, what it is for, and where it currently routes — the reference to read before delegating.',
+    'Cascade: binding → session dial → repo pin → user dial → base. An archetype with no dial runs on the host session\'s own model.',
+    'An unscoped set edits the highest layer that already holds a dial, and creates at the user default when none does.',
   ]),
-  shadow: aliasPage(SHADOW_PAGE, ['fadeno shadow', 'fadeno shadow <archetype> <model>[@effort] [options]', 'fadeno shadow clear [<archetype>]'], '`fadeno shadow` is an alias for `fadeno dial shadow`, and `fadeno shadow clear` for `fadeno dial clear-shadow`.'),
   plugin: page('Generate a harness plugin from this checkout.', 'fadeno plugin [dir] [--codex|--omp] [--force]', ['Claude Code is the default plugin; `--codex` and `--omp` select their generators. OpenCode and Grok use `fadeno init` instead.']),
   completion: page('Emit sourceable Bash completion.', 'fadeno completion bash'),
 };
@@ -128,9 +121,9 @@ const NESTED: Record<string, PageSeed> = {
     '`fadeno model verify` is an alias for `fadeno models verify`.',
   ),
   'dial clear': page('Clear one or more dial layers.', 'fadeno dial clear [<archetype>] [--session|--user|--repo]'),
-  'dial shadow': aliasPage(SHADOW_PAGE, SHADOW_PAGE.usage, '`fadeno shadow` is the top-level alias.'),
-  'dial clear-shadow': page('Remove shadow attachments.', 'fadeno dial clear-shadow [<archetype>]'),
-  'dial resolve': page('Emit the stable dial-resolution hook contract.', 'fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]'),
+  'dial resolve': page('Print what one archetype resolves to right now.', 'fadeno dial resolve --archetype <name>', [
+    'The inspection escape hatch: model, effort, harness and lane, answered by the same resolver a spawn takes.',
+  ]),
   'completion bash': page('Emit sourceable Bash completion.', 'fadeno completion bash', undefined, ['source <(fadeno completion bash)']),
 };
 
@@ -153,7 +146,6 @@ const OPTION_HINTS: Record<string, string> = {
   '--merged': 'Close: the work landed',
   '--message-file': 'File holding the agent\u2019s final message',
   '--model': 'Direct model reference',
-  '--n': 'Maximum shadow pairings',
   '--name': 'Semantic dispatch name; also the branch',
   '--non-interactive': 'Never prompt during setup',
   '--note': 'Free text recorded on the decision',
@@ -162,8 +154,6 @@ const OPTION_HINTS: Record<string, string> = {
   '--output': 'Print the report of a dispatch',
   '--parent': 'Dispatch id this spawn belongs to',
   '--prompt-file': 'Read prompt from file',
-  '--prompt-sha256': 'Prompt content SHA-256',
-  '--rate': 'Shadow sampling rate',
   '--repo': 'Repository scope',
   '--reset-runtime': 'Allow runtime downgrade',
   '--scope': 'Installation scope',
@@ -172,7 +162,6 @@ const OPTION_HINTS: Record<string, string> = {
   '--lane': 'Which lane opens it: auto (the resolution decides), host, or command',
   '--transcript': 'The agent\'s transcript, read for the dispatch id, final message and model',
   '--parent-transcript': 'The spawning agent\'s transcript; its contract header names the parent dispatch',
-  '--shadow': 'One-shot challenger reference',
   '--shared': 'Work in the live tree instead of a worktree',
   '--strict': 'Fail on an unreachable listing too',
   '--tail': 'Number of recent entries',
@@ -186,7 +175,6 @@ const OPTION_FORMS: Record<string, string> = {
   '--archetype': '--archetype <name>', '--model': '--model <ref>', '--harness': '--harness <id>',
   '--prompt-file': '--prompt-file <path>', '--output': '--output <path>', '--lane': '--lane <auto|host|command>', '--transcript': '--transcript <path>', '--parent-transcript': '--parent-transcript <path>', '--bind': '--bind <role=executor>',
   '--tool': '--tool <name>', '--input': '--input <name=path>',
-  '--rate': '--rate <0..1>', '--n': '--n <count>', '--prompt-sha256': '--prompt-sha256 <hex>',
   '--host-executor': '--host-executor <name>', '--native-executor': '--native-executor <name>',
   '--role': '--role <name>', '--run': '--run <id>', '--dispatch-id': '--dispatch-id <id>',
   '--tag': '--tag <label>', '--ignored-output': '--ignored-output <policy>', '--agent-id': '--agent-id <id>',
@@ -197,7 +185,7 @@ const OPTION_FORMS: Record<string, string> = {
   '--field': '--field <key=value>', '--max-transitions': '--max-transitions <count>', '--parallel': '--parallel <count>',
   '--actor-call': '--actor-call <id>', '--decision': '--decision <id>', '--feedback': '--feedback <text>',
   '--tail': '--tail <count>', '--wait': '--wait <seconds>', '--cancel': '--cancel <id|tag>', '--merge': '--merge <id|tag>',
-  '--arm': '--arm <arm>', '--shadow': '--shadow <ref>', '--evidence': '--evidence <mode>', '--comparison': '--comparison <path>',
+  '--arm': '--arm <arm>', '--evidence': '--evidence <mode>', '--comparison': '--comparison <path>',
   '--adversarial': '--adversarial <path>', '--judge': '--judge <ref>', '--scope': '--scope <project|user>',
   '--from': '--from <bin-dir>', '--unbind': '--unbind <role>', '--note': '--note <text>',
 };
@@ -215,7 +203,6 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   models: withGlobals('--harness', '--json'),
   model: withGlobals('--harness', '--json'),
   dial: withGlobals('--harness', '--session', '--user', '--repo', '--json'),
-  shadow: withGlobals('--harness', '--rate', '--n', '--json'),
   clean: withGlobals('--force'),
   dispatch: withGlobals('--archetype', '--model', '--name', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--heartbeat'),
   'dispatch-open': withGlobals('--archetype', '--model', '--name', '--lane', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--parent-transcript', '--harness', '--json'),
@@ -234,9 +221,7 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   'models verify': withGlobals('--harness', '--strict', '--json'),
   'model verify': withGlobals('--harness', '--strict', '--json'),
   'dial clear': withGlobals('--session', '--user', '--repo', '--json'),
-  'dial shadow': withGlobals('--harness', '--rate', '--n', '--json'),
-  'dial clear-shadow': withGlobals('--json'),
-  'dial resolve': withGlobals('--archetype', '--prompt-sha256'),
+  'dial resolve': withGlobals('--archetype'),
   'completion bash': withGlobals(),
 };
 
@@ -302,12 +287,12 @@ function optionsFor(path: string): string[] {
 }
 
 export function renderGlobalHelp(): string {
-  return `fadeno — the playbook layer for AI coding agents
+  return `fadeno — routes delegated work to models by archetype, and keeps the ledger
 
 Usage: fadeno <command> [options]
 
 Routing
-  dial        Show, set and resolve archetype bindings (shadow is its alias)
+  dial        Show, set and resolve archetype bindings
   models (model)  Inspect the model registry
   context     What a host session is told
 
@@ -325,11 +310,10 @@ Global options
 Run \`fadeno <command> --help\` for exact usage and command options.
 
 Examples:
-  fadeno init --codex
-  fadeno init --grok
-  fadeno playbooks
-  fadeno new-run code-change-review "Add CSV export"
-  fadeno drive <run>`;
+  fadeno dial
+  fadeno dial worker sol@high
+  fadeno dispatch --archetype worker --name csv-export < task.md
+  fadeno dispatch-close csv-export --merged`;
 }
 
 /** Render one structured focused page. Throws only if registry maintenance missed a public path. */

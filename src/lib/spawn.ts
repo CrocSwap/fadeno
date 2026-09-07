@@ -42,6 +42,7 @@ import {
   readLocalDialState,
   resolveDelivery,
   resolveRole,
+  roleResolutionEchoLabel,
   substitutePromptFile,
   withoutHarnessIdentity,
   type CompiledDelivery,
@@ -114,7 +115,18 @@ export interface ResolveInput {
   userPathOptions?: UserPathOptions;
 }
 
-function commandOf(delivery: CompiledDelivery): string[] | null {
+/**
+ * The lane, in one expression: a delivery the session can carry goes out
+ * in-session, everything else becomes a process. Exported because `dial show`
+ * and `dial resolve` must answer with this and not with a second predicate
+ * that agrees only by coincidence.
+ */
+export function laneOf(delivery: CompiledDelivery): Lane {
+  return delivery.hostCandidate ? 'host' : 'command';
+}
+
+/** The argv that delivers this compiled dial as a process, or null when none can. */
+export function commandOf(delivery: CompiledDelivery): string[] | null {
   const spec = delivery.spec;
   if (spec.adapter === 'command') return spec.command;
   return spec.fallbackCommand ?? null;
@@ -155,7 +167,7 @@ export function resolveArchetype(input: ResolveInput): Resolution {
       modelId: delivery.modelId,
       effort: delivery.effectiveEffort || null,
       harness: delivery.harness,
-      lane: delivery.hostCandidate ? 'host' : 'command',
+      lane: laneOf(delivery),
       command: commandOf(delivery),
       source,
       explicitModel: explicit,
@@ -202,7 +214,7 @@ export function describeArchetypes(input: { repoRoot: string; userPathOptions?: 
     const description = describeArchetype(name, profile.archetypes[name]?.description);
     try {
       const r = resolveArchetype({ repoRoot: input.repoRoot, archetype: name, userPathOptions: input.userPathOptions });
-      const source = r.source === 'base' ? 'no dial' : r.source === 'binding' ? 'binding' : `${r.source} dial`;
+      const source = r.source === 'explicit' ? 'explicit model' : roleResolutionEchoLabel(r.source);
       return { name, description, model: r.model, effort: r.effort, source };
     } catch (err) {
       return { name, description, model: 'unresolvable', effort: null, source: (err as Error).message };

@@ -76,13 +76,6 @@ const command = (
 const NONE: OptionSpec = { kind: 'none' };
 const PATH: OptionSpec = { kind: 'path' };
 
-// Shared by `dial shadow` and its top-level alias `shadow` — one spec so the
-// two spellings cannot drift apart on which flags they accept.
-const SHADOW_SPEC = command(
-  { '--harness': { kind: 'free' }, '--rate': { kind: 'free' }, '--n': { kind: 'free' }, '--json': NONE },
-  ['archetype', 'free'],
-);
-
 // Shared by `models` and its top-level alias `model` — one spec so the two
 // spellings cannot drift apart on which flags they accept.
 const MODELS_SPEC = command(
@@ -105,17 +98,13 @@ const COMMANDS: Record<string, CommandSpec> = {
   // Top-level alias for `models` — same handler in cli.ts, same flags.
   model: MODELS_SPEC,
   dial: command(
-    { '--harness': { kind: 'free' }, '--session': NONE, '--user': NONE, '--repo': NONE, '--rate': { kind: 'free' }, '--archetype': { kind: 'archetype' }, '--json': NONE },
+    { '--harness': { kind: 'free' }, '--session': NONE, '--user': NONE, '--repo': NONE, '--archetype': { kind: 'archetype' }, '--json': NONE },
     ['archetype', 'free'],
     {
       clear: command({ '--session': NONE, '--user': NONE, '--repo': NONE }, ['archetype']),
-      shadow: SHADOW_SPEC,
-      'clear-shadow': command({}, ['archetype']),
-      resolve: command({ '--archetype': { kind: 'archetype' }, '--prompt-sha256': { kind: 'free' } }, []),
+      resolve: command({ '--archetype': { kind: 'archetype' } }, []),
     },
   ),
-  // Top-level alias for `dial shadow` — same handler in cli.ts, same flags.
-  shadow: SHADOW_SPEC,
   clean: command({ '--force': NONE }),
   dispatch: command({
     '--archetype': { kind: 'archetype' }, '--model': { kind: 'free' }, '--name': { kind: 'free' }, '--prompt-file': PATH,

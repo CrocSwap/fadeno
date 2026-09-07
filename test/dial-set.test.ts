@@ -9,10 +9,8 @@ import {
   runDialResolve,
   runDialSet,
   runDialSetMany,
-  runDialShadow,
   runDialShow,
 } from '../src/commands/dial.ts';
-import { readLocalDialState } from '../src/lib/executors.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { read, tempRepo } from './helpers.ts';
 
@@ -171,7 +169,7 @@ test('clear: a session dial still wins over the user default on plain clear', (t
   assert.equal(shown.dials.user.judge.model, 'sol');
 });
 
-test('clear: no archetype wipes session AND user dials, preserves shadows and repo pins', (t) => {
+test('clear: no archetype wipes session AND user dials, and leaves repo pins standing', (t) => {
   const root = seedCatalog(t, { dials: { judge: 'sol' } });
   const user = isolatedUser(root);
   runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'judge', model: 'grok', session: true });
@@ -202,7 +200,7 @@ test('repo pin: --repo writes via parseDocument preserving comments', (t) => {
   assert.match(text, /dials:/);
 });
 
-test('set time validates against the REGISTRY only — no lane notes, no eligibility refusal', (t) => {
+test('set time validates against the REGISTRY only — no lane notes, nothing about the call', (t) => {
   // Catalog v4 moved both of these out of `dial set`. A dial is stored
   // host-neutrally and re-resolved at every dispatch, so narrating the lane a
   // pin would take made `fadeno dial worker opus@xhigh` print a different
@@ -225,13 +223,10 @@ test('set time validates against the REGISTRY only — no lane notes, no eligibi
   assert.equal(hostEffort.pinned_effort, 'high');
   assert.deepEqual(hostEffort.notes, [], 'no lane narration at set time');
 
-  // A model the archetype is forbidden on still DIALS. The refusal is real,
-  // and it is the kernel's: `dial resolve` reports it and names the remedy.
+  // Any model this catalog can compile dials, and `dial resolve` answers what
+  // it resolves to. Nothing here asks a model to justify itself.
   assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'forbidden' }));
-  const resolved = runDialResolve({ repoRoot: root, userPathOptions: user, archetype: 'worker' });
-  assert.equal(resolved.eligibility, 'forbidden');
-  assert.equal(resolved.delivery.dispatchable, false);
-  assert.match(resolved.delivery.action, /Do NOT dispatch/);
+  assert.equal(runDialResolve({ repoRoot: root, userPathOptions: user, archetype: 'worker' }).model, 'forbidden');
 
   // An unknown `--harness` IS refused at set time: it is the one thing a dial
   // can be wrong about without knowing anything about the call.
@@ -338,81 +333,4 @@ test('a dial that introduces a provider nothing else uses says so', (t) => {
   // And once xai is dialed somewhere, it stops being news.
   const repeat = runDialSet({ ...opts, archetype: 'worker', model: 'grok', session: true });
   assert.ok(!repeat.notes.some((n) => n.includes('NEW PROVIDER')), repeat.notes.join('\n'));
-});
-
-test('a shadow attachment gets the same provider check, scoped to its own slot', (t) => {
-  const root = seedCatalog(t);
-  const opts = { repoRoot: root, userPathOptions: onHarness('standalone') };
-  runDialSet({ ...opts, archetype: 'worker', model: 'sol', session: true });
-
-  // The slot is the unit, not the archetype: shadowing worker with the vendor
-  // worker already dials duplicates the prompt to nobody new.
-  const sameVendor = runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
-  assert.ok(!sameVendor.notes.some((n) => n.includes('NEW PROVIDER')), sameVendor.notes.join('\n'));
-
-  // A challenger at a vendor this repo has never dialed is the case the
-  // warning exists for — a shadow is standing egress once attached.
-  const novel = runDialShadow({ ...opts, archetype: 'worker', model: 'grok' });
-  const warning = novel.notes.find((n) => n.includes('NEW PROVIDER'));
-  assert.ok(warning, novel.notes.join('\n'));
-  assert.match(warning!, /worker ~ grok routes to "xai"/);
-  assert.match(warning!, /duplicates the prompt/);
-});
-
-test('an explicit shadow attach REFUSES when the primary has no command lane to force', (t) => {
-  const root = seedCatalog(t);
-  // Isolated user scope: this checks the truly undialed base, so it must not
-  // pick up whatever the real machine's user-scoped worker dial happens to be.
-  const opts = { repoRoot: root, userPathOptions: isolatedUser(root) };
-  // worker carries no primary dial anywhere, so it falls through to the
-  // current-host base — a host delivery with no fallback_command. A selected
-  // pair has nothing to reuse for the command lane, so this attachment could
-  // sample forever and never produce a pair; dispatch time is too late to say
-  // so.
-  //
-  // A REFUSAL, not a note: the user typed `dial shadow` and asked for a pair,
-  // and the honest answer is that this one cannot exist. (The graceful case —
-  // an attachment already in place whose primary is redialed underneath it —
-  // degrades to a warning instead, on the dial-change path.) This assertion
-  // is the reason the shadow-attach refusal must not be softened to make the
-  // mechanics tests below pass.
-  assert.throws(
-    () => runDialShadow({ ...opts, archetype: 'worker', model: 'sol' }),
-    (err: unknown) => err instanceof DialError
-      && /NO PAIR POSSIBLE/.test(err.message)
-      && /worker[\s\S]*current-host[\s\S]*no fallback_command/.test(err.message),
-  );
-  assert.deepEqual(readLocalDialState(root).shadows, {}, 'a refused attach writes nothing');
-
-  // Dialing the primary onto a command-capable executor makes the very same
-  // attach succeed, with no note.
-  runDialSet({ ...opts, archetype: 'worker', model: 'grok', session: true });
-  const fixed = runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
-  assert.ok(!fixed.notes.some((n) => n.includes('NO PAIR POSSIBLE')), fixed.notes.join('\n'));
-});
-
-test('dial resolve: shadow.routable mirrors whether the kernel could force the primary onto a command lane', (t) => {
-  const root = seedCatalog(t);
-  // Isolated user scope, same reason as above: the undialed check must not
-  // depend on the real machine's ambient user dial for worker.
-  const opts = { repoRoot: root, userPathOptions: isolatedUser(root) };
-  // Attach while the primary CAN carry a pair — an explicit attach onto an
-  // unroutable primary is refused outright (test above), so the only way to
-  // observe `routable: false` is the graceful path: redial the primary out
-  // from under an attachment that already exists.
-  runDialSet({ ...opts, archetype: 'worker', model: 'grok', session: true });
-  runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
-  const routable = runDialResolve({ ...opts, archetype: 'worker' });
-  assert.equal(routable.shadow?.routable, true);
-  // `selected` is a pure function of the roll, and with no rate on the
-  // attachment every dispatch "fires" it.
-  assert.equal(routable.shadow?.selected, true);
-
-  // Redial the primary to the current-host base: a host delivery with no
-  // fallback_command, so a selected pair has nothing to reuse. `routable`
-  // flips without the shadow attachment changing at all.
-  runDialClear({ ...opts, archetype: 'worker', session: true });
-  const unroutable = runDialResolve({ ...opts, archetype: 'worker' });
-  assert.equal(unroutable.shadow?.routable, false);
-  assert.equal(unroutable.shadow?.selected, true);
 });

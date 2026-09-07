@@ -318,7 +318,7 @@ test('v4: a committed v3 run snapshot still parses, unchanged', () => {
 
 // 7. A bare shell.
 
-test('v4: from a bare shell nothing is a host lane, and eligibility never refuses a dial', (t) => {
+test('v4: from a bare shell nothing is a host lane, and nothing about the model refuses a dial', (t) => {
   const root = tempRepo(t);
   const paths: UserPathOptions = {
     home: join(root, 'home'),
@@ -333,25 +333,25 @@ test('v4: from a bare shell nothing is a host lane, and eligibility never refuse
     archetypes: { worker: {}, scout: {} },
   }));
 
-  // Registry-only validation: a forbidden pairing DIALS, and `dial resolve`
-  // is where the refusal is reported.
+  // Registry-only validation: the dial lands, and nothing about the model is
+  // asked to justify itself at set time.
   assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'worker', model: 'gated', session: true }));
-  const forbidden = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker', env: {} });
-  assert.equal(forbidden.host, 'standalone');
-  assert.equal(forbidden.eligibility, 'forbidden');
-  assert.equal(forbidden.delivery.dispatchable, false);
 
   // Every dial with a command lane resolves to it; the base dial has none.
   runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'scout', model: 'sol', session: true });
-  const scout = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'scout', env: {} });
+  const scout = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'scout' });
   assert.equal(scout.host, 'standalone');
   assert.equal(scout.lane, 'command');
   assert.equal(scout.harness, 'codex');
-  assert.equal(scout.variant, null);
+  assert.deepEqual(scout.command, ['codex', 'exec', '--model', 'gpt-sol', '-']);
 
-  const base = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer', env: {} });
+  // A bare shell has no session to deliver into, so the base dial is off the
+  // host lane with nothing to invoke — reported as a null command, never as a
+  // command lane that would work.
+  const base = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer' });
   assert.equal(base.model, 'current-host');
-  assert.equal(base.lane, 'restart_required', 'a bare shell has no session to deliver into');
+  assert.equal(base.lane, 'command');
+  assert.equal(base.command, null);
 });
 
 // 8. Home-per-provider integrity.
@@ -514,8 +514,9 @@ test('dispatch\'s host-lane note agrees with dial resolve on the no-argv shapes'
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({ archetypes: { worker: {} } }));
   // Undialed from a bare shell → `current-host`, which has no session to
   // deliver into and no argv to spawn.
-  const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer', env: {} });
-  assert.equal(resolved.lane, 'restart_required');
+  const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer' });
+  assert.equal(resolved.lane, 'command');
+  assert.equal(resolved.command, null, 'off the host lane with nothing to invoke');
   let refusal = '';
   try {
     prepareDispatch({ archetype: 'reviewer', prompt: 'go', repoRoot: root, userPathOptions: paths, lane: 'command', env: {} });

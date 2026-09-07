@@ -392,8 +392,8 @@ test('archetypes: strict validation names the offending path', () => {
 
 test('pin v4: write and read round-trip (dial keys sorted)', (t) => {
   const root = tempRepo(t);
-  assert.deepEqual(readLocalDialState(root), { dials: {}, shadows: {}, legacyNote: null });
-  const state: LocalDialState = { dials: { generator: { model: 'gem' }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } }, shadows: { worker: { model: 'kimi-k3', rate: 0.25 } }, legacyNote: null };
+  assert.deepEqual(readLocalDialState(root), { dials: {} });
+  const state: LocalDialState = { dials: { generator: { model: 'gem' }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } } };
   const path = writeLocalDialState(root, state);
   assert.equal(path, join(root, DIALS_LOCAL_FILE));
   const text = read(root, DIALS_LOCAL_FILE);
@@ -402,24 +402,26 @@ test('pin v4: write and read round-trip (dial keys sorted)', (t) => {
   // a version bump must not need this literal edited twice.
   assert.equal(
     text,
-    `{"schema_version":${LOCAL_DIALS_SCHEMA_VERSION},"dials":{"generator":"gem","reviewer":"opus","worker":"sol@high"},"shadows":{"worker":{"model":"kimi-k3","rate":0.25}}}\n`,
+    `{"schema_version":${LOCAL_DIALS_SCHEMA_VERSION},"dials":{"generator":"gem","reviewer":"opus","worker":"sol@high"}}\n`,
   );
-  assert.deepEqual(readLocalDialState(root), { dials: { generator: { model: 'gem' }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } }, shadows: { worker: { model: 'kimi-k3', rate: 0.25 } }, legacyNote: null, legacyViaNote: null });
-  writeLocalDialState(root, { dials: {}, shadows: {}, legacyNote: null });
+  assert.deepEqual(readLocalDialState(root).dials, { generator: { model: 'gem' }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } });
+  writeLocalDialState(root, { dials: {} });
   assert.equal(exists(root, DIALS_LOCAL_FILE), false);
 });
 
-test('pin v3: legacy pin returns empty with legacyNote, never error', (t) => {
+test('a file this fadeno cannot read is refused by name, never read as "no dials"', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
-  writeFileSync(join(root, DIALS_LOCAL_FILE), 'openai-primary\n', 'utf8');
-  assert.deepEqual(readLocalDialState(root), { dials: {}, shadows: {}, legacyNote: 'pre-0.6 loadout pin ignored (named loadouts retired) — re-dial with `fadeno dial <archetype> <model>`' });
-  writeFileSync(join(root, DIALS_LOCAL_FILE), '{"loadout":"x","overrides":{"worker":"luna-cli"}}\n', 'utf8');
-  const legacy = readLocalDialState(root);
-  assert.ok(legacy.legacyNote != null && legacy.legacyNote.includes('pre-0.6'));
-  assert.deepEqual(legacy.dials, {});
+  // A pre-0.6 loadout pin, a pre-0.7 shadow attachment, and a stamp from the
+  // future: three shapes this reader does not understand. Each one decides
+  // which model runs, so each is an error naming the file and the fix — the
+  // one thing that must never happen is a silent fall-through to zero dials.
+  for (const body of ['openai-primary\n', '{"loadout":"x","overrides":{"worker":"luna-cli"}}\n', '{"dials":{},"shadows":{"worker":{"model":"opus"}}}\n', '{"schema_version":99,"dials":{}}\n']) {
+    writeFileSync(join(root, DIALS_LOCAL_FILE), body, 'utf8');
+    assert.throws(() => readLocalDialState(root), /\.fadeno\/local\/dials .*Fix: delete it/s, body);
+  }
   writeFileSync(join(root, DIALS_LOCAL_FILE), '   \n', 'utf8');
-  assert.deepEqual(readLocalDialState(root), { dials: {}, shadows: {}, legacyNote: null });
+  assert.deepEqual(readLocalDialState(root), { dials: {} });
 });
 
 test('pin v3: an unreadable pin names the file and how to reset it', (t) => {
@@ -429,20 +431,6 @@ test('pin v3: an unreadable pin names the file and how to reset it', (t) => {
   assert.throws(() => readLocalDialState(root), (err: unknown) => err instanceof ExecutorProfileError && (err.message.includes(DIALS_LOCAL_FILE) && /delete it/.test(err.message) && /fadeno dial <archetype> <model>/.test(err.message)));
   writeFileSync(join(root, DIALS_LOCAL_FILE), '{"dials":{"Worker":"sol"}}\n', 'utf8');
   assert.throws(() => readLocalDialState(root), /bare lowercase identifier/);
-});
-
-test('pin v4: shadows with harness and effort round-trip; a legacy `via` reads through', (t) => {
-  const root = tempRepo(t);
-  const state: LocalDialState = { dials: {}, shadows: { worker: { model: 'opus', effort: 'high', harness: 'opencode', rate: 0.5 } }, legacyNote: null };
-  writeLocalDialState(root, state);
-  const readBack = readLocalDialState(root);
-  assert.deepEqual(readBack.shadows.worker, { model: 'opus', effort: 'high', harness: 'opencode', rate: 0.5 });
-  // Written by a pre-v4 fadeno: translated on read, never rewritten silently —
-  // the note says so once.
-  writeFileSync(join(root, DIALS_LOCAL_FILE), JSON.stringify({ shadows: { worker: { model: 'opus', via: 'opencode-direct' } } }), 'utf8');
-  const legacy = readLocalDialState(root);
-  assert.deepEqual(legacy.shadows.worker, { model: 'opus', harness: 'opencode' });
-  assert.match(legacy.legacyViaNote ?? '', /still spells shadow worker with the removed `via <driver>` form/);
 });
 
 // --- cascade ---
@@ -530,7 +518,7 @@ test('roleResolutionEchoLabel vocabulary', () => {
   assert.equal(roleResolutionEchoLabel('session'), 'session dial');
   assert.equal(roleResolutionEchoLabel('repo'), 'repo pin');
   assert.equal(roleResolutionEchoLabel('user'), 'user dial');
-  assert.equal(roleResolutionEchoLabel('base'), 'base');
+  assert.equal(roleResolutionEchoLabel('base'), 'no dial');
 });
 
 // --- snapshot format v3 ---

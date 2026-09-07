@@ -85,7 +85,6 @@ test('model remove: takes a user alias out, preserving comments, siblings, and u
   assert.equal(result.alias, 'moonshot');
   assert.equal(result.path, userPaths(user).executorsFile);
   assert.deepEqual(result.dangling_dials, []);
-  assert.deepEqual(result.dangling_shadows, []);
 
   const text = readFileSync(userPaths(user).executorsFile, 'utf8');
   assert.match(text, /# personal catalog — hand maintained/, 'the file header survived');
@@ -165,19 +164,6 @@ test('model remove: refuses while a dial names the alias, and --force reports wh
   assert.deepEqual(forced.dangling_dials, [{ archetype: 'worker', layer: 'user', ref: 'moonshot' }]);
   assert.equal(forced.verifications_removed, 1);
   assert.doesNotMatch(readFileSync(userPaths(user).executorsFile, 'utf8'), /moonshot/);
-});
-
-test('model remove: a shadow attachment strands the same way a dial does', (t) => {
-  const { root, user } = seed(t);
-  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'moonshot' } }, legacyNote: null });
-
-  assert.throws(
-    () => runModelsRemove({ repoRoot: root, userPathOptions: user, alias: 'moonshot' }),
-    /shadowed on worker/,
-  );
-
-  const forced = runModelsRemove({ repoRoot: root, userPathOptions: user, alias: 'moonshot', force: true });
-  assert.deepEqual(forced.dangling_shadows, [{ archetype: 'worker', ref: 'moonshot' }]);
 });
 
 /**

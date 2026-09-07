@@ -35,20 +35,19 @@ test('help coverage is derived exactly from completion public paths', () => {
 });
 
 test('help routing uses the longest public path and preserves aliases', () => {
-  assert.equal(resolveHelpPath(['dial', 'shadow', 'worker']), 'dial shadow');
+  assert.equal(resolveHelpPath(['dial', 'clear', 'worker']), 'dial clear');
   assert.equal(resolveHelpPath(['model', 'add', 'moonshot']), 'model add');
   assert.equal(resolveHelpPath(['models', 'add', 'moonshot']), 'models add');
-  assert.equal(resolveHelpPath(['shadow', 'worker']), 'shadow');
+  assert.equal(resolveHelpPath(['dial', 'worker']), 'dial');
   assert.equal(resolveHelpPath(['no-such-command']), null);
   assert.match(renderFocusedHelp('model add'), /alias for `fadeno models add`/i);
-  assert.match(renderFocusedHelp('dial shadow'), /`fadeno shadow` is the top-level alias/);
 });
 
 test('focused help uses semantic options and preserves safety-critical modes', () => {
   const plugin = renderFocusedHelp('plugin');
   assert.doesNotMatch(plugin, /\n  --grok|\n  --opencode/);
   assert.match(plugin, /Claude Code is the default plugin/);
-  assert.doesNotMatch(renderFocusedHelp('dial'), /\n  --rate|\n  --archetype/);
+  assert.doesNotMatch(renderFocusedHelp('dial'), /\n  --archetype/);
 
   assert.match(renderFocusedHelp('clean'), /Remove machine-local scratch/);
   assert.match(renderFocusedHelp('dispatch'), /--archetype.*--model|--model.*--archetype/s);
@@ -60,7 +59,7 @@ test('focused help uses semantic options and preserves safety-critical modes', (
   assert.match(renderFocusedHelp('cancel'), /process group/);
   assert.match(renderFocusedHelp('models add'), /direct OpenCode.*OpenCode\/OpenRouter/s);
   assert.match(renderFocusedHelp('model'), /--harness <id>/);
-  for (const path of ['models add', 'model add', 'dial clear-shadow']) {
+  for (const path of ['models add', 'model add', 'dial clear']) {
     assert.match(renderFocusedHelp(path), /--json\s+Emit structured JSON output/);
   }
   assert.doesNotMatch(renderFocusedHelp('completion'), /private protocol/);
@@ -68,7 +67,7 @@ test('focused help uses semantic options and preserves safety-critical modes', (
 
 test('dial help discovers every public form and focused output stays terminal-width friendly', () => {
   const dial = renderFocusedHelp('dial');
-  for (const fragment of ['dial clear', 'dial shadow', 'dial clear-shadow', 'dial resolve', '<a> <b>...', '<a>+<b>[+...]', '<a>,<b>[,...]']) {
+  for (const fragment of ['dial clear', 'dial resolve', '<a> <b>...', '<a>+<b>[+...]', '<a>,<b>[,...]']) {
     assert.match(dial, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   for (const path of HELP_PATHS) {
@@ -106,8 +105,8 @@ test('source and every bundled CLI render representative focused and global help
     const prefix = bin === process.execPath ? [SOURCE] : [];
     const global = run(bin, [...prefix, '--help'], root);
     assert.match(global, /Routing/);
-    const nested = run(bin, [...prefix, 'dial', 'shadow', '--help'], root);
-    assert.match(nested, /fadeno dial shadow/);
+    const nested = run(bin, [...prefix, 'dial', 'resolve', '--help'], root);
+    assert.match(nested, /fadeno dial resolve/);
     const alias = run(bin, [...prefix, 'model', 'add', '--help'], root);
     assert.match(alias, /alias for `fadeno models add`/i);
   }

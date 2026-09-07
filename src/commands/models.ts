@@ -12,7 +12,6 @@ import {
   resolveDelivery,
   detectAmbientHarness,
   ExecutorProfileError,
-  shadowAttachmentRef,
   type CommandExecutorSpec,
   type DialRef,
   type EligibilityState,
@@ -578,11 +577,9 @@ export interface ModelRemoveOptions extends ModelsCommonOptions {
   alias: string;
   /** Remove despite live dials, reporting each one it strands. */
   force?: boolean;
-  /** Passed through to the dial cascade read; see `DialCommonOptions.env`. */
-  env?: NodeJS.ProcessEnv;
 }
 
-/** One dial (or shadow attachment) that names the alias being removed. */
+/** One dial that names the alias being removed. */
 export interface DanglingDial {
   archetype: string;
   /** Where the reference lives: a stored layer, or how the cascade reached it. */
@@ -597,8 +594,6 @@ export interface ModelRemoveResult {
   removed: true;
   /** Non-empty only under `--force`: the dials now naming a model that is gone. */
   dangling_dials: DanglingDial[];
-  /** Same, for shadow attachments — a stranded challenger fails the same way. */
-  dangling_shadows: Array<{ archetype: string; ref: string }>;
   verifications_removed: number;
 }
 
@@ -688,7 +683,7 @@ export function runModelsRemove(opts: ModelRemoveOptions): ModelRemoveResult {
   // reference to it has already become unresolvable.
   const show = (() => {
     try {
-      return runDialShow({ repoRoot, userPathOptions, ...(opts.cwd != null ? { cwd: opts.cwd } : {}), ...(opts.env != null ? { env: opts.env } : {}) });
+      return runDialShow({ repoRoot, userPathOptions, ...(opts.cwd != null ? { cwd: opts.cwd } : {}) });
     } catch (err) {
       if (err instanceof DialError) throw new ModelsError(err.message);
       throw err;
@@ -729,22 +724,10 @@ export function runModelsRemove(opts: ModelRemoveOptions): ModelRemoveResult {
   for (const row of show.rows) {
     if (row.dial.model === alias || row.model === alias) noteDial(row.archetype, row.source, row.dial);
   }
-  const dangling_shadows = Object.entries(show.shadows)
-    .filter(([, att]) => att.model === alias)
-    .map(([archetype, att]) => {
-      const ref = shadowAttachmentRef(att);
-      noteRef(ref);
-      return { archetype, ref: formatDialRef(ref) };
-    });
-
-  if (!opts.force && (dangling_dials.length > 0 || dangling_shadows.length > 0)) {
+  if (!opts.force && dangling_dials.length > 0) {
     const dialed = [...new Set(dangling_dials.map((d) => d.archetype))].sort();
-    const shadowed = [...new Set(dangling_shadows.map((s) => s.archetype))].sort();
-    const parts: string[] = [];
-    if (dialed.length > 0) parts.push(`dialed by ${dialed.join(', ')}`);
-    if (shadowed.length > 0) parts.push(`shadowed on ${shadowed.join(', ')}`);
     throw new ModelsError(
-      `model "${alias}" is still ${parts.join(' and ')} — re-dial first (\`fadeno dial <archetype> <other>\`), ` +
+      `model "${alias}" is still dialed by ${dialed.join(', ')} — re-dial first (\`fadeno dial <archetype> <other>\`), ` +
         'or pass --force to remove it anyway and leave those references dangling.',
     );
   }
@@ -883,7 +866,6 @@ export function runModelsRemove(opts: ModelRemoveOptions): ModelRemoveResult {
     path: userCatalogPath,
     removed: true,
     dangling_dials,
-    dangling_shadows,
     verifications_removed,
   };
 }

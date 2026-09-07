@@ -22,16 +22,11 @@ import {
   type OpenLane,
 } from './commands/dispatches.ts';
 import {
-  
-  formatShadowLine,
+  RESERVED_ARCHETYPES,
   runDialClear,
-  runDialSetMany,
-  runDialClearShadow,
   runDialResolve,
-  runDialShadow,
+  runDialSetMany,
   runDialShow,
-  runShadowShow,
-  
   type DialShowResult,
 } from './commands/dial.ts';
 import { runModels, runModelsAdd, runModelsHarness, runModelsRemove, type HarnessListingResult, type ModelAddResult, type ModelRemoveResult, type ModelsResult } from './commands/models.ts';
@@ -40,6 +35,7 @@ import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
 import { knownFlagsFor, retiredFlagFor, runCompletion, runCompletionCandidates, suggestFlag, TOP_LEVEL_COMMANDS, unknownFlagsFor } from './commands/completion.ts';
 import { runSetup } from './commands/setup.ts';
 import { runStatus } from './commands/status.ts';
+import { roleResolutionEchoLabel } from './lib/executors.ts';
 import { modelAgrees } from './lib/ledger.ts';
 import { packageVersion } from './lib/paths.ts';
 import { readInstallationManifest, syncManagedRuntime } from './lib/installations.ts';
@@ -137,47 +133,12 @@ export function maybeRunRuntimePreflight(
   }
 }
 
-/**
- * Clear one shadow attachment, or every one when `archetype` is null.
- *
- * ONE renderer for two spellings — `fadeno dial clear-shadow` and
- * `fadeno shadow clear`. Shadows only ever live in `.fadeno/local/dials`, so
- * neither spelling takes a scope flag, and a second copy of this output is
- * exactly how the two would start disagreeing about what was cleared.
- */
-function clearShadow(archetype: string | null, json: boolean): number {
-  const result = runDialClearShadow({ archetype });
-  if (json) {
-    console.log(JSON.stringify(result, null, 2));
-    return 0;
-  }
-  if (result.archetype == null) {
-    console.log(result.removed ? `cleared ${result.count} shadow attachment(s)` : 'no shadow attachments to clear (.fadeno/local/dials)');
-    return 0;
-  }
-  console.log(`cleared shadow attachment: ${result.archetype} (was ${result.cleared!.model});`);
-  return 0;
-}
-
-const DIAL_SOURCE_TEXT: Record<string, string> = {
-  binding: 'binding',
-  session: 'session dial',
-  repo: 'repo pin',
-  user: 'user dial',
-  base: 'base',
-};
-
-function printStaleShadows(stale: Array<{ archetype: string; target: string }>): void {
+function printStaleDials(stale: Array<{ archetype: string; reason: string }>): void {
   for (const item of stale) {
     console.error(
-      `warning: shadow attachment ${item.archetype}~${item.target} names a model that is no longer resolvable — run \`fadeno dial shadow ${item.archetype} <model>\` or \`fadeno dial clear-shadow ${item.archetype}\`; the attachment is ignored below.`,
+      `warning: ${item.archetype} does not resolve, so its row is omitted — ${item.reason} ` +
+        `Re-dial it with \`fadeno dial ${item.archetype} <model>\`.`,
     );
-  }
-}
-
-function printStaleDials(stale: Array<{ archetype: string; target: string }>): void {
-  for (const item of stale) {
-    console.error(`warning: dial ${item.archetype}→${item.target} is stale — re-dial with \`fadeno dial ${item.archetype} <model>\``);
   }
 }
 
@@ -254,11 +215,6 @@ function printModelRemove(result: ModelRemoveResult): void {
       `warning: dial ${dial.archetype}→${dial.ref} (${dial.layer}) now names a model that is gone — re-dial with \`fadeno dial ${dial.archetype} <other>\``,
     );
   }
-  for (const shadow of result.dangling_shadows) {
-    console.error(
-      `warning: shadow attachment ${shadow.archetype}~${shadow.ref} now names a model that is gone — \`fadeno dial clear-shadow ${shadow.archetype}\``,
-    );
-  }
 }
 
 function printModelsVerify(result: ModelsVerifyResult): void {
@@ -288,134 +244,52 @@ function printModelsVerify(result: ModelsVerifyResult): void {
 }
 
 /**
- * `emptyMessage` is for the shadow-filtered view: an effective table with zero
- * rows reads as broken (a bare header, nothing under it), where the full `dial`
- * table never has zero rows (the worker/reviewer/judge triad always shows).
- * When set and there is nothing to show, it replaces the header+rows entirely
- * rather than printing beside an empty table.
+ * The effective table: every archetype the catalog and the dials know, what it
+ * is for, and where it currently goes.
+ *
+ * The description sits under each row because this table is the reference a
+ * coordinator reads before delegating, and "which archetype" is the question
+ * it answers first. `lane` is printed rather than left to be inferred: it is
+ * what the harness column decides and does not show, and a reader who guesses
+ * it wrong routes a whole campaign the wrong way.
  */
-function printDialShow(result: DialShowResult, emptyMessage?: string): void {
-  if (result.legacy_pin_note) console.log(result.legacy_pin_note);
+function printDialShow(result: DialShowResult): void {
   if (result.staleDials.length > 0) printStaleDials(result.staleDials);
-  if (result.staleShadows.length > 0) printStaleShadows(result.staleShadows);
-  if (result.rows.length === 0 && emptyMessage != null) {
-    console.log(emptyMessage);
-    if (result.note) console.log(result.note);
-    return;
-  }
-  // Header
-  // `harness` is the EXECUTOR, and under v4 that is the only thing this word
-  // means anywhere: the ambient host travels as `host`, on its own key. The
-  // column used to be called `via` precisely because `harness` was taken.
-  // `(home)` marks a row whose DIAL named no harness — the registry answered,
-  // whether through the provider's home claim or a model-level `harness:`.
-  // `lane` sits between the harness and the source because it is what the two
-  // columns to its left decide together and neither shows: effort moves a
-  // delivery off the host lane only when PINNED, and the harness only when it
-  // is not this session's host. A reader who has to infer the lane from those
-  // two gets it wrong in exactly the cases that matter, and a preflight is
-  // where that inference gets acted on — a director read this table plus a
-  // shell `steering resolve`, concluded no host delegate existed, and routed a
-  // five-lane campaign onto the command lane.
-  //
-  // Same `decideLane` as `dial resolve` and as the resolution echo's
-  // `[command lane: …]` label; see `EffectiveRow.lane`.
-  const header = `${'archetype'.padEnd(12)}  ${'model'.padEnd(18)}  ${'effort'.padEnd(8)}  ${'harness'.padEnd(22)}  ${'lane'.padEnd(9)}  source`;
+  const header = `${'archetype'.padEnd(12)}  ${'model'.padEnd(18)}  ${'effort'.padEnd(8)}  ${'harness'.padEnd(22)}  ${'lane'.padEnd(8)}  source`;
   console.log(header);
   for (const row of result.rows) {
     const arch = row.archetype.padEnd(12);
-    const model = row.modelDisplay.padEnd(18);
-    // The PIN, never the resolved effort. Once the delivery lane depends on
-    // whether the user pinned an effort, printing the registry default in
-    // this column says "xhigh" for both `dial worker opus` and
-    // `dial worker opus@xhigh` — two dials that now deliver differently.
-    // `inherit` rather than `—`: `—` already means "not applicable" in this
-    // column (the fallback row below), and an unpinned dial is not
-    // effort-less, it takes its effort from elsewhere — the session on the
-    // host lane, the model's declared default on the command lane. `inherit`
-    // is also the one word that cannot be mistaken for a value, unlike
-    // `default`, which is a literal effort in the vocabulary.
-    const effort = (row.resolvedVia != null ? '—' : row.pinned_effort ?? 'inherit').padEnd(8);
+    const model = row.model.padEnd(18);
+    // The PIN, never the resolved effort: every catalog model declares a
+    // default, so a column showing the effective value says the same thing for
+    // `dial worker opus` and `dial worker opus@xhigh` and hides which one the
+    // user actually asked for. `inherit` rather than `—`, because an unpinned
+    // dial is not effort-less — it takes the model's declared default on the
+    // command lane and the session's own on the host lane.
+    const effort = (row.pinned_effort ?? 'inherit').padEnd(8);
     // `—` for a null harness, which is `current-host` with no host: the cell
-    // has no value rather than the value `null`. Same dash this table already
-    // uses for a not-applicable effort.
+    // has no value rather than the value `null`.
+    // `(home)` marks a row whose DIAL named no harness — the registry
+    // answered, through the provider's home claim or a model-level `harness:`.
     const harness = (row.harness == null ? '—' : `${row.harness}${row.harness_explicit ? '' : ' (home)'}`).padEnd(22);
-    const elig = row.eligibility === 'shadow_only' ? '  SHADOW-ONLY (never gates)' : row.eligibility === 'forbidden' ? '  FORBIDDEN (refused at dispatch)' : '';
     // `inherits`, not `via`: `resolvedVia` is the ARCHETYPE this row borrowed
     // its dial from (`reviewer` with no dial of its own falling back to
-    // `worker`), which has nothing to do with the harness column two cells
-    // left. Printing both as "via" on one line was the collision that kept
-    // the column named `harness` in the first place.
+    // `worker`), which has nothing to do with the harness column.
     const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : '';
-    // `restart` rather than `restart_required`: the column is 9 wide and the
-    // full value is the one lane nobody can act on anyway — the reason for it
-    // is one `--json` away. `host` and `command` print in full, because those
-    // two are what a reader is deciding between.
-    const lane = (row.lane === 'restart_required' ? 'restart' : row.lane).padEnd(9);
-    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${lane}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}`);
-    if (row.shadow) console.log(formatShadowLine(row.shadow, '  '));
+    // `none` is not a third lane; it is the command lane with nothing to
+    // invoke, which from a bare shell is every undialed archetype. Saying
+    // `command` there would name a dispatch that cannot start.
+    const lane = (row.deliverable ? row.lane : 'none').padEnd(8);
+    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${lane}  ${roleResolutionEchoLabel(row.source)}${inherits}`);
+    console.log(`  ${row.description}`);
   }
-  // One line, once, when any shadow is shown. The shadow row reads as a
-  // property of the archetype; its scope is narrower than that, and a reader
-  // of this table is exactly the person who would otherwise assume a playbook
-  // run pairs too. See the same note at attach time.
-  if (result.rows.some((row) => row.shadow)) {
-    console.log('  (shadows roll on ad-hoc `fadeno dispatch` only; `fadeno drive` runs are unpaired)');
+  if (result.rows.some((row) => !row.deliverable)) {
+    console.log(
+      'none: no lane from here — `current-host` names the session\'s own model and this is not a session. ' +
+        'Spawn it from a host harness, or dial it onto a model with a command lane.',
+    );
   }
   if (result.note) console.log(result.note);
-}
-
-const SHADOW_EMPTY_MESSAGE =
-  'no active shadow attachments — attach one with `fadeno shadow <archetype> <model> [--rate <r>] [--n <count>]`';
-
-/**
- * Shared handler for `fadeno dial shadow ...` and its top-level alias
- * `fadeno shadow ...` — both spellings call this, so they cannot drift. The
- * caller has already validated the positional shape (0 extra = show mode, 2
- * extra = attach, 1 extra = usage error, refused before this is reached).
- */
-function runShadowCommand(
-  archetype: string | undefined,
-  model: string | undefined,
-  opts: { harness: string | null; rate?: string; n?: string; json: boolean },
-): number {
-  if (archetype == null) {
-    const result = runShadowShow({});
-    if (opts.json) {
-      console.log(JSON.stringify(result, null, 2));
-      return 0;
-    }
-    printDialShow(result, SHADOW_EMPTY_MESSAGE);
-    return 0;
-  }
-  const result = runDialShadow({ archetype, model: model!, harness: opts.harness, rate: opts.rate, n: opts.n });
-  if (opts.json) {
-    console.log(JSON.stringify(result, null, 2));
-    return 0;
-  }
-  for (const note of result.notes) console.log(note);
-  const rate = result.rate != null ? ` [rate ${result.rate}]` : '';
-  const budget = result.n != null ? ` [${result.remaining}/${result.n} triggers remaining]` : '';
-  console.log(`shadow attached: ${result.archetype} ~ ${result.refString} on ${result.harness}${rate}${budget}`);
-  if (result.previous) {
-    const previousBudget = result.previous.n != null
-      ? result.previous.remaining === 0
-        ? ` expired after ${result.previous.n} triggers`
-        : ` ${result.previous.remaining}/${result.previous.n} triggers remaining`
-      : '';
-    console.log(`  (was ${result.previous.model}${result.previous.rate ? ` rate ${result.previous.rate}` : ''}${previousBudget})`);
-  }
-  // Said at attach time, because the dial reads like a property of the
-  // ARCHETYPE and is not one. `fadeno drive` never rolls a pair — shadow
-  // sampling lives in the ad-hoc dispatch kernel — so an archetype dialed here
-  // pairs when someone runs `fadeno dispatch`, and does not when the same
-  // archetype is dispatched by a playbook run. Left undisclosed, this is a
-  // dial that silently does nothing for half the system.
-  console.log(
-    `  scope: ad-hoc \`fadeno dispatch\` only. Engine runs (\`fadeno drive\`) do not roll shadow pairs, ` +
-      `so ${result.archetype} steps inside a playbook run are unpaired.`,
-  );
-  return 0;
 }
 
 type Target = 'codex' | 'claude' | 'grok' | 'opencode' | 'omp';
@@ -468,122 +342,53 @@ async function main(argv: string[]): Promise<number> {
       args: argv,
       allowPositionals: true,
       options: {
+        help: { type: 'boolean', short: 'h' },
+        version: { type: 'boolean', short: 'v' },
+        json: { type: 'boolean' },
+        force: { type: 'boolean' },
+        verbose: { type: 'boolean' },
+        // Harness targets, for `setup`, `status` and `plugin`.
         codex: { type: 'boolean' },
         claude: { type: 'boolean' },
         grok: { type: 'boolean' },
         opencode: { type: 'boolean' },
         omp: { type: 'boolean' },
-        force: { type: 'boolean' },
-        strict: { type: 'boolean' },
-        'with-hooks': { type: 'boolean' },
-        'with-steering': { type: 'boolean' },
-        'no-steering': { type: 'boolean' },
-        'data-only': { type: 'boolean' },
+        // setup
         'non-interactive': { type: 'boolean' },
-        timeout: { type: 'string' }, // retired: accepted, ignored, warned. See RETIRED_FLAGS.
-        from: { type: 'string' },
         'reset-runtime': { type: 'boolean' },
-        all: { type: 'boolean' },
-        'purge-user-data': { type: 'boolean' },
-        project: { type: 'boolean' },
-        verbose: { type: 'boolean' },
-        scope: { type: 'string' },
-        schema: { type: 'string' },
-        format: { type: 'string' },
-        step: { type: 'string' },
-        status: { type: 'string' },
-        event: { type: 'string' },
-        artifact: { type: 'string' },
-        report: { type: 'string' },
-        member: { type: 'string' },
-        field: { type: 'string', multiple: true },
-        actor: { type: 'string' },
-        iteration: { type: 'string' },
-        inline: { type: 'boolean' },
-        'no-record': { type: 'boolean' },
-        bind: { type: 'string', multiple: true },
-        unbind: { type: 'string', multiple: true },
-        'max-transitions': { type: 'string' },
-        parallel: { type: 'string' },
-        'actor-call': { type: 'string' },
-        input: { type: 'string', multiple: true },
+        // dial and models
         harness: { type: 'string' },
         user: { type: 'boolean' },
         session: { type: 'boolean' },
         repo: { type: 'boolean' },
-        model: { type: 'string' },
         archetype: { type: 'string' },
-        'prompt-sha256': { type: 'string' },
-        role: { type: 'string' },
-        'host-executor': { type: 'string' },
-        // Pre-0.6 spelling. Kept parseable so a Codex agent TOML materialized
-        // by an older setup keeps resolving until the next one rewrites it.
-        'native-executor': { type: 'string' },
-        run: { type: 'string' },
-        'dispatch-id': { type: 'string' },
-        'prompt-file': { type: 'string' },
+        strict: { type: 'boolean' },
+        // dispatch and the hooks' entry points
+        model: { type: 'string' },
         name: { type: 'string' },
+        from: { type: 'string' },
+        shared: { type: 'boolean' },
+        lane: { type: 'string' },
         parent: { type: 'string' },
         'session-id': { type: 'string' },
+        'prompt-file': { type: 'string' },
         'message-file': { type: 'string' },
         'agent-cwd': { type: 'string' },
         transcript: { type: 'string' },
         'parent-transcript': { type: 'string' },
-        lane: { type: 'string' },
+        heartbeat: { type: 'string' },
+        // dispatch-close
         merged: { type: 'boolean' },
         kept: { type: 'boolean' },
         discarded: { type: 'boolean' },
         failed: { type: 'boolean' },
-        heartbeat: { type: 'string' },
-        'no-brief': { type: 'boolean' },
-        isolate: { type: 'boolean' },
-        shared: { type: 'boolean' },
-        'allow-relay-mismatch': { type: 'boolean' },
-        'ignored-output': { type: 'string' },
-        diagnostics: { type: 'boolean' },
-        tail: { type: 'string' },
-        stops: { type: 'boolean' },
-        rate: { type: 'string' },
-        n: { type: 'string' },
-        tag: { type: 'string' },
-        shadow: { type: 'string' },
-        bakeoffs: { type: 'boolean' },
-        wait: { type: 'string' },
-        arm: { type: 'string' },
-        check: { type: 'boolean' },
-        'measure-only': { type: 'boolean' },
-        evidence: { type: 'string' },
-        prepare: { type: 'boolean' },
-        record: { type: 'boolean' },
-        comparison: { type: 'string' },
-        adversarial: { type: 'string' },
-        judge: { type: 'string' },
-        json: { type: 'boolean' },
-        'probe-models': { type: 'boolean' },
-        'agent-id': { type: 'string' },
-        windows: { type: 'boolean' },
-        workspace: { type: 'string' },
-        branch: { type: 'string' },
-        file: { type: 'string' },
-        source: { type: 'string' },
-        output: { type: 'string' },
-        cancel: { type: 'string' },
-        withdraw: { type: 'string' },
-        'work-left': { type: 'string' },
-        merge: { type: 'string' },
-        'no-merge': { type: 'boolean' },
         note: { type: 'string' },
-        commit: { type: 'string' },
-        reason: { type: 'string' },
-        decision: { type: 'string' },
-        feedback: { type: 'string' },
-        latest: { type: 'boolean' },
-        'allow-failed': { type: 'boolean' },
-        legacy: { type: 'boolean' },
-        events: { type: 'boolean' },
-        tool: { type: 'string' },
-        help: { type: 'boolean', short: 'h' },
-        version: { type: 'boolean', short: 'v' },
+        // dispatches
+        all: { type: 'boolean' },
+        tail: { type: 'string' },
+        output: { type: 'string' },
+        // Retired: accepted, ignored, warned. See RETIRED_FLAGS.
+        timeout: { type: 'string' },
       },
     });
   } catch (err) {
@@ -789,7 +594,6 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'dial': {
-      const RESERVED = new Set(['clear', 'shadow', 'clear-shadow', 'resolve']);
       const sub = positionals[1];
       if (sub == null) {
         const result = runDialShow({});
@@ -831,69 +635,32 @@ async function main(argv: string[]): Promise<number> {
         console.log(`cleared ${result.archetype} (${result.cleared})${result.inferred ? ' [user default — the only layer holding a dial]' : ''}`);
         return 0;
       }
-      if (sub === 'clear-shadow') {
-        if (positionals.length > 3) throw new Error('Usage: fadeno dial clear-shadow [<archetype>]');
-        return clearShadow(positionals[2] ?? null, Boolean(values.json));
-      }
-      if (sub === 'shadow') {
-        const shadowUsage = 'Usage: fadeno dial shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]]';
-        if (positionals.length > 4) throw new Error(shadowUsage);
-        const archetype = positionals[2];
-        const model = positionals[3];
-        if (archetype != null && model == null) throw new Error(shadowUsage);
-        return runShadowCommand(archetype, model, { harness: values.harness ?? null, rate: values.rate, n: values.n, json: Boolean(values.json) });
-      }
       if (sub === 'resolve') {
-        // `--prompt-sha256` is the CALLER's prompt digest — sha256 of the bytes
-        // handed to Fadeno, before any kernel decoration (no archetype brief,
-        // no result-protocol footer) and with trailing newlines stripped, since
-        // the relay's heredoc adds one on the way to the kernel. The kernel
-        // re-derives that same digest to re-roll the pair, so a digest taken
-        // after decoration — or over raw bytes a transport will change —
-        // answers a different question than the dispatch will.
-        if (!values.archetype) {
-          throw new Error(
-            'Usage: fadeno dial resolve --archetype <name> ' +
-              '[--prompt-sha256 <hex: the caller\'s prompt bytes, before any kernel decoration, trailing newlines stripped>]',
-          );
-        }
-        if (positionals.length > 2) throw new Error('Usage: fadeno dial resolve --archetype <name>');
-        const result = runDialResolve({ archetype: values.archetype, promptSha256: values['prompt-sha256'] ?? null });
-        console.log(JSON.stringify(result, null, 2));
+        const usage = 'Usage: fadeno dial resolve --archetype <name>';
+        if (!values.archetype) throw new Error(usage);
+        if (positionals.length > 2) throw new Error(usage);
+        console.log(JSON.stringify(runDialResolve({ archetype: values.archetype }), null, 2));
         return 0;
       }
-      // Otherwise treat as archetype: either show single row or set
-      // Reject reserved words and 'set' for grammar sanity
-      if (RESERVED.has(sub) || sub === 'set') {
-        // This branch should be unreachable because RESERVED already handled, but 'set' still needs refusal
+      // Otherwise `sub` names an archetype: one row, or a set.
+      if (RESERVED_ARCHETYPES.has(sub)) {
         throw new Error(`archetype "${sub}" is a reserved word — rename the archetype`);
       }
       if (positionals.length === 2) {
-        // Single-archetype view
-        const archetype = sub;
         const result = runDialShow({});
-        const row = result.rows.find((r) => r.archetype === archetype);
-        const shadow = result.shadow_attachments[archetype] ?? undefined;
-        // Filter to one row
-        const filtered = {
+        const row = result.rows.find((r) => r.archetype === sub);
+        const filtered: DialShowResult = {
           ...result,
           rows: row ? [row] : [],
-          shadows: shadow ? { [archetype]: result.shadows[archetype]! } : {},
-          shadow_attachments: shadow ? { [archetype]: shadow } : {},
-          staleShadows: result.staleShadows.filter((s) => s.archetype === archetype),
-          staleDials: result.staleDials.filter((s) => s.archetype === archetype),
+          staleDials: result.staleDials.filter((stale) => stale.archetype === sub),
           dials: {
-            session: Object.hasOwn(result.dials.session, archetype) ? { [archetype]: result.dials.session[archetype]! } : {},
-            repo: Object.hasOwn(result.dials.repo, archetype) ? { [archetype]: result.dials.repo[archetype]! } : {},
-            user: Object.hasOwn(result.dials.user, archetype) ? { [archetype]: result.dials.user[archetype]! } : {},
+            session: Object.hasOwn(result.dials.session, sub) ? { [sub]: result.dials.session[sub]! } : {},
+            repo: Object.hasOwn(result.dials.repo, sub) ? { [sub]: result.dials.repo[sub]! } : {},
+            user: Object.hasOwn(result.dials.user, sub) ? { [sub]: result.dials.user[sub]! } : {},
           },
         };
-        if (values.json) {
-          console.log(JSON.stringify(filtered, null, 2));
-          return 0;
-        }
-        // Reuse printer on filtered result
-        printDialShow(filtered as any);
+        if (values.json) console.log(JSON.stringify(filtered, null, 2));
+        else printDialShow(filtered);
         return 0;
       }
       if (positionals.length >= 3) {
@@ -919,26 +686,7 @@ async function main(argv: string[]): Promise<number> {
         }
         return 0;
       }
-      throw new Error('Usage: fadeno dial [<archetype> [<model>[@effort] [--harness <id>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]] | clear-shadow [<archetype>] | resolve --archetype <name>]');
-    }
-    // Top-level alias for `fadeno dial shadow ...` — same handler
-    // (`runShadowCommand`) as the `dial` subcommand above, so the two
-    // spellings cannot drift apart.
-    case 'shadow': {
-      // `fadeno shadow clear [<archetype>]` — the detach half of this command,
-      // which previously existed only as `fadeno dial clear-shadow`. Safe as a
-      // subcommand because `clear` is a RESERVED archetype name (runDialShadow
-      // refuses it), so it can never shadow a real archetype.
-      if (positionals[1] === 'clear') {
-        if (positionals.length > 3) throw new Error('Usage: fadeno shadow clear [<archetype>]');
-        return clearShadow(positionals[2] ?? null, Boolean(values.json));
-      }
-      const shadowUsage = 'Usage: fadeno shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]] | fadeno shadow clear [<archetype>]';
-      if (positionals.length > 3) throw new Error(shadowUsage);
-      const archetype = positionals[1];
-      const model = positionals[2];
-      if (archetype != null && model == null) throw new Error(shadowUsage);
-      return runShadowCommand(archetype, model, { harness: values.harness ?? null, rate: values.rate, n: values.n, json: Boolean(values.json) });
+      throw new Error('Usage: fadeno dial [<archetype> [<model>[@effort] [--harness <id>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | resolve --archetype <name>]');
     }
     case 'dispatch': {
       const promptFile = values['prompt-file'];

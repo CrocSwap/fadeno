@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { loadLayeredProfile, type ModelFallbackOutcome, type ProfileProvenance } from './config-layers.ts';
-import { type DocumentDefect, type FadenoHarness, type UserPathOptions } from './user-paths.ts';
+import { type FadenoHarness, type UserPathOptions } from './user-paths.ts';
 
 export class ExecutorProfileError extends Error {}
 
@@ -166,31 +166,6 @@ export function callerPromptDigest(prompt: string): string {
  */
 export function canonicalCallerPrompt(prompt: string): string {
   return prompt.replace(/(?:\r?\n)+$/, '');
-}
-
-/**
- * Deterministic shadow sampling roll, in [0, 1).
- *
- * Keyed on what is being compared rather than on chance, for two reasons.
- * A retried spawn — same task, same prompt — must not fire a challenger the
- * first attempt did not, or a retry loop silently multiplies challengers. And
- * because the roll is a pure function of (prompt, archetype, challenger), two
- * different processes reach the same verdict without passing state: the
- * steering hook can decide whether a spawn is a pair *before* routing it, and
- * the kernel independently re-derives the same answer at dispatch time.
- * Re-attaching a different challenger re-rolls.
- *
- * `promptSha256` is the CALLER's digest (`callerPromptDigest` above) on every
- * caller. Passing a decorated prompt's digest here is the one way to make two
- * agreeing processes disagree, and it has happened.
- *
- * `challenger` must be the attachment spelled `formatDialRef(shadowAttachmentRef(att))`
- * — the same string on both sides, since a different spelling re-rolls just as
- * surely as a different digest.
- */
-export function shadowSampleRoll(promptSha256: string, archetype: string, challenger: string): number {
-  const digest = createHash('sha256').update(`${promptSha256}:${archetype}:${challenger}`).digest('hex');
-  return Number.parseInt(digest.slice(0, 8), 16) / 0x1_0000_0000;
 }
 
 export const SESSION_ID_PLACEHOLDER = '{session_id}';
@@ -1939,39 +1914,20 @@ export function loadExecutorProfile(repoRoot: string, options: UserPathOptions =
 export const DIALS_LOCAL_FILE = join('.fadeno', 'local', 'dials');
 
 /**
- * Schema version `writeLocalDialState` stamps. v1 is the stamp beside the
- * existing `dials`/`shadows` keys; v0 — the unstamped pair every Fadeno up to
- * 0.6.1 wrote — stays readable forever. `PERSISTED_SURFACES` in
- * `src/lib/persisted-state.ts` reads this constant rather than restating it.
+ * Schema version `writeLocalDialState` stamps. An absent stamp is version 0 —
+ * the shape every Fadeno up to 0.6.1 wrote — and still reads; a stamp from the
+ * future is refused rather than half-read, because this file decides which
+ * model runs.
  */
 export const LOCAL_DIALS_SCHEMA_VERSION = 1;
 
-// --- New pin file v3 ---
-
-export interface ShadowAttachment {
-  model: string;
-  effort?: string;
-  /** Executor harness for the challenger; absent = the model's home harness. */
-  harness?: string;
-  rate?: number;
-  /** Maximum successful attachment-backed pairings; absent means unlimited. */
-  n?: number;
-  /** Successful pairings still available. Present exactly when `n` is present. */
-  remaining?: number;
-}
-
+/**
+ * The machine-local dial layer: session dials and nothing else. Never
+ * committed, and safe to delete — which is exactly what every error about it
+ * says to do, rather than reading a file it does not understand.
+ */
 export interface LocalDialState {
   dials: Record<string, DialRef>;
-  shadows: Record<string, ShadowAttachment>;
-  legacyNote: string | null;
-  /**
-   * Set when this file still spells a delivery the pre-v4 way (` via
-   * <driver>` on a dial, `via:` on a shadow). The value was translated to a
-   * harness on read and is never written back, so the user is told once —
-   * silently rewriting the meaning of stored state is the failure this whole
-   * project exists to prevent. Absent files and clean ones report `null`.
-   */
-  legacyViaNote?: string | null;
 }
 
 function localDialPinError(detail: string): ExecutorProfileError {
@@ -1980,387 +1936,64 @@ function localDialPinError(detail: string): ExecutorProfileError {
   );
 }
 
-const LOCAL_DIALS_LOCK = `${DIALS_LOCAL_FILE}.lock`;
-const LOCAL_DIALS_LOCK_WAIT_MS = 10;
-const LOCAL_DIALS_LOCK_TIMEOUT_MS = 30_000;
-const LOCAL_DIALS_LOCK_STALE_MS = 120_000;
-const heldLocalDialLocks = new Map<string, number>();
-
-function waitSync(milliseconds: number): void {
-  const signal = new Int32Array(new SharedArrayBuffer(4));
-  Atomics.wait(signal, 0, 0, milliseconds);
-}
-
-/**
- * Serialize a local dial read-modify-write operation across processes.
- *
- * Shadow trigger budgets live in the same machine-local file as session
- * dials. `mkdir` is the acquisition primitive: exactly one process wins, so
- * checking a remaining count and decrementing it cannot oversubscribe a
- * shadow attachment. The lock is re-entrant for nested synchronous helpers.
- */
-export function withLocalDialStateLock<T>(repoRoot: string, action: () => T): T {
-  const lockPath = join(repoRoot, LOCAL_DIALS_LOCK);
-  const depth = heldLocalDialLocks.get(lockPath) ?? 0;
-  if (depth > 0) {
-    heldLocalDialLocks.set(lockPath, depth + 1);
-    try {
-      return action();
-    } finally {
-      heldLocalDialLocks.set(lockPath, depth);
-    }
-  }
-  mkdirSync(dirname(lockPath), { recursive: true });
-  const started = Date.now();
-  for (;;) {
-    try {
-      mkdirSync(lockPath);
-      break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      let stale = false;
-      try {
-        stale = Date.now() - statSync(lockPath).mtimeMs > LOCAL_DIALS_LOCK_STALE_MS;
-      } catch {
-        // A competing writer may have released the lock between mkdir/stat.
-      }
-      if (stale) {
-        rmSync(lockPath, { recursive: true, force: true });
-        continue;
-      }
-      if (Date.now() - started >= LOCAL_DIALS_LOCK_TIMEOUT_MS) {
-        throw new ExecutorProfileError(`timed out waiting for the local dial lock at ${LOCAL_DIALS_LOCK}.`);
-      }
-      waitSync(LOCAL_DIALS_LOCK_WAIT_MS);
-    }
-  }
-  heldLocalDialLocks.set(lockPath, 1);
-  try {
-    return action();
-  } finally {
-    heldLocalDialLocks.delete(lockPath);
-    rmSync(lockPath, { recursive: true, force: true });
-  }
-}
-
-/** The dial ref an attachment names, in one place so callers cannot drift. */
-export function shadowAttachmentRef(att: ShadowAttachment): DialRef {
-  return {
-    model: att.model,
-    ...(att.effort ? { effort: att.effort } : {}),
-    ...(att.harness ? { harness: att.harness } : {}),
-  };
-}
-
-/** True only for an attachment whose finite trigger budget has run out. */
-export function shadowAttachmentExpired(attachment: ShadowAttachment): boolean {
-  return attachment.n != null && attachment.remaining === 0;
-}
-
-/**
- * Equality for the user-selected attachment configuration. `remaining` is
- * deliberately excluded: it changes whenever a pairing fires, while a
- * model/rate/count change means an already-prepared challenger is no longer
- * the attachment the user asked to sample.
- */
-export function sameShadowAttachmentConfiguration(a: ShadowAttachment, b: ShadowAttachment): boolean {
-  return a.model === b.model
-    && a.effort === b.effort
-    && a.harness === b.harness
-    && a.rate === b.rate
-    && a.n === b.n;
-}
-
-export interface ShadowTriggerReservation {
-  reserved: boolean;
-  reason: 'unchanged' | 'expired' | 'changed' | 'missing';
-  attachment: ShadowAttachment | null;
-}
-
-/**
- * Reserve one real attachment-backed shadow pairing.
- *
- * Call this only after all materialization checks pass and immediately before
- * recording/spawning the challenger. Unlimited attachments reserve without a
- * write; finite ones atomically decrement their persisted remaining count.
- */
-export function reserveShadowAttachmentTrigger(
-  repoRoot: string,
-  archetype: string,
-  expected: ShadowAttachment,
-): ShadowTriggerReservation {
-  return withLocalDialStateLock(repoRoot, () => {
-    const state = readLocalDialState(repoRoot);
-    const current = state.shadows[archetype] ?? null;
-    if (current == null) return { reserved: false, reason: 'missing', attachment: null };
-    if (!sameShadowAttachmentConfiguration(current, expected)) {
-      return { reserved: false, reason: 'changed', attachment: current };
-    }
-    if (shadowAttachmentExpired(current)) {
-      return { reserved: false, reason: 'expired', attachment: current };
-    }
-    if (current.n == null) return { reserved: true, reason: 'unchanged', attachment: current };
-    const remaining = current.remaining!;
-    const next = {
-      ...state,
-      shadows: {
-        ...state.shadows,
-        [archetype]: { ...current, remaining: remaining - 1 },
-      },
-      legacyNote: null,
-    };
-    writeLocalDialState(repoRoot, next);
-    return { reserved: true, reason: 'unchanged', attachment: next.shadows[archetype]! };
-  });
-}
-
-/**
- * Return a finite reservation that could not be admitted to the dispatch
- * ledger. The bounded increment is safe with concurrent reservations: it
- * restores exactly one available slot while never exceeding `n`, and does
- * nothing if the user changed or removed the attachment in the meantime.
- */
-export function releaseShadowAttachmentTrigger(
-  repoRoot: string,
-  archetype: string,
-  expected: ShadowAttachment,
-): void {
-  if (expected.n == null) return;
-  withLocalDialStateLock(repoRoot, () => {
-    const state = readLocalDialState(repoRoot);
-    const current = state.shadows[archetype];
-    if (current == null || !sameShadowAttachmentConfiguration(current, expected) || current.n == null) return;
-    if (current.remaining! >= current.n) return;
-    writeLocalDialState(repoRoot, {
-      ...state,
-      shadows: { ...state.shadows, [archetype]: { ...current, remaining: current.remaining! + 1 } },
-      legacyNote: null,
-    });
-  });
-}
-
 export function readLocalDialState(repoRoot: string): LocalDialState {
   const path = join(repoRoot, DIALS_LOCAL_FILE);
-  if (!existsSync(path)) return { dials: {}, shadows: {}, legacyNote: null };
+  if (!existsSync(path)) return { dials: {} };
   const text = readFileSync(path, 'utf8');
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return { dials: {}, shadows: {}, legacyNote: null };
-  if (!trimmed.startsWith('{')) {
-    return {
-      dials: {},
-      shadows: {},
-      legacyNote: 'pre-0.6 loadout pin ignored (named loadouts retired) — re-dial with `fadeno dial <archetype> <model>`',
-    };
-  }
+  if (text.trim().length === 0) return { dials: {} };
   let doc: unknown;
-  try { doc = JSON.parse(text); } catch (err) {
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
     throw localDialPinError(`did not parse as JSON: ${(err as Error).message}.`);
   }
-  if (!isMapping(doc)) {
-    throw localDialPinError('is JSON, but not an object (`{dials, shadows}`).');
-  }
-  return interpretLocalDialDocument(doc);
-}
-
-/**
- * Everything `readLocalDialState` decides once the bytes are parsed.
- *
- * Split from the file read so `validateLocalDialDocument` can ask the SAME
- * function whether a document is usable. A second, audit-only copy of these
- * rules would drift from the reader the first time a key was added.
- */
-function interpretLocalDialDocument(doc: Record<string, unknown>): LocalDialState {
-  if (doc.loadout !== undefined || doc.overrides !== undefined) {
-    return {
-      dials: {},
-      shadows: {},
-      legacyNote: 'pre-0.6 loadout pin ignored (named loadouts retired) — re-dial with `fadeno dial <archetype> <model>`',
-    };
-  }
-  // An absent stamp is version 0 — the shape every Fadeno up to 0.6.1 wrote —
-  // and reads exactly as it always did. A stamp from the future is refused
-  // rather than half-read: this file decides which model runs.
+  if (!isMapping(doc)) throw localDialPinError('is JSON, but not an object (`{dials}`).');
   if (doc.schema_version !== undefined) {
     if (typeof doc.schema_version !== 'number' || !Number.isSafeInteger(doc.schema_version) || doc.schema_version < 0) {
       throw localDialPinError(`has schema_version ${JSON.stringify(doc.schema_version)}, which is not a non-negative integer.`);
     }
     if (doc.schema_version > LOCAL_DIALS_SCHEMA_VERSION) {
-      throw localDialPinError(
-        `is schema_version ${doc.schema_version}; this fadeno reads ${LOCAL_DIALS_SCHEMA_VERSION}.`,
-      );
+      throw localDialPinError(`is schema_version ${doc.schema_version}; this fadeno reads ${LOCAL_DIALS_SCHEMA_VERSION}.`);
     }
   }
   const dials: Record<string, DialRef> = {};
-  const legacyShadowVia: string[] = [];
-  const legacyDialVia: string[] = [];
   if (doc.dials != null) {
     if (!isMapping(doc.dials)) throw localDialPinError('has a `dials` that is not a mapping (archetype → dial ref).');
-    for (const [arch, raw] of Object.entries(doc.dials)) {
-      if (!BARE_IDENTIFIER_RE.test(arch)) throw localDialPinError(`has dial key "${arch}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      if (typeof raw === 'string' ? raw.includes(VIA_SEPARATOR) : isMapping(raw) && raw.via !== undefined) legacyDialVia.push(arch);
+    for (const [archetype, raw] of Object.entries(doc.dials)) {
+      if (!BARE_IDENTIFIER_RE.test(archetype)) {
+        throw localDialPinError(`has dial key "${archetype}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
+      }
       try {
-        dials[arch] = parseDialRef(raw, `dials.${arch}`);
+        dials[archetype] = parseDialRef(raw, `dials.${archetype}`);
       } catch (err) {
         throw localDialPinError((err as Error).message);
       }
     }
   }
-  const shadows: Record<string, ShadowAttachment> = {};
-  if (doc.shadows != null) {
-    if (!isMapping(doc.shadows)) throw localDialPinError('has a `shadows` that is not a mapping (archetype → shadow attachment).');
-    for (const [arch, raw] of Object.entries(doc.shadows)) {
-      if (!BARE_IDENTIFIER_RE.test(arch)) throw localDialPinError(`has shadow key "${arch}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      if (!isMapping(raw)) throw localDialPinError(`shadow "${arch}" is not a mapping ({model, effort?, harness?, rate?, n?, remaining?}).`);
-      const model = raw.model;
-      if (typeof model !== 'string' || model.trim().length === 0) throw localDialPinError(`shadow "${arch}" needs a non-empty \`model\`.`);
-      let effort: string | undefined;
-      if (raw.effort !== undefined) {
-        if (typeof raw.effort !== 'string' || raw.effort.trim().length === 0) throw localDialPinError(`shadow "${arch}" has invalid \`effort\`.`);
-        effort = raw.effort.trim();
-      }
-      let shadowHarness: string | undefined;
-      if (raw.harness !== undefined) {
-        if (typeof raw.harness !== 'string' || raw.harness.trim().length === 0) throw localDialPinError(`shadow "${arch}" has invalid \`harness\`.`);
-        shadowHarness = raw.harness.trim();
-      } else if (raw.via !== undefined) {
-        // Legacy attachment, read only: `via` was always a harness wearing a
-        // driver's name. Translated on read; never written back.
-        if (typeof raw.via !== 'string' || raw.via.trim().length === 0) throw localDialPinError(`shadow "${arch}" has invalid \`via\`.`);
-        shadowHarness = legacyDriverHarness(raw.via.trim());
-        legacyShadowVia.push(arch);
-      }
-      let rate: number | undefined;
-      if (raw.rate !== undefined) {
-        if (typeof raw.rate !== 'number' || !Number.isFinite(raw.rate) || raw.rate <= 0 || raw.rate > 1) {
-          throw localDialPinError(`shadow "${arch}" has rate ${JSON.stringify(raw.rate)}, which is not a number in (0, 1].`);
-        }
-        rate = raw.rate;
-      }
-      let n: number | undefined;
-      let remaining: number | undefined;
-      if (raw.n !== undefined) {
-        if (typeof raw.n !== 'number' || !Number.isSafeInteger(raw.n) || raw.n <= 0) {
-          throw localDialPinError(`shadow "${arch}" has n ${JSON.stringify(raw.n)}, which is not a positive integer.`);
-        }
-        n = raw.n;
-        if (typeof raw.remaining !== 'number' || !Number.isSafeInteger(raw.remaining) || raw.remaining < 0 || raw.remaining > n) {
-          throw localDialPinError(`shadow "${arch}" has remaining ${JSON.stringify(raw.remaining)}, which must be an integer in [0, n].`);
-        }
-        remaining = raw.remaining;
-      } else if (raw.remaining !== undefined) {
-        throw localDialPinError(`shadow "${arch}" has \`remaining\` without a finite \`n\` trigger limit.`);
-      }
-      const unknown = Object.keys(raw).filter((k) => !['model','effort','harness','via','rate','n','remaining'].includes(k));
-      if (unknown.length > 0) throw localDialPinError(`shadow "${arch}" has unknown key(s) ${unknown.join(', ')}; only model, effort, harness, rate, n, remaining are allowed.`);
-      const att: ShadowAttachment = { model: model.trim() };
-      if (effort != null) att.effort = effort;
-      if (shadowHarness != null) att.harness = shadowHarness;
-      if (rate != null) att.rate = rate;
-      if (n != null) {
-        att.n = n;
-        att.remaining = remaining;
-      }
-      shadows[arch] = att;
-    }
+  const unknown = Object.keys(doc).filter((k) => k !== 'dials' && k !== 'schema_version');
+  if (unknown.length > 0) {
+    throw localDialPinError(`has unknown key(s) ${unknown.join(', ')}; only \`schema_version\` and \`dials\` are allowed.`);
   }
-  const unknownTop = Object.keys(doc).filter((k) => k !== 'dials' && k !== 'shadows' && k !== 'schema_version');
-  if (unknownTop.length > 0) {
-    throw localDialPinError(`has unknown key(s) ${unknownTop.join(', ')}; only \`schema_version\`, \`dials\` and \`shadows\` are allowed.`);
-  }
-  return { dials, shadows, legacyNote: null, legacyViaNote: formatLegacyViaNote(legacyDialVia, legacyShadowVia) };
-}
-
-/**
- * What `readLocalDialState` could not use in an already-parsed pin document,
- * or null when it reads the whole thing.
- *
- * The audit's question, answered by the reader itself. A `legacyNote` counts
- * as a problem here even though the reader returns rather than throws: on a
- * document that carries the CURRENT stamp, "pre-0.6 loadout pin ignored" means
- * the file has a stamp saying v1 and a body that yields zero dials, which is
- * precisely the state a version check alone would call healthy.
- */
-export function validateLocalDialDocument(doc: unknown): DocumentDefect | null {
-  // Every defect is fatal here: `readLocalDialState` either throws — in which
-  // case `fadeno dial` and the steering hook both fail on the file — or
-  // returns the legacy note with zero dials and zero shadows.
-  if (!isMapping(doc)) return { severity: 'error', detail: 'is JSON, but not an object (`{dials, shadows}`)' };
-  try {
-    const note = interpretLocalDialDocument(doc).legacyNote;
-    return note != null ? { severity: 'error', detail: note } : null;
-  } catch (err) {
-    return { severity: 'error', detail: (err as Error).message };
-  }
-}
-
-/**
- * One line telling the user their stored state was translated out of the
- * removed ` via <driver>` grammar, or null when nothing was.
- */
-export function formatLegacyViaNote(dials: string[], shadows: string[]): string | null {
-  const parts: string[] = [];
-  if (dials.length > 0) parts.push(`dial${dials.length === 1 ? '' : 's'} ${dials.sort().join(', ')}`);
-  if (shadows.length > 0) parts.push(`shadow${shadows.length === 1 ? '' : 's'} ${shadows.sort().join(', ')}`);
-  if (parts.length === 0) return null;
-  return (
-    `note: ${DIALS_LOCAL_FILE} still spells ${parts.join(' and ')} with the removed \`via <driver>\` form; ` +
-    'read as `on <harness>` (claude-exec/claude-cli→claude, opencode-direct→opencode, muse-code→muse). ' +
-    'Re-dial to rewrite the file.'
-  );
+  return { dials };
 }
 
 export function writeLocalDialState(repoRoot: string, state: LocalDialState): string {
   const path = join(repoRoot, DIALS_LOCAL_FILE);
-  const dialKeys = Object.keys(state.dials).sort();
-  const shadowKeys = Object.keys(state.shadows).sort();
-  if (dialKeys.length === 0 && shadowKeys.length === 0) {
+  const keys = Object.keys(state.dials).sort();
+  if (keys.length === 0) {
     if (existsSync(path)) unlinkSync(path);
     return path;
   }
   mkdirSync(dirname(path), { recursive: true });
-  for (const k of dialKeys) {
-    if (!BARE_IDENTIFIER_RE.test(k)) throw new ExecutorProfileError(`dial key "${k}" is not a bare identifier.`);
-  }
-  for (const [arch, att] of Object.entries(state.shadows)) {
-    if (!BARE_IDENTIFIER_RE.test(arch)) throw new ExecutorProfileError(`shadow key "${arch}" is not a bare identifier.`);
-    if (typeof att.model !== 'string' || att.model.trim().length === 0) throw new ExecutorProfileError(`shadow "${arch}" has empty model.`);
-    if (att.rate !== undefined && (typeof att.rate !== 'number' || !Number.isFinite(att.rate) || att.rate <= 0 || att.rate > 1)) throw new ExecutorProfileError(`shadow "${arch}" has invalid rate ${String(att.rate)}.`);
-    if (att.n !== undefined && (!Number.isSafeInteger(att.n) || att.n <= 0 || !Number.isSafeInteger(att.remaining) || att.remaining! < 0 || att.remaining! > att.n)) {
-      throw new ExecutorProfileError(`shadow "${arch}" has invalid finite trigger state.`);
-    }
-    if (att.n === undefined && att.remaining !== undefined) throw new ExecutorProfileError(`shadow "${arch}" has remaining without n.`);
-  }
-  const out: Record<string, unknown> = {};
-  if (dialKeys.length > 0) {
-    const sorted: Record<string, unknown> = {};
-    for (const k of dialKeys) {
-      const ref = state.dials[k]!;
-      sorted[k] = serializeDialRef(ref);
-    }
-    out.dials = sorted;
-  }
-  if (shadowKeys.length > 0) {
-    const sortedShadows: Record<string, ShadowAttachment> = {};
-    for (const k of shadowKeys) {
-      const att = state.shadows[k]!;
-      const entry: ShadowAttachment = { model: att.model };
-      if (att.effort != null) entry.effort = att.effort;
-      if (att.harness != null) entry.harness = att.harness;
-      if (att.rate != null) entry.rate = att.rate;
-      if (att.n != null) {
-        entry.n = att.n;
-        entry.remaining = att.remaining;
-      }
-      sortedShadows[k] = entry;
-    }
-    out.shadows = sortedShadows;
+  const dials: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (!BARE_IDENTIFIER_RE.test(key)) throw new ExecutorProfileError(`dial key "${key}" is not a bare identifier.`);
+    dials[key] = serializeDialRef(state.dials[key]!);
   }
   // Stamp first, then the sorted body: a version buried after the payload is
   // a version nobody reads when they open the file to debug a dial.
-  const ordered: Record<string, unknown> = { schema_version: LOCAL_DIALS_SCHEMA_VERSION };
-  for (const k of Object.keys(out).sort()) ordered[k] = out[k];
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  writeFileSync(tmp, `${JSON.stringify(ordered)}\n`, 'utf8');
+  writeFileSync(tmp, `${JSON.stringify({ schema_version: LOCAL_DIALS_SCHEMA_VERSION, dials })}\n`, 'utf8');
   try {
     renameSync(tmp, path);
   } catch (err) {
@@ -2439,13 +2072,19 @@ export function resolveRole(
   return { delivery, source: cascade.source, resolvedVia: cascade.resolvedVia };
 }
 
+/**
+ * Where a resolution came from, in the words the user sees. One list: the
+ * `dial` table's source column, the archetype vocabulary a host is handed, and
+ * every resolution echo read the same function, so no two surfaces can name
+ * the same layer differently.
+ */
 export function roleResolutionEchoLabel(source: RoleResolutionSource): string {
   switch (source) {
     case 'binding': return 'binding';
     case 'session': return 'session dial';
     case 'repo': return 'repo pin';
     case 'user': return 'user dial';
-    case 'base': return 'base';
+    case 'base': return 'no dial';
     default: return String(source);
   }
 }
@@ -2796,52 +2435,6 @@ export function eligibilityFor(spec: ExecutorSpec, archetype: string | null): El
  */
 export function commandRoutable(spec: ExecutorSpec): boolean {
   return spec.adapter === 'command' || (spec.adapter === 'host' && spec.fallbackCommand != null);
-}
-
-/**
- * Whether a selected pair can actually reach this spec's command lane. One
- * question now: does a lane EXIST. A pair moves the primary off in-session
- * delivery onto `spec.fallbackCommand`, and a host spec that declares none has
- * nothing to move it to.
- *
- * This used to ask a second question — whether that lane satisfied the
- * archetype's declared write posture — and refuse the pair when it did not.
- * That refusal is gone with the posture system it depended on. Capability
- * skew between the two arms is now MEASURED at bakeoff time by comparing the
- * argvs that actually ran, which catches sandbox flags and tool allowlists as
- * well as writes, and reports instead of refusing.
- *
- * One shared answer for the `steering`/`dial` resolve previews (which decide
- * whether to *announce* a pair), the attach-time note in `fadeno dial shadow`
- * (which decides whether to *warn*), and the dispatch kernel (which decides
- * whether to actually *form* one).
- */
-export function explainPairRoutability(
-  spec: ExecutorSpec,
-  executorName: string,
-): { routable: true } | { routable: false; reason: string } {
-  if (!commandRoutable(spec)) {
-    return {
-      routable: false,
-      reason: `executor "${executorName}" has no command lane — a host delivery with no fallback_command has nothing for a pair to move the primary onto.`,
-    };
-  }
-  return { routable: true };
-}
-
-/**
- * The two fields a preview surface publishes for a pair-routability answer.
- * Defined once so `dial resolve` and `steering resolve` cannot drift on
- * whether the reason travels with the verdict: both surfaces used to spread
- * `...routable` alone and drop the string the predicate had already written,
- * leaving a user at `--rate 1.0` with no pairs and nothing to read.
- */
-export function pairRoutabilityFields(
-  answer: ReturnType<typeof explainPairRoutability>,
-): { routable: boolean; routable_reason: string | null } {
-  return answer.routable
-    ? { routable: true, routable_reason: null }
-    : { routable: false, routable_reason: answer.reason };
 }
 
 export function explainEligibilityConflict(
