@@ -55,10 +55,6 @@ const MODEL_VERIFY_PAGE = page(
 const TOP_LEVEL: Record<string, PageSeed> = {
   setup: page('Install safe user-scoped integration.', 'fadeno setup [--codex|--claude] [options]'),
   status: page('Show effective definitions, routing, and runtime state.', 'fadeno status [options]'),
-  doctor: page('Run read-only integration diagnostics.', 'fadeno doctor [options]', [
-    'Every check reads files. --probe-models is the exception: it spawns each dialed harness\u2019s models_command.',
-    'Reports a dialed model its backend no longer lists, a user-catalog alias the loader had to repair or drop, a verification row past the freshness window, and every persisted surface whose schema_version this build cannot read.',
-  ]),
   vendor: page('Vendor capability and definitions into this project.', 'fadeno vendor --codex|--claude|--grok|--opencode|--omp [options]'),
   uninstall: page('Remove managed user integration.', [
     'fadeno uninstall --codex|--claude|--all [options]',
@@ -251,7 +247,6 @@ const withGlobals = (...flags: string[]): readonly string[] => ['--help', '--ver
 const PAGE_OPTIONS: Record<string, readonly string[]> = {
   setup: withGlobals('--codex', '--claude', '--from', '--reset-runtime'),
   status: withGlobals('--verbose', '--codex', '--claude', '--opencode', '--omp'),
-  doctor: withGlobals('--codex', '--claude', '--opencode', '--omp', '--probe-models', '--json'),
   vendor: withGlobals('--codex', '--claude', '--grok', '--opencode', '--omp', '--no-steering', '--force'),
   uninstall: withGlobals('--codex', '--claude', '--all', '--purge-user-data', '--force'),
   clean: withGlobals('--force', '--windows'),
@@ -326,7 +321,6 @@ const PATH_OPTION_HINTS: Record<string, Record<string, string>> = {
   'steering apply': { '--force': 'Overwrite managed steering files' },
   'models remove': { '--force': 'Remove despite live dials, naming each stranded' },
   'model remove': { '--force': 'Remove despite live dials, naming each stranded' },
-  doctor: { '--probe-models': 'Spawn each dialed harness\u2019s models_command and report a model it no longer lists' },
   dispatches: {
     '--output': 'Print saved snapshot bytes for an id, last dispatch, or tag',
     '--withdraw': 'Retire a dead dispatch that has no executor to signal',
@@ -425,7 +419,7 @@ Host dispatch protocol
   dispatch-open, dispatch-close  (runless: no playbook run required)
 
 Setup and maintenance
-  setup, status, doctor, vendor, unvendor, clean, uninstall, plugin, completion
+  setup, status, vendor, unvendor, clean, uninstall, plugin, completion
 
 Global options
   -h, --help       Show this page or focused command help

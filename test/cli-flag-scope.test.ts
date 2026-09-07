@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { KNOWN_CLI_COMMANDS, renderDoctorFindings } from '../src/cli.ts';
+import { KNOWN_CLI_COMMANDS } from '../src/cli.ts';
 import { knownFlagsFor, retiredFlagFor, suggestFlag, unknownFlagsFor } from '../src/commands/completion.ts';
 
 /**
@@ -21,39 +21,9 @@ import { knownFlagsFor, retiredFlagFor, suggestFlag, unknownFlagsFor } from '../
 
 test('a flag from another command is rejected, not ignored', () => {
   // The exact invocation that silently misreported.
-  assert.deepEqual(unknownFlagsFor('doctor', undefined, ['repo']), ['--repo']);
-  // And the ones doctor really takes are untouched.
-  assert.deepEqual(unknownFlagsFor('doctor', undefined, ['codex', 'claude', 'help']), []);
-});
-
-test('doctor accepts its own probe and json flags', () => {
-  // `--probe-models` is the only flag that makes doctor spawn anything, so a
-  // registry that forgot it would turn the opt-in into an "unknown flag" and
-  // leave the check unreachable.
-  assert.deepEqual(unknownFlagsFor('doctor', undefined, ['probe-models', 'json']), []);
-});
-
-test('a clean persisted-state inventory collapses to one line, and any trouble prints the table', () => {
-  const inventory = (severity: 'ok' | 'warning') => [
-    { check: 'runtime', severity: 'ok' as const, detail: 'up' },
-    { check: 'persisted-state:dials', severity, detail: 'dials.json' },
-    { check: 'persisted-state:installations', severity: 'ok' as const, detail: 'installations.json' },
-    { check: 'dials', severity: 'ok' as const, detail: '2 user dial(s)' },
-  ];
-
-  // Eighteen identical `ok` rows push the findings that matter off the top of
-  // a terminal, which is how a diagnostic teaches people to skip it.
-  const clean = renderDoctorFindings(inventory('ok'));
-  assert.equal(clean.length, 3, 'one line per non-inventory finding, plus one summary');
-  assert.match(clean[1]!, /^ok\s+persisted-state: 2 persisted surfaces/);
-  assert.equal(clean.filter((line) => line.includes('persisted-state:')).length, 1);
-
-  // The moment one surface is not ok, the surrounding rows are the context for
-  // it, so the whole table comes back.
-  const trouble = renderDoctorFindings(inventory('warning'));
-  assert.equal(trouble.length, 4);
-  assert.ok(trouble.some((line) => line.startsWith('warning persisted-state:dials')));
-  assert.ok(trouble.some((line) => line.startsWith('ok      persisted-state:installations')));
+  assert.deepEqual(unknownFlagsFor('status', undefined, ['repo']), ['--repo']);
+  // And the ones status really takes are untouched.
+  assert.deepEqual(unknownFlagsFor('status', undefined, ['codex', 'claude', 'help']), []);
 });
 
 test('a subcommand contributes its own flags without losing the parent\'s', () => {
@@ -61,7 +31,7 @@ test('a subcommand contributes its own flags without losing the parent\'s', () =
   assert.deepEqual(unknownFlagsFor('steering', 'resolve', ['archetype']), []);
   assert.deepEqual(unknownFlagsFor('steering', 'resolve', ['help']), []);
   // A flag belonging to a DIFFERENT subcommand is still caught.
-  assert.deepEqual(unknownFlagsFor('doctor', 'resolve', ['archetype']), ['--archetype']);
+  assert.deepEqual(unknownFlagsFor('status', 'resolve', ['archetype']), ['--archetype']);
 });
 
 test('an unknown command accepts everything rather than nothing', () => {
@@ -83,10 +53,10 @@ test('a bad guess is worse than no guess', () => {
   // `--repo` is three edits from `--help`. Suggesting it sends someone to
   // verify a wrong lead; saying nothing sends them to the accepted list in
   // the same message.
-  assert.equal(suggestFlag('doctor', undefined, '--repo'), null);
+  assert.equal(suggestFlag('status', undefined, '--repo'), null);
   // A real typo still gets caught.
-  assert.equal(suggestFlag('doctor', undefined, '--claud'), '--claude');
-  assert.equal(suggestFlag('doctor', undefined, '--codexx'), '--codex');
+  assert.equal(suggestFlag('status', undefined, '--claud'), '--claude');
+  assert.equal(suggestFlag('status', undefined, '--codexx'), '--codex');
 });
 
 test('every flag a command reads is a flag the registry accepts', () => {
@@ -150,6 +120,6 @@ test('a retired flag is tolerated on the commands that used to take it, and adve
 
   // And it is not a free pass for every command: one that never took it still
   // rejects it, so this cannot become a hole in the scope check.
-  assert.deepEqual(unknownFlagsFor('doctor', undefined, ['timeout']), ['--timeout']);
-  assert.ok(!retiredFlagFor('doctor', '--timeout'));
+  assert.deepEqual(unknownFlagsFor('status', undefined, ['timeout']), ['--timeout']);
+  assert.ok(!retiredFlagFor('status', '--timeout'));
 });

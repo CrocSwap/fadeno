@@ -105,7 +105,6 @@ const MODELS_SPEC = command(
 const COMMANDS: Record<string, CommandSpec> = {
   setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE, '--from': PATH, '--reset-runtime': NONE }),
   status: command({ '--verbose': NONE, '--codex': NONE, '--claude': NONE, '--opencode': NONE, '--omp': NONE }),
-  doctor: command({ '--codex': NONE, '--claude': NONE, '--opencode': NONE, '--omp': NONE, '--probe-models': NONE, '--json': NONE }),
   vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--opencode': NONE, '--omp': NONE, '--with-hooks': NONE, '--no-steering': NONE, '--force': NONE }),
   uninstall: command({ '--codex': NONE, '--claude': NONE, '--all': NONE, '--purge-user-data': NONE, '--force': NONE }),
   clean: command({ '--force': NONE, '--windows': NONE }),

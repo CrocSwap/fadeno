@@ -13,7 +13,6 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { runDialResolve, runDialSet, runDialShadow } from '../src/commands/dial.ts';
-import { runDoctor } from '../src/commands/doctor.ts';
 import { writeLocalDialState } from '../src/lib/executors.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
@@ -55,33 +54,4 @@ test('dial resolve refuses to recommend a dispatch the kernel forbids on eligibi
 // "we never asked" is not the same as "no meaningful delivery exists".
 
 
-// A misspelled `archetypes:` key cannot be refused — an archetype with no
-// declared posture is legal — so it is linted. The damage is indirect: the
-// REAL archetype silently loses its posture.
-test('doctor lints an archetype policy that nothing dials', (t) => {
-  const root = seed(t, {
-    schema_version: 4,
-    models: { ro: { provider: 'rop', id: 'ro-m' } },
-    harnesses: { rop: { provider: 'rop', command: ECHO('RO') } },
-    archetypes: { wroker: { } },
-    dials: { worker: 'ro' },
-  });
-  const r = runDoctor({ repoRoot: root, userPathOptions: iso(root) } as Parameters<typeof runDoctor>[0]);
-  const f = r.findings.find((x) => x.check === 'archetype-policy-unreferenced');
-  assert.ok(f, 'an archetype policy nothing dials is almost always a typo');
-  assert.equal(f.severity, 'warning');
-  assert.match(f.detail, /"wroker"/);
-});
-
-test('doctor stays quiet when every declared archetype is actually dialed', (t) => {
-  const root = seed(t, {
-    schema_version: 4,
-    models: { ro: { provider: 'rop', id: 'ro-m' } },
-    harnesses: { rop: { provider: 'rop', command: ECHO('RO') } },
-    archetypes: { worker: { } },
-    dials: { worker: 'ro' },
-  });
-  const r = runDoctor({ repoRoot: root, userPathOptions: iso(root) } as Parameters<typeof runDoctor>[0]);
-  assert.equal(r.findings.find((x) => x.check === 'archetype-policy-unreferenced'), undefined);
-});
 

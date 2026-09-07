@@ -6,7 +6,6 @@ import { runSteeringApply, type SteeringApplyResult } from './steering.ts';
 import { loadExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { retiredStateFiles, userPaths, type FadenoUserPaths, type UserPathOptions } from '../lib/user-paths.ts';
-import { describeMigrationReport, migratePersistedState, type MigrationReport } from '../lib/persisted-state.ts';
 import {
   syncManagedRuntime,
   readInstallationManifest,
@@ -56,12 +55,6 @@ export interface SetupResult {
     from: string | null;
     to: string | null;
   };
-  /**
-   * What `migratePersistedState` did to the on-disk state files. Returned as
-   * data — the command never prints. Its human lines are also folded into
-   * `notices` so a view that only renders notices still tells the user.
-   */
-  persistedState: MigrationReport;
 }
 
 const PROBES: Array<{ name: string; command: string }> = [
@@ -209,12 +202,6 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
   }
   removeRetiredState(paths, setupNotices);
 
-  // After the runtime is in place, before anything reads state: bring every
-  // migratable surface to its current version, each backed up first. `setup`
-  // is the only command that rewrites persisted state — `doctor` reports it.
-  const persistedState = migratePersistedState({ repoRoot, paths });
-  setupNotices.push(...describeMigrationReport(persistedState));
-
   try {
     loadExecutorProfile(repoRoot, opts.userPathOptions).profile;
   } catch (err) {
@@ -319,6 +306,5 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
     restartRequired: steering?.restartRequired ?? false,
     notices,
     runtimeRefresh: { outcome: syncOutcome, from: syncFrom, to: syncTo },
-    persistedState,
   };
 }

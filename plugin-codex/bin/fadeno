@@ -3992,10 +3992,10 @@ var require_resolve_block_map = __commonJS({
       let offset = bm.offset;
       let commentEnd = null;
       for (const collItem of bm.items) {
-        const { start, key, sep: sep5, value } = collItem;
+        const { start, key, sep: sep3, value } = collItem;
         const keyProps = resolveProps.resolveProps(start, {
           indicator: "explicit-key-ind",
-          next: key ?? sep5?.[0],
+          next: key ?? sep3?.[0],
           offset,
           onError,
           parentIndent: bm.indent,
@@ -4009,7 +4009,7 @@ var require_resolve_block_map = __commonJS({
             else if ("indent" in key && key.indent !== bm.indent)
               onError(offset, "BAD_INDENT", startColMsg);
           }
-          if (!keyProps.anchor && !keyProps.tag && !sep5) {
+          if (!keyProps.anchor && !keyProps.tag && !sep3) {
             commentEnd = keyProps.end;
             if (keyProps.comment) {
               if (map.comment)
@@ -4033,7 +4033,7 @@ var require_resolve_block_map = __commonJS({
         ctx.atKey = false;
         if (utilMapIncludes.mapIncludes(ctx, map.items, keyNode))
           onError(keyStart, "DUPLICATE_KEY", "Map keys must be unique");
-        const valueProps = resolveProps.resolveProps(sep5 ?? [], {
+        const valueProps = resolveProps.resolveProps(sep3 ?? [], {
           indicator: "map-value-ind",
           next: value,
           offset: keyNode.range[2],
@@ -4049,7 +4049,7 @@ var require_resolve_block_map = __commonJS({
             if (ctx.options.strict && keyProps.start < valueProps.found.offset - 1024)
               onError(keyNode.range, "KEY_OVER_1024_CHARS", "The : indicator must be at most 1024 chars after the start of an implicit block mapping key");
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep5, null, valueProps, onError);
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep3, null, valueProps, onError);
           if (ctx.schema.compat)
             utilFlowIndentCheck.flowIndentCheck(bm.indent, value, onError);
           offset = valueNode.range[2];
@@ -4140,7 +4140,7 @@ var require_resolve_end = __commonJS({
       let comment = "";
       if (end) {
         let hasSpace = false;
-        let sep5 = "";
+        let sep3 = "";
         for (const token of end) {
           const { source, type } = token;
           switch (type) {
@@ -4154,13 +4154,13 @@ var require_resolve_end = __commonJS({
               if (!comment)
                 comment = cb;
               else
-                comment += sep5 + cb;
-              sep5 = "";
+                comment += sep3 + cb;
+              sep3 = "";
               break;
             }
             case "newline":
               if (comment)
-                sep5 += source;
+                sep3 += source;
               hasSpace = true;
               break;
             default:
@@ -4203,18 +4203,18 @@ var require_resolve_flow_collection = __commonJS({
       let offset = fc.offset + fc.start.source.length;
       for (let i = 0; i < fc.items.length; ++i) {
         const collItem = fc.items[i];
-        const { start, key, sep: sep5, value } = collItem;
+        const { start, key, sep: sep3, value } = collItem;
         const props = resolveProps.resolveProps(start, {
           flow: fcName,
           indicator: "explicit-key-ind",
-          next: key ?? sep5?.[0],
+          next: key ?? sep3?.[0],
           offset,
           onError,
           parentIndent: fc.indent,
           startOnNewline: false
         });
         if (!props.found) {
-          if (!props.anchor && !props.tag && !sep5 && !value) {
+          if (!props.anchor && !props.tag && !sep3 && !value) {
             if (i === 0 && props.comma)
               onError(props.comma, "UNEXPECTED_TOKEN", `Unexpected , in ${fcName}`);
             else if (i < fc.items.length - 1)
@@ -4268,8 +4268,8 @@ var require_resolve_flow_collection = __commonJS({
             }
           }
         }
-        if (!isMap && !sep5 && !props.found) {
-          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep5, null, props, onError);
+        if (!isMap && !sep3 && !props.found) {
+          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep3, null, props, onError);
           coll.items.push(valueNode);
           offset = valueNode.range[2];
           if (isBlock(value))
@@ -4281,7 +4281,7 @@ var require_resolve_flow_collection = __commonJS({
           if (isBlock(key))
             onError(keyNode.range, "BLOCK_IN_FLOW", blockMsg);
           ctx.atKey = false;
-          const valueProps = resolveProps.resolveProps(sep5 ?? [], {
+          const valueProps = resolveProps.resolveProps(sep3 ?? [], {
             flow: fcName,
             indicator: "map-value-ind",
             next: value,
@@ -4292,8 +4292,8 @@ var require_resolve_flow_collection = __commonJS({
           });
           if (valueProps.found) {
             if (!isMap && !props.found && ctx.options.strict) {
-              if (sep5)
-                for (const st of sep5) {
+              if (sep3)
+                for (const st of sep3) {
                   if (st === valueProps.found)
                     break;
                   if (st.type === "newline") {
@@ -4310,7 +4310,7 @@ var require_resolve_flow_collection = __commonJS({
             else
               onError(valueProps.start, "MISSING_CHAR", `Missing , or : between ${fcName} items`);
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep5, null, valueProps, onError) : null;
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep3, null, valueProps, onError) : null;
           if (valueNode) {
             if (isBlock(value))
               onError(valueNode.range, "BLOCK_IN_FLOW", blockMsg);
@@ -4490,7 +4490,7 @@ var require_resolve_block_scalar = __commonJS({
           chompStart = i + 1;
       }
       let value = "";
-      let sep5 = "";
+      let sep3 = "";
       let prevMoreIndented = false;
       for (let i = 0; i < contentStart; ++i)
         value += lines[i][0].slice(trimIndent) + "\n";
@@ -4507,24 +4507,24 @@ var require_resolve_block_scalar = __commonJS({
           indent = "";
         }
         if (type === Scalar.Scalar.BLOCK_LITERAL) {
-          value += sep5 + indent.slice(trimIndent) + content;
-          sep5 = "\n";
+          value += sep3 + indent.slice(trimIndent) + content;
+          sep3 = "\n";
         } else if (indent.length > trimIndent || content[0] === "	") {
-          if (sep5 === " ")
-            sep5 = "\n";
-          else if (!prevMoreIndented && sep5 === "\n")
-            sep5 = "\n\n";
-          value += sep5 + indent.slice(trimIndent) + content;
-          sep5 = "\n";
+          if (sep3 === " ")
+            sep3 = "\n";
+          else if (!prevMoreIndented && sep3 === "\n")
+            sep3 = "\n\n";
+          value += sep3 + indent.slice(trimIndent) + content;
+          sep3 = "\n";
           prevMoreIndented = true;
         } else if (content === "") {
-          if (sep5 === "\n")
+          if (sep3 === "\n")
             value += "\n";
           else
-            sep5 = "\n";
+            sep3 = "\n";
         } else {
-          value += sep5 + content;
-          sep5 = " ";
+          value += sep3 + content;
+          sep3 = " ";
           prevMoreIndented = false;
         }
       }
@@ -4706,25 +4706,25 @@ var require_resolve_flow_scalar = __commonJS({
       if (!match)
         return source;
       let res = match[1];
-      let sep5 = " ";
+      let sep3 = " ";
       let pos = first.lastIndex;
       line.lastIndex = pos;
       while (match = line.exec(source)) {
         if (match[1] === "") {
-          if (sep5 === "\n")
-            res += sep5;
+          if (sep3 === "\n")
+            res += sep3;
           else
-            sep5 = "\n";
+            sep3 = "\n";
         } else {
-          res += sep5 + match[1];
-          sep5 = " ";
+          res += sep3 + match[1];
+          sep3 = " ";
         }
         pos = line.lastIndex;
       }
       const last = /[ \t]*(.*)/sy;
       last.lastIndex = pos;
       match = last.exec(source);
-      return res + sep5 + (match?.[1] ?? "");
+      return res + sep3 + (match?.[1] ?? "");
     }
     function doubleQuotedValue(source, onError) {
       let res = "";
@@ -5534,14 +5534,14 @@ var require_cst_stringify = __commonJS({
         }
       }
     }
-    function stringifyItem({ start, key, sep: sep5, value }) {
+    function stringifyItem({ start, key, sep: sep3, value }) {
       let res = "";
       for (const st of start)
         res += st.source;
       if (key)
         res += stringifyToken(key);
-      if (sep5)
-        for (const st of sep5)
+      if (sep3)
+        for (const st of sep3)
           res += st.source;
       if (value)
         res += stringifyToken(value);
@@ -6708,18 +6708,18 @@ var require_parser = __commonJS({
         if (this.type === "map-value-ind") {
           const prev = getPrevProps(this.peek(2));
           const start = getFirstKeyStartProps(prev);
-          let sep5;
+          let sep3;
           if (scalar.end) {
-            sep5 = scalar.end;
-            sep5.push(this.sourceToken);
+            sep3 = scalar.end;
+            sep3.push(this.sourceToken);
             delete scalar.end;
           } else
-            sep5 = [this.sourceToken];
+            sep3 = [this.sourceToken];
           const map = {
             type: "block-map",
             offset: scalar.offset,
             indent: scalar.indent,
-            items: [{ start, key: scalar, sep: sep5 }]
+            items: [{ start, key: scalar, sep: sep3 }]
           };
           this.onKeyLine = true;
           this.stack[this.stack.length - 1] = map;
@@ -6872,15 +6872,15 @@ var require_parser = __commonJS({
                 } else if (isFlowToken(it.key) && !includesToken(it.sep, "newline")) {
                   const start2 = getFirstKeyStartProps(it.start);
                   const key = it.key;
-                  const sep5 = it.sep;
-                  sep5.push(this.sourceToken);
+                  const sep3 = it.sep;
+                  sep3.push(this.sourceToken);
                   delete it.key;
                   delete it.sep;
                   this.stack.push({
                     type: "block-map",
                     offset: this.offset,
                     indent: this.indent,
-                    items: [{ start: start2, key, sep: sep5 }]
+                    items: [{ start: start2, key, sep: sep3 }]
                   });
                 } else if (start.length > 0) {
                   it.sep = it.sep.concat(start, this.sourceToken);
@@ -7074,13 +7074,13 @@ var require_parser = __commonJS({
             const prev = getPrevProps(parent);
             const start = getFirstKeyStartProps(prev);
             fixFlowSeqItems(fc);
-            const sep5 = fc.end.splice(1, fc.end.length);
-            sep5.push(this.sourceToken);
+            const sep3 = fc.end.splice(1, fc.end.length);
+            sep3.push(this.sourceToken);
             const map = {
               type: "block-map",
               offset: fc.offset,
               indent: fc.indent,
-              items: [{ start, key: fc, sep: sep5 }]
+              items: [{ start, key: fc, sep: sep3 }]
             };
             this.onKeyLine = true;
             this.stack[this.stack.length - 1] = map;
@@ -7735,11 +7735,11 @@ var require_codegen = __commonJS({
         const rhs = this.rhs === void 0 ? "" : ` = ${this.rhs}`;
         return `${varKind} ${this.name}${rhs};` + _n;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants) {
         if (!names[this.name.str])
           return;
         if (this.rhs)
-          this.rhs = optimizeExpr(this.rhs, names, constants2);
+          this.rhs = optimizeExpr(this.rhs, names, constants);
         return this;
       }
       get names() {
@@ -7756,10 +7756,10 @@ var require_codegen = __commonJS({
       render({ _n }) {
         return `${this.lhs} = ${this.rhs};` + _n;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants) {
         if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
           return;
-        this.rhs = optimizeExpr(this.rhs, names, constants2);
+        this.rhs = optimizeExpr(this.rhs, names, constants);
         return this;
       }
       get names() {
@@ -7820,8 +7820,8 @@ var require_codegen = __commonJS({
       optimizeNodes() {
         return `${this.code}` ? this : void 0;
       }
-      optimizeNames(names, constants2) {
-        this.code = optimizeExpr(this.code, names, constants2);
+      optimizeNames(names, constants) {
+        this.code = optimizeExpr(this.code, names, constants);
         return this;
       }
       get names() {
@@ -7850,12 +7850,12 @@ var require_codegen = __commonJS({
         }
         return nodes.length > 0 ? this : void 0;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants) {
         const { nodes } = this;
         let i = nodes.length;
         while (i--) {
           const n = nodes[i];
-          if (n.optimizeNames(names, constants2))
+          if (n.optimizeNames(names, constants))
             continue;
           subtractNames(names, n.names);
           nodes.splice(i, 1);
@@ -7908,12 +7908,12 @@ var require_codegen = __commonJS({
           return void 0;
         return this;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants) {
         var _a;
-        this.else = (_a = this.else) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants2);
-        if (!(super.optimizeNames(names, constants2) || this.else))
+        this.else = (_a = this.else) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants);
+        if (!(super.optimizeNames(names, constants) || this.else))
           return;
-        this.condition = optimizeExpr(this.condition, names, constants2);
+        this.condition = optimizeExpr(this.condition, names, constants);
         return this;
       }
       get names() {
@@ -7936,10 +7936,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.iteration})` + super.render(opts);
       }
-      optimizeNames(names, constants2) {
-        if (!super.optimizeNames(names, constants2))
+      optimizeNames(names, constants) {
+        if (!super.optimizeNames(names, constants))
           return;
-        this.iteration = optimizeExpr(this.iteration, names, constants2);
+        this.iteration = optimizeExpr(this.iteration, names, constants);
         return this;
       }
       get names() {
@@ -7975,10 +7975,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
       }
-      optimizeNames(names, constants2) {
-        if (!super.optimizeNames(names, constants2))
+      optimizeNames(names, constants) {
+        if (!super.optimizeNames(names, constants))
           return;
-        this.iterable = optimizeExpr(this.iterable, names, constants2);
+        this.iterable = optimizeExpr(this.iterable, names, constants);
         return this;
       }
       get names() {
@@ -8020,11 +8020,11 @@ var require_codegen = __commonJS({
         (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNodes();
         return this;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants) {
         var _a, _b;
-        super.optimizeNames(names, constants2);
-        (_a = this.catch) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants2);
-        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants2);
+        super.optimizeNames(names, constants);
+        (_a = this.catch) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants);
+        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants);
         return this;
       }
       get names() {
@@ -8325,7 +8325,7 @@ var require_codegen = __commonJS({
     function addExprNames(names, from) {
       return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
     }
-    function optimizeExpr(expr, names, constants2) {
+    function optimizeExpr(expr, names, constants) {
       if (expr instanceof code_1.Name)
         return replaceName(expr);
       if (!canOptimize(expr))
@@ -8340,14 +8340,14 @@ var require_codegen = __commonJS({
         return items;
       }, []));
       function replaceName(n) {
-        const c = constants2[n.str];
+        const c = constants[n.str];
         if (c === void 0 || names[n.str] !== 1)
           return n;
         delete names[n.str];
         return c;
       }
       function canOptimize(e) {
-        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants2[c.str] !== void 0);
+        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants[c.str] !== void 0);
       }
     }
     function subtractNames(names, from) {
@@ -13902,13 +13902,12 @@ var cli_exports = {};
 __export(cli_exports, {
   KNOWN_CLI_COMMANDS: () => KNOWN_CLI_COMMANDS,
   maybeRunRuntimePreflight: () => maybeRunRuntimePreflight,
-  renderDoctorFindings: () => renderDoctorFindings,
   resolveRuntimeSyncCandidate: () => resolveRuntimeSyncCandidate,
   shouldRunPreflight: () => shouldRunPreflight
 });
 module.exports = __toCommonJS(cli_exports);
-var import_node_fs59 = require("node:fs");
-var import_node_path60 = require("node:path");
+var import_node_fs57 = require("node:fs");
+var import_node_path58 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/lib/executors.ts
@@ -14089,22 +14088,6 @@ function interpretUserDials(doc, path) {
   }
   return { dials: out, problems, fatal };
 }
-function validateUserDialsDocument(doc, path = "dials.json") {
-  if (doc == null || typeof doc !== "object" || Array.isArray(doc)) {
-    return { severity: "error", detail: "is not a JSON object" };
-  }
-  let reading;
-  try {
-    reading = interpretUserDials(doc, path);
-  } catch (err) {
-    return { severity: "error", detail: err.message };
-  }
-  if (reading.fatal != null) return { severity: "error", detail: reading.fatal };
-  const first = reading.problems[0];
-  if (first == null) return null;
-  const yieldsNothing = Object.keys(reading.dials).length === 0;
-  return { severity: yieldsNothing ? "error" : "warning", detail: first };
-}
 function readUserDials(options = {}) {
   const path = userPaths(options).dialsFile;
   if (!(0, import_node_fs2.existsSync)(path)) return {};
@@ -14164,16 +14147,6 @@ function verificationRow(entry) {
   const harness = typeof map.harness === "string" ? map.harness : typeof map.driver === "string" ? legacyDriverHarness(map.driver) : null;
   if (harness == null || typeof map.model !== "string" || typeof map.verified_at !== "string") return null;
   return { harness, model: map.model, verified_at: map.verified_at };
-}
-function validateVerificationDocument(doc) {
-  const read = interpretVerificationDocument(doc);
-  if (read.problem != null) return { severity: "error", detail: read.problem };
-  const unusable = read.rows.filter((row) => verificationRow(row) == null).length;
-  if (unusable === 0) return null;
-  return {
-    severity: unusable === read.rows.length ? "error" : "warning",
-    detail: `has ${unusable} of ${read.rows.length} row(s) that are not {harness, model, verified_at}, which the reader drops`
-  };
 }
 function readVerificationDocument(path) {
   if (!(0, import_node_fs2.existsSync)(path)) return { rows: [], understood: true };
@@ -14634,60 +14607,6 @@ function loadGlobalProfile(options = {}, host) {
     suppressedCanonArchetypes: [],
     modelFallback: { promoted: [], dropped, repairs }
   };
-}
-function missingBuiltinDeclarations(builtinDoc, projectDoc) {
-  if (builtinDoc == null || projectDoc == null) return [];
-  const missing3 = [];
-  const walk = (builtin, project, path) => {
-    for (const [key, builtinValue] of Object.entries(builtin)) {
-      const here = path === "" ? key : `${path}.${key}`;
-      if (!Object.hasOwn(project, key)) {
-        if (mapping(builtinValue) == null) missing3.push(here);
-        continue;
-      }
-      const builtinChild = mapping(builtinValue);
-      const projectChild = mapping(project[key]);
-      if (builtinChild != null && projectChild != null) walk(builtinChild, projectChild, here);
-    }
-  };
-  walk(builtinDoc, projectDoc, "");
-  return missing3;
-}
-function explainSuppressedBuiltin(repoRoot, options = {}) {
-  void options;
-  const projectPath = (0, import_node_path3.join)(repoRoot, ".fadeno", "executors.yaml");
-  const builtinPath = `${templatesDir()}/common/fadeno/executors.yaml`;
-  if (!(0, import_node_fs3.existsSync)(projectPath) || !(0, import_node_fs3.existsSync)(builtinPath)) return null;
-  let projectDoc;
-  let builtinDoc;
-  try {
-    projectDoc = parseLayer(projectPath);
-    builtinDoc = parseLayer(builtinPath);
-  } catch {
-    return null;
-  }
-  if (!projectIsComplete(projectDoc)) return null;
-  return { missing: missingBuiltinDeclarations(builtinDoc, projectDoc) };
-}
-function catalogLayerVersions(repoRoot, options = {}) {
-  const paths = userPaths(options);
-  const candidates = [
-    { layer: "user", path: paths.executorsFile },
-    { layer: "project", path: (0, import_node_path3.join)(repoRoot, ".fadeno", "executors.yaml") }
-  ];
-  const out = [];
-  for (const candidate of candidates) {
-    if (!(0, import_node_fs3.existsSync)(candidate.path)) continue;
-    try {
-      const doc = parseLayer(candidate.path);
-      out.push({
-        ...candidate,
-        schemaVersion: typeof doc.schema_version === "number" ? doc.schema_version : null
-      });
-    } catch {
-    }
-  }
-  return out;
 }
 function stringifyObject(value) {
   return (0, import_yaml.stringify)(value);
@@ -15836,15 +15755,6 @@ function interpretLocalDialDocument(doc) {
     throw localDialPinError(`has unknown key(s) ${unknownTop.join(", ")}; only \`schema_version\`, \`dials\` and \`shadows\` are allowed.`);
   }
   return { dials, shadows, legacyNote: null, legacyViaNote: formatLegacyViaNote(legacyDialVia, legacyShadowVia) };
-}
-function validateLocalDialDocument(doc) {
-  if (!isMapping(doc)) return { severity: "error", detail: "is JSON, but not an object (`{dials, shadows}`)" };
-  try {
-    const note = interpretLocalDialDocument(doc).legacyNote;
-    return note != null ? { severity: "error", detail: note } : null;
-  } catch (err) {
-    return { severity: "error", detail: err.message };
-  }
 }
 function formatLegacyViaNote(dials, shadows) {
   const parts = [];
@@ -17618,9 +17528,9 @@ function planCollectivePath(flow, step, memberPaths, members, iteration, isBody)
   if (memberPaths.length > 0 && members.length > 0) {
     const first = memberPaths[0];
     const member = members[0];
-    for (const sep5 of [`.${member}`, `/${member}`, `-${member}`]) {
-      if (first.includes(sep5)) {
-        let stem = first.split(sep5).join("");
+    for (const sep3 of [`.${member}`, `/${member}`, `-${member}`]) {
+      if (first.includes(sep3)) {
+        let stem = first.split(sep3).join("");
         if (isBody && iteration != null && !/\.v\d+(\.|$)/.test(stem)) {
           stem = withGeneration(stem, iteration);
         }
@@ -18947,72 +18857,6 @@ function compactDispatchWindows(repoRoot, opts = {}) {
   return { ...plan, compacted: true, bytesAfter, rowsDrained };
 }
 var OPEN_WINDOW_STALE_MS = 24 * 60 * 60 * 1e3;
-var WINDOW_LOG_CHECK = "dispatch-window-log";
-var COMPACT_COMMAND = "`fadeno clean --windows`";
-function describeBytes(bytes) {
-  return bytes < 1024 ? `${bytes} B` : `${Math.round(bytes / 1024)} KiB`;
-}
-function dispatchWindowLogFindings(repoRoot, opts = {}) {
-  const abs = windowsAbs(repoRoot);
-  let bytes;
-  try {
-    if (!(0, import_node_fs8.existsSync)(abs)) {
-      return [{
-        check: WINDOW_LOG_CHECK,
-        severity: "ok",
-        detail: `no write-window log yet (${DISPATCH_WINDOWS_FILE}) \u2014 nothing has opened a dispatch window in this repository`
-      }];
-    }
-    bytes = (0, import_node_fs8.statSync)(abs).size;
-  } catch {
-    return [{
-      check: WINDOW_LOG_CHECK,
-      severity: "warning",
-      detail: `${DISPATCH_WINDOWS_FILE} exists but could not be inspected, so overlap detection is reading a file this check cannot see`,
-      remediation: `Check the permissions on ${(0, import_node_path9.dirname)(DISPATCH_WINDOWS_FILE)}. Nothing is gated by this log \u2014 a delivery that cannot read it still runs, its receipt just says less.`
-    }];
-  }
-  const now = opts.now ?? /* @__PURE__ */ new Date();
-  const { windows, degraded } = readDispatchWindows(repoRoot);
-  const plan = compactDispatchWindows(repoRoot, { now, dryRun: true });
-  const findings = [];
-  if (degraded) {
-    findings.push({
-      check: WINDOW_LOG_CHECK,
-      severity: "warning",
-      detail: `${DISPATCH_WINDOWS_FILE} carries ${plan.unreadableRowsDropped > 0 ? `${plan.unreadableRowsDropped} ` : ""}row(s) no reader can use \u2014 a torn append, a blank line, or a close whose open the log never saw. The log is append-only, so this does not heal: every receipt written from now on carries a \`concurrent_write\` stamp naming \`<window log unreadable>\`, which says the list of deliveries that overlapped it is a floor rather than the set`,
-      remediation: `${COMPACT_COMMAND} rewrites the log without the unusable rows and keeps every open window. Nothing else clears it \u2014 no dispatch rewrites this file, so the torn row and the stamp it causes stay until something does.`
-    });
-  }
-  const stale = windows.filter((w) => w.endedAt == null && now.getTime() - Date.parse(w.startedAt) > OPEN_WINDOW_STALE_MS).sort((a, b) => a.startedAt < b.startedAt ? -1 : a.startedAt > b.startedAt ? 1 : 0);
-  if (stale.length > 0) {
-    const shown = stale.slice(0, 5).map((w) => `"${w.dispatchId}" (${w.kind}, ${w.workspaceMode}, open since ${w.startedAt})`);
-    const rest = stale.length > shown.length ? `, +${stale.length - shown.length} more` : "";
-    findings.push({
-      check: WINDOW_LOG_CHECK,
-      severity: "warning",
-      detail: `${stale.length} write window(s) have been open for more than ${OPEN_WINDOW_STALE_MS / 36e5} hours: ${shown.join("; ")}${rest}. A delivery that was killed never closed its window, and every later dispatch reads it as a live writer \u2014 so they auto-isolate into their own worktrees when they did not need to`,
-      remediation: `Nothing closes these automatically, and nothing here decides whether the delivery is alive \u2014 that question is what the writer lease died of. The cost of leaving them is a worktree per dispatch, never a refusal. To close one, give it a terminal receipt: \`fadeno dispatch-close <id>\` for a runless host dispatch, \`fadeno dispatch-fail <run> <dispatch-id> --reason <text>\` inside a run. ${COMPACT_COMMAND} will NOT drop them: an open window is the auto-isolate signal.`
-    });
-  }
-  if (bytes >= WINDOW_LOG_COMPACT_BYTES && plan.rowsDropped > 0) {
-    findings.push({
-      check: WINDOW_LOG_CHECK,
-      severity: "warning",
-      detail: `${DISPATCH_WINDOWS_FILE} is ${describeBytes(bytes)} across ${plan.rowsBefore} rows, of which ${plan.rowsDropped} can be dropped (${plan.windowsDropped} closed window(s) whose interval can no longer meet anything). The whole file is re-read on every dispatch terminal and every auto-isolate decision`,
-      remediation: `${COMPACT_COMMAND}. A dispatch terminal also compacts on its own past ${describeBytes(WINDOW_LOG_COMPACT_BYTES)}, so a log this size means nothing has closed a window since it grew.`
-    });
-  }
-  if (findings.length === 0) {
-    const open = windows.filter((w) => w.endedAt == null).length;
-    findings.push({
-      check: WINDOW_LOG_CHECK,
-      severity: "ok",
-      detail: `${DISPATCH_WINDOWS_FILE} reads clean: ${windows.length} window(s), ${open} still open, ${describeBytes(bytes)}`
-    });
-  }
-  return findings;
-}
 function openWindowsOtherThan(repoRoot, dispatchId) {
   return readDispatchWindows(repoRoot).windows.filter((w) => w.endedAt == null && w.dispatchId !== dispatchId).sort((a, b) => a.startedAt < b.startedAt ? -1 : a.startedAt > b.startedAt ? 1 : 0);
 }
@@ -19215,54 +19059,6 @@ function listOverlapSnapshots(repoRoot) {
   } catch {
     return [];
   }
-}
-function overlapSnapshotFindings(repoRoot) {
-  let files;
-  try {
-    files = listOverlapSnapshots(repoRoot);
-  } catch {
-    return [];
-  }
-  if (files.length === 0) {
-    return [{
-      check: "overlap-snapshots",
-      severity: "ok",
-      detail: "no leftover pre-delivery workspace snapshots"
-    }];
-  }
-  const log = readDispatchWindows(repoRoot);
-  const claimed = new Map(log.windows.map((w) => [overlapSnapshotPath(w.dispatchId), w]));
-  const orphaned = [];
-  const unknown = [];
-  let inFlight = 0;
-  for (const file of files) {
-    const window = claimed.get(file);
-    if (window != null && window.endedAt == null) {
-      inFlight += 1;
-      continue;
-    }
-    if (window != null) {
-      orphaned.push(`${window.dispatchId} (${file})`);
-      continue;
-    }
-    if (log.degraded) unknown.push(file);
-    else orphaned.push(file);
-  }
-  const stale = orphaned.length + unknown.length;
-  if (stale === 0) {
-    return [{
-      check: "overlap-snapshots",
-      severity: "ok",
-      detail: `${inFlight} pre-delivery workspace snapshot${inFlight === 1 ? "" : "s"} under ${OVERLAP_SNAPSHOTS_DIR}, all for deliveries whose overlap window is still open`
-    }];
-  }
-  const named = [...orphaned, ...unknown].slice(0, 5).join(", ");
-  return [{
-    check: "overlap-snapshots",
-    severity: "warning",
-    detail: `${stale} leftover pre-delivery workspace snapshot${stale === 1 ? "" : "s"} under ${OVERLAP_SNAPSHOTS_DIR}${inFlight > 0 ? ` (a further ${inFlight} belong to deliveries still in flight)` : ""}: ${named}${stale > 5 ? ", \u2026" : ""}. ` + (unknown.length > 0 ? `${unknown.length} of them are claimed by no window this reader could match, and the window log could not be read whole \u2014 so those are possibly-live rather than proven stale. ` : "") + "Each one is a baseline that outlived the window it was taken for \u2014 a shared host delivery killed before its terminal receipt, or a terminal whose cleanup did not take. The files themselves do nothing: nothing reads a closed window's baseline, so no overlap was mis-reported either way.",
-    remediation: `Harmless to leave and harmless to delete: remove ${OVERLAP_SNAPSHOTS_DIR} (or run \`fadeno clean --force\`, which sweeps all of \`.fadeno/local\`). A growing pile means shared host deliveries are dying before \`dispatch-complete\`/\`dispatch-fail\`; \`fadeno dispatches\` names which.`
-  }];
 }
 
 // src/lib/run-ledger.ts
@@ -19681,69 +19477,6 @@ function undeclaredCarryEnvironment(repoRoot, declared, opts = {}) {
     present,
     unknown: false
   };
-}
-var CARRY_CHECK = "worktree-carry";
-var CARRY_CATALOG = ".fadeno/executors.yaml";
-function hasDispatchActivity(repoRoot) {
-  const markers = [
-    (0, import_node_path12.join)(repoRoot, ".fadeno", "dispatches.jsonl"),
-    (0, import_node_path12.join)(repoRoot, ".fadeno", "local", "isolated"),
-    (0, import_node_path12.join)(repoRoot, ".fadeno", "local", "host-worktrees")
-  ];
-  for (const marker of markers) {
-    try {
-      if ((0, import_node_fs11.existsSync)(marker)) return true;
-    } catch {
-    }
-  }
-  return false;
-}
-function carryYamlLine(paths) {
-  return `worktree_carry: [${paths.map((path) => JSON.stringify(path)).join(", ")}]`;
-}
-function undeclaredCarryFindings(repoRoot, declared, opts = {}) {
-  const found = undeclaredCarryEnvironment(repoRoot, declared, opts);
-  if (declared.length > 0) {
-    const alsoPresent = found.paths.length > 0 ? ` Also present, gitignored, and NOT declared: ${found.paths.join(", ")} \u2014 this check does not argue with a declaration, but a gate that needs one of those still cannot run in a worktree.` : "";
-    return [{
-      check: CARRY_CHECK,
-      severity: "ok",
-      detail: `${CARRY_CATALOG} declares worktree_carry: ${declared.join(", ")}, so those paths are copied into every freshly-cut worktree before the executor starts.${alsoPresent}`
-    }];
-  }
-  if (!hasDispatchActivity(repoRoot)) {
-    return [{
-      check: CARRY_CHECK,
-      severity: "ok",
-      detail: "no dispatch has cut a worktree in this repository yet, so nothing here has needed a build environment carried into one. `worktree_carry:` in " + CARRY_CATALOG + " is what declares one when that changes."
-    }];
-  }
-  if (found.unknown) {
-    return [{
-      check: CARRY_CHECK,
-      severity: "ok",
-      detail: "the gitignored listing could not be run here, so this check cannot say whether a build environment would travel into an isolated worktree. Not a claim that one would."
-    }];
-  }
-  if (found.paths.length === 0) {
-    const tracked = found.present.length > 0 ? ` ${found.present.join(", ")} ${found.present.length === 1 ? "is" : "are"} present and tracked, so a worktree gets that content for free.` : "";
-    return [{
-      check: CARRY_CHECK,
-      severity: "ok",
-      detail: `no gitignored build environment at the top level of this repository that a worktree would miss.${tracked}`
-    }];
-  }
-  const named = found.paths.join(", ");
-  return [{
-    check: CARRY_CHECK,
-    severity: "warning",
-    detail: `this repository dispatches, and ${named} ${found.paths.length === 1 ? "is" : "are"} gitignored, so ${found.paths.length === 1 ? "it does" : "they do"} not exist inside an isolated worktree \u2014 \`git worktree add\` checks out TRACKED content only. Nothing is declared in ` + CARRY_CATALOG + ", so nothing carries them in. An agent working there cannot run the repo's own gate and will usually substitute a weaker one and finish successfully: the observed failure is a terminal `ok` receipt over validation that silently degraded from the full suite to a smoke test. Do not infer correctness from exit 0.",
-    remediation: `Add this line to ${CARRY_CATALOG} (project scope only \u2014 the user and builtin catalogs refuse the key, because it describes this repo's build state and nobody else's):
-
-    ${carryYamlLine(found.paths)}
-
-Each declared path is carried into a freshly-cut worktree by reflink \u2192 hardlink \u2192 full copy before the executor runs, and a declared path that exists and cannot be carried REFUSES the dispatch rather than running it against an incomplete checkout. Drop any entry a run does not actually need; a hardlinked tree shares inodes with yours, so a tool that writes one of these files in place writes yours too (recorded after the fact as \`carry_mutated\`, never prevented).`
-  }];
 }
 var CARRY_FINGERPRINT_MAX_ENTRIES = 25e4;
 var CARRY_DRIFT_MAX_EXAMPLES = 10;
@@ -22939,8 +22672,8 @@ function ensureIgnorePatterns(repoRoot, patterns) {
   const lines = content.split(/\r?\n/).map((line) => line.trim());
   const missing3 = patterns.filter((pattern) => !isFadenoPathIgnored(lines, pattern));
   if (missing3.length === 0) return false;
-  const sep5 = content.length === 0 || content.endsWith("\n") ? "" : "\n";
-  const block = `${sep5}# Fadeno: local generated files (not committed)
+  const sep3 = content.length === 0 || content.endsWith("\n") ? "" : "\n";
+  const block = `${sep3}# Fadeno: local generated files (not committed)
 ${missing3.join("\n")}
 `;
   (0, import_node_fs15.writeFileSync)(path, content + block, "utf8");
@@ -34193,20 +33926,6 @@ function codexOutdatedClauses(row) {
   if (row.digest == null) clauses.push("no `digest=` in its managed header where this build always stamps one");
   return clauses;
 }
-function codexStandingReason(row) {
-  switch (row.status) {
-    case "not_applicable":
-      return null;
-    case "unmanaged":
-      return "carries no managed header";
-    case "tampered":
-      return "no longer hashes to the `digest=` its own managed header stamps";
-    case "outdated":
-      return `carries ${codexOutdatedClauses(row).join(", and ")}`;
-    default:
-      return `is not one Fadeno can vouch for (${row.status})`;
-  }
-}
 function identityText(identity) {
   if (identity == null) return "missing";
   if (identity.model == null) return "the session baseline";
@@ -35860,9 +35579,9 @@ function ensureGitignored(repoRoot, patterns, results) {
     return true;
   });
   if (missing3.length === 0) return;
-  const sep5 = content.length === 0 || content.endsWith("\n") ? "" : "\n";
+  const sep3 = content.length === 0 || content.endsWith("\n") ? "" : "\n";
   const comment = missing3[0] === ".claude/settings.local.json" ? "# Fadeno: per-user local Claude settings (not committed)" : "# Fadeno: local generated files (not committed)";
-  const block = `${sep5}${comment}
+  const block = `${sep3}${comment}
 ${missing3.join("\n")}
 `;
   (0, import_node_fs31.writeFileSync)(gitignorePath, content + block, "utf8");
@@ -37393,20 +37112,12 @@ function offHostLanes(refStrings, session, opts = {}) {
 }
 
 // src/commands/models.ts
-var import_node_child_process12 = require("node:child_process");
+var import_node_child_process11 = require("node:child_process");
 var import_node_fs34 = require("node:fs");
 var import_node_path35 = require("node:path");
 var import_yaml13 = __toESM(require_dist(), 1);
 
 // src/lib/model-listing.ts
-var import_node_child_process11 = require("node:child_process");
-var LISTING_TIMEOUT_MS = 1e4;
-var CHECK_LISTING_MISSING = "model-listing-missing";
-var CHECK_LISTING_UNAVAILABLE = "model-listing-unavailable";
-function isListable(entry) {
-  const command2 = entry?.models_command;
-  return command2 != null && command2.length > 0;
-}
 function listingPrefixOf(entry) {
   const prefix = entry?.models_prefix ?? entry?.modelsPrefix;
   return prefix != null && prefix.length > 0 ? prefix : null;
@@ -37422,73 +37133,8 @@ function parseListedIds(stdout) {
   }
   return ids;
 }
-function defaultSpawn(command2, opts) {
-  const run = (0, import_node_child_process11.spawnSync)(command2[0], command2.slice(1), { timeout: opts.timeout, encoding: "utf8" });
-  return { status: run.status, stdout: run.stdout ?? "", stderr: run.stderr ?? "", ...run.error != null ? { error: run.error } : {} };
-}
-function listHarnessModels(harness, entry, spawnFn) {
-  const modelsCommand = entry.models_command;
-  if (modelsCommand == null || modelsCommand.length === 0) {
-    return { ok: false, reason: `harness "${harness}" declares no models_command \u2014 its backend cannot be listed.` };
-  }
-  const spawn4 = spawnFn ?? defaultSpawn;
-  let result;
-  try {
-    result = spawn4(modelsCommand, { timeout: LISTING_TIMEOUT_MS });
-  } catch (err) {
-    return { ok: false, reason: `models_command failed for ${harness}: ${err.message}` };
-  }
-  if (result.error != null) return { ok: false, reason: `models_command failed for ${harness}: ${result.error.message}` };
-  if (result.status !== 0) return { ok: false, reason: `models_command for ${harness} exited ${result.status}.` };
-  const stdout = typeof result.stdout === "string" ? result.stdout : result.stdout.toString("utf8");
-  return { ok: true, listing: { harness, ids: parseListedIds(stdout), prefix: listingPrefixOf(entry) } };
-}
 function listingContains(listing, modelId) {
   return listing.ids.includes(qualifyListedModelId({ ...listing.prefix != null ? { modelsPrefix: listing.prefix } : {} }, modelId));
-}
-function listingFindings(input) {
-  const byHarness = /* @__PURE__ */ new Map();
-  for (const entry of input.listings) {
-    if (!byHarness.has(entry.harness)) byHarness.set(entry.harness, entry.result);
-  }
-  const checkable = input.dialed.filter((dial) => dial.modelId !== "current-host");
-  const findings = [];
-  const unavailableReported = /* @__PURE__ */ new Set();
-  for (const entry of input.listings) {
-    const result = byHarness.get(entry.harness);
-    if (result == null || result.ok) continue;
-    if (unavailableReported.has(entry.harness)) continue;
-    const dials = checkable.filter((dial) => dial.harness === entry.harness);
-    if (dials.length === 0) continue;
-    unavailableReported.add(entry.harness);
-    findings.push({
-      check: CHECK_LISTING_UNAVAILABLE,
-      severity: "warning",
-      detail: `${entry.harness}: could not read the model listing (${result.reason}) \u2014 ${dials.length} dialed model(s) on it were not checked: ${dials.map((dial) => `${dial.archetype} \u2192 ${dial.modelId}`).join(", ")}.`,
-      remediation: `Run \`fadeno models ${entry.harness}\` to see the failure directly, then retry \`fadeno doctor --probe-models\`.`
-    });
-  }
-  const reported = /* @__PURE__ */ new Set();
-  for (const dial of checkable) {
-    const result = byHarness.get(dial.harness);
-    if (result == null || !result.ok) continue;
-    if (listingContains(result.listing, dial.modelId)) continue;
-    const key = `${dial.archetype}\0${dial.harness}\0${dial.modelId}`;
-    if (reported.has(key)) continue;
-    reported.add(key);
-    const listedAs = qualifyListedModelId(
-      { ...result.listing.prefix != null ? { modelsPrefix: result.listing.prefix } : {} },
-      dial.modelId
-    );
-    const spelled = listedAs === dial.modelId ? "" : ` (listed as "${listedAs}")`;
-    findings.push({
-      check: CHECK_LISTING_MISSING,
-      severity: "warning",
-      detail: `${dial.archetype} is dialed to "${dial.modelId}"${spelled} on ${dial.harness}, but that harness lists ${result.listing.ids.length} model id(s) and none of them is it \u2014 the dial is stale or the id was renamed.`,
-      remediation: `Run \`fadeno models ${dial.harness}\` to see what the backend lists, then \`fadeno dial ${dial.archetype} <ref>\` to dial a listed model.`
-    });
-  }
-  return findings;
 }
 
 // src/commands/models.ts
@@ -37531,8 +37177,8 @@ var DEFAULT_MODEL_DISCOVERY_PATH = [
     spelling: (provider, id) => `${provider}/${id}`
   }
 ];
-function defaultSpawn2(command2, opts) {
-  const run = (0, import_node_child_process12.spawnSync)(command2[0], command2.slice(1), { timeout: opts.timeout, encoding: "utf8" });
+function defaultSpawn(command2, opts) {
+  const run = (0, import_node_child_process11.spawnSync)(command2[0], command2.slice(1), { timeout: opts.timeout, encoding: "utf8" });
   return { status: run.status, stdout: run.stdout ?? "", stderr: run.stderr ?? "", ...run.error != null ? { error: run.error } : {} };
 }
 function runListingCommand(profile, harness, spawn4) {
@@ -37544,7 +37190,7 @@ function runListingCommand(profile, harness, spawn4) {
   if (modelsCommand == null || modelsCommand.length === 0) {
     throw new ModelsError(`harness "${harness}" declares no models_command \u2014 its backend cannot be listed.`);
   }
-  const spawnFn = spawn4 ?? defaultSpawn2;
+  const spawnFn = spawn4 ?? defaultSpawn;
   let result;
   try {
     result = spawnFn(modelsCommand, { timeout: 1e4 });
@@ -38585,42 +38231,6 @@ function readWorkspaceLease(repoRoot) {
 }
 function workspaceLeaseHolderKey(holder) {
   return JSON.stringify([holder.kind, holder.id, holder.runId ?? null, holder.dispatchId ?? null]);
-}
-function describeVestigialWorkspaceLease(repoRoot) {
-  const leaseAbs = (0, import_node_path38.join)(repoRoot, WORKSPACE_LEASE_FILE);
-  const lockAbs = (0, import_node_path38.join)(repoRoot, WORKSPACE_LEASE_LOCK);
-  const paths = [];
-  let leasePresent = false;
-  try {
-    if ((0, import_node_fs38.existsSync)(leaseAbs)) {
-      paths.push(WORKSPACE_LEASE_FILE);
-      leasePresent = true;
-    }
-  } catch {
-  }
-  try {
-    if ((0, import_node_fs38.existsSync)(lockAbs)) paths.push(WORKSPACE_LEASE_LOCK);
-  } catch {
-  }
-  if (paths.length === 0) return null;
-  const record2 = leasePresent ? readWorkspaceLease(repoRoot) : null;
-  const unreadable = leasePresent && record2 == null;
-  const age2 = (() => {
-    if (record2 == null) return "";
-    const started = Date.parse(record2.started_at);
-    if (Number.isNaN(started)) return "";
-    return ` (taken ${record2.started_at})`;
-  })();
-  const named = record2 != null ? `naming ${record2.holder.kind} "${record2.holder.id}"${age2}` : unreadable ? "that no longer parses" : "";
-  const what = paths.length === 2 ? `a leftover writer lease and its lock directory (${paths.join(", ")})` : `a leftover ${paths[0] === WORKSPACE_LEASE_FILE ? "writer lease" : "lease lock directory"} (${paths[0]})`;
-  return {
-    paths,
-    holder: record2?.holder ?? null,
-    startedAt: record2?.started_at ?? null,
-    unreadable,
-    detail: `${what}${named === "" ? "" : ` ${named}`}. Fadeno no longer takes a repo-wide writer lease \u2014 nothing reads this file, and nothing is blocked by it.`,
-    remediation: `Delete ${paths.join(" and ")}. This is safe with work in flight: no command consults it, so there is no writer to verify first. Concurrent writers are now given their own worktrees and any overlap is recorded on both receipts.`
-  };
 }
 
 // src/commands/show.ts
@@ -41531,7 +41141,6 @@ var MODELS_SPEC = command(
 var COMMANDS = {
   setup: command({ "--codex": NONE, "--claude": NONE, "--non-interactive": NONE, "--from": PATH, "--reset-runtime": NONE }),
   status: command({ "--verbose": NONE, "--codex": NONE, "--claude": NONE, "--opencode": NONE, "--omp": NONE }),
-  doctor: command({ "--codex": NONE, "--claude": NONE, "--opencode": NONE, "--omp": NONE, "--probe-models": NONE, "--json": NONE }),
   vendor: command({ "--codex": NONE, "--claude": NONE, "--grok": NONE, "--opencode": NONE, "--omp": NONE, "--with-hooks": NONE, "--no-steering": NONE, "--force": NONE }),
   uninstall: command({ "--codex": NONE, "--claude": NONE, "--all": NONE, "--purge-user-data": NONE, "--force": NONE }),
   clean: command({ "--force": NONE, "--windows": NONE }),
@@ -42086,7 +41695,7 @@ function suggestFlag(command2, subcommand, flag) {
 }
 
 // src/commands/shadow-apply.ts
-var import_node_child_process13 = require("node:child_process");
+var import_node_child_process12 = require("node:child_process");
 var import_node_fs43 = require("node:fs");
 var import_node_path43 = require("node:path");
 var ShadowApplyCommandError = class extends Error {
@@ -42156,7 +41765,7 @@ function runShadowApply(opts) {
       `pair ${pairId8} has no recorded baseline_commit for its ${arm} arm \u2014 a 3-way apply needs a common ancestor and cannot proceed without one.`
     );
   }
-  const baselineCheck = (0, import_node_child_process13.spawnSync)(
+  const baselineCheck = (0, import_node_child_process12.spawnSync)(
     "git",
     ["-C", repoRoot, "cat-file", "-e", `${baselineCommit}^{commit}`],
     { encoding: "utf8" }
@@ -42169,7 +41778,7 @@ function runShadowApply(opts) {
   const applyArgs = ["-C", repoRoot, "apply", "--3way"];
   if (check) applyArgs.push("--check");
   applyArgs.push(diffAbs);
-  const applyRes = (0, import_node_child_process13.spawnSync)("git", applyArgs, { encoding: "utf8" });
+  const applyRes = (0, import_node_child_process12.spawnSync)("git", applyArgs, { encoding: "utf8" });
   const stderrText = (applyRes.stderr ?? "").trim();
   const dispatchId = target.dispatchId ?? "";
   if (check) {
@@ -42232,7 +41841,7 @@ function runShadowApply(opts) {
 }
 
 // src/commands/bakeoff.ts
-var import_node_child_process14 = require("node:child_process");
+var import_node_child_process13 = require("node:child_process");
 var import_node_crypto16 = require("node:crypto");
 var import_node_fs44 = require("node:fs");
 var import_node_path44 = require("node:path");
@@ -42319,7 +41928,7 @@ function redefinedAtBaseline(repoRoot, baseline, identifiers) {
   const out = [];
   for (const name of identifiers) {
     const pattern = `(function|const|let|class|interface|type)[[:space:]]+${name}([^A-Za-z0-9_$]|$)`;
-    const res = (0, import_node_child_process14.spawnSync)(
+    const res = (0, import_node_child_process13.spawnSync)(
       "git",
       ["-C", repoRoot, "grep", "-l", "-E", pattern, baseline, "--", "src", "templates"],
       { encoding: "utf8" }
@@ -42346,7 +41955,7 @@ function unreachedAtSurfaces(repoRoot, baseline, surfaces, identifiers, diffText
   const parts = [surfaceAdditions(diffText, new Set(surfaces))];
   if (baseline != null) {
     for (const rel of surfaces) {
-      const res = (0, import_node_child_process14.spawnSync)("git", ["-C", repoRoot, "show", `${baseline}:${rel}`], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+      const res = (0, import_node_child_process13.spawnSync)("git", ["-C", repoRoot, "show", `${baseline}:${rel}`], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
       if (res.status === 0) parts.push(res.stdout ?? "");
     }
   }
@@ -42546,7 +42155,7 @@ function materializeArmTree(repoRoot, relDest, baselineCommit, diffRelPath, armL
   const absDest = (0, import_node_path44.join)(repoRoot, relDest);
   (0, import_node_fs44.rmSync)(absDest, { recursive: true, force: true });
   (0, import_node_fs44.mkdirSync)(absDest, { recursive: true });
-  const archive = (0, import_node_child_process14.spawnSync)("git", ["-C", repoRoot, "archive", "--format=tar", baselineCommit], {
+  const archive = (0, import_node_child_process13.spawnSync)("git", ["-C", repoRoot, "archive", "--format=tar", baselineCommit], {
     encoding: "buffer",
     maxBuffer: 512 * 1024 * 1024
   });
@@ -42555,7 +42164,7 @@ function materializeArmTree(repoRoot, relDest, baselineCommit, diffRelPath, armL
       `could not read the ${armLabel} arm's baseline tree at ${baselineCommit.slice(0, 8)}: ${(archive.stderr ?? Buffer.from("")).toString("utf8").trim() || "git archive failed"}. The commit may have been garbage-collected \u2014 adjudicate with --evidence inlined, which needs only the diff.`
     );
   }
-  const untar = (0, import_node_child_process14.spawnSync)("tar", ["-x", "-C", absDest], { input: archive.stdout, encoding: "buffer" });
+  const untar = (0, import_node_child_process13.spawnSync)("tar", ["-x", "-C", absDest], { input: archive.stdout, encoding: "buffer" });
   if (untar.status !== 0) {
     throw new BakeoffCommandError(
       `could not extract the ${armLabel} arm's baseline tree: ${(untar.stderr ?? Buffer.from("")).toString("utf8").trim()}`
@@ -42564,13 +42173,13 @@ function materializeArmTree(repoRoot, relDest, baselineCommit, diffRelPath, armL
   const diffText = (0, import_node_fs44.readFileSync)((0, import_node_path44.join)(repoRoot, diffRelPath), "utf8");
   if (diffText.trim().length === 0) return;
   const applyArgs = ["-C", repoRoot, "apply", `--directory=${relDest}`, "--whitespace=nowarn", diffRelPath];
-  const applied = (0, import_node_child_process14.spawnSync)("git", [...applyArgs], { encoding: "utf8" });
+  const applied = (0, import_node_child_process13.spawnSync)("git", [...applyArgs], { encoding: "utf8" });
   if (applied.status !== 0) {
     throw new BakeoffCommandError(
       `could not replay the ${armLabel} arm's diff onto its baseline: ${applied.stderr.trim()}. The recorded diff and baseline_commit do not agree \u2014 adjudicate with --evidence inlined, which shows the diff as recorded without reconstructing anything.`
     );
   }
-  const reversible = (0, import_node_child_process14.spawnSync)(
+  const reversible = (0, import_node_child_process13.spawnSync)(
     "git",
     ["-C", repoRoot, "apply", `--directory=${relDest}`, "--reverse", "--check", diffRelPath],
     { encoding: "utf8" }
@@ -43707,880 +43316,10 @@ function runToolRun(opts) {
 }
 
 // src/commands/setup.ts
-var import_node_child_process15 = require("node:child_process");
-var import_node_fs49 = require("node:fs");
-var import_node_os4 = require("node:os");
-var import_node_path50 = require("node:path");
-
-// src/lib/persisted-state.ts
+var import_node_child_process14 = require("node:child_process");
 var import_node_fs48 = require("node:fs");
+var import_node_os4 = require("node:os");
 var import_node_path49 = require("node:path");
-var import_yaml22 = __toESM(require_dist(), 1);
-var PERSISTED_SURFACES = [
-  {
-    id: "user-executors",
-    scope: "user-config",
-    relPath: "executors.yaml",
-    format: "yaml",
-    versionField: "schema_version",
-    currentVersion: 4,
-    reader: "loadLayeredProfile / loadGlobalProfile (src/lib/config-layers.ts)",
-    writer: "runModelsAdd (src/commands/models.ts)",
-    notes: "The personal catalog layer. A `schema_version: 3` models-only layer still loads; `harnesses:` requires 4."
-  },
-  {
-    id: "user-config",
-    scope: "user-config",
-    relPath: "config.yaml",
-    format: "yaml",
-    versionField: null,
-    currentVersion: null,
-    reader: "(none)",
-    writer: "(none)",
-    notes: "Declared by userPaths() as `configFile` and NOT stamped \u2014 because nothing reads or writes it. No code path in src/ touches this path; it is a reserved location only. Stamp it when it grows a reader."
-  },
-  {
-    id: "installations",
-    scope: "user-state",
-    relPath: "installations.json",
-    format: "json",
-    versionField: "schema_version",
-    currentVersion: 1,
-    reader: "readInstallationManifest (src/lib/installations.ts)",
-    writer: "writeInstallationManifest (src/lib/installations.ts)",
-    notes: "Already stamped, and already atomic (tmp + rename). The pattern every writer here copies."
-  },
-  {
-    id: "dials",
-    scope: "user-state",
-    relPath: "dials.json",
-    format: "json",
-    versionField: "schema_version",
-    currentVersion: DIALS_SCHEMA_VERSION,
-    reader: "readUserDials (src/lib/user-paths.ts)",
-    writer: "writeUserDials (src/lib/user-paths.ts)",
-    notes: "v1 is `{schema_version, dials}`; v0 is the flat `{archetype: ref}` map, still read."
-  },
-  {
-    id: "model-verifications",
-    scope: "user-state",
-    relPath: "model-verifications.json",
-    format: "json",
-    versionField: "schema_version",
-    currentVersion: MODEL_VERIFICATIONS_SCHEMA_VERSION,
-    reader: "readVerifiedModels (src/lib/user-paths.ts)",
-    writer: "recordVerifiedModel (src/lib/user-paths.ts)",
-    notes: "v1 is `{schema_version, verifications}`; v0 is the bare array, still read."
-  },
-  {
-    id: "retired-harness-pin",
-    scope: "user-state",
-    relPath: "harness",
-    format: "text",
-    versionField: null,
-    currentVersion: null,
-    reader: "(none \u2014 retired)",
-    writer: "(none \u2014 retired)",
-    notes: 'One line naming "the harness you last set up". NO reader is left: `activeHarness` (src/lib/executors.ts) decides from the live session. `removeRetiredState` in src/commands/setup.ts sweeps a leftover.'
-  },
-  {
-    id: "retired-loadout-pin",
-    scope: "user-state",
-    relPath: "loadout",
-    format: "text",
-    versionField: null,
-    currentVersion: null,
-    reader: "(none \u2014 retired)",
-    writer: "(none \u2014 retired)",
-    notes: "One line naming a loadout. NO reader is left: named loadouts retired in 0.6. `removeRetiredState` in src/commands/setup.ts sweeps a leftover."
-  },
-  {
-    id: "project-executors",
-    scope: "repo-local",
-    relPath: (0, import_node_path49.join)(".fadeno", "executors.yaml"),
-    format: "yaml",
-    versionField: "schema_version",
-    currentVersion: 4,
-    reader: "loadLayeredProfile (src/lib/config-layers.ts), layer `project`",
-    writer: "runInit (src/commands/init.ts) \u2014 seeded once, then hand-edited",
-    notes: "The PROJECT catalog copy `fadeno init` seeds. Today it is a full copy of the builtin `harnesses:` table, so it SHADOWS later builtin catalog changes: a harness entry fixed in a new Fadeno never reaches a repo that was init-ed before the fix. Whether doctor should flag that divergence is the integrator's call. Separately: `EXECUTORS_FILE` (src/lib/executors.ts) is exported for this path and has NO consumer \u2014 config-layers.ts re-spells the literal in five places."
-  },
-  {
-    id: "repo-dials-pin",
-    scope: "repo-local",
-    relPath: DIALS_LOCAL_FILE,
-    format: "json",
-    versionField: "schema_version",
-    currentVersion: LOCAL_DIALS_SCHEMA_VERSION,
-    reader: "readLocalDialState (src/lib/executors.ts)",
-    writer: "writeLocalDialState (src/lib/executors.ts)",
-    notes: "v1 adds the stamp beside `dials`/`shadows`; v0 is the unstamped pair, still read. Machine-local, never committed."
-  },
-  {
-    id: "dispatches-ledger",
-    scope: "ledger",
-    relPath: (0, import_node_path49.join)(".fadeno", "dispatches.jsonl"),
-    format: "jsonl",
-    versionField: "format",
-    currentVersion: "1.1",
-    reader: "lookupInputProducers / findTagOccupant (src/commands/dispatch.ts), src/commands/dispatches.ts, readAdhocHostRecords (src/commands/dispatch-adhoc.ts), loadAgentStops (src/commands/dispatches.ts, consumed by src/commands/show.ts so a run projection can see a killed host agent)",
-    writer: "appendEvidenceRow (src/commands/dispatch.ts), called by the command lane, by the runless host lane (src/commands/dispatch-adhoc.ts), by the Claude steering hook, and by both harnesses' SubagentStop hooks (templates/{claude,codex}/hooks/agent-stop.mjs) \u2014 every hook writes the stamp as a literal",
-    notes: "Per-ROW stamp, not per-file: the log is append-only, so rows outlive the shape they were written in. FOUR writers land here \u2014 command (`dispatch_requested`/`dispatch_completed`/`dispatch_withdrawn`), runless host (`adhoc_host_dispatch_requested`/`adhoc_host_dispatch_closed`), the steering hook (`host_delivery`/`host_refused`/`host_rewritten`/`native_spawn`/`host_attestation`), and the stop hook (`host_agent_stopped`) \u2014 and every one of their event names is additive under format 1.x, because readers tier on the MAJOR. A row kind the entry reader does not handle is counted as unreadable DAMAGE, so a new event name always ships with its `foldEvidenceRow` case."
-  },
-  {
-    id: "run-ledger",
-    scope: "ledger",
-    relPath: (0, import_node_path49.join)(".fadeno", "runs", "<run>", "run.yaml"),
-    format: "yaml",
-    versionField: "schema_version",
-    currentVersion: RUN_LEDGER_SCHEMA_VERSION,
-    reader: "listRuns / resolveRun / readEvents (src/lib/run-ledger.ts)",
-    writer: "writeRunDocument / LedgerWriter (src/lib/run-ledger-write.ts)",
-    notes: "A STRING version, not an integer \u2014 the one surface that predates the integer rule. `events.jsonl` carries no stamp of its own and is governed by this one: `LedgerWriter` refuses to append across versions."
-  },
-  {
-    id: "run-snapshot",
-    scope: "run",
-    relPath: (0, import_node_path49.join)(".fadeno", "runs", "<run>", "profile.yaml"),
-    format: "yaml",
-    versionField: "snapshot_version",
-    currentVersion: 3,
-    reader: "parseSnapshotDocument (src/lib/executors.ts)",
-    writer: "serializeSnapshot (src/lib/executors.ts)",
-    notes: "Its own field name, `snapshot_version`, and refused rather than degraded when it is not 3."
-  },
-  {
-    id: "bakeoff-records",
-    scope: "repo-local",
-    relPath: (0, import_node_path49.join)(".fadeno", "bakeoffs"),
-    format: "json",
-    versionField: null,
-    currentVersion: null,
-    reader: "parseBakeoffFile (src/commands/dispatches.ts, BAKEOFFS_DIR)",
-    writer: "src/commands/bakeoff.ts",
-    notes: "Adjudication records. Unstamped today; a directory of independent documents rather than one evolving file."
-  },
-  {
-    id: "host-workspace-state",
-    scope: "ephemeral",
-    relPath: HOST_WORKSPACES_DIR,
-    format: "json",
-    versionField: "schema_version",
-    currentVersion: HOST_WORKSPACE_SCHEMA_VERSION,
-    reader: "readHostWorkspaceState (src/lib/host-workspace.ts)",
-    writer: "writeStateAtomic (src/lib/host-workspace.ts)",
-    notes: "One file per host dispatch, stamped `1.0` as a string. Machine-local; a stale one is swept, never migrated."
-  },
-  {
-    id: "workspace-lease",
-    scope: "ephemeral",
-    relPath: (0, import_node_path49.join)(".fadeno", "local", "workspace-lease.json"),
-    format: "json",
-    versionField: null,
-    currentVersion: null,
-    reader: "readWorkspaceLease (src/lib/workspace-lease.ts)",
-    writer: "nothing \u2014 the repo-wide writer lease was removed",
-    notes: "VESTIGIAL. Fadeno no longer takes a repo-wide writer lease: it required proving a holder dead, which a pid-less host delivery made impossible, so a killed agent wedged the repo forever. A file here is a leftover from before the removal; `fadeno doctor` reports it and says to delete it. Read only for that report, never migrated."
-  },
-  {
-    id: "inflight-status",
-    scope: "ephemeral",
-    relPath: (0, import_node_path49.join)(".fadeno", "local", "inflight"),
-    format: "json",
-    versionField: null,
-    currentVersion: null,
-    reader: "readInflightClaim (src/lib/supervisor.ts) for fallback-*.json, readSupervisorStatus for *.status.json",
-    writer: "runDispatchFallback and the command-lane supervisor (src/commands/dispatch.ts)",
-    notes: "TWO document kinds share this directory: in-flight claims (`<dispatch>.json`, and `fallback-<run>-<dispatch>.json` from `fallbackClaimRelPath`) and `<dispatch>.status.json` supervisor exit records. Naming only the claim reader was how the audit could face a directory of 143 status records and read none of them. A pid means nothing elsewhere; a claim left by a crash must never look like evidence."
-  },
-  {
-    id: "pending-relays",
-    scope: "ephemeral",
-    relPath: (0, import_node_path49.join)(".fadeno", "local", "pending-relays.jsonl"),
-    format: "jsonl",
-    versionField: null,
-    currentVersion: null,
-    reader: "consumeSpawnSideRelay (src/commands/dispatch.ts, PENDING_RELAYS_FILE)",
-    writer: "templates/claude/hooks/dispatch-steering.mjs and templates/codex/hooks/spawn-guard.mjs \u2014 standalone hooks that cannot import the constant",
-    notes: "Proof that a relay-bound spawn happened. Consumed and truncated within a session. Two writers, one row shape: the Claude hook stashes a spawn bound for a dispatch proxy, the Codex hook stashes every delivered managed role spawn (any of which can dispatch on a per-task `mode=command` resolution)."
-  },
-  {
-    id: "proxy-dispatches",
-    scope: "ephemeral",
-    relPath: (0, import_node_path49.join)(".fadeno", "local", "proxy-dispatches.jsonl"),
-    format: "jsonl",
-    versionField: null,
-    currentVersion: null,
-    reader: "consumeProxyDispatchMarker (src/commands/dispatch.ts, PROXY_DISPATCHES_FILE)",
-    writer: "templates/claude/hooks/dispatch-proxy-guard.mjs and templates/codex/hooks/dispatch-proxy-guard.mjs \u2014 standalone hooks that cannot import the constant",
-    notes: "Sibling of pending-relays; machine-local proxy bookkeeping. The Codex writer digests the prompt FILE the role agent named, since a Codex relay carries the path rather than the bytes."
-  }
-];
-function surfaceAbsolutePath(surface, opts) {
-  if (surface.relPath.split(/[\\/]/).includes("<run>")) return null;
-  if (surface.scope === "user-config" || surface.scope === "user-state") {
-    const paths = opts.paths ?? userPaths();
-    const root = surface.scope === "user-config" ? paths.configDir : paths.stateDir;
-    return (0, import_node_path49.join)(root, surface.relPath);
-  }
-  if (opts.repoRoot == null) return null;
-  return (0, import_node_path49.join)(opts.repoRoot, surface.relPath);
-}
-function stampSchemaVersion(doc, version) {
-  const out = { schema_version: version };
-  for (const [key, value] of Object.entries(doc)) {
-    if (key === "schema_version") continue;
-    out[key] = value;
-  }
-  return out;
-}
-function readVersioned(path, opts) {
-  if (!(0, import_node_fs48.existsSync)(path)) return { missing: true };
-  let text2;
-  try {
-    text2 = (0, import_node_fs48.readFileSync)(path, "utf8");
-  } catch (err) {
-    return { unreadable: err.message };
-  }
-  if (text2.trim().length === 0) return { missing: true };
-  const yaml = /\.ya?ml$/i.test(path);
-  let doc;
-  try {
-    doc = yaml ? (0, import_yaml22.parse)(text2) : JSON.parse(text2);
-  } catch (err) {
-    return { unreadable: `not valid ${yaml ? "YAML" : "JSON"}: ${err.message}` };
-  }
-  if (doc == null || typeof doc !== "object") {
-    return { unreadable: "is not a JSON/YAML object or array" };
-  }
-  if (Array.isArray(doc)) {
-    return opts.legacyIsVersion0 ? { version: 0, body: doc } : { unreadable: "is an array with no version" };
-  }
-  const raw = doc.schema_version;
-  if (raw === void 0) return { version: 0, body: doc };
-  if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0) {
-    return { unreadable: `has schema_version ${JSON.stringify(raw)}, which is not a non-negative integer` };
-  }
-  if (raw > opts.expected) {
-    return { unreadable: `has schema_version ${raw}, which is newer than this fadeno reads (${opts.expected})` };
-  }
-  return { version: raw, body: doc };
-}
-var RUN_AUDIT_SCAN_LIMIT = 50;
-var MEMBER_AUDIT_SCAN_LIMIT = 250;
-function finding(surface, severity, detail2, remediation) {
-  return {
-    check: `persisted-state:${surface.id}`,
-    severity,
-    detail: detail2,
-    ...remediation != null ? { remediation } : {}
-  };
-}
-var BEHIND_REMEDIATION = {
-  "user-executors": "Harmless on its own \u2014 a `models:`-only personal catalog still loads at 3. `fadeno model add <alias> <provider/id> --harness <h>` rewrites it at 4.",
-  "project-executors": "Edit `.fadeno/executors.yaml` and set `schema_version: 4`, or re-seed it with `fadeno init --force`.",
-  "host-workspace-state": "Machine-local and never migrated: remove the stale directory under `.fadeno/local/host-workspaces/`."
-};
-function behindRemediation(surface) {
-  if (MIGRATABLE.has(surface.id)) return "Run `fadeno setup` to migrate it (a timestamped backup is written first).";
-  return BEHIND_REMEDIATION[surface.id] ?? `Rewrite it with its writer (${surface.writer}); \`fadeno setup\` does not migrate this surface.`;
-}
-function unreadableRemediation(surface, abs, backupDir = null) {
-  const where = backupDir != null ? ` (e.g. into ${backupDir}/)` : "";
-  return `Copy ${abs} somewhere safe${where}, then delete it; ${surface.writer} recreates it.`;
-}
-var SHAPE_VALIDATORS = {
-  // `parseLayer` (config-layers.ts) asks one thing of a catalog LAYER: that it
-  // be a YAML mapping — which `readVersioned` has already established. Parsing
-  // the merged profile is doctor's `configuration` check, and it must stay
-  // there: a user layer is legitimately a `models:`-only fragment that no
-  // full-profile parse would accept, so validating it here would report every
-  // healthy personal catalog as damaged.
-  "user-executors": null,
-  "project-executors": null,
-  installations: validateInstallationManifestDocument,
-  dials: (body) => validateUserDialsDocument(body),
-  "model-verifications": validateVerificationDocument,
-  "repo-dials-pin": validateLocalDialDocument,
-  // Immutable history and per-document ephemeral state: a run ledger, a run
-  // snapshot and a host-workspace file are written once and never migrated, so
-  // "the reader cannot use this one" is damage the reader reports where it is
-  // read, not drift the inventory can act on. The dispatch ledger is
-  // append-only and validated row by row in `auditJsonlRows`; the run ledger's
-  // `events.jsonl` companion likewise, through `readEvents` itself
-  // (`auditRunEventRows`), which is why neither needs a body validator here.
-  "run-ledger": null,
-  "run-snapshot": null,
-  "host-workspace-state": null,
-  "dispatches-ledger": null
-};
-function shapeValidatorFor(surface) {
-  if (surface.versionField == null || surface.currentVersion == null) return null;
-  if (!Object.hasOwn(SHAPE_VALIDATORS, surface.id)) {
-    throw new Error(`persisted surface "${surface.id}" is stamped but has no SHAPE_VALIDATORS entry`);
-  }
-  return SHAPE_VALIDATORS[surface.id] ?? null;
-}
-function surfaceBackupDir(surface, opts) {
-  const userScoped = surface.scope === "user-config" || surface.scope === "user-state";
-  if (userScoped) return (0, import_node_path49.join)((opts.paths ?? userPaths()).stateDir, "backups");
-  if (opts.repoRoot == null) return null;
-  return (0, import_node_path49.join)(opts.repoRoot, ".fadeno", "local", "backups");
-}
-function malformedCurrent(surface, abs, defect, backupDir) {
-  const where = backupDir != null ? ` (e.g. into ${backupDir}/)` : "";
-  const consequence = defect.severity === "error" ? "Every read of it comes back empty." : "The rest of it still reads; that part is silently dropped.";
-  return finding(
-    surface,
-    defect.severity,
-    `${surface.relPath} is stamped ${surface.versionField} ${surface.currentVersion}, but its body is not one ${surface.reader} can read in full: it ${defect.detail}. ${consequence}`,
-    `Copy ${abs} somewhere safe${where}, then ${defect.severity === "error" ? "delete it" : "delete it or repair the offending entry"}; ${surface.writer} recreates it. \`fadeno setup\` will not repair this \u2014 migration only runs version 0 \u2192 ${surface.currentVersion}.`
-  );
-}
-function auditStamped(surface, abs, backupDir = null) {
-  const expected = surface.currentVersion;
-  if (typeof expected === "number" && surface.versionField === "schema_version") {
-    const read = readVersioned(abs, { expected, legacyIsVersion0: true });
-    if ("missing" in read) return finding(surface, "ok", `${surface.relPath} is not present (nothing to migrate).`);
-    if ("unreadable" in read) {
-      return finding(surface, "error", `${surface.relPath} ${read.unreadable}.`, unreadableRemediation(surface, abs, backupDir));
-    }
-    if (read.version === expected) {
-      const defect = shapeValidatorFor(surface)?.(read.body) ?? null;
-      if (defect != null) return malformedCurrent(surface, abs, defect, backupDir);
-      return finding(surface, "ok", `${surface.relPath} is at ${surface.versionField} ${expected}.`);
-    }
-    return finding(
-      surface,
-      "warning",
-      `${surface.relPath} is at ${surface.versionField} ${read.version}; this fadeno writes ${expected}.`,
-      behindRemediation(surface)
-    );
-  }
-  return auditStringStamped(surface, abs, String(expected), backupDir);
-}
-function auditStringStamped(surface, abs, expected, backupDir = null) {
-  if (!(0, import_node_fs48.existsSync)(abs)) return finding(surface, "ok", `${surface.relPath} is not present (nothing to migrate).`);
-  let doc;
-  try {
-    const text2 = (0, import_node_fs48.readFileSync)(abs, "utf8");
-    if (text2.trim().length === 0) return finding(surface, "ok", `${surface.relPath} is empty.`);
-    doc = /\.ya?ml$/i.test(abs) ? (0, import_yaml22.parse)(text2) : JSON.parse(text2);
-  } catch (err) {
-    return finding(surface, "error", `${surface.relPath} could not be parsed: ${err.message}.`, unreadableRemediation(surface, abs, backupDir));
-  }
-  if (doc == null || typeof doc !== "object" || Array.isArray(doc)) {
-    return finding(surface, "error", `${surface.relPath} is not an object.`, unreadableRemediation(surface, abs, backupDir));
-  }
-  const found = doc[surface.versionField ?? "schema_version"];
-  if (found === void 0) {
-    return finding(surface, "warning", `${surface.relPath} has no ${surface.versionField}; this fadeno writes ${expected}.`, behindRemediation(surface));
-  }
-  if (String(found) === expected) {
-    const defect = shapeValidatorFor(surface)?.(doc) ?? null;
-    if (defect != null) return malformedCurrent(surface, abs, defect, backupDir);
-    return finding(surface, "ok", `${surface.relPath} is at ${surface.versionField} ${expected}.`);
-  }
-  return finding(
-    surface,
-    "warning",
-    `${surface.relPath} is at ${surface.versionField} ${String(found)}; this fadeno writes ${expected}.`,
-    behindRemediation(surface)
-  );
-}
-function auditJsonlRows(surface, abs, backupDir = null) {
-  if (!(0, import_node_fs48.existsSync)(abs)) return finding(surface, "ok", `${surface.relPath} is not present (nothing to migrate).`);
-  const expected = String(surface.currentVersion);
-  const field = surface.versionField;
-  let lines;
-  try {
-    lines = (0, import_node_fs48.readFileSync)(abs, "utf8").split("\n").filter((line) => line.trim().length > 0);
-  } catch (err) {
-    return finding(surface, "error", `${surface.relPath} could not be read: ${err.message}.`, unreadableRemediation(surface, abs, backupDir));
-  }
-  if (lines.length === 0) return finding(surface, "ok", `${surface.relPath} is empty.`);
-  const versions = /* @__PURE__ */ new Set();
-  let unparsed = 0;
-  for (const line of lines) {
-    try {
-      const row = JSON.parse(line);
-      const value = row?.[field];
-      versions.add(value === void 0 ? "(none)" : String(value));
-    } catch {
-      unparsed += 1;
-    }
-  }
-  if (unparsed > 0) {
-    return finding(
-      surface,
-      "error",
-      `${surface.relPath} has ${unparsed} of ${lines.length} row(s) that are not valid JSON.`,
-      `Append-only evidence is never rewritten in place: keep ${abs}, and treat the unparsable rows as lost.`
-    );
-  }
-  const stale = [...versions].filter((v) => v !== expected).sort();
-  if (stale.length === 0) return finding(surface, "ok", `${lines.length} row(s) in ${surface.relPath} are all ${field} ${expected}.`);
-  return finding(
-    surface,
-    "warning",
-    `${surface.relPath} carries row ${field}(s) ${stale.join(", ")} beside the current ${expected}.`,
-    "Expected for an append-only log \u2014 older rows keep the stamp they were written with. Nothing to fix unless a reader rejects them."
-  );
-}
-function runDirectories(repoRoot) {
-  const runsDir = (0, import_node_path49.join)(repoRoot, ".fadeno", "runs");
-  let entries;
-  try {
-    entries = (0, import_node_fs48.readdirSync)(runsDir);
-  } catch {
-    return [];
-  }
-  return entries.filter((name) => {
-    try {
-      return (0, import_node_fs48.statSync)((0, import_node_path49.join)(runsDir, name)).isDirectory();
-    } catch {
-      return false;
-    }
-  }).sort().reverse().slice(0, RUN_AUDIT_SCAN_LIMIT).map((name) => (0, import_node_path49.join)(runsDir, name));
-}
-var RUN_COMPANION_ROWS = {
-  "run-ledger": "events.jsonl"
-};
-var MAX_NAMED_BAD_LINES = 3;
-function auditRunEventRows(surface, dir, companion, backupDir) {
-  const abs = (0, import_node_path49.join)(dir, companion);
-  if (!(0, import_node_fs48.existsSync)(abs)) return null;
-  const runId = (0, import_node_path49.basename)(dir);
-  let read;
-  try {
-    read = readEvents(dir);
-  } catch (err) {
-    return {
-      rows: 0,
-      defect: finding(
-        surface,
-        "error",
-        `run ${runId}: ${companion} could not be read: ${err.message}.`,
-        unreadableRemediation(surface, abs, backupDir)
-      )
-    };
-  }
-  if (read.badLines.length === 0) return { rows: read.events.length, defect: null };
-  const named = read.badLines.slice(0, MAX_NAMED_BAD_LINES).join(", ");
-  const more = read.badLines.length > MAX_NAMED_BAD_LINES ? ` (+${read.badLines.length - MAX_NAMED_BAD_LINES} more)` : "";
-  const plural = read.badLines.length === 1 ? "line" : "lines";
-  return {
-    rows: read.events.length,
-    defect: finding(
-      surface,
-      "error",
-      `run ${runId}: ${companion} has ${read.badLines.length} row(s) its reader cannot use, at ${plural} ${named}${more}; ${read.events.length} row(s) still read.`,
-      `Append-only evidence is never rewritten in place: keep ${abs} (a copy belongs${backupDir != null ? ` in ${backupDir}/` : " somewhere safe"}) and treat those ${plural} as lost. \`fadeno show ${runId}\` reads the rest.`
-    )
-  };
-}
-function auditPerRun(surface, repoRoot) {
-  const dirs = runDirectories(repoRoot);
-  if (dirs.length === 0) return finding(surface, "ok", `no runs recorded under .fadeno/runs/.`);
-  const leaf = (0, import_node_path49.basename)(surface.relPath);
-  const worst = {
-    severity: "ok",
-    detail: ""
-  };
-  const rank = { ok: 0, warning: 1, error: 2 };
-  const consider = (per) => {
-    if (rank[per.severity] <= rank[worst.severity]) return;
-    worst.severity = per.severity;
-    worst.detail = per.detail;
-    if (per.remediation != null) worst.remediation = per.remediation;
-  };
-  const companion = RUN_COMPANION_ROWS[surface.id] ?? null;
-  const backupDir = surfaceBackupDir(surface, { repoRoot });
-  let checked = 0;
-  let companionRuns = 0;
-  let companionRows = 0;
-  const older = /* @__PURE__ */ new Set();
-  for (const dir of dirs) {
-    if (companion != null) {
-      const rows2 = auditRunEventRows(surface, dir, companion, backupDir);
-      if (rows2 != null) {
-        companionRuns += 1;
-        companionRows += rows2.rows;
-        if (rows2.defect != null) consider(rows2.defect);
-      }
-    }
-    const abs = (0, import_node_path49.join)(dir, leaf);
-    if (!(0, import_node_fs48.existsSync)(abs)) continue;
-    checked += 1;
-    const scoped = { ...surface, relPath: (0, import_node_path49.join)((0, import_node_path49.basename)(dir), leaf) };
-    const per = typeof surface.currentVersion === "number" ? auditStamped(scoped, abs, backupDir) : auditStringStamped(scoped, abs, String(surface.currentVersion), backupDir);
-    if (per.severity === "warning") {
-      older.add((0, import_node_path49.basename)(dir));
-      continue;
-    }
-    consider(per);
-  }
-  if (worst.severity !== "ok") {
-    return finding(surface, worst.severity, `${worst.detail} (worst of ${dirs.length} run(s) scanned)`, worst.remediation);
-  }
-  const rows = companion != null && companionRuns > 0 ? ` ${companionRows} ${companion} row(s) across ${companionRuns} run(s) read cleanly.` : "";
-  if (checked === 0) return finding(surface, "ok", `no ${leaf} in the ${dirs.length} most recent run(s).${rows}`);
-  const current = checked - older.size;
-  if (older.size === 0) {
-    return finding(
-      surface,
-      "ok",
-      `${checked} of the ${dirs.length} most recent run(s) carry ${leaf} at ${surface.versionField} ${surface.currentVersion}.${rows}`
-    );
-  }
-  return finding(
-    surface,
-    "ok",
-    `${current} of ${checked} scanned run(s) carry ${leaf} at ${surface.versionField} ${surface.currentVersion}; ${older.size} older run(s) keep the format they were written with (e.g. ${[...older].sort().reverse()[0]}).${rows}`
-  );
-}
-function directoryMembers(abs, keep) {
-  let entries;
-  try {
-    entries = (0, import_node_fs48.readdirSync)(abs);
-  } catch {
-    return null;
-  }
-  const names = entries.filter(keep).sort();
-  return { names: names.slice(0, MEMBER_AUDIT_SCAN_LIMIT), truncated: names.length > MEMBER_AUDIT_SCAN_LIMIT };
-}
-function scanned(count, truncated) {
-  return truncated ? `${count} (the ${MEMBER_AUDIT_SCAN_LIMIT}-document scan bound was reached)` : `${count}`;
-}
-function memberRel(repoRoot, abs) {
-  return abs.startsWith(repoRoot + import_node_path49.sep) ? abs.slice(repoRoot.length + 1) : abs;
-}
-var UNVERSIONED_READERS = {
-  // No reader in src/: `userPaths()` declares `configFile` as a reserved
-  // location and nothing in the codebase opens it. Reading it here would
-  // invent a shape it has never had.
-  "user-config": null,
-  // Retired: `activeHarness` decides from the live session, and named
-  // loadouts were retired in 0.6. `removeRetiredState` sweeps a leftover, so
-  // a file here is litter, not state — there is nothing to read it WITH.
-  "retired-harness-pin": null,
-  "retired-loadout-pin": null,
-  // `readWorkspaceLease` answers `null` for BOTH "no lease" and "a record
-  // this build cannot use" — so existence is checked first and a null from a
-  // file that is there is a rejection, never an absence. That distinction used
-  // to be load-bearing (a half-written lease read as "workspace free" and
-  // mutual exclusion silently stopped excluding). It no longer gates anything,
-  // and it is kept because this inventory's job is to say whether every
-  // persisted surface still reads back — including the ones nothing writes.
-  "workspace-lease": ({ abs, repoRoot, surface }) => {
-    const record2 = readWorkspaceLease(repoRoot);
-    if (record2 == null) {
-      return {
-        state: "rejected",
-        rel: surface.relPath,
-        abs,
-        why: "readWorkspaceLease refuses it \u2014 an unparsable record, an unknown workspace_mode, a holder it cannot read, or a missing timestamp. Vestigial either way: `fadeno doctor` reports the leftover file and it is safe to delete"
-      };
-    }
-    return { state: "read", detail: `${surface.relPath} reads back as a leftover ${record2.workspace_mode} lease naming "${record2.holder.id}"; nothing reads it any more.` };
-  },
-  // Two document kinds in one directory (see the surface's notes); both are
-  // read, because auditing only the one the inventory happened to name is how
-  // a directory of 147 status files got reported on by nothing.
-  "inflight-status": ({ abs, repoRoot, surface }) => {
-    const members = directoryMembers(abs, (name) => name.endsWith(".json"));
-    if (members == null) {
-      return { state: "rejected", rel: surface.relPath, abs, why: "the directory could not be listed" };
-    }
-    const read = (path) => (0, import_node_fs48.readFileSync)(path, "utf8");
-    let claims = 0;
-    let statuses = 0;
-    for (const name of members.names) {
-      const memberAbs = (0, import_node_path49.join)(abs, name);
-      const isStatus = name.endsWith(".status.json");
-      const parsed = isStatus ? readSupervisorStatus(memberAbs, read) : readInflightClaim(memberAbs, read);
-      if (parsed == null) {
-        return {
-          state: "rejected",
-          rel: memberRel(repoRoot, memberAbs),
-          abs: memberAbs,
-          why: isStatus ? "readSupervisorStatus gets nothing from it \u2014 unparsable bytes, or a scalar where the record belongs" : "readInflightClaim gets nothing from it \u2014 unparsable bytes, or no usable supervisor pid, which makes a live delivery look finished"
-        };
-      }
-      if (isStatus) statuses += 1;
-      else claims += 1;
-    }
-    return {
-      state: "read",
-      detail: `${surface.relPath} holds ${scanned(claims, members.truncated)} claim(s) and ${scanned(statuses, members.truncated)} supervisor status record(s); every one reads cleanly.`
-    };
-  },
-  // Append-only marker logs. `spawnMarkerLines` throws on a line that is not
-  // JSON — the same abort the consumers take — and `spawnMarkerRow` is the
-  // one predicate deciding whether a row is usable, shared with
-  // `consumeSpawnSideRelay`/`consumeProxyDispatchMarker`. A row the reader
-  // cannot use is silently skipped there, so this is the only place it is
-  // ever said out loud. Age is NOT a defect: a stale marker is one the
-  // consumer correctly ignores.
-  "pending-relays": auditSpawnMarkerLog,
-  "proxy-dispatches": auditSpawnMarkerLog,
-  // The scorecard reads `.fadeno/bakeoffs/` with `parseBakeoffFile` and counts
-  // what it rejects as `skipped` — so a judged pair that cost two dispatches
-  // can vanish from the accumulation with nothing saying the numbers stopped
-  // adding up. The audit says it.
-  "bakeoff-records": ({ abs, repoRoot, surface }) => {
-    const members = directoryMembers(abs, (name) => name.endsWith(".md"));
-    if (members == null) {
-      return { state: "rejected", rel: surface.relPath, abs, why: "the directory could not be listed" };
-    }
-    for (const name of members.names) {
-      const rel = (0, import_node_path49.join)(surface.relPath, name).split("\\").join("/");
-      const artifact = parseBakeoffFile(repoRoot, rel);
-      if (!artifact.valid) {
-        return {
-          state: "rejected",
-          rel,
-          abs: (0, import_node_path49.join)(abs, name),
-          why: `parseBakeoffFile rejects it (${artifact.error ?? "unknown"}), so the scorecard counts it as skipped and the pair it records disappears from every tally`
-        };
-      }
-    }
-    return {
-      state: "read",
-      detail: `${scanned(members.names.length, members.truncated)} record(s) in ${surface.relPath} parse as valid comparisons.`
-    };
-  }
-};
-function auditSpawnMarkerLog(ctx) {
-  const { abs, surface } = ctx;
-  let rows;
-  try {
-    rows = spawnMarkerLines((0, import_node_fs48.readFileSync)(abs, "utf8"));
-  } catch (err) {
-    return { state: "rejected", rel: surface.relPath, abs, why: `a row is not valid JSON: ${err.message}` };
-  }
-  for (const [index, row] of rows.entries()) {
-    if (spawnMarkerRow(row) == null) {
-      return {
-        state: "rejected",
-        rel: surface.relPath,
-        abs,
-        why: `row ${index + 1} carries no usable timestamp/prompt_sha256 pair, so ${surface.reader} skips it silently`
-      };
-    }
-  }
-  return { state: "read", detail: `${rows.length} row(s) in ${surface.relPath} carry a marker its reader can use.` };
-}
-function unversionedReaderFor(surface) {
-  if (surface.versionField != null && surface.currentVersion != null) return null;
-  if (!Object.hasOwn(UNVERSIONED_READERS, surface.id)) {
-    throw new Error(`persisted surface "${surface.id}" is unversioned but has no UNVERSIONED_READERS entry`);
-  }
-  return UNVERSIONED_READERS[surface.id] ?? null;
-}
-function fromRead(surface, read, backupDir) {
-  if (read.state === "absent") return finding(surface, "ok", `${surface.relPath} is not present (nothing to read).`);
-  if (read.state === "read") return finding(surface, "ok", read.detail);
-  return finding(
-    surface,
-    "error",
-    // The `why` always names the reader that refused it — repeating the
-    // surface's whole `reader` column here made a two-reader surface read as
-    // one unpunctuated run-on.
-    `${read.rel} is not a document its reader can use: ${read.why}.`,
-    unreadableRemediation(surface, read.abs, backupDir)
-  );
-}
-function auditUnversioned(surface, opts) {
-  const reader = unversionedReaderFor(surface);
-  if (reader == null) {
-    const why = surface.reader.startsWith("(none") ? "nothing reads it" : "ephemeral or per-document state";
-    return finding(surface, "ok", `${surface.relPath} is unversioned by design (${why}).`);
-  }
-  const abs = surfaceAbsolutePath(surface, opts);
-  if (abs == null || opts.repoRoot == null) {
-    return finding(surface, "ok", `${surface.relPath} could not be resolved here.`);
-  }
-  if (!(0, import_node_fs48.existsSync)(abs)) return fromRead(surface, { state: "absent" }, null);
-  return fromRead(surface, reader({ surface, abs, repoRoot: opts.repoRoot }), surfaceBackupDir(surface, opts));
-}
-function auditStampedDirectory(surface, abs, opts) {
-  if (surface.id !== "host-workspace-state") {
-    throw new Error(`persisted surface "${surface.id}" is a stamped directory with no member reader`);
-  }
-  const repoRoot = opts.repoRoot;
-  const backupDir = surfaceBackupDir(surface, opts);
-  const runs = directoryMembers(abs, (name) => {
-    try {
-      return (0, import_node_fs48.statSync)((0, import_node_path49.join)(abs, name)).isDirectory();
-    } catch {
-      return false;
-    }
-  });
-  if (runs == null) {
-    return finding(surface, "error", `${surface.relPath} could not be listed.`, unreadableRemediation(surface, abs, backupDir));
-  }
-  let documents = 0;
-  let truncated = runs.truncated;
-  for (const run of runs.names) {
-    const members = directoryMembers((0, import_node_path49.join)(abs, run), (name) => name.endsWith(".json"));
-    if (members == null) continue;
-    truncated = truncated || members.truncated;
-    for (const name of members.names) {
-      const dispatchId = name.slice(0, -".json".length);
-      const memberAbs = (0, import_node_path49.join)(abs, run, name);
-      try {
-        if (readHostWorkspaceState(repoRoot, run, dispatchId) != null) documents += 1;
-      } catch (err) {
-        return finding(
-          surface,
-          "error",
-          `${memberRel(repoRoot, memberAbs)} is not a document readHostWorkspaceState can use: ${err.message}.`,
-          unreadableRemediation(surface, memberAbs, backupDir)
-        );
-      }
-    }
-  }
-  return finding(
-    surface,
-    "ok",
-    `${surface.relPath} holds ${scanned(documents, truncated)} per-dispatch document(s), each stamped ${surface.versionField} ${surface.currentVersion} and readable by ${surface.reader}; not migrated.`
-  );
-}
-function auditPersistedState(opts) {
-  const findings = [];
-  for (const surface of PERSISTED_SURFACES) {
-    const repoScoped = surface.scope !== "user-config" && surface.scope !== "user-state";
-    if (repoScoped && opts.repoRoot == null) {
-      findings.push(finding(surface, "ok", `${surface.relPath} is repo-scoped; not checked outside a repository.`));
-      continue;
-    }
-    if (surface.currentVersion == null || surface.versionField == null) {
-      findings.push(auditUnversioned(surface, opts));
-      continue;
-    }
-    if (surface.relPath.split(/[\\/]/).includes("<run>")) {
-      findings.push(auditPerRun(surface, opts.repoRoot));
-      continue;
-    }
-    const abs = surfaceAbsolutePath(surface, opts);
-    if (abs == null) {
-      findings.push(finding(surface, "ok", `${surface.relPath} could not be resolved here.`));
-      continue;
-    }
-    if ((0, import_node_fs48.existsSync)(abs) && (0, import_node_fs48.statSync)(abs).isDirectory()) {
-      findings.push(auditStampedDirectory(surface, abs, opts));
-      continue;
-    }
-    findings.push(
-      surface.format === "jsonl" ? auditJsonlRows(surface, abs, surfaceBackupDir(surface, opts)) : auditStamped(surface, abs, surfaceBackupDir(surface, opts))
-    );
-  }
-  return findings;
-}
-var MIGRATABLE = /* @__PURE__ */ new Set(["dials", "model-verifications", "repo-dials-pin"]);
-function backupStamp(now) {
-  return now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-}
-function backupBefore(abs, surface, opts, stamp) {
-  const userScoped = surface.scope === "user-config" || surface.scope === "user-state";
-  const root = userScoped ? (0, import_node_path49.join)((opts.paths ?? userPaths()).stateDir, "backups", stamp) : (0, import_node_path49.join)(opts.repoRoot, ".fadeno", "local", "backups", stamp);
-  (0, import_node_fs48.mkdirSync)(root, { recursive: true });
-  const target = (0, import_node_path49.join)(root, (0, import_node_path49.basename)(abs));
-  (0, import_node_fs48.writeFileSync)(target, (0, import_node_fs48.readFileSync)(abs), { flag: "w" });
-  return target;
-}
-function writeAtomic(abs, text2) {
-  (0, import_node_fs48.mkdirSync)((0, import_node_path49.dirname)(abs), { recursive: true });
-  const tmp = `${abs}.tmp-${process.pid}-${Date.now()}`;
-  (0, import_node_fs48.writeFileSync)(tmp, text2, "utf8");
-  try {
-    (0, import_node_fs48.renameSync)(tmp, abs);
-  } catch (err) {
-    try {
-      (0, import_node_fs48.rmSync)(tmp, { force: true });
-    } catch {
-    }
-    throw err;
-  }
-}
-function migrateDocument(surface, abs) {
-  const to = surface.currentVersion;
-  const read = readVersioned(abs, { expected: to, legacyIsVersion0: true });
-  if ("missing" in read) return { plan: "empty" };
-  if ("unreadable" in read) throw new Error(`${surface.relPath} ${read.unreadable}`);
-  if (read.version === to) return { plan: "current" };
-  if (read.version !== 0) throw new Error(`${surface.relPath} is at ${surface.versionField} ${read.version}; only 0 \u2192 ${to} is known`);
-  let next;
-  if (surface.id === "model-verifications") {
-    if (!Array.isArray(read.body)) throw new Error(`${surface.relPath} v0 is not an array`);
-    next = stampSchemaVersion({ verifications: read.body }, to);
-  } else if (surface.id === "dials") {
-    next = stampSchemaVersion({ dials: read.body }, to);
-  } else {
-    next = stampSchemaVersion(read.body, to);
-  }
-  return { plan: "rewrite", from: read.version, to, text: `${JSON.stringify(next)}
-` };
-}
-function migratePersistedState(opts) {
-  const report = { migrated: [], skipped: [], errors: [] };
-  const stamp = backupStamp(opts.now ?? /* @__PURE__ */ new Date());
-  for (const surface of PERSISTED_SURFACES) {
-    if (!MIGRATABLE.has(surface.id)) continue;
-    const repoScoped = surface.scope !== "user-config" && surface.scope !== "user-state";
-    if (repoScoped && opts.repoRoot == null) {
-      report.skipped.push({ id: surface.id, reason: "repo-scoped; no repository root" });
-      continue;
-    }
-    const abs = surfaceAbsolutePath(surface, opts);
-    if (abs == null) {
-      report.skipped.push({ id: surface.id, reason: "path could not be resolved" });
-      continue;
-    }
-    if (!(0, import_node_fs48.existsSync)(abs)) {
-      report.skipped.push({ id: surface.id, reason: "not present" });
-      continue;
-    }
-    try {
-      const apply = () => {
-        const planned = migrateDocument(surface, abs);
-        if (planned.plan === "empty") {
-          report.skipped.push({ id: surface.id, reason: "empty" });
-          return;
-        }
-        if (planned.plan === "current") {
-          report.skipped.push({ id: surface.id, reason: `already at ${surface.versionField} ${surface.currentVersion}` });
-          return;
-        }
-        if (opts.dryRun === true) {
-          report.skipped.push({ id: surface.id, reason: `dry run: would migrate ${planned.from} \u2192 ${planned.to}` });
-          return;
-        }
-        const backup = backupBefore(abs, surface, opts, stamp);
-        writeAtomic(abs, planned.text);
-        report.migrated.push({ id: surface.id, from: planned.from, to: planned.to, backup });
-      };
-      if (surface.id === "repo-dials-pin") withLocalDialStateLock(opts.repoRoot, apply);
-      else apply();
-    } catch (err) {
-      report.errors.push({ id: surface.id, error: err.message });
-    }
-  }
-  return report;
-}
-function describeMigrationReport(report) {
-  const lines = [];
-  for (const item of report.migrated) {
-    lines.push(`Migrated ${item.id} schema_version ${item.from} \u2192 ${item.to} (backup: ${item.backup}).`);
-  }
-  for (const item of report.errors) {
-    lines.push(`Could not migrate ${item.id}: ${item.error} \u2014 it was left untouched and stays readable.`);
-  }
-  return lines;
-}
-
-// src/commands/setup.ts
 var SetupError = class extends Error {
 };
 var PROBES = [
@@ -44589,7 +43328,7 @@ var PROBES = [
   { name: "grok", command: "grok" }
 ];
 function probe(command2) {
-  const result = (0, import_node_child_process15.spawnSync)(command2, ["--version"], { encoding: "utf8", timeout: 1e4 });
+  const result = (0, import_node_child_process14.spawnSync)(command2, ["--version"], { encoding: "utf8", timeout: 1e4 });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
   return {
     name: command2,
@@ -44600,7 +43339,7 @@ function probe(command2) {
 }
 function isRegularFile(path) {
   try {
-    return (0, import_node_fs49.lstatSync)(path).isFile();
+    return (0, import_node_fs48.lstatSync)(path).isFile();
   } catch {
     return false;
   }
@@ -44608,19 +43347,19 @@ function isRegularFile(path) {
 function removeRetiredState(paths, notices) {
   for (const path of retiredStateFiles(paths)) {
     if (!isRegularFile(path)) continue;
-    (0, import_node_fs49.rmSync)(path, { force: true });
+    (0, import_node_fs48.rmSync)(path, { force: true });
     notices.push(`Removed retired state ${path} (nothing reads it; there is no stored default harness).`);
   }
 }
 function ensureClaudePermission(paths, options, notices) {
-  if (!(0, import_node_fs49.existsSync)(paths.managedCli)) return null;
+  if (!(0, import_node_fs48.existsSync)(paths.managedCli)) return null;
   const env = options?.env ?? process.env;
-  const settingsPath = (0, import_node_path50.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path50.join)(options?.home ?? (0, import_node_os4.homedir)(), ".claude"), "settings.json");
-  const createdFile = !(0, import_node_fs49.existsSync)(settingsPath);
+  const settingsPath = (0, import_node_path49.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path49.join)(options?.home ?? (0, import_node_os4.homedir)(), ".claude"), "settings.json");
+  const createdFile = !(0, import_node_fs48.existsSync)(settingsPath);
   let data = {};
   if (!createdFile) {
     try {
-      const parsed = JSON.parse((0, import_node_fs49.readFileSync)(settingsPath, "utf8"));
+      const parsed = JSON.parse((0, import_node_fs48.readFileSync)(settingsPath, "utf8"));
       if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
         notices.push(`Claude user settings ${settingsPath} are not an object; permission setup left them untouched.`);
         return null;
@@ -44646,28 +43385,28 @@ function ensureClaudePermission(paths, options, notices) {
   allow.push(rule);
   permissions.allow = allow;
   data.permissions = permissions;
-  (0, import_node_fs49.mkdirSync)((0, import_node_path50.dirname)(settingsPath), { recursive: true });
-  (0, import_node_fs49.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
+  (0, import_node_fs48.mkdirSync)((0, import_node_path49.dirname)(settingsPath), { recursive: true });
+  (0, import_node_fs48.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   notices.push(`Claude user permission added for the managed Fadeno runtime only: ${rule}`);
   return { path: settingsPath, rule, createdFile };
 }
 function inferBundledRuntimeForRemediation(userPathOptions) {
   const env = userPathOptions?.env ?? process.env;
-  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs49.existsSync)((0, import_node_path50.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
+  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs48.existsSync)((0, import_node_path49.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
     return env.FADENO_BUNDLED_RUNTIME;
   }
   try {
     const argv1 = process.argv[1];
     if (argv1) {
-      const dir = (0, import_node_path50.dirname)((0, import_node_path50.resolve)(argv1));
-      if ((0, import_node_fs49.existsSync)((0, import_node_path50.join)(dir, "fadeno")) && (0, import_node_fs49.existsSync)((0, import_node_path50.join)(dir, "package.json"))) {
+      const dir = (0, import_node_path49.dirname)((0, import_node_path49.resolve)(argv1));
+      if ((0, import_node_fs48.existsSync)((0, import_node_path49.join)(dir, "fadeno")) && (0, import_node_fs48.existsSync)((0, import_node_path49.join)(dir, "package.json"))) {
         return dir;
       }
       try {
-        const real = (0, import_node_fs49.realpathSync)(argv1);
-        const realDir = (0, import_node_path50.dirname)((0, import_node_path50.resolve)(real));
-        if ((0, import_node_fs49.existsSync)((0, import_node_path50.join)(realDir, "fadeno"))) return realDir;
+        const real = (0, import_node_fs48.realpathSync)(argv1);
+        const realDir = (0, import_node_path49.dirname)((0, import_node_path49.resolve)(real));
+        if ((0, import_node_fs48.existsSync)((0, import_node_path49.join)(realDir, "fadeno"))) return realDir;
       } catch {
       }
     }
@@ -44682,7 +43421,7 @@ function runSetup(opts = {}) {
   const probes = PROBES.map((item) => probeCommand(item.command));
   const created = [];
   const setupNotices = [];
-  const manifestExisted = (0, import_node_fs49.existsSync)(paths.installationsFile);
+  const manifestExisted = (0, import_node_fs48.existsSync)(paths.installationsFile);
   const manifest = readInstallationManifest(opts.userPathOptions);
   const runtimeSource = opts.runtimeSource !== void 0 ? opts.runtimeSource : (opts.userPathOptions?.env ?? process.env).FADENO_BUNDLED_RUNTIME ?? null;
   let syncOutcome = "absent";
@@ -44704,8 +43443,6 @@ function runSetup(opts = {}) {
     throw err;
   }
   removeRetiredState(paths, setupNotices);
-  const persistedState = migratePersistedState({ repoRoot, paths });
-  setupNotices.push(...describeMigrationReport(persistedState));
   try {
     loadExecutorProfile(repoRoot, opts.userPathOptions).profile;
   } catch (err) {
@@ -44718,13 +43455,13 @@ function runSetup(opts = {}) {
       target: "codex",
       scope: "user",
       userPathOptions: opts.userPathOptions,
-      cliPath: (0, import_node_fs49.existsSync)(paths.managedCli) ? paths.managedCli : void 0
+      cliPath: (0, import_node_fs48.existsSync)(paths.managedCli) ? paths.managedCli : void 0
     });
   }
   const priorPermissionRules = opts.target == null ? [] : manifest.harnesses[opts.target]?.permissionRules ?? [];
   const addedPermission = opts.target === "claude" ? ensureClaudePermission(paths, opts.userPathOptions, setupNotices) : null;
   if (opts.target != null) {
-    const managedFiles = steering?.results.map((item) => item.path).filter((path) => (0, import_node_fs49.existsSync)(path) && (0, import_node_fs49.readFileSync)(path, "utf8").startsWith("# fadeno:managed")) ?? [];
+    const managedFiles = steering?.results.map((item) => item.path).filter((path) => (0, import_node_fs48.existsSync)(path) && (0, import_node_fs48.readFileSync)(path, "utf8").startsWith("# fadeno:managed")) ?? [];
     const permissionRules = (addedPermission == null ? priorPermissionRules : [...priorPermissionRules, addedPermission]).filter((item, index, all) => all.findIndex((other) => other.path === item.path && other.rule === item.rule) === index);
     recordHarnessInstallation(
       paths,
@@ -44735,7 +43472,7 @@ function runSetup(opts = {}) {
     );
     if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
   } else if (manifest.runtime != null) {
-    if (!(0, import_node_fs49.existsSync)(paths.installationsFile)) {
+    if (!(0, import_node_fs48.existsSync)(paths.installationsFile)) {
       writeInstallationManifest(paths, manifest);
       if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
     }
@@ -44796,19 +43533,18 @@ function runSetup(opts = {}) {
     steering,
     restartRequired: steering?.restartRequired ?? false,
     notices,
-    runtimeRefresh: { outcome: syncOutcome, from: syncFrom, to: syncTo },
-    persistedState
+    runtimeRefresh: { outcome: syncOutcome, from: syncFrom, to: syncTo }
   };
 }
 
 // src/commands/status.ts
-var import_node_fs51 = require("node:fs");
-var import_node_path52 = require("node:path");
+var import_node_fs50 = require("node:fs");
+var import_node_path51 = require("node:path");
 
 // src/lib/opencode-steering.ts
 var import_node_crypto19 = require("node:crypto");
-var import_node_fs50 = require("node:fs");
-var import_node_path51 = require("node:path");
+var import_node_fs49 = require("node:fs");
+var import_node_path50 = require("node:path");
 var OPENCODE_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
 var AGENT_MARK2 = /<!-- fadeno:managed version=([^\s]+) digest=([0-9a-f]{64}) -->/;
 var PLUGIN_MARK = /^\/\/ fadeno:managed version=([^\s]+)(?: digest=([0-9a-f]{64}))?$/m;
@@ -44829,7 +43565,7 @@ function missing2(path) {
 }
 function readText2(path) {
   try {
-    return (0, import_node_fs50.existsSync)(path) ? (0, import_node_fs50.readFileSync)(path, "utf8") : null;
+    return (0, import_node_fs49.existsSync)(path) ? (0, import_node_fs49.readFileSync)(path, "utf8") : null;
   } catch {
     return null;
   }
@@ -44892,13 +43628,13 @@ function inspectPlugin(path, issues) {
   return { path, present: true, managed: true, valid, version, digest: recordedDigest, digestValid, stale };
 }
 function inspectOpenCodeMaterialization(repoRoot, expected) {
-  const agentDir = (0, import_node_path51.join)(repoRoot, ".opencode", "agent");
-  const pluginPath = (0, import_node_path51.join)(repoRoot, ".opencode", "plugin", "fadeno-steering.js");
+  const agentDir = (0, import_node_path50.join)(repoRoot, ".opencode", "agent");
+  const pluginPath = (0, import_node_path50.join)(repoRoot, ".opencode", "plugin", "fadeno-steering.js");
   const issues = [];
   const slots = [];
   for (const archetype of OPENCODE_STEERING_ARCHETYPES) {
-    const hostPath = (0, import_node_path51.join)(agentDir, `${archetype}.md`);
-    const commandPath = (0, import_node_path51.join)(agentDir, `fadeno-dispatch-${archetype}.md`);
+    const hostPath = (0, import_node_path50.join)(agentDir, `${archetype}.md`);
+    const commandPath = (0, import_node_path50.join)(agentDir, `fadeno-dispatch-${archetype}.md`);
     const expectedKind = expected.get(archetype) ?? null;
     const host = inspectAgent2(hostPath, issues, expectedKind === "host");
     const command2 = inspectAgent2(commandPath, issues, expectedKind === "command");
@@ -44909,7 +43645,7 @@ function inspectOpenCodeMaterialization(repoRoot, expected) {
     slots.push({ archetype, expected: expectedKind, host, command: command2, contradictory });
   }
   const refusals = OPENCODE_STEERING_ARCHETYPES.map(
-    (archetype) => inspectAgent2((0, import_node_path51.join)(agentDir, `fadeno-steering-refused-${archetype}.md`), issues)
+    (archetype) => inspectAgent2((0, import_node_path50.join)(agentDir, `fadeno-steering-refused-${archetype}.md`), issues)
   );
   const plugin = inspectPlugin(pluginPath, issues);
   return {
@@ -45014,7 +43750,7 @@ function runStatus(opts = {}) {
   const external = roles.filter((r) => r.adapter === "command");
   const installation = readInstallationManifest(opts.userPathOptions);
   const upaths = userPaths(opts.userPathOptions);
-  const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim() || (installation.runtime != null && (0, import_node_path52.resolve)(process.argv[1] ?? "") === (0, import_node_path52.resolve)(installation.runtime.path) ? "managed" : "path");
+  const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim() || (installation.runtime != null && (0, import_node_path51.resolve)(process.argv[1] ?? "") === (0, import_node_path51.resolve)(installation.runtime.path) ? "managed" : "path");
   const codexMaintained = maintainedHarnesses(opts.userPathOptions).includes("codex");
   let codexProfileLoads = false;
   if (codexMaintained) {
@@ -45039,7 +43775,7 @@ function runStatus(opts = {}) {
   let observedVersion = null;
   let observedSource = null;
   try {
-    if ((0, import_node_fs51.existsSync)(upaths.managedRuntimeDir)) {
+    if ((0, import_node_fs50.existsSync)(upaths.managedRuntimeDir)) {
       const obs = readRuntimeVersionAt(upaths.managedRuntimeDir);
       if (obs.version != null) {
         observedVersion = obs.version;
@@ -45067,7 +43803,7 @@ function runStatus(opts = {}) {
   }
   let preferredCli;
   let preferredReason = null;
-  const invokingPath = (0, import_node_path52.resolve)(process.argv[1] ?? "fadeno");
+  const invokingPath = (0, import_node_path51.resolve)(process.argv[1] ?? "fadeno");
   if (managedVersion != null && managedVersion === invokingVersion && installation.runtime?.path) {
     preferredCli = installation.runtime.path;
   } else {
@@ -45096,7 +43832,7 @@ function runStatus(opts = {}) {
     codexMaterialization: materialized,
     opencodeMaterialization: opencodeMaterialized,
     ompMaterialization: ompMaterialized,
-    projectCustomized: (0, import_node_fs51.existsSync)((0, import_node_path52.join)(repoRoot, ".fadeno")),
+    projectCustomized: (0, import_node_fs50.existsSync)((0, import_node_path51.join)(repoRoot, ".fadeno")),
     verbose: Boolean(opts.verbose),
     next,
     runtime: {
@@ -45118,683 +43854,28 @@ function runStatus(opts = {}) {
   };
 }
 
-// src/commands/doctor.ts
-var import_node_fs52 = require("node:fs");
-var import_node_path53 = require("node:path");
-
-// src/lib/catalog-rot.ts
-var VERIFICATION_MAX_AGE_DAYS = 30;
-var MS_PER_DAY = 864e5;
-function ageInDays(verifiedAt, now) {
-  const parsed = Date.parse(verifiedAt);
-  if (!Number.isFinite(parsed)) return null;
-  const elapsed2 = now.getTime() - parsed;
-  return elapsed2 <= 0 ? 0 : elapsed2 / MS_PER_DAY;
-}
-function isVerificationStale(entry, now, maxAgeDays = VERIFICATION_MAX_AGE_DAYS) {
-  if (entry == null) return "missing";
-  const age2 = ageInDays(entry.verified_at, now);
-  if (age2 == null) return "stale";
-  return age2 > maxAgeDays ? "stale" : "fresh";
-}
-var REPAIR_REMEDIATION = "Re-add the alias against a harness this catalog actually declares \u2014 `fadeno models add <alias> <provider/id> --harness <h>` \u2014 or, for one that is simply dead, `fadeno models remove <alias>`, which deletes it and its cached verification rows together. Until then the alias is absent from the effective catalog and any dial naming it fails.";
-function catalogRepairFindings(input) {
-  const seen = /* @__PURE__ */ new Set();
-  const findings = [];
-  for (const note of [...input.repairs, ...input.drops]) {
-    const detail2 = note.trim();
-    if (detail2.length === 0 || seen.has(detail2)) continue;
-    seen.add(detail2);
-    findings.push({
-      check: "user-catalog-repairs",
-      severity: "warning",
-      detail: detail2,
-      remediation: REPAIR_REMEDIATION
-    });
-  }
-  return findings;
-}
-function ignoredDeadlineFindings(notes, token) {
-  const seen = /* @__PURE__ */ new Set();
-  const findings = [];
-  for (const note of notes) {
-    const detail2 = note.trim();
-    if (detail2.length === 0 || !detail2.includes(token) || seen.has(detail2)) continue;
-    seen.add(detail2);
-    findings.push({
-      check: "ignored-deadline-key",
-      severity: "warning",
-      detail: detail2,
-      remediation: "Delete the key from the catalog. It has no effect: no executor runs under a deadline, and ending a long attempt is `fadeno cancel` / `fadeno dispatches --cancel`."
-    });
-  }
-  return findings;
-}
-function verificationFindings(input) {
-  const grouped = /* @__PURE__ */ new Map();
-  for (const dial of input.dialed) {
-    const key = `${dial.harness}\0${dial.modelId}`;
-    const existing = grouped.get(key);
-    const listable = dial.listable !== false;
-    if (existing == null) {
-      grouped.set(key, { harness: dial.harness, modelId: dial.modelId, archetypes: [dial.archetype], listable });
-    } else {
-      if (!existing.archetypes.includes(dial.archetype)) existing.archetypes.push(dial.archetype);
-      existing.listable = existing.listable || listable;
-    }
-  }
-  const cachePath = input.verificationsPath ?? "model-verifications.json";
-  const findings = [];
-  const ordered = [...grouped.values()].sort((a, b) => a.harness !== b.harness ? a.harness.localeCompare(b.harness) : a.modelId.localeCompare(b.modelId));
-  for (const group of ordered) {
-    const entry = input.verifications.find(
-      (row) => row.harness === group.harness && row.model === group.modelId
-    ) ?? null;
-    const state = isVerificationStale(entry, input.now);
-    if (state === "fresh") continue;
-    const dialers = `dialed by ${[...group.archetypes].sort().join(", ")}`;
-    const label = `"${group.modelId}" on ${group.harness}`;
-    const unlistable = `${group.harness} declares no \`models_command\`, so nothing can probe it: ${input.verifyCommand} reports this pair \`skipped\` and \`fadeno dial\` records it unverified.`;
-    if (state === "missing") {
-      findings.push({
-        check: "model-verification-stale",
-        severity: "warning",
-        detail: `${label} (${dialers}) has no row in the model-verification cache \u2014 nothing has ever confirmed that ${group.harness} lists this model id, so a dispatch is the first thing that would find out`,
-        remediation: group.listable ? `${input.verifyCommand} probes the harness for every dialed pair and records a row for each one the listing names.` : `${unlistable} Nothing to run: either accept the dial unverified \u2014 the dispatch itself is the only test \u2014 or re-dial the archetype onto a harness that can list its models (\`fadeno dial <archetype> <ref> --harness <listable>\`).`
-      });
-      continue;
-    }
-    const age2 = entry != null ? ageInDays(entry.verified_at, input.now) : null;
-    const when = age2 == null ? `carries an unreadable verified_at ("${entry?.verified_at ?? ""}")` : `was last verified ${Math.floor(age2)} days ago (${entry.verified_at})`;
-    findings.push({
-      check: "model-verification-stale",
-      severity: "warning",
-      detail: `${label} (${dialers}) ${when}, past the ${VERIFICATION_MAX_AGE_DAYS}-day freshness window \u2014 a provider can retire a model id without notice and the cached row keeps asserting it is listed`,
-      remediation: group.listable ? `${input.verifyCommand} ignores the cache and always re-probes: it refreshes this row when the harness still lists the id and deletes it when the listing does not. Re-dialing alone will not \u2014 \`fadeno dial\` checks the cache for EXISTENCE, not age, so an existing row short-circuits its probe.` : `${unlistable} The row can only be cleared by hand: delete the ${group.harness}/${group.modelId} entry from ${cachePath} if you no longer trust it, or re-dial the archetype onto a harness that can list its models. Re-dialing alone will not \u2014 \`fadeno dial\` checks the cache for EXISTENCE, not age.`
-    });
-  }
-  return findings;
-}
-
-// src/commands/doctor.ts
-var CLAUDE_MANAGED_MARK2 = "<!-- fadeno:managed";
-function describeContractDrift(items) {
-  const drifted = items.filter((item) => item.missingFlags.length > 0);
-  if (drifted.length === 0) {
-    return "Each one still passes the resolver flags this build expects, so nothing is broken yet \u2014 but frozen text cannot follow the contract, and nothing here will say so when it moves.";
-  }
-  const named = drifted.map((item) => `${item.name} omits ${item.missingFlags.join(" and ")}`).join("; ");
-  return `${named} \u2014 so \`steering resolve\` is invoked without ${drifted.some((item) => item.missingFlags.includes("--prompt-file")) ? "the prompt bytes it hashes to decide whether a spawn is paired, dropping this repo out of shadow pairing" : "the proof of the effort its agent was materialized at, defeating mismatch detection"}.`;
-}
-function finding2(check, severity, detail2, remediation) {
-  return remediation ? { check, severity, detail: detail2, remediation } : { check, severity, detail: detail2 };
-}
-function commandOnPath(command2) {
-  const candidates = (0, import_node_path53.isAbsolute)(command2) || command2.includes("/") || command2.includes("\\") ? [""] : (process.env.PATH ?? "").split(import_node_path53.delimiter);
-  const suffixes = process.platform === "win32" ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";") : [""];
-  for (const directory of candidates) {
-    const base = directory === "" ? command2 : (0, import_node_path53.join)(directory, command2);
-    for (const suffix of suffixes) {
-      const path = suffix !== "" && !base.toUpperCase().endsWith(suffix.toUpperCase()) ? `${base}${suffix}` : base;
-      try {
-        (0, import_node_fs52.accessSync)(path, process.platform === "win32" ? import_node_fs52.constants.F_OK : import_node_fs52.constants.X_OK);
-        return true;
-      } catch {
-      }
-    }
-  }
-  return false;
-}
-function pluginSurface(env) {
-  const candidates = [];
-  const explicit = env.CLAUDE_PLUGIN_ROOT;
-  if (typeof explicit === "string" && explicit.length > 0) candidates.push(explicit);
-  for (const entry of (env.PATH ?? "").split(import_node_path53.delimiter)) {
-    if (entry.endsWith(`${import_node_path53.sep}bin`)) candidates.push((0, import_node_path53.dirname)(entry));
-  }
-  for (const root of candidates) {
-    try {
-      const parsed = JSON.parse(
-        (0, import_node_fs52.readFileSync)((0, import_node_path53.join)(root, ".claude-plugin", "plugin.json"), "utf8")
-      );
-      if (parsed.name !== "fadeno") continue;
-      return { root, version: typeof parsed.version === "string" ? parsed.version : null };
-    } catch {
-    }
-  }
-  return null;
-}
-function runDoctor(opts = {}) {
-  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
-  const findings = [];
-  const persistedStateFindings = () => {
-    try {
-      return auditPersistedState({ repoRoot, paths: userPaths(opts.userPathOptions ?? {}) });
-    } catch (err) {
-      return [finding2(
-        "persisted-state",
-        "warning",
-        `the persisted-state inventory could not be audited: ${err.message}`,
-        "Report this \u2014 every surface in the inventory is read defensively, so reaching here is a bug in the audit itself."
-      )];
-    }
-  };
-  let status;
-  try {
-    status = runStatus(opts);
-    findings.push(finding2("runtime", "ok", `Fadeno ${status.version} and bundled definitions are available.`));
-    const skew = status.runtime.skew;
-    const managedV = status.runtime.managedVersion;
-    const invokingV = status.version;
-    const managedPath = status.runtime.managedPath;
-    const preferredCli = status.runtime.preferredCli;
-    const preferredReason = status.runtime.preferredReason;
-    findings.push(finding2("runtime-source", "ok", `${status.runtime.invocationSource}; managed runtime ${managedV ?? "not installed"}`));
-    if (managedV == null) {
-      if (status.runtime.installedHarnesses.length > 0 || managedPath) {
-        findings.push(finding2("runtime", "warning", `managed runtime not installed but host integrations reference ${managedPath ?? "a managed path"}`, "Run fadeno setup --from <bin-dir> to install it."));
-      }
-    } else if (skew === "managed-older") {
-      const harnessFlag = status.runtime.installedHarnesses.length === 1 ? ` --${status.runtime.installedHarnesses[0]}` : status.runtime.installedHarnesses.includes("codex") && status.runtime.installedHarnesses.includes("claude") ? status.harness === "claude" || status.harness === "codex" ? ` --${status.harness}` : " --codex" : status.runtime.installedHarnesses.includes("claude") ? " --claude" : status.runtime.installedHarnesses.includes("codex") ? " --codex" : "";
-      const dir = preferredCli ? (0, import_node_path53.dirname)(preferredCli) : "<bin-dir>";
-      const remediation = `refreshes at next plugin-launched command, or run fadeno setup${harnessFlag} --from ${dir} (e.g. fadeno setup${harnessFlag} --from ${dir})`;
-      findings.push(finding2("runtime-version", "warning", `managed runtime ${managedV} is older than this CLI ${invokingV} (managed-older); ${preferredReason ?? ""}`, remediation));
-    } else if (skew === "managed-newer") {
-      findings.push(finding2("runtime-version", "warning", `managed runtime ${managedV} is newer than this CLI ${invokingV} (managed-newer); ${preferredReason ?? ""}`, "Update this CLI via your package manager \u2014 do not rerun setup from this older CLI."));
-    } else if (skew === "divergent") {
-      findings.push(finding2("runtime-version", "warning", `managed runtime ${managedV} differs from caller ${invokingV} (divergent)`, `Run fadeno status to see preferred CLI: ${preferredCli}`));
-    }
-    try {
-      const manifest = readInstallationManifest(opts.userPathOptions);
-      if (manifest.runtime?.source && !(0, import_node_fs52.existsSync)(manifest.runtime.source)) {
-        findings.push(finding2("runtime-source-missing", "warning", `managed runtime source ${manifest.runtime.source} no longer exists (version-keyed cache may have moved)`, "Plugin-launched commands still refresh via their bundled runtime; a direct managed-CLI invocation cannot heal until the source reappears."));
-      }
-      const upaths = userPaths(opts.userPathOptions);
-      const pkgPath = (0, import_node_path53.join)(upaths.managedRuntimeDir, "package.json");
-      if (managedV != null && !(0, import_node_fs52.existsSync)(pkgPath)) {
-        findings.push(finding2("runtime-unstamped", "warning", `managed runtime at ${upaths.managedRuntimeDir} has no version marker (installed by a build older than 0.6.0-rc.33); refresh to stamp it`, "Run fadeno setup --from <bin-dir> to add the marker."));
-      }
-    } catch {
-    }
-    if (preferredReason) {
-      findings.push(finding2("preferred-cli", "ok", `use: ${preferredCli} (${preferredReason})`));
-    } else if (managedV != null && managedV === invokingV) {
-      findings.push(finding2("preferred-cli", "ok", `use: ${preferredCli} (managed runtime matches this CLI)`));
-    }
-    findings.push(finding2("session-definitions", "ok", `Skills and subagents are loaded at host session start; a fresh session is required to refresh them \u2014 no setup or refresh will update the current session. Compare the [fadeno ...] stamp in your skill/agent listing against ${invokingV}.`));
-  } catch (err) {
-    findings.push(finding2("configuration", "error", err.message, "Fix the malformed YAML or missing catalog before running a playbook."));
-    findings.push(...persistedStateFindings());
-    return { repoRoot, findings, ok: false };
-  }
-  const paths = [(0, import_node_path53.join)(repoRoot, ".fadeno"), (0, import_node_path53.join)(repoRoot, ".fadeno", "runs"), (0, import_node_path53.join)(repoRoot, ".fadeno", "progress")];
-  for (const path of paths) {
-    try {
-      if ((0, import_node_fs52.existsSync)(path)) (0, import_node_fs52.accessSync)(path, import_node_fs52.constants.W_OK);
-      findings.push(finding2(`path:${path}`, "ok", (0, import_node_fs52.existsSync)(path) ? "writable" : "will be created lazily"));
-    } catch {
-      findings.push(finding2(`path:${path}`, "error", "not writable", "Choose a writable repository or state location."));
-    }
-  }
-  findings.push(...persistedStateFindings());
-  const dials = status.dials;
-  const legacyNote = status.legacy_pin_note;
-  if (dials) {
-    const sessionCount = Object.keys(dials.session).length;
-    const userCount = Object.keys(dials.user).length;
-    const repoCount = Object.keys(dials.repo).length;
-    const detail2 = `${sessionCount} session dial(s), ${userCount} user dial(s)${repoCount ? `, ${repoCount} repo pin(s)` : ""}`;
-    findings.push(finding2("dials", "ok", detail2));
-    if (legacyNote) findings.push(finding2("dials", "warning", `legacy pin: ${legacyNote}`, "Run `fadeno dial clear` then re-dial with `fadeno dial`"));
-    try {
-      const { profile } = loadLayeredProfile(repoRoot, opts.userPathOptions ?? {});
-      const referenced = /* @__PURE__ */ new Set([
-        // Every archetype Fadeno itself ships. A typo lands in a project or
-        // user layer, never in the built-in catalog, so treating the shipped
-        // names as referenced is what keeps this lint from firing on Fadeno's
-        // own `director` policy.
-        ...ARCHETYPE_DISPLAY_ORDER,
-        ...Object.keys(profile.dials ?? {}),
-        ...Object.keys(dials.session),
-        ...Object.keys(dials.user),
-        ...Object.keys(dials.repo)
-      ]);
-      const orphans = Object.keys(profile.archetypes).filter((a) => !referenced.has(a)).sort();
-      if (orphans.length > 0) {
-        findings.push(finding2(
-          "archetype-policy-unreferenced",
-          "warning",
-          `catalog declares archetype policy for ${orphans.map((o) => `"${o}"`).join(", ")}, which nothing dials \u2014 if that is a typo, the archetype it was meant for has NO declared write posture and its guard is silently off`,
-          `Check the \`archetypes:\` keys in .fadeno/executors.yaml against the archetypes you actually dispatch.`
-        ));
-      }
-    } catch {
-    }
-  } else if (status.activeLoadout == null) {
-    findings.push(finding2("dials", "error", "no dials resolved", "Run `fadeno dial <archetype> <model>`"));
-  } else {
-    findings.push(finding2("dials", "ok", `${status.activeLoadout.name} (${status.activeLoadout.source})`));
-  }
-  {
-    let suppressed = null;
-    try {
-      suppressed = explainSuppressedBuiltin(repoRoot, opts.userPathOptions ?? {});
-    } catch {
-      suppressed = null;
-    }
-    if (suppressed != null) {
-      const missing3 = suppressed.missing;
-      if (missing3.length === 0) {
-        findings.push(finding2(
-          "catalog-layering",
-          "ok",
-          "project catalog is self-contained (suppresses the builtin and user layers) and omits no builtin declaration"
-        ));
-      } else {
-        const shown = missing3.slice(0, 6).join(", ");
-        const rest = missing3.length > 6 ? `, +${missing3.length - 6} more` : "";
-        findings.push(finding2(
-          "catalog-layering",
-          "warning",
-          `project catalog is self-contained (suppresses the builtin and user layers) and omits ${missing3.length} declaration(s) the builtin makes: ${shown}${rest}`,
-          "Either re-declare them, or \u2014 usually better \u2014 delete everything from `.fadeno/executors.yaml` that is not a deliberate override. Without its own `models:` and `harnesses:` the file layers on the builtin instead of replacing it, and cannot fall behind again. Note this reports ABSENCES only: a stale VALUE is indistinguishable from a deliberate override and is not checked."
-        ));
-      }
-    }
-  }
-  for (const layer of catalogLayerVersions(repoRoot, opts.userPathOptions ?? {})) {
-    if (layer.schemaVersion === 4) continue;
-    findings.push(finding2(
-      "catalog-version",
-      "warning",
-      `${layer.path} declares schema_version ${layer.schemaVersion ?? "(absent)"}; catalog v4 is current`,
-      "It still loads because it declares none of the keys v4 removed (`routes`, `relay`, `unregistered_model_driver`, a model `delivery:`, a ` via ` in a dial). Bump it to `schema_version: 4` when you next edit it \u2014 see docs/experimental/harness-neutral-dials.md."
-    ));
-  }
-  {
-    let layered = null;
-    try {
-      layered = loadLayeredProfile(repoRoot, opts.userPathOptions ?? {});
-    } catch {
-      layered = null;
-    }
-    if (layered != null) {
-      const fallback = layered.modelFallback;
-      findings.push(...catalogRepairFindings({
-        repairs: fallback.repairs,
-        // `dropped` is structured (`{ alias, harness }`); phrase it the way
-        // `formatModelFallbackNote` does so the two surfaces cannot drift into
-        // describing the same event differently.
-        drops: fallback.dropped.map((drop) => `user-catalog model "${drop.alias}" dropped \u2014 nothing in this catalog can deliver harness/provider "${drop.harness}"`)
-      }));
-      const layers = status.dials;
-      const archetypeNames = /* @__PURE__ */ new Set([
-        ...ARCHETYPE_DISPLAY_ORDER,
-        ...Object.keys(layers.session),
-        ...Object.keys(layers.repo),
-        ...Object.keys(layers.user),
-        ...Object.keys(layered.profile.dials)
-      ]);
-      const dialed = [];
-      for (const archetype of [...archetypeNames].sort()) {
-        let harness;
-        let modelId;
-        try {
-          const resolved = resolveRole(archetype, archetype, layered.profile, layers);
-          harness = resolved.delivery.harness;
-          modelId = resolved.delivery.modelId;
-        } catch {
-          continue;
-        }
-        if (harness == null || modelId === "current-host") continue;
-        dialed.push({ archetype, harness, modelId, listable: isListable(layered.profile.harnesses?.[harness]) });
-      }
-      findings.push(...ignoredDeadlineFindings(layered.profile.notes, IGNORED_DEADLINE_NOTE_TOKEN));
-      findings.push(...verificationFindings({
-        dialed,
-        verifications: readVerifiedModels(opts.userPathOptions ?? {}),
-        now: /* @__PURE__ */ new Date(),
-        // `fadeno models verify` re-probes every dialed pair with the cache
-        // ignored (`force: true`), refreshing a row that still lists and
-        // deleting one that does not — so it is the remediation for BOTH the
-        // missing and the stale case. `fadeno dial`'s own probe only fires on
-        // a cache miss, which is why it is not named here. For an unlistable
-        // harness the library says so instead of naming it.
-        verifyCommand: "`fadeno models verify`",
-        verificationsPath: userPaths(opts.userPathOptions ?? {}).modelVerificationsFile
-      }));
-      findings.push(...undeclaredCarryFindings(repoRoot, layered.profile.worktreeCarry));
-      const probeable = dialed.filter((dial) => dial.listable);
-      if (opts.probeModels === true) {
-        const probeHarnesses = [...new Set(probeable.map((dial) => dial.harness))].sort();
-        const listings = probeHarnesses.map((harness) => ({ harness, entry: layered.profile.harnesses?.[harness] ?? null })).filter((item) => isListable(item.entry)).map((item) => ({ harness: item.harness, result: listHarnessModels(item.harness, item.entry) }));
-        findings.push(...listingFindings({ dialed: probeable, listings }));
-      } else if (probeable.length === 0) {
-        findings.push(finding2(
-          "model-listing-skipped",
-          "ok",
-          "no dialed model resolves onto a harness that declares a models_command, so there is no backend listing to check it against.",
-          "`fadeno doctor --probe-models` runs this check; it has nothing to spawn until a dialed model resolves onto a harness that declares a models_command."
-        ));
-      } else {
-        findings.push(finding2(
-          "model-listing-skipped",
-          "ok",
-          `${probeable.length} dialed model(s) were not checked against their harness listings; that check spawns each harness's models_command.`,
-          "Run `fadeno doctor --probe-models` to list every dialed harness and report a model its backend no longer names."
-        ));
-      }
-    }
-  }
-  for (const role of status.roles) {
-    const spec = role.adapter === "command" ? status.external.find((item) => item.archetype === role.archetype) : null;
-    if (spec == null || spec.command == null) continue;
-    if (!commandOnPath(spec.command[0])) {
-      findings.push(finding2(`executor:${role.executor}`, "warning", `${role.command?.[0] ?? role.executor} is unavailable`, "Install the provider CLI or select a host executor explicitly; Fadeno will not fall back automatically."));
-    } else {
-      findings.push(finding2(`executor:${role.executor}`, "ok", "executable is present on PATH (not executed)"));
-    }
-  }
-  const ambient = detectAmbientHarness(opts.userPathOptions);
-  if (ambient.evidence.length > 1) {
-    const names = ambient.evidence.map((item) => `${item.harness} (${item.marker})`).join(" and ");
-    findings.push(finding2(
-      "harness",
-      "warning",
-      `nested hosts both claim this session \u2014 ${names} \u2014 so detection abstained and this call compiled as ${status.harness ?? "standalone"}`,
-      "Set FADENO_HARNESS explicitly for this session; a spawned executor gets its own identity automatically."
-    ));
-  } else if (ambient.harness == null) {
-    const resolved = status.harness ?? "standalone";
-    findings.push(finding2(
-      "harness",
-      "ok",
-      resolved === "standalone" ? "standalone; not inside a harness, so no host lane is compiled here" : `${resolved}; no host claims this session, so an explicit setting selected it`
-    ));
-  } else if (status.harness === ambient.harness) {
-    findings.push(finding2("harness", "ok", `${ambient.harness}, detected from the host this session is running inside`));
-  } else {
-    findings.push(finding2(
-      "harness",
-      "warning",
-      `${ambient.evidence[0].marker} says this session runs inside ${ambient.harness}, but an explicit setting selected ${status.harness}`,
-      `Drop the override to route as ${ambient.harness}; the two compile different adapters for the same slot.`
-    ));
-  }
-  if (status.codexMaterialization?.restartRequired) {
-    const drifted = status.codexMaterialization.agents.filter(
-      (agent) => agent.status !== "current" && agent.status !== "not_applicable"
-    );
-    const detail2 = drifted.map(describeCodexAgentIdentityRow).join("; ");
-    findings.push(finding2(
-      "codex-agents",
-      "warning",
-      // The header names the managed user-scope directory; a row that was
-      // judged elsewhere names its own file, which is why the describer prints
-      // the path for every scope but that one.
-      `the agents Codex would load for the role slots are missing or stale (managed set in ${status.codexMaterialization.path})${detail2 === "" ? "" : ` \u2014 ${detail2}`}`,
-      // One remediation, printed from where it is defined: `status`, `dial` and
-      // `doctor` re-spelling it separately is how the three drift apart.
-      `${status.codexMaterialization.remediation ?? CODEX_IDENTITY_REMEDIATION}.`
-    ));
-  } else if (status.codexMaterialization != null) {
-    findings.push(finding2("codex-agents", "ok", "managed host-agent state is current"));
-  }
-  if (status.opencodeMaterialization != null) {
-    const materialized = status.opencodeMaterialization;
-    if (materialized.healthy) {
-      findings.push(finding2("opencode-steering", "ok", "managed OpenCode agents and runtime plugin are current and internally consistent"));
-    } else {
-      for (const issue of materialized.issues) {
-        const remediation = issue.kind === "missing" ? "Run `fadeno steering apply --opencode --force`, then restart OpenCode." : issue.kind === "unmanaged" ? "Move or remove the foreign file, or replace it deliberately with `fadeno steering apply --opencode --force`; never edit a managed file in place." : issue.kind === "malformed" ? "Run `fadeno steering apply --opencode --force`, then restart OpenCode." : issue.kind === "stale-version" || issue.kind === "digest-drifted" ? "Refresh with `fadeno steering apply --opencode --force`, then restart OpenCode." : "Keep only the lane selected by `fadeno status --opencode`; refresh with `fadeno steering apply --opencode --force`.";
-        findings.push(finding2(`opencode-${issue.kind}`, "warning", `${issue.detail} (${issue.path})`, remediation));
-      }
-    }
-  }
-  if (status.ompMaterialization != null) {
-    const materialized = status.ompMaterialization;
-    if (materialized.healthy) {
-      findings.push(finding2("omp-steering", "ok", "managed omp agents and runtime extension are current and internally consistent"));
-    } else {
-      for (const issue of materialized.issues) {
-        const remediation = issue.kind === "missing" ? "Run `fadeno steering apply --omp --force`, then restart omp." : issue.kind === "unmanaged" ? "Move or rename the foreign file, then run `fadeno steering apply --omp`; Fadeno preserves unmarked files." : issue.kind === "contradictory" ? "Keep only the lane selected by `fadeno status --omp`; refresh with `fadeno steering apply --omp --force`." : "Refresh with `fadeno steering apply --omp --force`, then restart omp.";
-        findings.push(finding2(`omp-${issue.kind}`, "warning", `${issue.detail} (${issue.path})`, remediation));
-      }
-    }
-  }
-  {
-    const projectDir = (0, import_node_path53.join)(repoRoot, ".codex", "agents");
-    const userDir = codexUserAgentDir(opts.userPathOptions);
-    const soleProject = [];
-    const unmanagedShadow = [];
-    const staleShadow = [];
-    for (const candidate of effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions)) {
-      if (candidate.scope !== "project") continue;
-      const name = `${candidate.archetype}.toml`;
-      const project = candidate.state;
-      const user = readCodexAgentFile((0, import_node_path53.join)(userDir, `fadeno-${candidate.archetype}.toml`));
-      if (user == null) {
-        const row = codexAgentIdentityRow(candidate.archetype, candidate, null);
-        soleProject.push({ name, row, standing: codexStandingReason(row) });
-      } else if (!project.managed) {
-        unmanagedShadow.push({ name, missingFlags: project.missingFlags });
-      } else if (project.version != null && user.version != null && compareFadenoVersions(project.version, user.version) === -1) {
-        staleShadow.push({ name, label: `${name} (${project.version} < ${user.version})` });
-      }
-    }
-    const absolute = (names) => names.map((name) => (0, import_node_path53.join)(projectDir, name)).join(", ");
-    if (soleProject.length > 0) {
-      const unvouched = soleProject.filter((item) => item.standing != null);
-      const one = unvouched.length === 1;
-      const unmanaged = unvouched.filter((item) => item.row.status === "unmanaged").map((item) => item.name);
-      const refreshable = unvouched.filter((item) => item.row.status !== "unmanaged");
-      findings.push(finding2(
-        "codex-agents-project",
-        "ok",
-        `project-scope Codex agent file(s) ${soleProject.map((item) => item.name).join(", ")} in ${projectDir} have no user-scope counterpart in ${userDir}, so nothing is being shadowed` + (unvouched.length === 0 ? "" : ` \u2014 which is all this check reads. ${unvouched.map((item) => `${item.name} ${item.standing}`).join("; ")}, so this \`ok\` is not a clean bill of health for ${one ? "that file" : "those files"}; whether Codex would load something Fadeno can vouch for is the \`codex-agents\` check's question, answered there whenever Codex is a maintained harness`),
-        "Codex prefers project scope: once `fadeno setup --codex` materializes managed user-scope brokers, these files would win over them" + // The forward-looking half is still true, but on its own it implies
-        // the unmanaged file is an ordinary managed one that would simply
-        // win. It would win and never be refreshable, so the fix for that is
-        // printed from where it is defined rather than re-spelled here.
-        (unmanaged.length === 0 ? "" : ` \u2014 and \`fadeno steering apply\` would never refresh the unmanaged one${unmanaged.length === 1 ? "" : "s"}. To hand ${unmanaged.length === 1 ? "that slot" : "those slots"} back, ${CODEX_UNMANAGED_IDENTITY_REMEDIATION}`) + // And the fix for everything else, chosen by the one mapping that owns
-        // "which apply spelling reaches this file".
-        (refreshable.length === 0 ? "." : `. For ${refreshable.map((item) => item.name).join(", ")}, ${codexIdentityRemediation(refreshable.map((item) => item.row))}.`)
-      ));
-    }
-    if (unmanagedShadow.length > 0) {
-      findings.push(finding2(
-        "codex-agents-shadow",
-        "warning",
-        `${unmanagedShadow.map((item) => item.name).join(", ")} in ${projectDir} carry no managed header, and Codex prefers project scope over the user-scope broker(s) in ${userDir} \u2014 so the unmanaged copy is what every session loads, and no ordinary \`fadeno steering apply --codex\` or \`fadeno init\` refreshes it in place, because project-scope emit only ever refreshes a file carrying the managed header. ${describeContractDrift(unmanagedShadow)}`,
-        `Delete ${absolute(unmanagedShadow.map((item) => item.name))} so the user-scope broker takes over \u2014 or, to keep project scope deliberately, run \`fadeno steering apply --codex --scope project --force\`, which rewrites the content and stamps the managed header, clearing this finding.`
-      ));
-    }
-    if (staleShadow.length > 0) {
-      findings.push(finding2(
-        "codex-agents-shadow-stale",
-        "warning",
-        `${staleShadow.map((item) => item.label).join(", ")} in ${projectDir} are managed but stamped older than the user-scope broker(s) in ${userDir}, and Codex prefers project scope \u2014 so the older generation is what every session actually loads`,
-        `Delete ${absolute(staleShadow.map((item) => item.name))} so the current user-scope broker takes over, or run \`fadeno steering apply --codex --scope project\` to bring the project copy up to this build \u2014 a managed project file is refreshed in place.`
-      ));
-    }
-  }
-  try {
-    const latestRun = listRuns(repoRoot)[0];
-    if (latestRun != null) {
-      const { events } = readEvents(latestRun.dir);
-      const fallbackRows = events.filter(
-        (event) => event.type === "actor_dispatched" && normalizeDeliveryTransport(event.extra.delivery_transport) === "command-fallback"
-      );
-      if (fallbackRows.length > 0) {
-        const candidates = effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions);
-        const avoidableExecutors = /* @__PURE__ */ new Set();
-        let avoidableCount = 0;
-        for (const row of fallbackRows) {
-          const executor = typeof row.extra.executor === "string" ? row.extra.executor : null;
-          if (executor == null) continue;
-          const agentType = typeof row.extra.agent_type === "string" ? row.extra.agent_type : null;
-          const model = typeof row.extra.model === "string" ? row.extra.model : null;
-          const reasoningEffort = typeof row.extra.reasoning_effort === "string" ? row.extra.reasoning_effort : null;
-          if (model == null || reasoningEffort == null) continue;
-          if (findSpawnableCodexAgent(candidates, agentType, executor, { model, reasoningEffort }) == null) continue;
-          avoidableCount += 1;
-          avoidableExecutors.add(executor);
-        }
-        if (avoidableCount > 0) {
-          findings.push(finding2(
-            "codex-agents-fallback-avoidable",
-            "warning",
-            `${avoidableCount} engine dispatch(es) in the most recent run (${latestRun.runId}) took the command fallback for executor(s) ${[...avoidableExecutors].sort().join(", ")}, even though a managed Codex role agent whose file carries that exact identity is installed and could have delivered them in-host`,
-            "Spawn the role agent named in the resolver's `delegate_to` and hand it the engine assignment envelope. When the resolver names the installed agent as stale instead, run `fadeno steering apply --codex` and start a fresh Codex session to re-cut it. Otherwise use `fadeno dispatch-fallback`."
-          ));
-        }
-      }
-    }
-  } catch {
-  }
-  {
-    const claudeAgentDir2 = (0, import_node_path53.join)(repoRoot, ".claude", "agents");
-    for (const name of ["worker.md", "reviewer.md", "judge.md"]) {
-      const path = (0, import_node_path53.join)(claudeAgentDir2, name);
-      let text2;
-      try {
-        if (!(0, import_node_fs52.existsSync)(path)) continue;
-        text2 = (0, import_node_fs52.readFileSync)(path, "utf8");
-      } catch {
-        continue;
-      }
-      if (!text2.includes(CLAUDE_MANAGED_MARK2)) continue;
-      const modelMatch = /^model:\s*(.+)$/m.exec(text2);
-      const model = modelMatch ? modelMatch[1].trim() : "unknown";
-      findings.push(finding2(
-        "claude-agents-legacy",
-        "warning",
-        `${name} is a legacy per-dial managed agent pinning model "${model}" \u2014 it silently overrides whatever \`fadeno dial\` currently resolves for this archetype`,
-        "Run `fadeno steering apply --claude` to remove it; the plugin's role agents deliver the dial live."
-      ));
-    }
-    const retiredGrid = listRetiredClaudeGridCells(claudeAgentDir2);
-    if (retiredGrid.length > 0) {
-      findings.push(finding2(
-        "claude-agents-grid",
-        "warning",
-        `${retiredGrid.length} retired identity-grid cell(s) remain in ${claudeAgentDir2} (${retiredGrid.map((path) => (0, import_node_path53.basename)(path)).slice(0, 3).join(", ")}${retiredGrid.length > 3 ? ", \u2026" : ""}) \u2014 they pin an effort nothing consults any more, and the harness still registers them at session start`,
-        "Run `fadeno steering apply --claude` to remove them."
-      ));
-    }
-  }
-  function missingBundledTemplates(pluginRoot) {
-    const relDir = (0, import_node_path53.join)("common", "fadeno");
-    const source = (0, import_node_path53.join)(templatesDir(), relDir);
-    const bundled = (0, import_node_path53.join)(pluginRoot, "bin", "templates", relDir);
-    if (!(0, import_node_fs52.existsSync)(source) || !(0, import_node_fs52.existsSync)(bundled)) return [];
-    const walk = (dir, prefix, out) => {
-      let entries = [];
-      try {
-        entries = (0, import_node_fs52.readdirSync)(dir);
-      } catch {
-        return out;
-      }
-      for (const entry of entries) {
-        const abs = (0, import_node_path53.join)(dir, entry);
-        let isDir = false;
-        try {
-          isDir = (0, import_node_fs52.statSync)(abs).isDirectory();
-        } catch {
-          continue;
-        }
-        if (isDir) walk(abs, `${prefix}${entry}/`, out);
-        else out.push(`${prefix}${entry}`);
-      }
-      return out;
-    };
-    const want = walk(source, "", []);
-    return want.filter((rel) => !(0, import_node_fs52.existsSync)((0, import_node_path53.join)(bundled, rel))).sort();
-  }
-  const surface = pluginSurface(opts.processEnv ?? process.env);
-  if (surface != null) {
-    if (surface.version == null) {
-      findings.push(finding2("plugin-surface", "warning", `the plugin at ${surface.root} declares no version`, "Regenerate it with `fadeno plugin` so evidence rows can name the build that wrote them."));
-    } else if (surface.version !== status.version) {
-      findings.push(finding2(
-        "plugin-surface",
-        "warning",
-        `hooks and subagents load from plugin ${surface.version} (${surface.root}), but this CLI is ${status.version}`,
-        "Restart the harness so both halves are the same build; dispatch rows record the version that actually ran under `fadeno_version`."
-      ));
-    } else {
-      const missing3 = missingBundledTemplates(surface.root);
-      if (missing3.length > 0) {
-        findings.push(finding2(
-          "plugin-surface",
-          "warning",
-          `plugin ${surface.version} is the same version as this CLI but its bundled templates are stale: ${missing3.length} file(s) present in templates/ and missing from the bundle (${missing3.slice(0, 3).join(", ")}${missing3.length > 3 ? ", \u2026" : ""})`,
-          "Regenerate with `npm run build:plugin` and `npm run build:plugin:codex` \u2014 a version bump alone does not rebuild the bundle."
-        ));
-      } else {
-        findings.push(finding2(
-          "plugin-surface",
-          "ok",
-          `plugin ${surface.version} matches this CLI, and its bundled templates are complete`,
-          `Subagent definitions are still whatever this session loaded at startup \u2014 if your agent list stamps a version other than ${status.version}, restart to refresh it.`
-        ));
-      }
-    }
-  }
-  const gitignore = (0, import_node_path53.join)(repoRoot, ".gitignore");
-  const ignored = (0, import_node_fs52.existsSync)(gitignore) ? (0, import_node_fs52.readFileSync)(gitignore, "utf8") : "";
-  const ignoreLines = ignored.split(/\r?\n/).map((line) => line.trim());
-  const ignorePatterns = [
-    ".fadeno/runs/",
-    ".fadeno/progress/",
-    ".fadeno/local/",
-    ".fadeno/dispatches.jsonl",
-    ".codex/agents/fadeno-*.toml",
-    ".claude/settings.local.json",
-    ...status.harness === "opencode" ? openCodeManagedIgnorePatterns(repoRoot) : [],
-    ...status.harness === "omp" ? ompManagedIgnorePatterns(repoRoot) : []
-  ];
-  for (const pattern of ignorePatterns) {
-    if (!isFadenoPathIgnored(ignoreLines, pattern)) {
-      const remediation = pattern.startsWith(".opencode/") ? "Run `fadeno steering apply --opencode`; it adds ignores only for currently managed OpenCode files." : pattern.startsWith(".omp/") ? "Run `fadeno steering apply --omp`; it adds ignores only for currently managed omp files." : "The first `new-run`/`dispatch`, `fadeno init`, or `fadeno vendor` adds it non-destructively.";
-      findings.push(finding2(`ignore:${pattern}`, "warning", "managed ignore entry is absent", remediation));
-    }
-  }
-  {
-    const vestigial = describeVestigialWorkspaceLease(repoRoot);
-    if (vestigial == null) {
-      findings.push(finding2("workspace-lease", "ok", "no leftover writer lease (Fadeno no longer takes one)"));
-    } else {
-      findings.push(finding2("workspace-lease", "warning", vestigial.detail, vestigial.remediation));
-    }
-  }
-  findings.push(...dispatchWindowLogFindings(repoRoot));
-  findings.push(...overlapSnapshotFindings(repoRoot));
-  return { repoRoot, findings, ok: findings.every((item) => item.severity !== "error") };
-}
-
 // src/commands/vendor.ts
 var import_node_crypto20 = require("node:crypto");
-var import_node_fs53 = require("node:fs");
-var import_node_path54 = require("node:path");
+var import_node_fs51 = require("node:fs");
+var import_node_path52 = require("node:path");
 function makeVendoredCodexAgentsTrackable(repoRoot) {
-  const path = (0, import_node_path54.join)(repoRoot, ".gitignore");
-  const current = (0, import_node_fs53.existsSync)(path) ? (0, import_node_fs53.readFileSync)(path, "utf8") : "";
+  const path = (0, import_node_path52.join)(repoRoot, ".gitignore");
+  const current = (0, import_node_fs51.existsSync)(path) ? (0, import_node_fs51.readFileSync)(path, "utf8") : "";
   const rules = ["!.codex/agents/worker.toml", "!.codex/agents/reviewer.toml", "!.codex/agents/judge.toml"];
   const missing3 = rules.filter((rule) => !current.split(/\r?\n/).includes(rule));
   if (missing3.length === 0) return;
   const separator = current.length === 0 || current.endsWith("\n") ? "" : "\n";
-  (0, import_node_fs53.writeFileSync)(path, `${current}${separator}# Fadeno: explicitly vendored Codex brokers
+  (0, import_node_fs51.writeFileSync)(path, `${current}${separator}# Fadeno: explicitly vendored Codex brokers
 ${missing3.join("\n")}
 `, "utf8");
 }
 function digestTree(root) {
   const files = {};
   function walk(dir) {
-    for (const entry of (0, import_node_fs53.readdirSync)(dir, { withFileTypes: true })) {
-      const full = (0, import_node_path54.join)(dir, entry.name);
+    for (const entry of (0, import_node_fs51.readdirSync)(dir, { withFileTypes: true })) {
+      const full = (0, import_node_path52.join)(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.isFile()) files[(0, import_node_path54.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto20.createHash)("sha256").update((0, import_node_fs53.readFileSync)(full)).digest("hex");
+      else if (entry.isFile()) files[(0, import_node_path52.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto20.createHash)("sha256").update((0, import_node_fs51.readFileSync)(full)).digest("hex");
     }
   }
   walk(root);
@@ -45805,9 +43886,9 @@ function ownedVendoredFiles(repoRoot, init) {
   const shared = /* @__PURE__ */ new Set(["AGENTS.md", "CLAUDE.md", ".gitignore", ".claude/settings.local.json"]);
   for (const result of init.results) {
     if (result.status !== "created" && result.status !== "overwritten") continue;
-    const rel = (0, import_node_path54.relative)(repoRoot, result.path).split("\\").join("/");
-    if (shared.has(rel) || rel.startsWith("../") || !(0, import_node_fs53.existsSync)(result.path)) continue;
-    owned[rel] = (0, import_node_crypto20.createHash)("sha256").update((0, import_node_fs53.readFileSync)(result.path)).digest("hex");
+    const rel = (0, import_node_path52.relative)(repoRoot, result.path).split("\\").join("/");
+    if (shared.has(rel) || rel.startsWith("../") || !(0, import_node_fs51.existsSync)(result.path)) continue;
+    owned[rel] = (0, import_node_crypto20.createHash)("sha256").update((0, import_node_fs51.readFileSync)(result.path)).digest("hex");
   }
   return owned;
 }
@@ -45821,14 +43902,14 @@ function runVendor(opts) {
     withSteering: opts.withSteering ?? opts.target !== "grok"
   });
   if (opts.target === "codex") makeVendoredCodexAgentsTrackable(repoRoot);
-  const lockPath = (0, import_node_path54.join)(repoRoot, "fadeno.lock");
+  const lockPath = (0, import_node_path52.join)(repoRoot, "fadeno.lock");
   const lockDoc = {
     version: 1,
     fadeno_version: packageVersion(),
     target: opts.target,
     mode: "vendored",
-    definitions: digestTree((0, import_node_path54.join)(templatesDir(), "common", "fadeno")),
-    capability: digestTree((0, import_node_path54.join)(templatesDir(), opts.target)),
+    definitions: digestTree((0, import_node_path52.join)(templatesDir(), "common", "fadeno")),
+    capability: digestTree((0, import_node_path52.join)(templatesDir(), opts.target)),
     files: ownedVendoredFiles(repoRoot, init)
   };
   const lock = emitFile(lockPath, `${JSON.stringify(lockDoc, null, 2)}
@@ -45838,27 +43919,27 @@ function runVendor(opts) {
 
 // src/commands/evidence.ts
 var import_node_crypto21 = require("node:crypto");
-var import_node_fs54 = require("node:fs");
-var import_node_path55 = require("node:path");
+var import_node_fs52 = require("node:fs");
+var import_node_path53 = require("node:path");
 var EvidenceError = class extends Error {
 };
 function sha256(path) {
-  return (0, import_node_crypto21.createHash)("sha256").update((0, import_node_fs54.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto21.createHash)("sha256").update((0, import_node_fs52.readFileSync)(path)).digest("hex");
 }
 function copyOne(source, destination, rel, files) {
-  if ((0, import_node_fs54.existsSync)(destination)) {
+  if ((0, import_node_fs52.existsSync)(destination)) {
     if (sha256(source) !== sha256(destination)) throw new EvidenceError(`evidence destination conflict at ${destination}; refusing to overwrite it.`);
   } else {
-    (0, import_node_fs54.mkdirSync)((0, import_node_path55.join)(destination, ".."), { recursive: true });
-    (0, import_node_fs54.cpSync)(source, destination);
+    (0, import_node_fs52.mkdirSync)((0, import_node_path53.join)(destination, ".."), { recursive: true });
+    (0, import_node_fs52.cpSync)(source, destination);
   }
   files.push(rel);
 }
 function copyTree2(sourceRoot, destinationRoot, files, prefix = "artifacts") {
-  if (!(0, import_node_fs54.existsSync)(sourceRoot)) return;
-  for (const entry of (0, import_node_fs54.readdirSync)(sourceRoot, { withFileTypes: true })) {
-    const source = (0, import_node_path55.join)(sourceRoot, entry.name);
-    const destination = (0, import_node_path55.join)(destinationRoot, entry.name);
+  if (!(0, import_node_fs52.existsSync)(sourceRoot)) return;
+  for (const entry of (0, import_node_fs52.readdirSync)(sourceRoot, { withFileTypes: true })) {
+    const source = (0, import_node_path53.join)(sourceRoot, entry.name);
+    const destination = (0, import_node_path53.join)(destinationRoot, entry.name);
     const childPrefix = `${prefix}/${entry.name}`;
     if (entry.isDirectory()) copyTree2(source, destination, files, childPrefix);
     else if (entry.isFile()) copyOne(source, destination, childPrefix, files);
@@ -45869,25 +43950,25 @@ function runEvidencePromote(opts) {
   const verification = runVerify({ run: opts.run, repoRoot });
   if (!verification.ok) throw new EvidenceError(`run ${verification.run.runId} did not verify successfully; promotion refused.`);
   const run = resolveRun(repoRoot, opts.run);
-  const destination = (0, import_node_path55.join)(repoRoot, ".fadeno", "evidence", run.runId);
-  (0, import_node_fs54.mkdirSync)(destination, { recursive: true });
+  const destination = (0, import_node_path53.join)(repoRoot, ".fadeno", "evidence", run.runId);
+  (0, import_node_fs52.mkdirSync)(destination, { recursive: true });
   const files = [];
-  copyOne((0, import_node_path55.join)(run.dir, "run.yaml"), (0, import_node_path55.join)(destination, "run.yaml"), "run.yaml", files);
-  copyOne((0, import_node_path55.join)(run.dir, "events.jsonl"), (0, import_node_path55.join)(destination, "events.jsonl"), "events.jsonl", files);
-  if ((0, import_node_fs54.existsSync)((0, import_node_path55.join)(run.dir, "profile.yaml"))) copyOne((0, import_node_path55.join)(run.dir, "profile.yaml"), (0, import_node_path55.join)(destination, "profile.yaml"), "profile.yaml", files);
-  copyTree2((0, import_node_path55.join)(run.dir, "artifacts"), (0, import_node_path55.join)(destination, "artifacts"), files);
-  const snapshottedDefinitions = (0, import_node_path55.join)(run.dir, "definitions");
-  if ((0, import_node_fs54.existsSync)(snapshottedDefinitions)) {
-    copyTree2(snapshottedDefinitions, (0, import_node_path55.join)(destination, "definitions"), files, "definitions");
+  copyOne((0, import_node_path53.join)(run.dir, "run.yaml"), (0, import_node_path53.join)(destination, "run.yaml"), "run.yaml", files);
+  copyOne((0, import_node_path53.join)(run.dir, "events.jsonl"), (0, import_node_path53.join)(destination, "events.jsonl"), "events.jsonl", files);
+  if ((0, import_node_fs52.existsSync)((0, import_node_path53.join)(run.dir, "profile.yaml"))) copyOne((0, import_node_path53.join)(run.dir, "profile.yaml"), (0, import_node_path53.join)(destination, "profile.yaml"), "profile.yaml", files);
+  copyTree2((0, import_node_path53.join)(run.dir, "artifacts"), (0, import_node_path53.join)(destination, "artifacts"), files);
+  const snapshottedDefinitions = (0, import_node_path53.join)(run.dir, "definitions");
+  if ((0, import_node_fs52.existsSync)(snapshottedDefinitions)) {
+    copyTree2(snapshottedDefinitions, (0, import_node_path53.join)(destination, "definitions"), files, "definitions");
   } else {
     if (run.playbook != null) {
       const playbook = resolvePlaybookFile(repoRoot, run.playbook);
-      if (playbook) copyOne(playbook.path, (0, import_node_path55.join)(destination, "definitions", "playbook.yaml"), "definitions/playbook.yaml", files);
+      if (playbook) copyOne(playbook.path, (0, import_node_path53.join)(destination, "definitions", "playbook.yaml"), "definitions/playbook.yaml", files);
     }
     const schemaNames = ["playbook.schema.json", "run.schema.json", "review-report.schema.json", "test-result.schema.json"];
     for (const name of schemaNames) {
       const schema = resolveDefinition(repoRoot, "schema", name);
-      if (schema) copyOne(schema.path, (0, import_node_path55.join)(destination, "definitions", "schemas", name), `definitions/schemas/${name}`, files);
+      if (schema) copyOne(schema.path, (0, import_node_path53.join)(destination, "definitions", "schemas", name), `definitions/schemas/${name}`, files);
     }
   }
   files.sort();
@@ -45895,46 +43976,46 @@ function runEvidencePromote(opts) {
     fadeno_version: packageVersion(),
     run_id: run.runId,
     files: Object.fromEntries(files.map((rel) => {
-      const path = (0, import_node_path55.join)(destination, rel);
+      const path = (0, import_node_path53.join)(destination, rel);
       return [rel, sha256(path)];
     }))
   };
-  const manifestPath = (0, import_node_path55.join)(destination, "manifest.json");
+  const manifestPath = (0, import_node_path53.join)(destination, "manifest.json");
   const text2 = `${JSON.stringify(manifest, null, 2)}
 `;
-  const hadManifest = (0, import_node_fs54.existsSync)(manifestPath);
-  if (hadManifest && (0, import_node_fs54.readFileSync)(manifestPath, "utf8") !== text2) throw new EvidenceError(`evidence destination conflict at ${manifestPath}; refusing to overwrite it.`);
-  if (!(0, import_node_fs54.existsSync)(manifestPath)) (0, import_node_fs54.writeFileSync)(manifestPath, text2, "utf8");
+  const hadManifest = (0, import_node_fs52.existsSync)(manifestPath);
+  if (hadManifest && (0, import_node_fs52.readFileSync)(manifestPath, "utf8") !== text2) throw new EvidenceError(`evidence destination conflict at ${manifestPath}; refusing to overwrite it.`);
+  if (!(0, import_node_fs52.existsSync)(manifestPath)) (0, import_node_fs52.writeFileSync)(manifestPath, text2, "utf8");
   return { run: run.runId, destination, manifest: manifestPath, idempotent: hadManifest, files };
 }
 
 // src/commands/uninstall.ts
-var import_node_fs55 = require("node:fs");
+var import_node_fs53 = require("node:fs");
 var import_node_os5 = require("node:os");
-var import_node_path56 = require("node:path");
+var import_node_path54 = require("node:path");
 var UninstallError = class extends Error {
 };
 function unrecordedManagedFiles(harness, opts) {
   const home = opts?.home ?? (0, import_node_os5.homedir)();
-  if (harness === "claude") return listRetiredClaudeGridCells((0, import_node_path56.join)(home, ".claude", "agents"));
+  if (harness === "claude") return listRetiredClaudeGridCells((0, import_node_path54.join)(home, ".claude", "agents"));
   if (harness !== "codex") return [];
   const agentsDir = codexUserAgentDir(opts);
-  return ["worker", "reviewer", "judge"].map((role) => (0, import_node_path56.join)(agentsDir, `fadeno-${role}.toml`));
+  return ["worker", "reviewer", "judge"].map((role) => (0, import_node_path54.join)(agentsDir, `fadeno-${role}.toml`));
 }
 function carriesManagedMarker(path) {
   let text2;
   try {
-    text2 = (0, import_node_fs55.readFileSync)(path, "utf8");
+    text2 = (0, import_node_fs53.readFileSync)(path, "utf8");
   } catch {
     return false;
   }
   return text2.startsWith("# fadeno:managed") || isRetiredClaudeGridCell(text2);
 }
 function removePermissionRule(permission, removed, preserved) {
-  if (!(0, import_node_fs55.existsSync)(permission.path)) return;
+  if (!(0, import_node_fs53.existsSync)(permission.path)) return;
   let data;
   try {
-    const parsed = JSON.parse((0, import_node_fs55.readFileSync)(permission.path, "utf8"));
+    const parsed = JSON.parse((0, import_node_fs53.readFileSync)(permission.path, "utf8"));
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     data = parsed;
   } catch {
@@ -45948,14 +44029,14 @@ function removePermissionRule(permission, removed, preserved) {
   permissions.allow = allow.filter((item) => item !== permission.rule);
   const emptyPermissions = Object.values(permissions).every((value) => Array.isArray(value) && value.length === 0);
   if (emptyPermissions) delete data.permissions;
-  if (permission.createdFile && Object.keys(data).length === 0) (0, import_node_fs55.rmSync)(permission.path, { force: true });
-  else (0, import_node_fs55.writeFileSync)(permission.path, `${JSON.stringify(data, null, 2)}
+  if (permission.createdFile && Object.keys(data).length === 0) (0, import_node_fs53.rmSync)(permission.path, { force: true });
+  else (0, import_node_fs53.writeFileSync)(permission.path, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   removed.push(`${permission.path} permission ${permission.rule}`);
 }
 function isRegularFile2(path) {
   try {
-    return (0, import_node_fs55.lstatSync)(path).isFile();
+    return (0, import_node_fs53.lstatSync)(path).isFile();
   } catch {
     return false;
   }
@@ -45980,10 +44061,10 @@ function runUninstall(opts) {
       ...unrecordedManagedFiles(harness, opts.userPathOptions).filter((path) => !recorded.some((file) => file.path === path)).map((path) => ({ path, sha256: "" }))
     ];
     for (const file of files) {
-      if (!(0, import_node_fs55.existsSync)(file.path)) continue;
+      if (!(0, import_node_fs53.existsSync)(file.path)) continue;
       const managedMarker = carriesManagedMarker(file.path);
       if (managedMarker || file.sha256 !== "" && fileDigest(file.path) === file.sha256) {
-        (0, import_node_fs55.rmSync)(file.path, { force: true });
+        (0, import_node_fs53.rmSync)(file.path, { force: true });
         removed.push(file.path);
       } else {
         preserved.push(file.path);
@@ -45996,30 +44077,30 @@ function runUninstall(opts) {
   }
   for (const path of retiredStateFiles(paths)) {
     if (!isRegularFile2(path)) continue;
-    (0, import_node_fs55.rmSync)(path, { force: true });
+    (0, import_node_fs53.rmSync)(path, { force: true });
     removed.push(path);
   }
   if (Object.keys(manifest.harnesses).length === 0) {
-    (0, import_node_fs55.rmSync)(paths.managedRuntimeDir, { recursive: true, force: true });
-    (0, import_node_fs55.rmSync)((0, import_node_path56.join)(paths.dataDir, "runtime.staging"), { recursive: true, force: true });
-    (0, import_node_fs55.rmSync)((0, import_node_path56.join)(paths.dataDir, "runtime.old"), { recursive: true, force: true });
-    (0, import_node_fs55.rmSync)((0, import_node_path56.join)(paths.dataDir, ".runtime.lock"), { recursive: true, force: true });
+    (0, import_node_fs53.rmSync)(paths.managedRuntimeDir, { recursive: true, force: true });
+    (0, import_node_fs53.rmSync)((0, import_node_path54.join)(paths.dataDir, "runtime.staging"), { recursive: true, force: true });
+    (0, import_node_fs53.rmSync)((0, import_node_path54.join)(paths.dataDir, "runtime.old"), { recursive: true, force: true });
+    (0, import_node_fs53.rmSync)((0, import_node_path54.join)(paths.dataDir, ".runtime.lock"), { recursive: true, force: true });
     manifest.runtime = null;
   }
   writeInstallationManifest(paths, manifest);
   if (opts.purgeUserData) {
-    (0, import_node_fs55.rmSync)(paths.configDir, { recursive: true, force: true });
-    (0, import_node_fs55.rmSync)(paths.stateDir, { recursive: true, force: true });
-    (0, import_node_fs55.rmSync)(paths.dataDir, { recursive: true, force: true });
+    (0, import_node_fs53.rmSync)(paths.configDir, { recursive: true, force: true });
+    (0, import_node_fs53.rmSync)(paths.stateDir, { recursive: true, force: true });
+    (0, import_node_fs53.rmSync)(paths.dataDir, { recursive: true, force: true });
     return { harnesses: selected, removed, preserved, purged: true };
   }
   return { harnesses: selected, removed, preserved, purged: false };
 }
 
 // src/commands/clean.ts
-var import_node_child_process16 = require("node:child_process");
-var import_node_fs56 = require("node:fs");
-var import_node_path57 = require("node:path");
+var import_node_child_process15 = require("node:child_process");
+var import_node_fs54 = require("node:fs");
+var import_node_path55 = require("node:path");
 var LOCAL_DIR = ".fadeno/local";
 function runCleanWindows(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
@@ -46028,13 +44109,13 @@ function runCleanWindows(opts = {}) {
 function runClean(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const candidates = [
-    (0, import_node_path57.join)(repoRoot, ".fadeno", "runs"),
-    (0, import_node_path57.join)(repoRoot, ".fadeno", "progress"),
-    (0, import_node_path57.join)(repoRoot, ...LOCAL_DIR.split("/")),
-    (0, import_node_path57.join)(repoRoot, ".fadeno", "dispatches.jsonl")
-  ].filter(import_node_fs56.existsSync);
+    (0, import_node_path55.join)(repoRoot, ".fadeno", "runs"),
+    (0, import_node_path55.join)(repoRoot, ".fadeno", "progress"),
+    (0, import_node_path55.join)(repoRoot, ...LOCAL_DIR.split("/")),
+    (0, import_node_path55.join)(repoRoot, ".fadeno", "dispatches.jsonl")
+  ].filter(import_node_fs54.existsSync);
   const retainedShadowWorktrees = listRetainedShadowWorktrees({ repoRoot }).map(
-    (w) => (0, import_node_path57.join)(repoRoot, w.workspace)
+    (w) => (0, import_node_path55.join)(repoRoot, w.workspace)
   );
   const registeredWorktrees = listRegisteredWorktreesUnder(repoRoot, LOCAL_DIR);
   const overlapSnapshots = listOverlapSnapshots(repoRoot);
@@ -46043,7 +44124,7 @@ function runClean(opts = {}) {
   if (opts.force) {
     for (const worktree of registeredWorktrees) {
       try {
-        const result = (0, import_node_child_process16.spawnSync)("git", ["worktree", "remove", "--force", worktree], {
+        const result = (0, import_node_child_process15.spawnSync)("git", ["worktree", "remove", "--force", worktree], {
           cwd: repoRoot,
           encoding: "utf8"
         });
@@ -46052,11 +44133,11 @@ function runClean(opts = {}) {
       }
     }
     try {
-      (0, import_node_child_process16.spawnSync)("git", ["worktree", "prune"], { cwd: repoRoot, encoding: "utf8" });
+      (0, import_node_child_process15.spawnSync)("git", ["worktree", "prune"], { cwd: repoRoot, encoding: "utf8" });
     } catch {
     }
     for (const path of candidates) {
-      (0, import_node_fs56.rmSync)(path, { recursive: true, force: true });
+      (0, import_node_fs54.rmSync)(path, { recursive: true, force: true });
       removed.push(path);
     }
   }
@@ -46074,38 +44155,38 @@ function runClean(opts = {}) {
 
 // src/commands/unvendor.ts
 var import_node_crypto22 = require("node:crypto");
-var import_node_fs57 = require("node:fs");
-var import_node_path58 = require("node:path");
+var import_node_fs55 = require("node:fs");
+var import_node_path56 = require("node:path");
 var UnvendorError = class extends Error {
 };
 function digest3(path) {
-  return (0, import_node_crypto22.createHash)("sha256").update((0, import_node_fs57.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto22.createHash)("sha256").update((0, import_node_fs55.readFileSync)(path)).digest("hex");
 }
 function runUnvendor(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
-  const lockPath = (0, import_node_path58.join)(repoRoot, "fadeno.lock");
-  if (!(0, import_node_fs57.existsSync)(lockPath)) throw new UnvendorError("fadeno.lock is missing; refusing an ownership-blind unvendor.");
-  const lock = JSON.parse((0, import_node_fs57.readFileSync)(lockPath, "utf8"));
+  const lockPath = (0, import_node_path56.join)(repoRoot, "fadeno.lock");
+  if (!(0, import_node_fs55.existsSync)(lockPath)) throw new UnvendorError("fadeno.lock is missing; refusing an ownership-blind unvendor.");
+  const lock = JSON.parse((0, import_node_fs55.readFileSync)(lockPath, "utf8"));
   if (lock.files == null) throw new UnvendorError("fadeno.lock predates managed file ownership; re-run `fadeno vendor --force` first.");
   const removed = [];
   const preserved = [];
   for (const [rel, expected] of Object.entries(lock.files)) {
-    const path = (0, import_node_path58.resolve)(repoRoot, rel);
-    const back = (0, import_node_path58.relative)(repoRoot, path).split("\\").join("/");
-    if (back.startsWith("../") || (0, import_node_path58.isAbsolute)(back) || !(0, import_node_fs57.existsSync)(path)) continue;
+    const path = (0, import_node_path56.resolve)(repoRoot, rel);
+    const back = (0, import_node_path56.relative)(repoRoot, path).split("\\").join("/");
+    if (back.startsWith("../") || (0, import_node_path56.isAbsolute)(back) || !(0, import_node_fs55.existsSync)(path)) continue;
     if (opts.force || digest3(path) === expected) {
-      (0, import_node_fs57.rmSync)(path, { force: true });
+      (0, import_node_fs55.rmSync)(path, { force: true });
       removed.push(path);
     } else preserved.push(path);
   }
   const lockRemoved = preserved.length === 0 || Boolean(opts.force);
-  if (lockRemoved) (0, import_node_fs57.rmSync)(lockPath, { force: true });
+  if (lockRemoved) (0, import_node_fs55.rmSync)(lockPath, { force: true });
   return { repoRoot, removed, preserved, lockRemoved };
 }
 
 // src/commands/cancel.ts
-var import_node_fs58 = require("node:fs");
-var import_node_path59 = require("node:path");
+var import_node_fs56 = require("node:fs");
+var import_node_path57 = require("node:path");
 var CancelError = class extends Error {
 };
 function defaultProbe(pid, signal) {
@@ -46142,11 +44223,11 @@ function runCancel(opts) {
     throw new CancelError(err.message);
   }
   const runId = summary.runId;
-  const inflightDir = (0, import_node_path59.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
+  const inflightDir = (0, import_node_path57.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
   let fileNames = [];
-  if ((0, import_node_fs58.existsSync)(inflightDir)) {
+  if ((0, import_node_fs56.existsSync)(inflightDir)) {
     try {
-      fileNames = (0, import_node_fs58.readdirSync)(inflightDir);
+      fileNames = (0, import_node_fs56.readdirSync)(inflightDir);
     } catch {
       fileNames = [];
     }
@@ -46161,8 +44242,8 @@ function runCancel(opts) {
     const parsed = parseFilenameForRun(fileName, runId);
     if (parsed == null) continue;
     if (actorCallFilter != null && parsed.actorCallId !== actorCallFilter) continue;
-    const abs = (0, import_node_path59.join)(inflightDir, fileName);
-    const claim2 = readInflightClaim(abs, (p) => (0, import_node_fs58.readFileSync)(p, "utf8"));
+    const abs = (0, import_node_path57.join)(inflightDir, fileName);
+    const claim2 = readInflightClaim(abs, (p) => (0, import_node_fs56.readFileSync)(p, "utf8"));
     if (claim2 == null) continue;
     if (!inflightClaimIsAlive(claim2, probe2)) continue;
     aliveMatches.push({ fileName, claim: claim2, actorCallId: parsed.actorCallId, attempt: parsed.attempt });
@@ -46274,10 +44355,6 @@ var MODEL_VERIFY_PAGE = page(
 var TOP_LEVEL = {
   setup: page("Install safe user-scoped integration.", "fadeno setup [--codex|--claude] [options]"),
   status: page("Show effective definitions, routing, and runtime state.", "fadeno status [options]"),
-  doctor: page("Run read-only integration diagnostics.", "fadeno doctor [options]", [
-    "Every check reads files. --probe-models is the exception: it spawns each dialed harness\u2019s models_command.",
-    "Reports a dialed model its backend no longer lists, a user-catalog alias the loader had to repair or drop, a verification row past the freshness window, and every persisted surface whose schema_version this build cannot read."
-  ]),
   vendor: page("Vendor capability and definitions into this project.", "fadeno vendor --codex|--claude|--grok|--opencode|--omp [options]"),
   uninstall: page("Remove managed user integration.", [
     "fadeno uninstall --codex|--claude|--all [options]",
@@ -46556,7 +44633,6 @@ var withGlobals = (...flags) => ["--help", "--version", ...flags];
 var PAGE_OPTIONS = {
   setup: withGlobals("--codex", "--claude", "--from", "--reset-runtime"),
   status: withGlobals("--verbose", "--codex", "--claude", "--opencode", "--omp"),
-  doctor: withGlobals("--codex", "--claude", "--opencode", "--omp", "--probe-models", "--json"),
   vendor: withGlobals("--codex", "--claude", "--grok", "--opencode", "--omp", "--no-steering", "--force"),
   uninstall: withGlobals("--codex", "--claude", "--all", "--purge-user-data", "--force"),
   clean: withGlobals("--force", "--windows"),
@@ -46630,7 +44706,6 @@ var PATH_OPTION_HINTS = {
   "steering apply": { "--force": "Overwrite managed steering files" },
   "models remove": { "--force": "Remove despite live dials, naming each stranded" },
   "model remove": { "--force": "Remove despite live dials, naming each stranded" },
-  doctor: { "--probe-models": "Spawn each dialed harness\u2019s models_command and report a model it no longer lists" },
   dispatches: {
     "--output": "Print saved snapshot bytes for an id, last dispatch, or tag",
     "--withdraw": "Retire a dead dispatch that has no executor to signal",
@@ -46718,7 +44793,7 @@ Host dispatch protocol
   dispatch-open, dispatch-close  (runless: no playbook run required)
 
 Setup and maintenance
-  setup, status, doctor, vendor, unvendor, clean, uninstall, plugin, completion
+  setup, status, vendor, unvendor, clean, uninstall, plugin, completion
 
 Global options
   -h, --help       Show this page or focused command help
@@ -46754,25 +44829,25 @@ var import_meta2 = {};
 var KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
 function shouldRunPreflight(command2) {
   if (!command2) return false;
-  const excluded = /* @__PURE__ */ new Set(["status", "doctor", "setup", "uninstall"]);
+  const excluded = /* @__PURE__ */ new Set(["status", "setup", "uninstall"]);
   if (excluded.has(command2)) return false;
   if (!KNOWN_CLI_COMMANDS.has(command2)) return false;
   return true;
 }
 function resolveRuntimeSyncCandidate(env, argv1, paths, manifest) {
-  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs59.existsSync)((0, import_node_path60.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
+  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs57.existsSync)((0, import_node_path58.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
     return { sourceDir: env.FADENO_BUNDLED_RUNTIME, trustSource: true };
   }
   if (argv1) {
     try {
-      const dir = (0, import_node_path60.dirname)((0, import_node_path60.resolve)(argv1));
-      const parent = (0, import_node_path60.dirname)(dir);
-      const candidates = [(0, import_node_path60.join)(parent, ".claude-plugin", "plugin.json"), (0, import_node_path60.join)(parent, ".codex-plugin", "plugin.json")];
+      const dir = (0, import_node_path58.dirname)((0, import_node_path58.resolve)(argv1));
+      const parent = (0, import_node_path58.dirname)(dir);
+      const candidates = [(0, import_node_path58.join)(parent, ".claude-plugin", "plugin.json"), (0, import_node_path58.join)(parent, ".codex-plugin", "plugin.json")];
       let isFadeno = false;
       for (const cand of candidates) {
         try {
-          if ((0, import_node_fs59.existsSync)(cand)) {
-            const p = JSON.parse((0, import_node_fs59.readFileSync)(cand, "utf8"));
+          if ((0, import_node_fs57.existsSync)(cand)) {
+            const p = JSON.parse((0, import_node_fs57.readFileSync)(cand, "utf8"));
             if (p.name === "fadeno") {
               isFadeno = true;
               break;
@@ -46781,7 +44856,7 @@ function resolveRuntimeSyncCandidate(env, argv1, paths, manifest) {
         } catch {
         }
       }
-      if (isFadeno && (0, import_node_fs59.existsSync)((0, import_node_path60.join)(dir, "fadeno"))) {
+      if (isFadeno && (0, import_node_fs57.existsSync)((0, import_node_path58.join)(dir, "fadeno"))) {
         return { sourceDir: dir, trustSource: true };
       }
     } catch {
@@ -46789,12 +44864,12 @@ function resolveRuntimeSyncCandidate(env, argv1, paths, manifest) {
   }
   if (argv1) {
     try {
-      const resolvedArgv = (0, import_node_path60.resolve)(argv1);
-      const managedDir = (0, import_node_path60.resolve)(paths.managedRuntimeDir);
-      const isManaged = resolvedArgv === (0, import_node_path60.resolve)(paths.managedCli) || (0, import_node_path60.dirname)(resolvedArgv) === managedDir || resolvedArgv.startsWith(managedDir + import_node_path60.sep);
+      const resolvedArgv = (0, import_node_path58.resolve)(argv1);
+      const managedDir = (0, import_node_path58.resolve)(paths.managedRuntimeDir);
+      const isManaged = resolvedArgv === (0, import_node_path58.resolve)(paths.managedCli) || (0, import_node_path58.dirname)(resolvedArgv) === managedDir || resolvedArgv.startsWith(managedDir + import_node_path58.sep);
       if (isManaged) {
         const src = manifest.runtime?.source;
-        if (src && (0, import_node_fs59.existsSync)(src) && (0, import_node_fs59.existsSync)((0, import_node_path60.join)(src, "fadeno"))) {
+        if (src && (0, import_node_fs57.existsSync)(src) && (0, import_node_fs57.existsSync)((0, import_node_path58.join)(src, "fadeno"))) {
           return { sourceDir: src, trustSource: false };
         }
         return null;
@@ -46838,7 +44913,7 @@ function printInitSummary(target, repoRoot, results, withHooks, withSteering, da
   console.log(`Fadeno initialized for ${target} in ${repoRoot}
 `);
   for (const r of results) {
-    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path60.relative)(repoRoot, r.path) || r.path}`);
+    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path58.relative)(repoRoot, r.path) || r.path}`);
   }
   console.log(
     `
@@ -46885,7 +44960,7 @@ function printIssue(issue) {
 function printValidate(outcome) {
   let warnings = 0;
   for (const result of outcome.results) {
-    const rel = (0, import_node_path60.relative)(outcome.repoRoot, result.file) || result.file;
+    const rel = (0, import_node_path58.relative)(outcome.repoRoot, result.file) || result.file;
     const fileWarnings = result.issues.filter((i) => i.severity === "warning").length;
     warnings += fileWarnings;
     if (result.ok) {
@@ -47190,7 +45265,7 @@ ${heading} \u2014 gitignored content no diff carried out of its worktree${trunca
 function printShow(repoRoot, result, rawTimeline) {
   const { run, mode, events, badLines, artifacts, projection } = result;
   const dash = (value) => value ?? "\u2014";
-  const relDir = (0, import_node_path60.relative)(repoRoot, run.dir) || run.dir;
+  const relDir = (0, import_node_path58.relative)(repoRoot, run.dir) || run.dir;
   console.log(`run ${run.runId}`);
   console.log(`  playbook:  ${dash(run.playbook)}`);
   console.log(`  task:      ${dash(run.task)}`);
@@ -47580,27 +45655,6 @@ function optionalTarget(values) {
   if (selected.length > 1) throw new Error("Choose at most one target: --codex, --claude, --grok, --opencode, or --omp.");
   return selected[0];
 }
-function renderDoctorFindings(findings) {
-  const line = (item) => `${item.severity.padEnd(7)} ${item.check}: ${item.detail}${item.remediation ? ` \u2014 ${item.remediation}` : ""}`;
-  const inventory = findings.filter((item) => item.check.startsWith("persisted-state:"));
-  if (inventory.length === 0 || inventory.some((item) => item.severity !== "ok")) {
-    return findings.map(line);
-  }
-  const out = [];
-  let collapsed = false;
-  for (const item of findings) {
-    if (item.check.startsWith("persisted-state:")) {
-      if (collapsed) continue;
-      collapsed = true;
-      out.push(
-        `${"ok".padEnd(7)} persisted-state: ${inventory.length} persisted surfaces are at the schema_version this build writes (run \`fadeno doctor --json\` to see each one).`
-      );
-      continue;
-    }
-    out.push(line(item));
-  }
-  return out;
-}
 function main(argv) {
   if (argv[0] === "completion" && argv[1] === "candidates") {
     const separator = argv.indexOf("--", 3);
@@ -47840,17 +45894,6 @@ function main(argv) {
       if (result.next) console.log(`next: ${result.next}`);
       if (values.verbose) console.log(JSON.stringify({ repoRoot: result.repoRoot, paths: result.definitions, roles: result.roles }, null, 2));
       return 0;
-    }
-    case "doctor": {
-      const target = optionalTarget(values);
-      if (target === "grok") throw new Error("Use `fadeno doctor` without --grok; steering for that host is intentionally unsupported.");
-      const result = runDoctor({ target: target ?? null, probeModels: Boolean(values["probe-models"]) });
-      if (values.json) {
-        console.log(JSON.stringify({ repoRoot: result.repoRoot, ok: result.ok, findings: result.findings }, null, 2));
-        return result.ok ? 0 : 1;
-      }
-      for (const item of renderDoctorFindings(result.findings)) console.log(item);
-      return result.ok ? 0 : 1;
     }
     case "vendor": {
       const target = requireTarget(values);
@@ -48166,7 +46209,7 @@ Or advance manually with the playbook cursor:`);
       const parts = [];
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(", ")}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(", ")}`);
-      console.log(`${(0, import_node_path60.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
+      console.log(`${(0, import_node_path58.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
       if (result.manifest) {
         const v = result.manifest.validation;
         const note = v.schema ? `, ${v.schema}: ${v.ok ? "valid" : "INVALID"}` : "";
@@ -48186,9 +46229,9 @@ Or advance manually with the playbook cursor:`);
       }
       const result = runToolRun({ run, tool: values.tool });
       const repoRoot = findRepoRoot();
-      const runDir = (0, import_node_path60.join)(repoRoot, ".fadeno", "runs", result.run);
-      const absArtifact = (0, import_node_path60.join)(runDir, result.artifact);
-      const rel = (0, import_node_path60.relative)(process.cwd(), absArtifact) || absArtifact;
+      const runDir = (0, import_node_path58.join)(repoRoot, ".fadeno", "runs", result.run);
+      const absArtifact = (0, import_node_path58.join)(runDir, result.artifact);
+      const rel = (0, import_node_path58.relative)(process.cwd(), absArtifact) || absArtifact;
       console.log(`${rel}: tool ${result.tool} \u2192 ${result.status} (exit ${result.exitCode ?? "null"})`);
       console.log(`  attempt ${result.attempt} duration ${result.durationMs ?? 0}ms`);
       return result.status === "passed" || result.status === "failed" ? 0 : 1;
@@ -48199,7 +46242,7 @@ Or advance manually with the playbook cursor:`);
         throw new Error("Usage: fadeno tool-complete <run> --output <artifact-path>");
       }
       const result = runToolComplete({ run, output: values.output });
-      console.log(`${(0, import_node_path60.relative)(process.cwd(), result.runDir) || result.runDir}: completed tool step ${result.step}`);
+      console.log(`${(0, import_node_path58.relative)(process.cwd(), result.runDir) || result.runDir}: completed tool step ${result.step}`);
       if (result.manifest) {
         const validation = result.manifest.validation;
         const note = validation.schema ? `, ${validation.schema}: ${validation.ok ? "valid" : "INVALID"}` : "";
@@ -48231,7 +46274,7 @@ Or advance manually with the playbook cursor:`);
       if (codex) {
         console.log("\nTest it: `codex plugin marketplace add . && codex plugin add fadeno@fadeno`");
       } else {
-        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path60.relative)(process.cwd(), outDir) + "`");
+        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path58.relative)(process.cwd(), outDir) + "`");
       }
       return 0;
     }
@@ -48583,7 +46626,7 @@ Or advance manually with the playbook cursor:`);
         diagnostics: Boolean(values.diagnostics),
         noBrief: Boolean(values["no-brief"]),
         promptFile,
-        prompt: promptFile == null ? (0, import_node_fs59.readFileSync)(0, "utf8") : void 0,
+        prompt: promptFile == null ? (0, import_node_fs57.readFileSync)(0, "utf8") : void 0,
         onEcho: (line) => console.error(line)
       });
       if (result.relayAttested === false) {
@@ -48670,7 +46713,7 @@ Or advance manually with the playbook cursor:`);
       let stdinBytes;
       if (values.output === "-") {
         try {
-          stdinBytes = (0, import_node_fs59.readFileSync)(0);
+          stdinBytes = (0, import_node_fs57.readFileSync)(0);
         } catch (err) {
           throw new Error(`failed to read stdin for --output -: ${err.message}`);
         }
@@ -49085,7 +47128,6 @@ if (_isMain) {
 0 && (module.exports = {
   KNOWN_CLI_COMMANDS,
   maybeRunRuntimePreflight,
-  renderDoctorFindings,
   resolveRuntimeSyncCandidate,
   shouldRunPreflight
 });
