@@ -88,12 +88,12 @@ pre .c { color: var(--faint); }
 <div class="wrap">
 
 <header class="masthead">
-  <div class="eyebrow"><span>Specification</span><span>Draft 1</span><span>2026-09-07</span><span>derives from decisions 01–33</span></div>
+  <div class="eyebrow"><span>Specification</span><span>Draft 1</span><span>2026-09-07</span><span>derives from decisions 01–33</span><span>accepted</span></div>
   <h1>Fadeno</h1>
   <p class="standfirst">A meta-harness for common subagent workflow patterns, neutral across harnesses and models. It routes work to models by role, wraps the spawn with deterministic scaffolding, and keeps a record nobody has to think about. Everything else is the intelligence's job.</p>
 </header>
 
-<p class="lede" style="margin-top:26px;">This document specifies behaviour, not implementation. Where a passage makes a call the decision log does not cover, it is marked <b>OPEN CALL</b> — those are the places worth arguing with; the rest is transcription.</p>
+<p class="lede" style="margin-top:26px;">This document specifies behaviour, not implementation. Every call in it has been made and reviewed; nothing is left open.</p>
 
 <h2><span class="sn">01</span>What Fadeno is for</h2>
 <p>The user is someone constantly splitting and routing work between different models on different harnesses, who needs structure without ceremony. Fadeno gives them four things and deliberately nothing else:</p>
@@ -153,7 +153,7 @@ pre .c { color: var(--faint); }
 
 <p>On the host lane the hook applies model and effort by rewriting the spawn. Where the resolved model can only be reached as a process, the hook instead redirects the spawn to a <b>dispatch proxy</b> — a minimal agent whose only job is to invoke the command lane. The host observes no difference.</p>
 
-<div class="flag"><span class="lbl">Open call</span>Whether the proxy is still needed on harnesses where the hook could invoke the command lane directly. Keeping it is the known-good path; removing it is an optimisation to consider after the rest works.</div>
+<p><b>The proxy is the design on every harness, not a fallback.</b> A hook may turn out to be able to invoke the command lane directly on some harness; the design does not assume it, and does not vary by harness where it can. One path that works everywhere beats a faster path that works in one place — the same reasoning that put the worktree contract in the prompt rather than using Claude's native isolation.</p>
 
 <h3>The worktree</h3>
 <ul class="rule-list">
@@ -164,7 +164,7 @@ pre .c { color: var(--faint); }
   <li>A shared tree remains available on request. When one is requested while another shared dispatch is open, <b>say so</b> — that is the only collision git does not solve.</li>
 </ul>
 
-<div class="flag"><span class="lbl">Open call</span>Branch-name sanitization: what happens to a semantic name containing characters git rejects. Proposal — lowercase, replace runs of non-<code>[a-z0-9._-]</code> with <code>-</code>, trim to 60 characters, and let the duplicate counter handle any collision the trim creates.</div>
+<p><b>Branch-name sanitization is deliberately dumb:</b> lowercase, replace runs of anything outside <code>[a-z0-9._-]</code> with a single <code>-</code>, trim to 60 characters. A collision created by the trim is just another collision, handled by the duplicate counter that already exists. No cleverness, because a surprising branch name is worse than an ugly one.</p>
 
 <h2><span class="sn">05</span>The three contracts</h2>
 
@@ -200,7 +200,7 @@ pre .c { color: var(--faint); }
   <li>When a worker's working directory did not match its assigned worktree, <b>say so</b> — at stop and in the nag.</li>
 </ul>
 
-<div class="flag"><span class="lbl">Open call</span>Where the threshold is configured. Proposal — <code>.fadeno/executors.yaml</code> alongside the dials, since it is repo-scoped policy and that file is already the repo's Fadeno config.</div>
+<p>The threshold is configured in <code>.fadeno/executors.yaml</code>, alongside the dials — it is repo-scoped policy and that file is already the repo's Fadeno config. Wired from the start, unexposed until someone asks.</p>
 
 <h2><span class="sn">06</span>Context delivery</h2>
 <ul class="rule-list">
@@ -250,7 +250,7 @@ id · at · verb · note</pre>
   </table>
 </div>
 
-<div class="flag"><span class="lbl">Open call</span>Whether <code>worktrees</code> is its own verb or a section of <code>status</code>. Proposal — its own verb, because it is the one report someone runs deliberately when they suspect work was forgotten, and burying it in a status wall makes it easy to skim past.</div>
+<p><code>worktrees</code> is its own verb rather than a section of <code>status</code>. It is the report someone runs deliberately when they suspect work was forgotten, and burying that in a status wall makes it easy to skim past — which is the exact failure it exists to catch.</p>
 
 <h2><span class="sn">09</span>Non-goals</h2>
 <p class="lede">Named explicitly, because each was in the product and was removed for a reason. Anything here must argue its way back in.</p>
