@@ -4,7 +4,6 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { runCompletion, runCompletionCandidates } from '../src/commands/completion.ts';
-import { runInit } from '../src/commands/init.ts';
 import { userPaths } from '../src/lib/user-paths.ts';
 import { catalogV4, tempRepo } from './helpers.ts';
 

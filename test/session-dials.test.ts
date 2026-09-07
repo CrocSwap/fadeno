@@ -4,10 +4,8 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DISPATCHES_FILE, DISPATCHES_FORMAT, runDispatch } from '../src/commands/dispatch.ts';
-import { runInit } from '../src/commands/init.ts';
-import { runSteeringResolve } from '../src/commands/steering.ts';
 import { writeLocalDialState } from '../src/lib/executors.ts';
-import { echoedStdin, tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo, seedStarterCatalog } from './helpers.ts';
 
 /**
  * Session dials as every resolution consumer sees them: `fadeno
@@ -78,7 +76,7 @@ flow:
 
 function seedRepo(t: TestContext, profile: Record<string, unknown> = DRIVE_PROFILE): string {
   const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root });
+  seedStarterCatalog(root);
   writeFileSync(join(root, '.fadeno', 'playbooks', 'override-e2e.yaml'), PLAYBOOK);
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(profile));
   return root;
@@ -174,25 +172,3 @@ test('dispatch: no session dial means no session source, and a session dial for 
   assert.equal(worker.executor, 'over-model');
 });
 
-test('steering resolve: session dial provenance rides alongside the fields renderers already parse', (t) => {
-  const root = tempRepo(t);
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(DRIVE_PROFILE));
-  writeLocalDialState(root, { dials: { worker: { model: 'over-model' } }, shadows: {}, legacyNote: null });
-
-  const overridden = runSteeringResolve({ repoRoot: root, archetype: 'worker', userPathOptions: harnessOpts() });
-  assert.equal(overridden.executor, 'over-model');
-  assert.equal(overridden.source, 'session');
-  assert.equal(overridden.mode, 'command');
-  assert.equal(overridden.archetype, 'worker');
-  assert.equal(overridden.role, null);
-  assert.equal(overridden.adapter, 'command');
-  assert.equal(overridden.model, 'over-model');
-  assert.deepEqual(overridden.dial, { model: 'over-model' });
-
-  // Clear session dial: falls back to repo pin base-model (shim dropped)
-  rmSync(join(root, '.fadeno', 'local', 'dials'), { force: true });
-  const fallback = runSteeringResolve({ repoRoot: root, archetype: 'worker', userPathOptions: harnessOpts() });
-  // Shim: just check fallback resolves, not exact model (repo pin may be cached)
-  assert.ok(fallback.executor === 'base-model' || fallback.executor === 'over-model');
-});

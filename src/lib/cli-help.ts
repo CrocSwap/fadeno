@@ -55,19 +55,12 @@ const MODEL_VERIFY_PAGE = page(
 const TOP_LEVEL: Record<string, PageSeed> = {
   setup: page('Install safe user-scoped integration.', 'fadeno setup [--codex|--claude] [options]'),
   status: page('Show effective definitions, routing, and runtime state.', 'fadeno status [options]'),
-  vendor: page('Vendor capability and definitions into this project.', 'fadeno vendor --codex|--claude|--grok|--opencode|--omp [options]'),
-  uninstall: page('Remove managed user integration.', [
-    'fadeno uninstall --codex|--claude|--all [options]',
-    'fadeno uninstall --purge-user-data --force [--codex|--claude|--all]',
-  ]),
   clean: page('Preview or remove ignored repository runtime state.', [
     'fadeno clean [--force]',
     'fadeno clean --windows',
   ], [
     '--windows deletes nothing: it compacts .fadeno/local/dispatch-windows.jsonl, dropping torn rows and closed windows that can no longer overlap anything, and keeping every open one. Use it when doctor reports the write-window log degraded — `--force` would delete that log along with the open windows of deliveries writing right now.',
   ]),
-  unvendor: page('Remove lock-owned vendored files.', 'fadeno unvendor [--force]'),
-  init: page('Scaffold project-owned Fadeno capability.', 'fadeno init --codex|--claude|--grok|--opencode|--omp [options]'),
   models: MODELS_PAGE,
   model: aliasPage(MODELS_PAGE, [
     'fadeno model [<name>]',
@@ -92,7 +85,6 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     '`clear-shadow` with an archetype detaches that one and fails if it has none; with NO archetype it detaches EVERY attachment. Shadows live only in `.fadeno/local/dials`, so — unlike `clear` — it takes no `--session|--user|--repo` scope flag.',
   ]),
   shadow: aliasPage(SHADOW_PAGE, ['fadeno shadow', 'fadeno shadow <archetype> <model>[@effort] [options]', 'fadeno shadow clear [<archetype>]'], '`fadeno shadow` is an alias for `fadeno dial shadow`, and `fadeno shadow clear` for `fadeno dial clear-shadow`.'),
-  steering: page('Resolve dials or materialize harness steering.', ['fadeno steering resolve --archetype <name> [options]', 'fadeno steering apply --codex|--claude|--opencode|--omp [options]']),
   dispatch: page('Resolve an archetype and invoke it once.', ['fadeno dispatch --archetype <name> [options]', 'fadeno dispatch --model <ref> [options]'], ['Read prompt text from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted.', 'Dispatches isolate by default and merge a successful primary diff back. `--isolate` withholds merge-back; `--shadow <ref>` adds a one-shot challenger.', 'A failed relay-fidelity check refuses the dispatch before the executor spawns; `--allow-relay-mismatch` proceeds and records `relay_mismatch_allowed: true`.', 'Recover output with `fadeno dispatches --output tag:<tag> --wait 120`.']),
   'dispatch-open': page(
     'Open a runless host dispatch: an isolated worktree, an id, and a receipt to come.',
@@ -112,7 +104,6 @@ const TOP_LEVEL: Record<string, PageSeed> = {
       'The worktree is removed on exactly one condition: the work landed in this tree. Every other ending retains it and the command says where it is.',
     ],
   ),
-  attest: page('Record this subagent delivery as evidence.', 'fadeno attest --archetype <name>'),
   dispatches: page('Inspect or recover command dispatches.', ['fadeno dispatches [--tail <count>] [--stops] [--json] [--bakeoffs]', 'fadeno dispatches --output <id|last|tag:<tag>> [--wait <seconds>]', 'fadeno dispatches --cancel <id|tag:<tag>> | --merge <id|tag:<tag>>', 'fadeno dispatches --withdraw <id|tag:<tag>> --reason <text> [--work-left <path>]'], ['`--output` writes the saved snapshot bytes verbatim to stdout; use `--wait` only for a completion row.', '`--cancel` signals a live executor. `--withdraw` is the second move for one nothing can signal: it records the terminal receipt, signals nothing, and removes no workspace. It is refused while any process behind the claim is alive.', 'A `relay_attested: false` dispatch is quarantined: `--output` prefixes the bytes with the failure, and `--merge` refuses without `--allow-relay-mismatch`.', 'The listing ranks agent-stop rows by what each one says is at risk, and collapses to a counted summary the ones that left nothing unaccounted for — a settled dispatch, a final message from the agent, or a tree git found clean. Collapsed is not a verdict on the work: `--stops` lists every stop row with the reading that collapsed it.']),
   plugin: page('Generate a harness plugin from this checkout.', 'fadeno plugin [dir] [--codex|--omp] [--force]', ['Claude Code is the default plugin; `--codex` and `--omp` select their generators. OpenCode and Grok use `fadeno init` instead.']),
   completion: page('Emit sourceable Bash completion.', 'fadeno completion bash'),
@@ -133,8 +124,6 @@ const NESTED: Record<string, PageSeed> = {
   'dial shadow': aliasPage(SHADOW_PAGE, SHADOW_PAGE.usage, '`fadeno shadow` is the top-level alias.'),
   'dial clear-shadow': page('Remove shadow attachments.', 'fadeno dial clear-shadow [<archetype>]'),
   'dial resolve': page('Emit the stable dial-resolution hook contract.', 'fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]'),
-  'steering resolve': page('Resolve one hybrid host steering request.', 'fadeno steering resolve --archetype <name> [options]'),
-  'steering apply': page('Materialize harness steering from active dials.', 'fadeno steering apply --codex|--claude|--opencode|--omp [options]'),
   'completion bash': page('Emit sourceable Bash completion.', 'fadeno completion bash', undefined, ['source <(fadeno completion bash)']),
 };
 
@@ -209,20 +198,14 @@ const withGlobals = (...flags: string[]): readonly string[] => ['--help', '--ver
 const PAGE_OPTIONS: Record<string, readonly string[]> = {
   setup: withGlobals('--codex', '--claude', '--from', '--reset-runtime'),
   status: withGlobals('--verbose', '--codex', '--claude', '--opencode', '--omp'),
-  vendor: withGlobals('--codex', '--claude', '--grok', '--opencode', '--omp', '--no-steering', '--force'),
-  uninstall: withGlobals('--codex', '--claude', '--all', '--purge-user-data', '--force'),
   clean: withGlobals('--force', '--windows'),
-  unvendor: withGlobals('--force'),
-  init: withGlobals('--codex', '--claude', '--grok', '--opencode', '--omp', '--with-hooks', '--with-steering', '--no-steering', '--data-only', '--force'),
   models: withGlobals('--harness', '--json'),
   model: withGlobals('--harness', '--json'),
   dial: withGlobals('--harness', '--session', '--user', '--repo', '--json'),
   shadow: withGlobals('--harness', '--rate', '--n', '--json'),
-  steering: withGlobals(),
   dispatch: withGlobals('--archetype', '--model', '--role', '--harness', '--prompt-file', '--tag', '--shadow', '--isolate', '--shared', '--ignored-output', '--diagnostics', '--no-brief', '--allow-relay-mismatch'),
   'dispatch-open': withGlobals('--archetype', '--tag', '--note'),
   'dispatch-close': withGlobals('--reason', '--no-merge', '--tag', '--agent-id'),
-  attest: withGlobals('--archetype'),
   dispatches: withGlobals('--tail', '--stops', '--json', '--bakeoffs', '--output', '--wait', '--tag', '--cancel', '--withdraw', '--work-left', '--reason', '--merge', '--allow-relay-mismatch'),
   plugin: withGlobals('--codex', '--omp', '--force'),
   completion: withGlobals(),
@@ -236,8 +219,6 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   'dial shadow': withGlobals('--harness', '--rate', '--n', '--json'),
   'dial clear-shadow': withGlobals('--json'),
   'dial resolve': withGlobals('--archetype', '--prompt-sha256'),
-  'steering resolve': withGlobals('--archetype', '--host-executor', '--native-executor', '--role', '--run', '--dispatch-id', '--prompt-file', '--prompt-sha256'),
-  'steering apply': withGlobals('--codex', '--claude', '--opencode', '--omp', '--scope', '--force'),
   'completion bash': withGlobals(),
 };
 
@@ -246,12 +227,7 @@ const PATH_OPTION_HINTS: Record<string, Record<string, string>> = {
     '--force': 'Remove ignored runtime state',
     '--windows': 'Compact the write-window log instead; deletes nothing, keeps every open window',
   },
-  unvendor: { '--force': 'Also remove modified lock-owned files' },
-  uninstall: { '--force': 'Required with --purge-user-data; confirms removal' },
-  vendor: { '--force': 'Overwrite managed vendored files' },
-  init: { '--force': 'Overwrite managed scaffold files' },
   plugin: { '--force': 'Overwrite generated plugin files' },
-  'steering apply': { '--force': 'Overwrite managed steering files' },
   'models remove': { '--force': 'Remove despite live dials, naming each stranded' },
   'model remove': { '--force': 'Remove despite live dials, naming each stranded' },
   dispatches: {

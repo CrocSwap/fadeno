@@ -101,22 +101,7 @@ const MODELS_SPEC = command(
 const COMMANDS: Record<string, CommandSpec> = {
   setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE, '--from': PATH, '--reset-runtime': NONE }),
   status: command({ '--verbose': NONE, '--codex': NONE, '--claude': NONE, '--opencode': NONE, '--omp': NONE }),
-  vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--opencode': NONE, '--omp': NONE, '--with-hooks': NONE, '--no-steering': NONE, '--force': NONE }),
-  uninstall: command({ '--codex': NONE, '--claude': NONE, '--all': NONE, '--purge-user-data': NONE, '--force': NONE }),
   clean: command({ '--force': NONE, '--windows': NONE }),
-  unvendor: command({ '--force': NONE }),
-  init: command({
-    '--codex': NONE,
-    '--claude': NONE,
-    '--grok': NONE,
-    '--opencode': NONE,
-    '--omp': NONE,
-    '--force': NONE,
-    '--with-hooks': NONE,
-    '--with-steering': NONE,
-    '--no-steering': NONE,
-    '--data-only': NONE,
-  }),
   models: MODELS_SPEC,
   // Top-level alias for `models` — same handler in cli.ts, same flags.
   model: MODELS_SPEC,
@@ -132,26 +117,6 @@ const COMMANDS: Record<string, CommandSpec> = {
   ),
   // Top-level alias for `dial shadow` — same handler in cli.ts, same flags.
   shadow: SHADOW_SPEC,
-  steering: command(
-    {},
-    [],
-    {
-      resolve: command({
-        '--archetype': { kind: 'archetype' },
-        '--host-executor': { kind: 'free' },
-        // Legacy spelling of `--host-executor`, still read by cli.ts.
-        '--native-executor': { kind: 'free' },
-        '--role': { kind: 'free' },
-        '--run': { kind: 'run' },
-        '--dispatch-id': { kind: 'free' },
-        // The prompt bytes the resolver hashes to decide pairing; the Codex
-        // broker passes one of these on every ordinary dispatch.
-        '--prompt-file': PATH,
-        '--prompt-sha256': { kind: 'free' },
-      }),
-      apply: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--opencode': NONE, '--omp': NONE, '--force': NONE, '--scope': { kind: 'enum', values: ['project', 'user'] } }, ['dial']),
-    },
-  ),
   dispatch: command(
     {
       '--archetype': { kind: 'archetype' },
@@ -173,7 +138,6 @@ const COMMANDS: Record<string, CommandSpec> = {
     { '--reason': { kind: 'free' }, '--no-merge': NONE, '--tag': { kind: 'free' }, '--agent-id': { kind: 'free' } },
     ['free'],
   ),
-  attest: command({ '--archetype': { kind: 'archetype' } }),
   dispatches: command({
     '--tail': { kind: 'free' },
     '--stops': NONE,

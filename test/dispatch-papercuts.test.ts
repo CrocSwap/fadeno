@@ -5,11 +5,9 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DispatchCommandError, DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
-import { runInit } from '../src/commands/init.ts';
 import { runDialShow } from '../src/commands/dial.ts';
-import { runSteeringResolve } from '../src/commands/steering.ts';
 import { DIALS_LOCAL_FILE, parseExecutorProfile, writeLocalDialState } from '../src/lib/executors.ts';
-import { echoedStdin, read, tempRepo } from './helpers.ts';
+import { echoedStdin, read, tempRepo, seedStarterCatalog } from './helpers.ts';
 
 /**
  * Dogfood papercut fixes for the dial/dispatch kernel: scaffold
@@ -71,7 +69,7 @@ function cli(
 
 test('scaffold: executors.yaml carries the built-in v3 catalog', (t) => {
   const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root });
+  seedStarterCatalog(root);
 
   const content = read(root, join('.fadeno', 'executors.yaml'));
   assert.match(content, /^schema_version: 4$/m);
@@ -94,23 +92,6 @@ test('scaffold: executors.yaml carries the built-in v3 catalog', (t) => {
   assert.equal((asShipped as any).defaultLoadout ?? null, null);
 });
 
-test('built-in catalog: worker resolves to base (current-host) with no dials', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root });
-  // steering resolve for worker with no dials → base host. User state is
-  // isolated: "no dials" must mean this fixture, not the developer's real
-  // user layer (a real `worker` user dial would flip source to `user`).
-  const result = runSteeringResolve({
-    repoRoot: root,
-    archetype: 'worker',
-    userPathOptions: { home: join(root, 'home'), env: { FADENO_STATE_HOME: join(root, 'user-state'), FADENO_HARNESS: HARNESS } },
-  });
-  // In standalone, current-host host without fallback is unsupported for dispatch
-  // but steering should still resolve mode; for codex host materialization is host.
-  // With standalone harness the base is host; we just check executor is current-host.
-  assert.equal(result.executor, 'current-host');
-  assert.equal(result.source, 'base');
-});
 
 // --- 2. help text -----------------------------------------------------------
 
@@ -304,35 +285,11 @@ test('cli: empty stdin is a clear dispatch error, not a silent empty dispatch', 
 
 // --- 8. evidence gitignore ---------------------------------------------------
 
-test('init gitignores .fadeno/dispatches.jsonl beside progress/ and local/', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root });
-  const gitignore = read(root, '.gitignore');
-  assert.match(gitignore, /^\.fadeno\/dispatches\.jsonl$/m);
-  assert.match(gitignore, /^\.fadeno\/progress\/$/m);
-  assert.match(gitignore, /^\.fadeno\/local\/$/m);
 
-  // Idempotent on re-init.
-  runInit({ target: 'codex', repoRoot: root });
-  assert.equal(read(root, '.gitignore'), gitignore);
-});
-
-test('a repo scaffolded before dispatch evidence existed gains only the missing entry', (t) => {
-  const root = tempRepo(t);
-  writeFileSync(
-    join(root, '.gitignore'),
-    '# Fadeno: local generated files (not committed)\n.fadeno/progress/\n.fadeno/local/\n',
-  );
-  runInit({ target: 'codex', repoRoot: root });
-  const gitignore = read(root, '.gitignore');
-  assert.match(gitignore, /^\.fadeno\/dispatches\.jsonl$/m);
-  assert.equal(gitignore.match(/^\.fadeno\/progress\/$/gm)!.length, 1);
-  assert.equal(gitignore.match(/^\.fadeno\/local\/$/gm)!.length, 1);
-});
 
 test('a repo already ignoring .fadeno/ entirely gets no dispatches entry', (t) => {
   const root = tempRepo(t);
   writeFileSync(join(root, '.gitignore'), '.fadeno/\n');
-  runInit({ target: 'codex', repoRoot: root });
+  seedStarterCatalog(root);
   assert.doesNotMatch(read(root, '.gitignore'), /dispatches\.jsonl/);
 });

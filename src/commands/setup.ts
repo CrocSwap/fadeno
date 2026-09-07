@@ -2,7 +2,6 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { runSteeringApply, type SteeringApplyResult } from './steering.ts';
 import { loadExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { retiredStateFiles, userPaths, type FadenoUserPaths, type UserPathOptions } from '../lib/user-paths.ts';
@@ -47,7 +46,6 @@ export interface SetupResult {
   probes: CommandProbe[];
   created: string[];
   activeLoadout: string;
-  steering: SteeringApplyResult | null;
   restartRequired: boolean;
   notices: string[];
   runtimeRefresh: {
@@ -208,24 +206,12 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
     throw new SetupError((err as Error).message);
   }
 
-  let steering: SteeringApplyResult | null = null;
-  if (opts.target === 'codex') {
-    steering = (runSteeringApply as any)({
-      repoRoot,
-      target: 'codex',
-      scope: 'user',
-      userPathOptions: opts.userPathOptions,
-      cliPath: existsSync(paths.managedCli) ? paths.managedCli : undefined,
-    });
-  }
   const priorPermissionRules = opts.target == null ? [] : manifest.harnesses[opts.target]?.permissionRules ?? [];
   const addedPermission = opts.target === 'claude'
     ? ensureClaudePermission(paths, opts.userPathOptions, setupNotices)
     : null;
   if (opts.target != null) {
-    const managedFiles = steering?.results
-      .map((item) => item.path)
-      .filter((path) => existsSync(path) && readFileSync(path, 'utf8').startsWith('# fadeno:managed')) ?? [];
+    const managedFiles: string[] = [];
     const permissionRules = (addedPermission == null ? priorPermissionRules : [...priorPermissionRules, addedPermission])
       .filter((item, index, all) => all.findIndex((other) => other.path === item.path && other.rule === item.rule) === index);
     recordHarnessInstallation(
@@ -289,7 +275,6 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
   if (opts.target === 'claude') {
     notices.push('Claude steering is installed by the plugin and remains inert while the host-native base is active.');
   }
-  if (opts.target === 'codex') notices.push('Codex managed agents are user-scoped; start a fresh Codex session to load them, and trust the plugin\'s spawn-guard and Bash guard hooks when that session asks to review them — an untrusted Bash guard leaves role dispatches unattested (relay_attested stays absent) and role agents unguarded against destructive git.');
   if (!opts.nonInteractive) notices.push('External command dials remain opt-in; setup selected safe host-native base.');
 
   // Add session definitions notice (point 7)
@@ -302,8 +287,7 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
     probes,
     created,
     activeLoadout: 'host-native base',
-    steering,
-    restartRequired: steering?.restartRequired ?? false,
+    restartRequired: false,
     notices,
     runtimeRefresh: { outcome: syncOutcome, from: syncFrom, to: syncTo },
   };

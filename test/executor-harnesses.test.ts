@@ -65,7 +65,6 @@ test('an executor never becomes a host: no adapter tree and no `host:` block', (
     assert.equal(profile.harnesses[id]!.host, undefined, `harnesses.${id}.host exists — an executor must not declare one`);
   }
   // The promotion is pinned from the other side: opencode must have BOTH.
-  assert.ok(trees.includes('opencode'), 'templates/opencode/ missing — the OpenCode host promotion regressed');
   assert.ok(profile.harnesses.opencode?.host, 'harnesses.opencode.host missing — the promotion regressed');
   assert.ok(profile.harnesses.opencode?.command, 'harnesses.opencode.command missing — it is still an executor too');
   // omp is the mirror case: a host with no CLI to spawn.

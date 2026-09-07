@@ -2,7 +2,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
-import { runAttest } from './commands/attest.ts';
 import {
   runDispatch,
 } from './commands/dispatch.ts';
@@ -17,7 +16,6 @@ import {
   runDispatchesMerge,
 } from './commands/dispatches.ts';
 import { renderExecutorStderr } from './lib/diagnostics.ts';
-import { runInit, type Target } from './commands/init.ts';
 import {
   
   formatShadowLine,
@@ -36,7 +34,6 @@ import { runModelsVerify, type ModelsVerifyResult } from './commands/models-veri
 import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
 import { IGNORED_DEADLINE_NOTE_TOKEN } from './lib/executors.ts';
 import { knownFlagsFor, retiredFlagFor, runCompletion, runCompletionCandidates, suggestFlag, TOP_LEVEL_COMMANDS, unknownFlagsFor } from './commands/completion.ts';
-import { runSteeringApply, runSteeringApplyClaude, runSteeringApplyOpenCode, runSteeringApplyOmp, runSteeringResolve } from './commands/steering.ts';
 import { runDispatchClose, runDispatchOpen } from './commands/dispatch-adhoc.ts';
 import { mergeBackReapplyCommand } from './lib/workspace-baseline.ts';
 import {
@@ -46,14 +43,9 @@ import {
   ignoredOutputVerdict,
 } from './lib/receipt-attestations.ts';
 import { runSetup } from './commands/setup.ts';
-import { runStatus, type CodexMaterialization } from './commands/status.ts';
-import { runVendor } from './commands/vendor.ts';
-import { runUninstall } from './commands/uninstall.ts';
+import { runStatus } from './commands/status.ts';
 import { runClean, runCleanWindows } from './commands/clean.ts';
-import { runUnvendor } from './commands/unvendor.ts';
-import type { EmitResult } from './lib/fsutil.ts';
 import { packageVersion } from './lib/paths.ts';
-import { describeCodexAgentIdentityRow } from './lib/codex-agent-file.ts';
 import { readInstallationManifest, syncManagedRuntime } from './lib/installations.ts';
 import { userPaths } from './lib/user-paths.ts';
 import { renderFocusedHelp, renderGlobalHelp, resolveHelpPath } from './lib/cli-help.ts';
@@ -147,72 +139,6 @@ export function maybeRunRuntimePreflight(
     try {
       console.error(`fadeno: managed runtime sync warning: ${(err as Error).message}`);
     } catch {}
-  }
-}
-
-const SIGIL: Record<Target, string> = { codex: '$', claude: '/', grok: '/', opencode: '', omp: '' };
-function printInitSummary(
-  target: Target,
-  repoRoot: string,
-  results: EmitResult[],
-  withHooks: boolean,
-  withSteering: boolean,
-  dataOnly: boolean,
-): void {
-  const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
-  for (const r of results) counts[r.status] += 1;
-
-  console.log(`Fadeno initialized for ${target} in ${repoRoot}\n`);
-  for (const r of results) {
-    console.log(`  ${r.status.padEnd(11)} ${relative(repoRoot, r.path) || r.path}`);
-  }
-  console.log(
-    `\n${counts.created} created, ${counts.appended} appended, ` +
-      `${counts.overwritten} overwritten, ${counts.skipped} skipped.`,
-  );
-  if (counts.skipped > 0) {
-    console.log('Some files already existed and were left untouched. Re-run with --force to overwrite.');
-  }
-
-  if (target === 'claude') {
-    const perm = results.find((r) => r.path.endsWith('settings.local.json'));
-    if (perm && (perm.status === 'created' || perm.status === 'appended')) {
-      console.log(
-        '\nPre-approved `Bash(fadeno:*)` in .claude/settings.local.json (local, git-ignored)\n' +
-          'so fadeno CLI calls no longer prompt each run — delete that allow rule to restore prompts.',
-      );
-    }
-  }
-
-  console.log('\nNext steps:');
-  console.log('  1. Review .fadeno/playbooks and .fadeno/vocabulary.md');
-  console.log('  2. Run `fadeno validate` to check the playbooks');
-  if (dataOnly) {
-    console.log(
-        target === 'codex'
-          ? '  3. Use the $fadeno-runner skill (from the installed Fadeno plugin)'
-          : target === 'opencode' || target === 'omp'
-            ? '  3. Use the fadeno-runner skill (installed under .agents/skills)'
-            : '  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)',
-    );
-  } else {
-    console.log(`  3. Ask your agent to use the ${SIGIL[target]}fadeno-runner skill on a complex task`);
-  }
-  let nextStep = 4;
-  if (withHooks) {
-    console.log(`  ${nextStep}. Activate enforcement: see .fadeno/hooks/README.md`);
-    nextStep += 1;
-  }
-  if (withSteering) {
-    console.log(
-      target === 'claude'
-        ? `  ${nextStep}. Steering is active locally; restart Claude Code so the Agent hook is loaded`
-        : target === 'opencode'
-          ? `  ${nextStep}. Steering materialized under .opencode/; restart OpenCode so the agent files and plugin load`
-          : target === 'omp'
-            ? `  ${nextStep}. Steering materialized under .omp/; restart omp so agents and the extension load`
-          : `  ${nextStep}. Materialize Codex steering with \`fadeno steering apply <loadout> --codex --force\`; command slots switch live, while host changes require a fresh session`,
-    );
   }
 }
 
@@ -506,23 +432,8 @@ function runShadowCommand(
   return 0;
 }
 
+type Target = 'codex' | 'claude' | 'grok' | 'opencode' | 'omp';
 type TargetFlags = { codex?: boolean; claude?: boolean; grok?: boolean; opencode?: boolean; omp?: boolean };
-
-function requireTarget(values: TargetFlags): Target {
-  const selected: Target[] = [];
-  if (values.codex) selected.push('codex');
-  if (values.claude) selected.push('claude');
-  if (values.grok) selected.push('grok');
-  if (values.opencode) selected.push('opencode');
-  if (values.omp) selected.push('omp');
-  if (selected.length > 1) {
-    throw new Error('Choose exactly one target: --codex, --claude, --grok, --opencode, or --omp.');
-  }
-  if (selected.length === 1) return selected[0];
-  throw new Error(
-    'Specify a target: `fadeno init --codex`, `fadeno init --claude`, `fadeno init --grok`, `fadeno init --opencode`, or `fadeno init --omp`.',
-  );
-}
 
 function optionalTarget(values: TargetFlags): Target | undefined {
   const selected: Target[] = [];
@@ -761,7 +672,6 @@ function main(argv: string[]): number {
     }
     case 'status': {
       const target = optionalTarget(values);
-      if (target === 'grok') throw new Error('Use `fadeno status` without --grok; steering for that host is intentionally unsupported.');
       const result = runStatus({ verbose: values.verbose, target: target ?? null } as any);
       console.log(`Fadeno ${(result as any).version} · harness ${(result as any).harness ?? 'unknown'}`);
       console.log(`runtime: ${(result as any).runtime.invocationSource}; managed ${(result as any).runtime.managedVersion ?? 'not installed'}${(result as any).runtime.managedPath ? ` at ${(result as any).runtime.managedPath}` : ''}${(result as any).runtime.versionCurrent ? '' : ' (version skew)'}`);
@@ -785,53 +695,9 @@ function main(argv: string[]): number {
       }
       if ((result as any).staleProjectPin) console.log(`stale project pin: ${(result as any).staleProjectPin}`);
       if ((result as any).staleUserPin) console.log(`stale user pin: ${(result as any).staleUserPin}`);
-      if ((result as any).codexMaterialization) {
-        const m = (result as any).codexMaterialization as CodexMaterialization;
-        // Every verdict that is not "fine": `unmanaged` and `shadowed` are as
-        // actionable as `stale`, and dropping them here would print
-        // `Codex managed agents: stale — ; <fix>` with an empty detail.
-        const drifted = m.agents.filter((agent) => agent.status !== 'current' && agent.status !== 'not_applicable');
-        const detail = drifted.map(describeCodexAgentIdentityRow).join('; ');
-        console.log(
-          m.fresh
-            ? 'Codex managed agents: current'
-            : `Codex managed agents: stale — ${detail}; ${m.remediation}`,
-        );
-        if (values.verbose) console.log(JSON.stringify({ codexMaterialization: m }, null, 2));
-      }
-      if ((result as any).opencodeMaterialization) {
-        const m = (result as any).opencodeMaterialization;
-        const issueKinds = [...new Set((m.issues ?? []).map((issue: any) => issue.kind))].join(', ');
-        console.log(`OpenCode steering: ${m.healthy ? 'current' : `missing/stale${issueKinds ? ` (${issueKinds})` : ''}`}${m.restartRequired ? ' (restart required)' : ''}`);
-        if (values.verbose) console.log(JSON.stringify({ opencodeMaterialization: m }, null, 2));
-      }
-      if ((result as any).ompMaterialization) {
-        const m = (result as any).ompMaterialization;
-        const issueKinds = [...new Set((m.issues ?? []).map((issue: any) => issue.kind))].join(', ');
-        console.log(`omp steering: ${m.healthy ? 'current' : `missing/stale${issueKinds ? ` (${issueKinds})` : ''}`}${m.restartRequired ? ' (restart required)' : ''}`);
-        if (values.verbose) console.log(JSON.stringify({ ompMaterialization: m }, null, 2));
-      }
       if ((result as any).next) console.log(`next: ${(result as any).next}`);
       if (values.verbose) console.log(JSON.stringify({ repoRoot: (result as any).repoRoot, roles: (result as any).roles }, null, 2));
       return 0;
-    }
-    case 'vendor': {
-      const target = requireTarget(values);
-      const result = runVendor({
-        target,
-        withSteering: target !== 'grok' && !values['no-steering'],
-        force: values.force,
-      });
-      console.log(`Fadeno vendored for ${result.target} in ${result.repoRoot}`);
-      console.log(`  ${result.lock.status} fadeno.lock`);
-      return 0;
-    }
-    case 'unvendor': {
-      const result = runUnvendor({ force: values.force });
-      for (const path of result.removed) console.log(`removed ${path}`);
-      for (const path of result.preserved) console.log(`preserved modified ${path}`);
-      if (!result.lockRemoved) console.log('fadeno.lock preserved because modified files remain.');
-      return result.preserved.length === 0 ? 0 : 2;
     }
     case 'clean': {
       // `--windows` is a mode, not a modifier: it compacts the write-window
@@ -895,200 +761,6 @@ function main(argv: string[]): number {
       }
       if (result.dryRun && paths.length > 0) console.log('Re-run with --force to remove these ignored runtime files.');
       return 0;
-    }
-    case 'uninstall': {
-      const target = optionalTarget(values);
-      if (target === 'grok' || target === 'opencode' || target === 'omp') throw new Error('Grok, OpenCode, and omp have no user-scoped Fadeno integration to uninstall.');
-      const result = runUninstall({
-        target: target ?? null,
-        all: values.all,
-        purgeUserData: values['purge-user-data'],
-        force: values.force,
-      });
-      for (const path of result.removed) console.log(`removed ${path}`);
-      for (const path of result.preserved) console.log(`preserved modified ${path}`);
-      if (result.purged) console.log('purged Fadeno user configuration, state, and managed runtime.');
-      return result.preserved.length === 0 ? 0 : 2;
-    }
-    case 'init': {
-      const target = requireTarget(values);
-      const { repoRoot, results } = runInit({
-        target,
-        force: values.force,
-        withHooks: values['with-hooks'],
-        withSteering: values['with-steering'],
-        noSteering: values['no-steering'],
-        dataOnly: values['data-only'],
-      });
-      printInitSummary(
-        target,
-        repoRoot,
-        results,
-        Boolean(values['with-hooks']),
-        Boolean(values['with-steering'] || (target !== 'grok' && !values['no-steering'])),
-        Boolean(values['data-only']),
-      );
-      return 0;
-    }
-    case 'steering': {
-      const sub = positionals[1];
-      if (sub === 'resolve') {
-        if (!values.archetype) {
-          throw new Error(
-            'Usage: fadeno steering resolve --archetype <name> [--host-executor <name>] [--role <name>] [--run <id> --dispatch-id <id>]',
-          );
-        }
-        const result = runSteeringResolve({
-          archetype: String(values.archetype),
-          hostExecutor: values['host-executor'] != null ? String(values['host-executor']) : values['native-executor'] != null ? String(values['native-executor']) : undefined,
-          role: values.role != null ? String(values.role) : undefined,
-          run: values.run != null ? String(values.run) : undefined,
-          dispatchId: values['dispatch-id'] != null ? String(values['dispatch-id']) : undefined,
-          promptSha256: values['prompt-sha256'] != null ? String(values['prompt-sha256']) : undefined,
-          promptFile: values['prompt-file'] != null ? String(values['prompt-file']) : undefined,
-        });
-        const steeringOut: Record<string, unknown> = {
-          mode: result.mode,
-          archetype: result.archetype,
-          role: result.role,
-          executor: result.executor,
-          adapter: result.adapter,
-          model: result.model,
-          effort: result.effort ?? null,
-          // The lane decision. `steering resolve` is a hook/script contract,
-          // so a consumer that cannot see `lane` cannot route on effort at all.
-          effort_pinned: result.effort_pinned,
-          effective_effort: result.effective_effort,
-          session_effort: result.session_effort,
-          lane: result.lane,
-          lane_reason: result.lane_reason,
-          // WHO ASKED, and what a caller holding the host identity would get.
-          // `lane` alone is not a property of the dial and must never be read
-          // as one: a resolve from a shell names no `--host-executor`, so its
-          // `lane` is `command` for that caller while `host_frame` reports the
-          // host lane the work actually belongs on. A director read the former
-          // as the latter and lost a five-lane campaign to the command lane.
-          host_frame: result.host_frame,
-          harness: result.harness,
-          variant: result.variant ?? null,
-          host: result.host ?? null,
-          host_executor: result.hostExecutor,
-          resolution: result.source,
-          resolved_via: result.resolved_via ?? null,
-          requested_agent_type: result.requested_agent_type ?? null,
-          delivered_archetype: result.delivered_archetype ?? null,
-          identity_evidence: result.identity_evidence ?? null,
-          run: values.run ?? null,
-          dispatch_id: values['dispatch-id'] ?? null,
-          detail: result.detail,
-          writeConflict: result.writeConflict ?? null,
-          shadow: result.shadow ?? null,
-          delegate_to: result.delegate_to ?? null,
-        };
-        console.log(JSON.stringify(steeringOut, null, 2));
-        // A refused slot is not runnable here, same as a restart: non-zero, so
-        // a caller that only checks the exit code still stops.
-        return result.mode === 'restart_required' || result.mode === 'write_conflict' ? 2 : 0;
-      }
-      if (sub === 'apply') {
-        const targets = [values.codex && 'codex', values.claude && 'claude', values.opencode && 'opencode', values.omp && 'omp'].filter(Boolean) as string[];
-        const applyTarget = targets.length === 1 ? targets[0]! : null;
-        if (applyTarget == null || values.grok || positionals[2] != null) {
-          throw new Error('Usage: fadeno steering apply --codex|--claude|--opencode|--omp [--scope project|user] [--force]');
-        }
-        if (values.scope && values.scope !== 'project' && values.scope !== 'user') throw new Error('Invalid --scope. Use project or user.');
-        if (applyTarget === 'opencode') {
-          const result = runSteeringApplyOpenCode({ target: 'opencode', force: values.force, scope: values.scope as 'project' | 'user' | undefined });
-          const changed = result.results.filter((item) => item.status !== 'skipped').length;
-          console.log(`OpenCode steering materialized: ${result.scope}`);
-          for (const [archetype, slot] of Object.entries(result.materialization)) {
-            const how = slot.kind === 'host'
-              ? `in-session agent file (model: ${slot.model ?? 'session baseline'})`
-              : 'dispatch broker (relay to the command lane)';
-            console.log(`  ${archetype} → ${how} ${slot.executor}`);
-          }
-          const removed = result.removed ?? [];
-          for (const path of removed) console.log(`  removed stale managed agent: ${path}`);
-          console.log(
-            `  ${changed} file(s) written under .opencode/; agent files and plugins load at ` +
-              'process start, so restart OpenCode to steer live sessions.',
-          );
-          if (changed === 0 && result.conflicts.length > 0) console.log('  Existing files were preserved; pass --force to replace them.');
-          return 0;
-        }
-        if (applyTarget === 'omp') {
-          const result = runSteeringApplyOmp({ target: 'omp', force: values.force, scope: values.scope as 'project' | 'user' | undefined });
-          const changed = result.results.filter((item) => item.status !== 'skipped').length;
-          console.log(`omp steering materialized: ${result.scope}`);
-          for (const [archetype, slot] of Object.entries(result.materialization)) {
-            const how = slot.kind === 'host' ? 'in-session agent' : 'dispatch broker';
-            console.log(`  ${archetype} → ${how} ${slot.executor}`);
-          }
-          for (const path of result.removed ?? []) console.log(`  removed stale managed agent: ${path}`);
-          console.log(`  ${changed} file(s) written under .omp/; restart omp so agents and the extension load.`);
-          if (changed === 0 && result.conflicts.length > 0) console.log('  Existing files were preserved; pass --force to replace them.');
-          return 0;
-        }
-        if (applyTarget === 'claude') {
-          const result = runSteeringApplyClaude({ target: 'claude', force: values.force, scope: values.scope as 'project' | 'user' | undefined });
-          const changed = result.results.filter((item) => item.status !== 'skipped').length;
-          console.log(`Claude steering materialized: ${result.scope}`);
-          for (const archetype of ['judge', 'reviewer', 'worker']) {
-            const slot = result.materialization[archetype]!;
-            const how = slot.kind === 'host'
-              ? slot.model === 'current-host'
-                ? 'session baseline (no agent file)'
-                : `in-session when the effort matches (model: ${slot.model})`
-              : 'dispatch proxy (no agent file)';
-            console.log(`  ${archetype} → ${how} ${slot.executor}`);
-          }
-          const removed = result.removed ?? [];
-          for (const path of removed) console.log(`  removed managed agent: ${path}`);
-          console.log(
-            removed.length === 0
-              ? '  Nothing to remove; effort selects the delivery lane, so no agent file carries an identity.'
-              : `  Removed ${removed.length} managed agent definition(s). Effort now selects the lane, so nothing is written and no restart is needed.`,
-          );
-          const ignored = result.ignoredLocalDials ?? [];
-          if (ignored.length > 0) {
-            console.log(
-              `  Ignored repo-local dial(s) for ${ignored.join(', ')}: a user-scope agent set steers every ` +
-                'repo, so it is cut from user dials only. Use --scope project, or `fadeno dial <archetype> ' +
-                '<model> --user` to make the choice global.',
-            );
-          }
-          if (changed === 0 && result.conflicts.length > 0) console.log('  Existing files were preserved; pass --force to replace them.');
-          return 0;
-        }
-        const result = runSteeringApply({ target: 'codex', force: values.force, scope: values.scope as 'project' | 'user' | undefined });
-        const changed = result.results.filter((item) => item.status !== 'skipped').length;
-        console.log(`Codex steering materialized: ${result.scope}`);
-        for (const archetype of ['judge', 'reviewer', 'worker']) {
-          const slot = result.materialization[archetype]!;
-          if (slot.kind === 'write-conflict') {
-            console.log(`  ${archetype} → refused (write conflict) ${slot.executor}: ${slot.writeConflict}`);
-            continue;
-          }
-          console.log(
-            `  ${archetype} → ${slot.kind === 'host' ? 'host agent' : 'command broker'} ${slot.executor}`,
-          );
-        }
-        console.log(
-          `  ${changed} agent definition(s) written; declared fallbacks work immediately, ` +
-            'or start a fresh Codex session to deliver changed host slots in-session.',
-        );
-        const ignored = result.ignoredLocalDials ?? [];
-        if (ignored.length > 0) {
-          console.log(
-            `  Ignored repo-local dial(s) for ${ignored.join(', ')}: a user-scope agent set steers every ` +
-              'repo, so it is cut from user dials only. Use --scope project, or `fadeno dial <archetype> ' +
-              '<model> --user` to make the choice global.',
-          );
-        }
-        if (changed === 0) console.log('  Existing files were preserved; pass --force to replace them.');
-        return 0;
-      }
-      throw new Error('Usage: fadeno steering resolve|apply [...]');
     }
     case 'plugin': {
       if (values.omp) {
@@ -1305,11 +977,6 @@ function main(argv: string[]): number {
             if (note.startsWith('WARNING:')) console.error(note);
             else console.log(note);
           }
-          if (result.codex_materialization != null) {
-            console.log(
-              `NOTE: Codex managed agent still says ${result.codex_materialization.detail}; ${result.codex_materialization.remediation}`,
-            );
-          }
         }
         return 0;
       }
@@ -1508,20 +1175,6 @@ function main(argv: string[]): number {
       } else if (result.workspaceRemoved) {
         console.log('  worktree removed; the work is in this workspace.');
       }
-      return 0;
-    }
-    case 'attest': {
-      if (!values.archetype) {
-        throw new Error('Usage: fadeno attest --archetype <a>');
-      }
-      const result = runAttest({ archetype: String(values.archetype) });
-      const effortNote = result.effortEvidence === 'measured'
-        ? `effort ${result.effort}`
-        : 'effort unavailable (CLAUDE_EFFORT not set)';
-      console.log(
-        `attested: ${result.archetype} — ${effortNote}, pid ${result.pid}, identity_evidence: ${result.identityEvidence}`,
-      );
-      console.log(`  recorded in .fadeno/dispatches.jsonl (fadeno ${result.fadenoVersion})`);
       return 0;
     }
     case 'dispatches': {

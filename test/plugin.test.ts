@@ -122,26 +122,7 @@ test('the committed plugin ships a self-contained CJS binary + templates', () =>
   assert.ok(existsSync(join(binDir, 'templates', 'common', 'fadeno', 'executors.yaml')));
 });
 
-test('the bundled CLI carries the Grok adapter templates', () => {
-  const grokDir = join(import.meta.dirname, '..', 'plugin', 'bin', 'templates', 'grok');
-  assert.ok(existsSync(join(grokDir, 'AGENTS.md')));
-  for (const role of ['worker', 'reviewer', 'judge']) {
-    const agent = join(grokDir, 'grok-agents', `${role}.md`);
-    assert.ok(existsSync(agent), `bundled Grok ${role} agent template missing`);
-    assert.match(readFileSync(agent, 'utf8'), new RegExp(`^name: ${role}$`, 'm'));
-  }
-});
 
-test('the bundled CLI carries the OpenCode adapter templates', () => {
-  const opencodeDir = join(import.meta.dirname, '..', 'plugin', 'bin', 'templates', 'opencode');
-  assert.ok(existsSync(join(opencodeDir, 'AGENTS.md')), 'bundled OpenCode bootstrap template missing');
-  for (const role of ['worker', 'reviewer', 'judge']) {
-    const agent = join(opencodeDir, 'opencode-agents', `${role}.md`);
-    assert.ok(existsSync(agent), `bundled OpenCode ${role} agent template missing`);
-    const body = readFileSync(agent, 'utf8');
-    assert.match(body, /^mode: subagent$/m, `bundled OpenCode ${role} agent must be a subagent`);
-  }
-});
 
 test('every skill template declares the name of the directory it lives in', () => {
   // The generator renames a skill by replacing `name: <src>` with `name: <dst>`,

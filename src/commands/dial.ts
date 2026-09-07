@@ -53,15 +53,6 @@ import {
   writeUserDials,
   type UserPathOptions,
 } from '../lib/user-paths.ts';
-import { maintainedHarnesses } from '../lib/installations.ts';
-import {
-  codexAgentIdentityRow,
-  codexIdentityRemediation,
-  describeCodexAgentIdentityRow,
-  effectiveCodexAgentCandidates,
-  type CodexAgentIdentityRow,
-  type CodexDialIdentity,
-} from '../lib/codex-agent-file.ts';
 
 export class DialError extends Error {}
 
@@ -415,37 +406,6 @@ export interface DialSetResult {
   narrative: string;
   /** Loud advisories (unregistered fall-through, probe fail-open) for the CLI to print. */
   notes: string[];
-  /**
-   * The Codex managed agent file for this archetype still carries a different
-   * identity than the dial just set, and only re-materializing it will change
-   * that.
-   *
-   * `fadeno dial` deliberately does not rewrite `~/.codex/agents/*`: a Codex
-   * agent file is a frozen identity that the session loads at start, so
-   * editing it under a running session would make `status` and the session
-   * disagree, and rewriting a machine-wide surface from a `dial` that may have
-   * landed on a session layer is the same reach violation `dialLayersForApply`
-   * refuses. What it CAN do is stop being silent about it — the friction that
-   * put this here was a director dialing a role and then spawning the old
-   * model for the rest of the session.
-   *
-   * Non-null only when Codex is maintained and the file Codex would actually
-   * LOAD will not deliver this dial, so `stale` is true whenever the field is
-   * present; read the field rather than the null-ness, which is what a later
-   * "current" notice would change.
-   *
-   * `status` says which of the three ways it will not deliver it — the file's
-   * identity has drifted (`stale`), Fadeno did not write the file at all
-   * (`unmanaged`), or a project-scope broker shadows the host agent this dial
-   * needs (`shadowed`) — because they take three different fixes and `stale:
-   * true` alone cannot carry that.
-   */
-  codex_materialization: {
-    stale: boolean;
-    status: CodexAgentIdentityRow['status'];
-    detail: string;
-    remediation: string;
-  } | null;
 }
 
 export interface DialSetManyOptions extends DialCommonOptions {
@@ -629,71 +589,6 @@ function unroutablePrimaryNote(params: {
     'so this shadow attachment can never be sampled and every dispatch will silently run unpaired.\n' +
     `${routability.reason}`
   );
-}
-
-/**
- * The Codex managed-agent notice for the dial that was just set, or null when
- * there is nothing to say.
- *
- * The dial's own compiled delivery supplies the expected identity — the model
- * id and effective effort `renderCodexHostAgent` bakes — and `harness` decides
- * whether the file is cut for it at all: a dial on any other harness
- * materializes as a command broker whose identity is the relay's, which the
- * shared `codexAgentIdentityStatus` then declines to judge.
- *
- * The file judged is the one Codex would actually LOAD, through the same
- * `effectiveCodexAgentCandidates` `status` and `doctor` read. Reading the
- * user-scope path directly was wrong twice over here, and the second way was
- * the silent one: `if (state == null) return null` meant that when a project
- * file shadowed an ABSENT user file — the ordinary state of a repo scaffolded
- * by `fadeno init` on a machine where `fadeno setup --codex` never ran — the
- * dial printed nothing at all, having decided there was no managed agent to
- * disagree with while a project file sat there ready to spawn.
- *
- * `missing` (no file at either scope) still says nothing, and deliberately:
- * this notice exists to catch a dial the LOADED file will not honour, and a
- * repo with no agent files at all is `status`/`doctor`'s report to make, not a
- * consequence of the dial just typed.
- */
-function codexIdentityNotice(
-  archetype: string,
-  compiled: CompiledDelivery,
-  repoRoot: string,
-  userPathOptions: UserPathOptions | undefined,
-): DialSetResult['codex_materialization'] {
-  if (!maintainedHarnesses(userPathOptions).includes('codex')) return null;
-  const candidate = effectiveCodexAgentCandidates(repoRoot, userPathOptions)
-    .find((item) => item.archetype === archetype) ?? null;
-  if (candidate == null) return null;
-  const neutral = compiled.modelId === 'current-host';
-  const dial: CodexDialIdentity = {
-    model: neutral ? null : compiled.modelId,
-    effort: neutral ? null : compiled.effectiveEffort,
-    lane: compiled.harness === 'codex' ? 'host' : 'command',
-  };
-  const row: CodexAgentIdentityRow = codexAgentIdentityRow(archetype, candidate, dial);
-  // Every verdict that means "the file that loads will not deliver this dial as
-  // this build intends". `unmanaged`, `shadowed` and `outdated` are as much the
-  // dial's business as `stale` is: in all four the user has just moved an
-  // identity the next spawn will not carry, or will carry under settings this
-  // build no longer renders — the exact silence this notice was added to break.
-  //
-  // Written as the list of verdicts that say NOTHING, not the list that speak.
-  // The allowlist it replaced would have swallowed `outdated` silently on the
-  // day it was added, which is the same shape of drift as the bug that added
-  // it: `current` and `not_applicable` are the only two verdicts that mean
-  // "fine", and `missing` is deliberately somebody else's report to make (see
-  // above).
-  if (row.status === 'current' || row.status === 'not_applicable' || row.status === 'missing') return null;
-  return {
-    stale: true,
-    status: row.status,
-    detail: describeCodexAgentIdentityRow(row),
-    // The fix depends on which file loads; `codexIdentityRemediation` is the
-    // one place that mapping lives. Non-null by the guard above: every status
-    // that reaches here is one it has an answer for.
-    remediation: codexIdentityRemediation([row])!,
-  };
 }
 
 export function runDialSet(opts: DialSetOptions): DialSetResult {
@@ -907,7 +802,6 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     verification,
     narrative,
     notes: [...notes, ...(probeNote != null ? [probeNote] : [])],
-    codex_materialization: codexIdentityNotice(archetype, compiled, repoRoot, opts.userPathOptions),
   };
 }
 

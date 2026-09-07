@@ -5,8 +5,6 @@ import test from 'node:test';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { runDialResolve, runDialSet, runDialShow } from '../src/commands/dial.ts';
 import { runDispatch } from '../src/commands/dispatch.ts';
-import { runInit } from '../src/commands/init.ts';
-import { runSteeringApply, runSteeringApplyOpenCode } from '../src/commands/steering.ts';
 import { loadGlobalProfile, loadLayeredProfile } from '../src/lib/config-layers.ts';
 import {
   argvGrantsFadenoShell,
@@ -24,7 +22,7 @@ import {
   type HarnessId,
 } from '../src/lib/executors.ts';
 import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
-import { catalogV4, tempRepo } from './helpers.ts';
+import { catalogV4, tempRepo, seedStarterCatalog } from './helpers.ts';
 
 /**
  * Catalog v4: the properties the collapse is FOR.
@@ -533,46 +531,6 @@ test('regression: a PROJECT-declared undeliverable model is still a load error',
 
 // --- Host-slot decisions: hostCandidate, not spec.adapter ------------------
 
-/**
- * The reviewer's repro, executable.
- *
- * `spec.adapter === 'host'` is not "can be delivered in-session": a host spec
- * is also how a delivery with NO argv is represented. Keyed on it,
- * `steering apply --codex` wrote a Codex host agent — `model = "opus"`,
- * `--host-executor 'opus on omp'` — for a dial that `dial resolve` was calling
- * `restart_required`, and `dispatch` prefixed its refusal with "spawn the
- * in-session agent and you are done".
- */
-test('a dial on a host-only harness nobody is in materializes a BROKER, not a host agent', (t) => {
-  const root = tempRepo(t);
-  const paths: UserPathOptions = {
-    home: join(root, 'home'),
-    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'codex' },
-  };
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
-    models: { opus: { provider: 'anthropic', id: 'opus', effort: 'xhigh' } },
-    harnesses: {
-      codex: { provider: 'openai', host: { effort_channel: 'agent-file', relay: 'relaymodel' }, command: ['codex', 'exec'] },
-      omp: { provider: 'anthropic', host: { effort_channel: 'none' } },
-    },
-    archetypes: { worker: {} },
-    extra: { models: { opus: { provider: 'anthropic', id: 'opus', effort: 'xhigh' }, relaymodel: { provider: 'openai', id: 'relay-1' } } },
-  }));
-  runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'worker', model: 'opus', harness: 'omp', session: true });
-
-  const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker', env: {} });
-  assert.equal(resolved.harness, 'omp');
-  assert.equal(resolved.host, 'codex');
-  assert.equal(resolved.lane, 'restart_required', 'omp is a host this session is not inside, with no command to spawn');
-  assert.equal(resolved.delivery.dispatchable, false);
-
-  const applied = runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: paths });
-  assert.equal(applied.materialization.worker?.kind, 'command-broker', 'never a Codex host agent for an omp dial');
-  const toml = readFileSync(join(root, '.codex', 'agents', 'worker.toml'), 'utf8');
-  assert.doesNotMatch(toml, /--host-executor/, 'a broker bakes no host identity');
-  assert.doesNotMatch(toml, /model = "opus"/, 'and never the dialed model');
-});
 
 test('dispatch\'s host-lane note agrees with dial resolve on the no-argv shapes', (t) => {
   const root = tempRepo(t);
@@ -869,32 +827,6 @@ test('user layer: an override that would break a lower-layer model restores it a
 
 // --- The sixth materialization site, and the reads around it ---------------
 
-/**
- * `steering apply --opencode` was the last of the six sites still branching on
- * `spec.adapter`, and it fails the same way `--codex` did: a dial on a
- * host-only harness nobody is in compiles to a host spec with no argv, so the
- * apply wrote `<archetype>.md` — an IN-SESSION OpenCode role slot naming a
- * model OpenCode was never going to be handed.
- */
-test('opencode apply routes a host-only-elsewhere dial to a broker, not a role slot', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'opencode', repoRoot: root });
-  // The shipped catalog: `omp` is host-only, and this apply resolves against
-  // the `opencode` host — so `opus on omp` has no lane here at all.
-  writeLocalDialState(root, { dials: { worker: { model: 'opus', harness: 'omp' } }, shadows: {}, legacyNote: null });
-  const applied = runSteeringApplyOpenCode({ repoRoot: root, force: true });
-  assert.equal(applied.materialization.worker?.kind, 'command-broker');
-  assert.equal(existsSync(join(root, '.opencode', 'agent', 'fadeno-dispatch-worker.md')), true);
-  assert.equal(existsSync(join(root, '.opencode', 'agent', 'worker.md')), false, 'no in-session slot for a model this host cannot deliver');
-
-  // The control: the session's own identity still materializes in-session, so
-  // the fix is `hostCandidate`, not "always broker".
-  writeLocalDialState(root, { dials: { worker: { model: 'current-host' } }, shadows: {}, legacyNote: null });
-  const native = runSteeringApplyOpenCode({ repoRoot: root, force: true });
-  assert.equal(native.materialization.worker?.kind, 'host');
-  assert.equal(existsSync(join(root, '.opencode', 'agent', 'worker.md')), true);
-  assert.equal(existsSync(join(root, '.opencode', 'agent', 'fadeno-dispatch-worker.md')), false, 'the stale broker is removed');
-});
 
 /**
  * `--bind` names a DIAL REF, and the run may have frozen an archetype-specific

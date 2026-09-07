@@ -27,9 +27,9 @@ test('a flag from another command is rejected, not ignored', () => {
 });
 
 test('a subcommand contributes its own flags without losing the parent\'s', () => {
-  // `steering resolve --archetype` is valid; `steering --help` still is too.
-  assert.deepEqual(unknownFlagsFor('steering', 'resolve', ['archetype']), []);
-  assert.deepEqual(unknownFlagsFor('steering', 'resolve', ['help']), []);
+  // `models verify --harness` is valid; `models verify --help` still is too.
+  assert.deepEqual(unknownFlagsFor('models', 'verify', ['harness']), []);
+  assert.deepEqual(unknownFlagsFor('models', 'verify', ['help']), []);
   // A flag belonging to a DIFFERENT subcommand is still caught.
   assert.deepEqual(unknownFlagsFor('status', 'resolve', ['archetype']), ['--archetype']);
 });

@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DispatchCommandError, runDispatch } from '../src/commands/dispatch.ts';
-import { runInit } from '../src/commands/init.ts';
 import {
   COORDINATING_ARCHETYPES,
   DISPATCH_NESTING_ENV,

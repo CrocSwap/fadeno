@@ -48,13 +48,9 @@ test('focused help uses semantic options and preserves safety-critical modes', (
   const plugin = renderFocusedHelp('plugin');
   assert.doesNotMatch(plugin, /\n  --grok|\n  --opencode/);
   assert.match(plugin, /Claude Code is the default plugin/);
-  assert.doesNotMatch(renderFocusedHelp('steering apply'), /\n  --grok/);
-  assert.doesNotMatch(renderFocusedHelp('vendor'), /\n  --with-hooks/);
   assert.doesNotMatch(renderFocusedHelp('dial'), /\n  --rate|\n  --archetype/);
 
   assert.match(renderFocusedHelp('clean'), /Remove ignored runtime state/);
-  assert.match(renderFocusedHelp('unvendor'), /Remove lock-owned vendored files/);
-  assert.match(renderFocusedHelp('uninstall'), /confirms removal/);
   assert.match(renderFocusedHelp('dispatch'), /--archetype.*--model|--model.*--archetype/s);
   assert.match(renderFocusedHelp('dispatch'), /--shadow <ref>/);
   assert.match(renderFocusedHelp('dispatch'), /isolate by default.*merge.*--isolate.*withholds/s);
@@ -68,12 +64,7 @@ test('focused help uses semantic options and preserves safety-critical modes', (
   for (const path of ['models add', 'model add', 'dial clear-shadow']) {
     assert.match(renderFocusedHelp(path), /--json\s+Emit structured JSON output/);
   }
-  assert.match(renderFocusedHelp('uninstall'), /Required with --purge-user-data/);
-  assert.match(renderFocusedHelp('unvendor'), /remove modified lock-owned files/);
-  assert.match(renderFocusedHelp('steering apply'), /Overwrite managed steering files/);
   assert.doesNotMatch(renderFocusedHelp('completion'), /private protocol/);
-  assert.match(renderFocusedHelp('uninstall'), /--purge-user-data --force/);
-  assert.match(renderFocusedHelp('init'), /Deprecated compatibility alias; steering is already default/);
 });
 
 test('dial help discovers every public form and focused output stays terminal-width friendly', () => {

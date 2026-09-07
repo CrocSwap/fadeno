@@ -6,7 +6,6 @@ import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DialError, runDialResolve, runDialShow } from '../src/commands/dial.ts';
 import { DispatchCommandError, runDispatch } from '../src/commands/dispatch.ts';
-import { SteeringError, runSteeringResolve } from '../src/commands/steering.ts';
 import { loadLayeredProfile } from '../src/lib/config-layers.ts';
 import { ExecutorProfileError } from '../src/lib/executors.ts';
 import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
@@ -126,11 +125,6 @@ test('dial resolve: a malformed v3 pin throws the same message dispatch would', 
   assert.throws(() => runDispatch({ archetype: 'worker', prompt: 'hi', repoRoot: root, userPathOptions: paths }), (err: unknown) => err instanceof DispatchCommandError && err.message === resolveErr);
 });
 
-test('dial resolve: steering also strict on malformed pin', (t) => {
-  const { root, paths } = seedProject(t);
-  writeMalformedPin(root);
-  assert.throws(() => runSteeringResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker' }), (err: unknown) => err instanceof SteeringError && /has unknown key/.test((err as Error).message) && !(err instanceof ExecutorProfileError));
-});
 
 test('dial show: a legacy pin is surfaced gracefully, not thrown', (t) => {
   const { root, paths } = seedProject(t, V3_BASE);
@@ -194,14 +188,6 @@ test('dial show: render the canon note on the effective view', (t) => {
   assert.equal(open.note, null);
 });
 
-test('steering resolve: a malformed pin stays a hard error', (t) => {
-  const { root, paths } = seedProject(t);
-  writeMalformedPin(root);
-  assert.throws(
-    () => runSteeringResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker' }),
-    (err: unknown) => err instanceof SteeringError && /has unknown key/.test((err as Error).message) && !(err instanceof ExecutorProfileError),
-  );
-});
 
 test('Claude steering hook: resolver error denies a spawn that would have been rewritten', (t) => {
   const root = tempRepo(t);

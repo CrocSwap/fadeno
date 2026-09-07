@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
@@ -191,4 +191,15 @@ export function catalogV4Doc(input: CatalogV4Input = {}): Record<string, unknown
 
 export function catalogV4(input: CatalogV4Input = {}): string {
   return stringifyYaml(catalogV4Doc(input));
+}
+
+const STARTER_CATALOG = join(import.meta.dirname, '..', 'templates', 'common', 'fadeno', 'executors.yaml');
+
+/**
+ * Seed `.fadeno/executors.yaml` in a temp repo from the shipped starter
+ * catalog — what `fadeno init` used to do before the redesign removed it.
+ */
+export function seedStarterCatalog(root: string): void {
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  copyFileSync(STARTER_CATALOG, join(root, '.fadeno', 'executors.yaml'));
 }

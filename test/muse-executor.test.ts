@@ -4,7 +4,6 @@ import { isAbsolute, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { runDispatch } from '../src/commands/dispatch.ts';
-import { runInit } from '../src/commands/init.ts';
 import {
   resolveDelivery,
   parseExecutorProfile,
