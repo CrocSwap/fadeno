@@ -1,13 +1,9 @@
-import { SCHEMA_KINDS } from '../lib/playbook-validate.ts';
 import { readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { editDistance, loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
-import { listRuns, readEvents, type RunSummary } from '../lib/run-ledger.ts';
-import { hostRequestTerminalState } from '../lib/host-dispatch.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { userPaths } from '../lib/user-paths.ts';
-import { listDefinitionNames, resolvePlaybookFile } from '../lib/definitions.ts';
 import { runDialShow } from './dial.ts';
 
 /** Arguments supplied by the generated Bash completion function. */
@@ -109,7 +105,6 @@ const COMMANDS: Record<string, CommandSpec> = {
   uninstall: command({ '--codex': NONE, '--claude': NONE, '--all': NONE, '--purge-user-data': NONE, '--force': NONE }),
   clean: command({ '--force': NONE, '--windows': NONE }),
   unvendor: command({ '--force': NONE }),
-  evidence: command({}, ['free'], { promote: command({}, ['run']) }),
   init: command({
     '--codex': NONE,
     '--claude': NONE,
@@ -122,10 +117,6 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--no-steering': NONE,
     '--data-only': NONE,
   }),
-  validate: command({ '--schema': { kind: 'enum', values: [...SCHEMA_KINDS] } }, ['path']),
-  playbooks: command({ '--json': NONE }, ['playbook']),
-  diagram: command({ '--format': { kind: 'enum', values: ['ascii', 'mermaid'] } }, ['playbook']),
-  'new-run': command({ '--input': { kind: 'input' } }, ['playbook', 'free']),
   models: MODELS_SPEC,
   // Top-level alias for `models` — same handler in cli.ts, same flags.
   model: MODELS_SPEC,
@@ -177,52 +168,11 @@ const COMMANDS: Record<string, CommandSpec> = {
       '--diagnostics': NONE,
     },
   ),
-  'dispatch-prepare': command({ '--isolate': NONE }, ['run', 'dispatch-id']),
   'dispatch-open': command({ '--archetype': { kind: 'archetype' }, '--tag': { kind: 'free' }, '--note': { kind: 'free' } }),
   'dispatch-close': command(
     { '--reason': { kind: 'free' }, '--no-merge': NONE, '--tag': { kind: 'free' }, '--agent-id': { kind: 'free' } },
     ['free'],
   ),
-  'dispatch-prompt': command({}, ['run', 'dispatch-id']),
-  'dispatch-fallback': command({}, ['run', 'dispatch-id']),
-  'dispatch-start': command({ '--agent-id': { kind: 'free' }, '--workspace': PATH, '--branch': { kind: 'free' } }, ['run', 'dispatch-id']),
-  'dispatch-progress': command({ '--file': PATH, '--source': { kind: 'enum', values: ['agent', 'harness', 'director'] } }, ['run', 'dispatch-id']),
-  'dispatch-complete': command({ '--output': { kind: 'path-or-stdin' }, '--commit': { kind: 'free' } }, ['run', 'dispatch-id']),
-  'dispatch-fail': command({ '--reason': { kind: 'free' } }, ['run', 'dispatch-id']),
-  'dispatch-withdraw': command({ '--reason': { kind: 'free' } }, ['run', 'dispatch-id']),
-  run: command(
-    {
-      '--step': { kind: 'step' },
-      '--status': { kind: 'enum', values: ['running', 'completed', 'failed', 'aborted'] },
-      '--event': { kind: 'free' },
-      '--artifact': PATH,
-      '--member': { kind: 'free' },
-      '--field': { kind: 'free' },
-    },
-    ['run'],
-  ),
-  'tool-run': command({ '--tool': { kind: 'free' }, '--output': PATH }, ['run']),
-  'tool-complete': command({ '--output': PATH }, ['run']),
-  gate: command(
-    { '--artifact': PATH, '--report': PATH },
-    ['run', 'enum'],
-  ),
-  prompt: command(
-    {
-      '--actor': { kind: 'free' },
-      '--iteration': { kind: 'free' },
-      '--inline': NONE,
-      '--no-record': NONE,
-      '--format': { kind: 'enum', values: ['text', 'json'] },
-    },
-    ['run', 'step'],
-  ),
-  next: command({ '--legacy': NONE }, ['run']),
-  drive: command({ '--bind': { kind: 'bind' }, '--unbind': { kind: 'role' }, '--max-transitions': { kind: 'free' }, '--parallel': { kind: 'free' }, '--diagnostics': NONE }, ['run']),
-  cancel: command({ '--actor-call': { kind: 'free' } }, ['run']),
-  decide: command({ '--decision': { kind: 'free' }, '--feedback': { kind: 'free' } }, ['run', 'free']),
-  'attempt-accept': command({}, ['run', 'free']),
-  runs: command({}),
   attest: command({ '--archetype': { kind: 'archetype' } }),
   dispatches: command({
     '--tail': { kind: 'free' },
@@ -239,23 +189,6 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--merge': { kind: 'free' },
     '--allow-relay-mismatch': NONE,
   }),
-  'shadow-apply': command({ '--arm': { kind: 'enum', values: ['challenger', 'primary'] }, '--check': NONE }, ['free']),
-  bakeoff: command(
-    {
-      '--measure-only': NONE,
-      '--evidence': { kind: 'enum', values: ['inlined', 'explored'] },
-      '--prepare': NONE,
-      '--record': NONE,
-      '--comparison': PATH,
-      '--adversarial': PATH,
-      '--json': NONE,
-      '--judge': { kind: 'free' },
-      '--harness': { kind: 'free' },
-    },
-    ['free'],
-  ),
-  show: command({ '--legacy': NONE, '--events': NONE }, ['run']),
-  verify: command({ '--latest': NONE, '--allow-failed': NONE, '--legacy': NONE }, ['run']),
   plugin: command({ '--codex': NONE, '--grok': NONE, '--opencode': NONE, '--omp': NONE, '--force': NONE }, ['path']),
   completion: command({}, [], {
     bash: command({}),
@@ -406,18 +339,6 @@ function pathCandidates(prefix: string, cwd: string): string[] {
   return startsWith(out, prefix);
 }
 
-function readPlaybookNames(repoRoot: string): string[] {
-  return uniqueSorted(listDefinitionNames(repoRoot));
-}
-
-function safeRuns(repoRoot: string): RunSummary[] {
-  try {
-    return listRuns(repoRoot);
-  } catch {
-    return [];
-  }
-}
-
 function readProfile(repoRoot: string): ExecutorProfile | null {
   try {
     return loadExecutorProfile(repoRoot).profile;
@@ -484,116 +405,17 @@ function profileValues(repoRoot: string, kind: 'dial' | 'executor' | 'archetype'
   return [...names];
 }
 
-function resolveRun(runs: RunSummary[], ref: string): RunSummary | null {
-  const exact = runs.find((run) => run.runId === ref);
-  if (exact != null) return exact;
-  const matches = runs.filter((run) => run.runId.startsWith(ref));
-  return matches.length === 1 ? matches[0]! : null;
-}
-
-function playbookFile(repoRoot: string, run: RunSummary): string | null {
-  if (run.playbook == null) return null;
-  const stripped = run.playbook.replace(/\.ya?ml$/i, '');
-  return resolvePlaybookFile(repoRoot, stripped)?.path ?? null;
-}
-
-function readStepIds(repoRoot: string, runRef: string): string[] {
-  const run = resolveRun(safeRuns(repoRoot), runRef);
-  if (run == null) return [];
-  const file = playbookFile(repoRoot, run);
-  if (file == null) return [];
-  try {
-    const doc = parseYaml(readFileSync(file, 'utf8')) as { flow?: unknown };
-    if (!Array.isArray(doc?.flow)) return [];
-    const byId = new Map<string, Record<string, unknown>>();
-    for (const raw of doc.flow) {
-      if (raw != null && typeof raw === 'object' && !Array.isArray(raw)) {
-        const id = (raw as Record<string, unknown>).id;
-        if (typeof id === 'string') byId.set(id, raw as Record<string, unknown>);
-      }
-    }
-    const found = new Set<string>();
-    const visit = (id: string): void => {
-      if (found.has(id)) return;
-      const step = byId.get(id);
-      if (step == null) return;
-      found.add(id);
-      if (Array.isArray(step.body)) for (const child of step.body) if (typeof child === 'string') visit(child);
-    };
-    for (const id of byId.keys()) visit(id);
-    return uniqueSorted(found);
-  } catch {
-    return [];
-  }
-}
-
-/** Nonterminal host requests in the selected run, suitable for host handoff commands. */
-function readPendingDispatchIds(repoRoot: string, runRef: string): string[] {
-  const run = resolveRun(safeRuns(repoRoot), runRef);
-  if (run == null) return [];
-  try {
-    const events = readEvents(run.dir).events;
-    // "Still open" asked of the one shared reading, rather than a local list of
-    // terminal event types: a withdrawn request is retired and must not be
-    // offered to `dispatch-start`, and a fourth receipt added later drops out
-    // here without anyone having to remember this file.
-    const open = (dispatchId: string): boolean => {
-      const state = hostRequestTerminalState(events, dispatchId);
-      return state === 'requested' || state === 'started';
-    };
-    return uniqueSorted(
-      events
-        .filter((event) => event.type === 'host_dispatch_requested')
-        .map((event) => event.extra.dispatch_id)
-        .filter((value): value is string => typeof value === 'string' && open(value)),
-    );
-  } catch {
-    return [];
-  }
-}
-
-function readPlaybookRoles(repoRoot: string, runRef: string): string[] {
-  const run = resolveRun(safeRuns(repoRoot), runRef);
-  if (run == null) return [];
-  const file = playbookFile(repoRoot, run);
-  if (file == null) return [];
-  try {
-    const doc = parseYaml(readFileSync(file, 'utf8')) as { roles?: unknown };
-    if (doc?.roles == null || typeof doc.roles !== 'object' || Array.isArray(doc.roles)) return [];
-    return Object.keys(doc.roles as Record<string, unknown>);
-  } catch {
-    return [];
-  }
-}
-
-function readPlaybookInputs(repoRoot: string, runRef: string): string[] {
-  const run = resolveRun(safeRuns(repoRoot), runRef);
-  if (run == null) return [];
-  const file = playbookFile(repoRoot, run);
-  if (file == null) return [];
-  try {
-    const doc = parseYaml(readFileSync(file, 'utf8')) as { inputs?: unknown };
-    if (doc?.inputs == null || typeof doc.inputs !== 'object' || Array.isArray(doc.inputs)) return [];
-    return Object.keys(doc.inputs as Record<string, unknown>);
-  } catch {
-    return [];
-  }
-}
-
 function dynamicValues(
   kind: ValueKind,
   prefix: string,
   repoRoot: string,
   cwd: string,
-  runRef: string | undefined,
   optionToken?: string,
 ): string[] {
   let values: string[];
   switch (kind) {
     case 'enum':
-      values = optionToken === '--schema'
-        ? [...SCHEMA_KINDS]
-        : optionToken === '--format'
+      values = optionToken === '--format'
           ? ['ascii', 'mermaid', 'text', 'json']
           : optionToken === '--status'
             ? ['running', 'completed', 'failed', 'aborted']
@@ -605,14 +427,6 @@ function dynamicValues(
       return pathCandidates(prefix, cwd);
     case 'path-or-stdin':
       return startsWith([...pathCandidates(prefix, cwd), '-'], prefix);
-    case 'playbook':
-      return startsWith(readPlaybookNames(repoRoot), prefix);
-    case 'run':
-      return startsWith(safeRuns(repoRoot).map((run) => run.runId), prefix);
-    case 'dispatch-id':
-      return startsWith(runRef == null ? [] : readPendingDispatchIds(repoRoot, runRef), prefix);
-    case 'step':
-      return startsWith(runRef == null ? [] : readStepIds(repoRoot, runRef), prefix);
     case 'dial':
     case 'executor':
     case 'archetype':
@@ -621,8 +435,6 @@ function dynamicValues(
       return startsWith(userCatalogModels(), prefix);
     case 'dialed-model':
       return startsWith(dialedModelRefs(repoRoot, cwd), prefix);
-    case 'role':
-      return startsWith(runRef == null ? [] : readPlaybookRoles(repoRoot, runRef), prefix);
     case 'bind': {
       const equals = prefix.indexOf('=');
       const rolePrefix = equals < 0 ? '' : prefix.slice(0, equals + 1);
@@ -632,7 +444,7 @@ function dynamicValues(
       // tempting suggestions here, but would be rejected by the CLI; wait for
       // the user to type a role prefix (and `=`) before suggesting values.
       if (equals < 0) return [];
-      const roles = runRef == null ? [] : readPlaybookRoles(repoRoot, runRef);
+      const roles: string[] = [];
       const role = prefix.slice(0, equals);
       const roleValues = roles.includes(role) ? roles : [...roles, role];
       return startsWith(roleValues.flatMap((name) => executors.map((executor) => `${name}=${executor}`)), `${rolePrefix}${executorPrefix}`);
@@ -640,8 +452,7 @@ function dynamicValues(
     case 'input': {
       const equals = prefix.indexOf('=');
       if (equals < 0) {
-        const names = runRef == null ? [] : readPlaybookInputs(repoRoot, runRef);
-        return startsWith(names.map((name) => `${name}=`), prefix);
+        return [];
       }
       const left = prefix.slice(0, equals + 1);
       return pathCandidates(prefix.slice(equals + 1), cwd).map((value) => `${left}${value}`);
@@ -649,10 +460,6 @@ function dynamicValues(
     default:
       return [];
   }
-}
-
-function currentRun(positionals: string[]): string | undefined {
-  return positionals[0];
 }
 
 function commandOptions(spec: CommandSpec): string[] {
@@ -691,10 +498,9 @@ export function runCompletionCandidates(opts: CompletionCandidatesOptions): stri
 
   const previous = cword > 0 ? words[cword - 1] : undefined;
   const previousSpec = previous == null ? undefined : optionSpec(context.spec, previous);
-  const runRef = currentRun(context.positionals);
   if (previousSpec != null && previousSpec.kind !== 'none' && previous != null && !previous.includes('=')) {
     if (previousSpec.kind === 'enum' && previousSpec.values != null) return startsWith(previousSpec.values, current);
-    return dynamicValues(previousSpec.kind, current, repoRoot, cwd, runRef, previous);
+    return dynamicValues(previousSpec.kind, current, repoRoot, cwd, previous);
   }
 
   const equal = current.indexOf('=');
@@ -705,7 +511,7 @@ export function runCompletionCandidates(opts: CompletionCandidatesOptions): stri
       if (found.kind === 'enum' && found.values != null) {
         return startsWith(found.values, current.slice(equal + 1)).map((value) => `${tokenName}=${value}`);
       }
-      return dynamicValues(found.kind, current.slice(equal + 1), repoRoot, cwd, runRef, tokenName)
+      return dynamicValues(found.kind, current.slice(equal + 1), repoRoot, cwd, tokenName)
         .map((value) => `${tokenName}=${value}`);
     }
   }
@@ -718,7 +524,7 @@ export function runCompletionCandidates(opts: CompletionCandidatesOptions): stri
   const declared = context.spec.positionals;
   const kind = declared[positionalIndex]
     ?? (context.spec.repeatLast === true ? declared[declared.length - 1] : undefined);
-  if (kind != null) return dynamicValues(kind, current, repoRoot, cwd, runRef);
+  if (kind != null) return dynamicValues(kind, current, repoRoot, cwd);
 
   // A free-form positional (task, feedback, reason, and so on) has no useful
   // semantic candidates. An empty next word still benefits from relevant flags.

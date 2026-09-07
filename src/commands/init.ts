@@ -43,7 +43,7 @@ export interface InitResult {
  * `judge` subagent the skill spawns, so omitting it shipped the actor without
  * the instructions for using it.
  */
-const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-bakeoff'] as const;
+const SKILLS = [] as const;
 
 /**
  * Scaffold a Fadeno setup for the given target into the repository.

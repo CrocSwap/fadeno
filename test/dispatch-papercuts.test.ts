@@ -5,12 +5,9 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DispatchCommandError, DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
-import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runDialShow } from '../src/commands/dial.ts';
-import { runNewRun } from '../src/commands/new-run.ts';
 import { runSteeringResolve } from '../src/commands/steering.ts';
-import { runValidate } from '../src/commands/validate.ts';
 import { DIALS_LOCAL_FILE, parseExecutorProfile, writeLocalDialState } from '../src/lib/executors.ts';
 import { echoedStdin, read, tempRepo } from './helpers.ts';
 
@@ -95,7 +92,6 @@ test('scaffold: executors.yaml carries the built-in v3 catalog', (t) => {
   assert.ok(Object.keys(asShipped.harnesses).length > 0);
   assert.deepEqual(asShipped.dials, {}, 'starter catalog ships no repo dials');
   assert.equal((asShipped as any).defaultLoadout ?? null, null);
-  assert.ok(runValidate({ repoRoot: root }).ok);
 });
 
 test('built-in catalog: worker resolves to base (current-host) with no dials', (t) => {
@@ -134,41 +130,6 @@ test('help: new dial flags are discoverable and old loadout vars are gone', (t) 
 });
 
 // --- 3. echo-tag disambiguation ---------------------------------------------
-
-test('echo: resolution labels use dial source vocabulary, not loadout', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root });
-  // Seed a repo pin for worker
-  writeFileSync(
-    join(root, '.fadeno', 'executors.yaml'),
-    stringifyYaml({
-      schema_version: 4,
-      models: {
-        'echo-worker': { provider: 'openai', id: 'echo-worker' },
-        'luna-worker': { provider: 'openai', id: 'luna-worker' },
-      },
-      harnesses: harnessesFor(STDIN_ECHO('REPORT:')),
-      archetypes: { worker: {}, reviewer: {} },
-      dials: { worker: 'echo-worker' },
-    }),
-  );
-  const created = runNewRun({ playbook: 'code-change-review', task: 'Echo tags', repoRoot: root, userPathOptions: harnessOpts });
-  assert.ok(created.resolution);
-  assert.ok(created.resolution.echo.length > 0);
-  for (const line of created.resolution.echo) {
-    // No old loadout vocabulary
-    assert.doesNotMatch(line, /\[default\]/);
-    assert.doesNotMatch(line, /\[fallback "\*"\]/);
-    assert.doesNotMatch(line, /\[loadout/);
-    // At least one recognised dial label
-    assert.match(line, /\[(repo pin|base|binding|session dial|user dial)\]/);
-  }
-  // repo pin row carries source repo
-  const repoRow = created.resolution.roles.find((r) => r.role === 'implementer' || r.archetype === 'worker');
-  if (repoRow) assert.equal(repoRow.source, 'repo');
-});
-
-// --- 4. evidence completeness -----------------------------------------------
 
 test('evidence: rows record the resolution path for dial sources', (t) => {
   const root = seedProfile(t, {
@@ -298,29 +259,6 @@ test('stale pin: dispatch still succeeds via base/repo pin (legacy pin ignored)'
   assert.equal(rows.length, 2);
   assert.equal(rows[0]!.resolution, 'repo');
 });
-
-test('stale pin: drive still succeeds with legacy pin ignored', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root });
-  writeFileSync(
-    join(root, '.fadeno', 'executors.yaml'),
-    stringifyYaml({
-      schema_version: 4,
-      models: { probe: { provider: 'openai', id: 'probe' } },
-      harnesses: harnessesFor(STDIN_ECHO('REPORT:')),
-      archetypes: { worker: {} },
-      dials: { worker: 'probe' },
-    }),
-  );
-  const created = runNewRun({ playbook: 'code-change-review', task: 'Stale pin', repoRoot: root, userPathOptions: harnessOpts });
-  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
-  writeFileSync(join(root, DIALS_LOCAL_FILE), 'removed-loadout\n');
-  // drive should not throw due to stale pin – it is ignored
-  const driven = runDrive({ run: created.runId, repoRoot: root, userPathOptions: harnessOpts });
-  assert.ok(driven != null);
-});
-
-// --- 7. empty prompt guard ---------------------------------------------------
 
 test('dispatch: an empty or whitespace-only prompt is refused before any invocation', (t) => {
   const root = seedProfile(t, {

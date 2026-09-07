@@ -7,7 +7,6 @@ import {
   resolveRole,
   readLocalDialState,
 } from '../lib/executors.ts';
-import { definitionSourceSummary } from '../lib/definitions.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { codexUserAgentDir, readUserDials, type UserPathOptions, userPaths } from '../lib/user-paths.ts';
 import { loadLayeredProfile } from '../lib/config-layers.ts';
@@ -52,7 +51,6 @@ export interface StatusResult {
   repoRoot: string;
   version: string;
   harness: 'codex' | 'claude' | 'grok' | 'opencode' | 'omp' | 'standalone' | null;
-  definitions: ReturnType<typeof definitionSourceSummary>;
   dials: { session: Record<string, DialRef>; repo: Record<string, DialRef>; user: Record<string, DialRef> };
   legacy_pin_note: string | null;
   roles: StatusRole[];
@@ -349,7 +347,6 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     repoRoot,
     version: invokingVersion,
     harness,
-    definitions: definitionSourceSummary(repoRoot),
     dials: { session: sessionDials, repo: repoDials, user: userDials },
     legacy_pin_note,
     roles,

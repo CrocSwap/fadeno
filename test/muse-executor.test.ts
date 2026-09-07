@@ -4,9 +4,7 @@ import { isAbsolute, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { runDispatch } from '../src/commands/dispatch.ts';
-import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
-import { runNewRun } from '../src/commands/new-run.ts';
 import {
   resolveDelivery,
   parseExecutorProfile,
@@ -58,49 +56,6 @@ test('dispatch: a file-reading executor receives the attested snapshot via {prom
   const pathArg = command[command.length - 1]!;
   assert.ok(isAbsolute(pathArg), pathArg);
   assert.equal(readFileSync(pathArg, 'utf8'), echoedStdin('FILE-DELIVERED'));
-});
-
-test('drive: a file-reading actor gets the run-recorded prompt artifact', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root });
-  writeFileSync(join(root, '.fadeno', 'playbooks', 'one-file.yaml'), [
-    'kind: AgentPlaybook',
-    'schema_version: "0.1"',
-    'name: one-file',
-    'description: Single step through a file-reading executor.',
-    'when_to_use:',
-    '  - prompt-file executor engine test',
-    'roles:',
-    '  builder:',
-    '    purpose: Implement the task.',
-    '    archetype: worker',
-    'flow:',
-    '  - id: implement',
-    '    kind: actor_call',
-    '    actor: builder',
-    '    output: Notes',
-    '    output_path: artifacts/notes.md',
-    '    terminal_status: completed',
-    '',
-  ].join('\n'));
-  const harnesses = { muse: { provider: 'muse', command: ['node', '-e', FILE_READER, '{prompt_file}'] } };
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 4,
-    models: { musey: { provider: 'muse', id: 'musey-1', effort: 'xhigh' } },
-    harnesses,
-    archetypes: { worker: {} },
-    dials: { worker: 'musey' },
-  }));
-  const { runId } = runNewRun({ playbook: 'one-file', task: 'file executor test', repoRoot: root });
-  const result = runDrive({ run: runId, repoRoot: root, env: null });
-  assert.equal(result.outcome, 'terminal', JSON.stringify(result));
-  assert.equal(result.status, 'completed');
-  // The artifact is the executor's stdout = the recorded prompt artifact bytes.
-  const artifact = readFileSync(join(root, '.fadeno', 'runs', runId, 'artifacts', 'notes.md'), 'utf8');
-  const promptFiles = readFileSync(join(root, '.fadeno', 'runs', runId, 'events.jsonl'), 'utf8');
-  assert.ok(artifact.length > 0);
-  assert.match(promptFiles, /artifacts\/prompts\//);
-  assert.match(artifact, /file executor test/);
 });
 
 test('starter catalog: muse compiles onto the muse harness under every host, with the {prompt_file} spelling', () => {

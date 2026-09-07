@@ -3,14 +3,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import { runAttest } from './commands/attest.ts';
-import { runDecide } from './commands/decide.ts';
 import {
   runDispatch,
-  runDispatchComplete,
-  runDispatchFail,
-  runDispatchFallback,
-  runDispatchProgress,
-  runDispatchStart,
 } from './commands/dispatch.ts';
 import {
   runDispatches,
@@ -23,12 +17,9 @@ import {
   runDispatchesMerge,
 } from './commands/dispatches.ts';
 import { renderExecutorStderr } from './lib/diagnostics.ts';
-import { runDiagram } from './commands/diagram.ts';
-import { DRIVE_PARALLEL_DEFAULT, DRIVE_PARALLEL_MAX, DRIVE_PARALLEL_MIN, runAttemptAccept, runDrive, type DriveResult } from './commands/drive.ts';
-import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
 import {
-  offHostLanes,
+  
   formatShadowLine,
   runDialClear,
   runDialSetMany,
@@ -37,36 +28,15 @@ import {
   runDialShadow,
   runDialShow,
   runShadowShow,
-  sessionEffort,
+  
   type DialShowResult,
 } from './commands/dial.ts';
 import { runModels, runModelsAdd, runModelsHarness, runModelsRemove, type HarnessListingResult, type ModelAddResult, type ModelRemoveResult, type ModelsResult } from './commands/models.ts';
 import { runModelsVerify, type ModelsVerifyResult } from './commands/models-verify.ts';
-import { runNewRun } from './commands/new-run.ts';
-import { runPlaybooks, type PlaybooksDetailResult, type PlaybooksListResult } from './commands/playbooks.ts';
 import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
-import { runNext } from './commands/next.ts';
-import { runPrompt } from './commands/prompt.ts';
-import { runRun } from './commands/run.ts';
-import { runRuns } from './commands/runs.ts';
-import { runShow } from './commands/show.ts';
-import { runValidate } from './commands/validate.ts';
-import { runVerify, type VerifyResult } from './commands/verify.ts';
 import { IGNORED_DEADLINE_NOTE_TOKEN } from './lib/executors.ts';
 import { knownFlagsFor, retiredFlagFor, runCompletion, runCompletionCandidates, suggestFlag, TOP_LEVEL_COMMANDS, unknownFlagsFor } from './commands/completion.ts';
-import { runShadowApply } from './commands/shadow-apply.ts';
-import {
-  runBakeoff,
-  runBakeoffPrepare,
-  runBakeoffRecord,
-  type BakeoffArmMeasurement,
-  type BakeoffPrepareResult,
-  type BakeoffResult,
-} from './commands/bakeoff.ts';
-import { EVIDENCE_MODES, isEvidenceMode, type EvidenceMode } from './lib/bakeoff.ts';
 import { runSteeringApply, runSteeringApplyClaude, runSteeringApplyOpenCode, runSteeringApplyOmp, runSteeringResolve } from './commands/steering.ts';
-import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
-import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
 import { runDispatchClose, runDispatchOpen } from './commands/dispatch-adhoc.ts';
 import { mergeBackReapplyCommand } from './lib/workspace-baseline.ts';
 import {
@@ -75,28 +45,15 @@ import {
   ignoredOutputSignalOrder,
   ignoredOutputVerdict,
 } from './lib/receipt-attestations.ts';
-import { runDispatchWithdraw } from './commands/dispatch-withdraw.ts';
-import { runToolComplete } from './commands/tool-complete.ts';
-import { runToolRun } from './commands/tool-run.ts';
 import { runSetup } from './commands/setup.ts';
 import { runStatus, type CodexMaterialization } from './commands/status.ts';
 import { runVendor } from './commands/vendor.ts';
-import { runEvidencePromote } from './commands/evidence.ts';
 import { runUninstall } from './commands/uninstall.ts';
 import { runClean, runCleanWindows } from './commands/clean.ts';
 import { runUnvendor } from './commands/unvendor.ts';
-import { runCancel, CancelError } from './commands/cancel.ts';
-import type { DiagramFormat } from './lib/diagram.ts';
 import type { EmitResult } from './lib/fsutil.ts';
-import { SCHEMA_KINDS as SCHEMA_KIND_LIST } from './lib/playbook-validate.ts';
-import type { SchemaKind, ValidationIssue } from './lib/playbook-validate.ts';
-import { findRepoRoot, packageVersion } from './lib/paths.ts';
-import type { RunEvent, RunSummary } from './lib/run-ledger.ts';
-import type { DispatchProgressSource } from './lib/host-dispatch.ts';
+import { packageVersion } from './lib/paths.ts';
 import { describeCodexAgentIdentityRow } from './lib/codex-agent-file.ts';
-import { describeIdleOutput, describeSelfReport, readClaimProgress, requestProgressRelPath } from './lib/attempt-progress.ts';
-import type { ValidateOutcome } from './commands/validate.ts';
-import type { ShowProjection, ShowResult, StepView } from './commands/show.ts';
 import { readInstallationManifest, syncManagedRuntime } from './lib/installations.ts';
 import { userPaths } from './lib/user-paths.ts';
 import { renderFocusedHelp, renderGlobalHelp, resolveHelpPath } from './lib/cli-help.ts';
@@ -194,8 +151,6 @@ export function maybeRunRuntimePreflight(
 }
 
 const SIGIL: Record<Target, string> = { codex: '$', claude: '/', grok: '/', opencode: '', omp: '' };
-const SCHEMA_KINDS: readonly SchemaKind[] = SCHEMA_KIND_LIST;
-
 function printInitSummary(
   target: Target,
   repoRoot: string,
@@ -261,73 +216,6 @@ function printInitSummary(
   }
 }
 
-function printIssue(issue: ValidationIssue): void {
-  const at = issue.path ? `${issue.path}: ` : '';
-  const line = `          ${issue.severity === 'error' ? 'error' : 'warn '} ${at}${issue.message}`;
-  if (issue.severity === 'error') console.error(line);
-  else console.log(line);
-}
-
-function printValidate(outcome: ValidateOutcome): void {
-  let warnings = 0;
-  for (const result of outcome.results) {
-    const rel = relative(outcome.repoRoot, result.file) || result.file;
-    const fileWarnings = result.issues.filter((i) => i.severity === 'warning').length;
-    warnings += fileWarnings;
-    if (result.ok) {
-      const note = fileWarnings > 0 ? ` (${fileWarnings} warning${fileWarnings > 1 ? 's' : ''})` : '';
-      console.log(`  ok    ${rel} [${result.kind}]${note}`);
-    } else {
-      console.log(`  FAIL  ${rel} [${result.kind}]`);
-    }
-    for (const issue of result.issues) printIssue(issue);
-  }
-
-  const failed = outcome.results.filter((r) => !r.ok).length;
-  const summary =
-    `\n${outcome.results.length - failed} ok, ${failed} invalid` +
-    (warnings > 0 ? `, ${warnings} warning${warnings > 1 ? 's' : ''}` : '');
-  if (outcome.ok) console.log(summary);
-  else console.error(summary);
-}
-
-function truncateWithEllipsis(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return `${text.slice(0, maxLen)}…`;
-}
-
-function formatRunLine(run: RunSummary): string {
-  if (run.problems.length > 0) {
-    const playbook = run.playbook ?? '?';
-    const task = run.task ? truncateWithEllipsis(run.task, 60) : '?';
-    return `${run.runId}  [malformed]  ${playbook} — ${task} (${run.problems[0]})`;
-  }
-  const status = run.status ?? '?';
-  const playbook = run.playbook ?? '?';
-  const task = run.task ? truncateWithEllipsis(run.task, 60) : '?';
-  const legacyTag = run.schemaVersion == null ? ' [legacy]' : '';
-  return `${run.runId}  [${status}]${legacyTag}  ${playbook} — ${task}`;
-}
-
-function printRuns(runs: RunSummary[]): void {
-  if (runs.length === 0) {
-    console.log('No runs yet under .fadeno/runs.');
-    return;
-  }
-
-  for (const run of runs) console.log(formatRunLine(run));
-
-  const statusCounts = new Map<string, number>();
-  for (const run of runs) {
-    const key = run.status ?? '?';
-    statusCounts.set(key, (statusCounts.get(key) ?? 0) + 1);
-  }
-  const parts = [...statusCounts.entries()]
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-    .map(([status, n]) => `${n} ${status}`);
-  console.log(`\n${runs.length} run${runs.length === 1 ? '' : 's'} (${parts.join(', ')})`);
-}
-
 /**
  * Clear one shadow attachment, or every one when `archetype` is null.
  *
@@ -359,323 +247,6 @@ function printDispatches(result: DispatchesResult): void {
   console.log(`\n${result.summary}`);
 }
 
-function utcTime(timestamp: string | null): string {
-  if (!timestamp) return '--:--:--';
-  const d = new Date(timestamp);
-  if (Number.isNaN(d.getTime())) return '--:--:--';
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
-}
-
-function stepSuffix(step: string | null): string {
-  return step != null ? `  (step: ${step})` : '';
-}
-
-function renderEvent(event: RunEvent): string {
-  const { type, step, extra } = event;
-  switch (type) {
-    case 'step_started':
-      return `step_started  ${step ?? '?'}`;
-    case 'artifact_created': {
-      const artifact = typeof extra.artifact === 'string' ? extra.artifact : '?';
-      return `artifact_created  ${artifact}${stepSuffix(step)}`;
-    }
-    case 'gate_evaluated': {
-      const condition = typeof extra.condition === 'string' ? extra.condition : '?';
-      const resultRaw = typeof extra.result === 'string' ? extra.result : '?';
-      const artifact = typeof extra.artifact === 'string' ? extra.artifact : '?';
-      return `gate_evaluated  ${condition} → ${resultRaw.toUpperCase()}  (${artifact})`;
-    }
-    case 'run_started':
-    case 'run_completed':
-      return `${type}${stepSuffix(step)}`;
-    default: {
-      const compact = JSON.stringify(extra);
-      return `${type}  ${truncateWithEllipsis(compact, 80)}`;
-    }
-  }
-}
-
-const STEP_GLYPHS: Record<StepView['state'], string> = {
-  pending: '○',
-  running: '→',
-  waiting: '!',
-  blocked: '■',
-  completed: '✓',
-  failed: '✗',
-};
-
-function formatDuration(ms: number | null): string | null {
-  if (ms == null) return null;
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remainder = seconds % 60;
-  if (hours > 0) return `${hours}h ${minutes}m ${remainder}s`;
-  if (minutes > 0) return `${minutes}m ${remainder}s`;
-  return `${remainder}s`;
-}
-
-function stepSummary(step: StepView): string {
-  const parts: string[] = [];
-  parts.push(step.state);
-  const runtime = formatDuration(step.runtimeMs);
-  if (runtime != null) parts.push(runtime);
-  if (step.actorCalls > 1) parts.push(`${step.actorCalls} actor calls`);
-  if (step.attempts > step.actorCalls) {
-    const repairNote = step.repairs > 0 ? `, ${step.repairs} schema repair${step.repairs === 1 ? '' : 's'}` : '';
-    parts.push(`${step.attempts} attempts${repairNote}`);
-  }
-  if (step.resumed > 0) {
-    parts.push(step.resumed === 1 ? 'resumed session' : `${step.resumed} resumed-session calls`);
-  }
-  if (step.artifacts > 0) parts.push(`${step.artifacts} artifact${step.artifacts === 1 ? '' : 's'}`);
-  for (const gate of step.gates) parts.push(`gate ${gate.condition} → ${gate.result}`);
-  if (step.iterations > 0) parts.push(`${step.iterations} iteration${step.iterations === 1 ? '' : 's'}`);
-  for (const decision of step.decisions) parts.push(`decision: ${decision}`);
-  return parts.join(' · ');
-}
-
-function printProjection(projection: ShowProjection): void {
-  const total = formatDuration(projection.runtimeMs);
-  console.log(`\nworkflow${projection.playbook ? ` · ${projection.playbook}` : ''}${total ? ` · total ${total}` : ''}`);
-  if (projection.steps.length === 0) console.log('  (no steps recorded)');
-  const width = Math.max(0, ...projection.steps.map((s) => s.id.length));
-  for (const step of projection.steps) {
-    const summary = stepSummary(step);
-    const indent = step.loopBodyOf != null ? '    ↳ ' : '  ';
-    const kind = step.kind != null ? ` [${step.kind}]` : '';
-    console.log(`${indent}${STEP_GLYPHS[step.state]} ${step.id.padEnd(width)}${kind}${summary ? `  ${summary}` : ''}`);
-    for (const actor of step.actors) {
-      const details: string[] = [actor.state];
-      const actorRuntime = formatDuration(actor.runtimeMs);
-      if (actorRuntime != null) details.push(actorRuntime);
-      if (actor.phase != null) details.push(actor.phase);
-      if (actor.summary != null) details.push(truncateWithEllipsis(actor.summary, 120));
-      if (actor.completed.length > 0) details.push(`${actor.completed.length} checkpoint${actor.completed.length === 1 ? '' : 's'}`);
-      if (actor.current != null) details.push(truncateWithEllipsis(actor.current, 120));
-      if (actor.next != null) details.push(`next: ${truncateWithEllipsis(actor.next, 100)}`);
-      if (actor.blockers.length > 0) details.push(`blocked: ${truncateWithEllipsis(actor.blockers.join('; '), 120)}`);
-      if (actor.source != null) {
-        const progressAge = formatDuration(actor.progressAgeMs);
-        details.push(`${actor.source}-attested semantic progress${progressAge == null ? '' : ` ${progressAge} ago`} (non-gating)`);
-      }
-      console.log(`${indent}    ${STEP_GLYPHS[actor.state]} ${actor.actor}  ${details.join(' · ')}`);
-    }
-    for (const instance of step.instances) {
-      // Nested leaf/generation instances are already visible under their
-      // logical step; map-member roots are the useful branch summary here.
-      if (instance.parentId != null) continue;
-      const details: string[] = [instance.state];
-      const runtime = formatDuration(instance.runtimeMs);
-      if (runtime != null) details.push(runtime);
-      if (instance.generation != null) details.push(`generation ${instance.generation}`);
-      console.log(`${indent}    ${STEP_GLYPHS[instance.state]} ${instance.member ?? instance.id}  ${details.join(' · ')}`);
-    }
-  }
-
-  // Both sections sit HERE — directly under the workflow, above the process
-  // facts and well above `active artifacts` — because they qualify the thing
-  // the reader is about to be shown. A reader who meets the artifact list
-  // first concludes it is the whole product, which is exactly how a
-  // `data/research/` deliverable was lost twice without anyone noticing;
-  // `failures` at the bottom of this projection is the other end of the page.
-  if (projection.discardedOutput.length > 0) {
-    const truncated = projection.discardedOutput.some((item) => item.truncated);
-    // The heading names both fates when both are present. It said DISCARDED
-    // over every row, retained ones included, and a heading is what a reader
-    // takes away from a section they skim.
-    const anyLost = projection.discardedOutput.some((item) => item.verdict === 'DISCARDED');
-    const anyKept = projection.discardedOutput.some((item) => item.verdict === 'KEPT');
-    const heading = anyLost && anyKept ? 'DISCARDED / KEPT OUTPUT' : anyLost ? 'DISCARDED OUTPUT' : 'KEPT OUTPUT';
-    console.log(
-      `\n${heading} — gitignored content no diff carried out of its worktree${truncated ? ' (at least: a listing was a FLOOR, not the set)' : ''}`,
-    );
-    for (const item of projection.discardedOutput) {
-      const where = `${item.step ?? '(run)'}${item.actor != null ? `/${item.actor}` : ''}`;
-      console.log(`  ${where}: ${item.detail}`);
-    }
-  }
-
-  if (projection.workspaceOverlaps.length > 0) {
-    // The header states the register before the rows do. Nothing prevents a
-    // concurrent writer any more, so this is a record that one happened —
-    // not a finding that either side lost work.
-    console.log('\nconcurrent writes (attestation, non-gating — an overlap is not proof of damage)');
-    for (const item of projection.workspaceOverlaps) {
-      const where = `${item.step ?? '(run)'}${item.actor != null ? `/${item.actor}` : ''}`;
-      console.log(`  ${where}: ${item.detail}`);
-    }
-  }
-
-  if (projection.harnessObserved.length > 0) {
-    console.log('\nharness-observed processes (non-gating)');
-    for (const fact of projection.harnessObserved) {
-      const holder = fact.holderId != null ? `holder: ${fact.holderId}${fact.holderKind != null ? ` (${fact.holderKind})` : ''}` : 'holder: —';
-      const mode = `workspace_mode=${fact.workspaceMode ?? '—'}`;
-      const pids = `supervisor_pid=${fact.supervisorPid ?? '—'} executor_pid=${fact.executorPid ?? '—'} pgid=${fact.processGroupId ?? '—'}`;
-      const runtime = formatDuration(fact.runtimeMs);
-      const heartbeatAge = formatDuration(fact.heartbeatAgeMs);
-      const outputAge = formatDuration(fact.outputAgeMs);
-      const state = `${fact.processState}${runtime == null ? '' : ` · ${runtime}`}`;
-      const times = `heartbeat=${heartbeatAge == null ? 'unknown' : `${heartbeatAge} ago`} output=${outputAge == null ? 'not observed' : `${outputAge} ago`}`;
-      const bytes = `stdout_bytes=${fact.stdoutBytes ?? '—'} stderr_bytes=${fact.stderrBytes ?? '—'}`;
-      const correlation = `run=${fact.runId ?? '—'} dispatch=${fact.dispatchId ?? '—'}`;
-      const outcome = fact.signal != null
-        ? ` signal=${fact.signal}`
-        : fact.exitCode != null
-          ? ` exit_code=${fact.exitCode}`
-          : '';
-      const ended = fact.endedAt == null ? '' : ` ended_at=${fact.endedAt}`;
-      const error = fact.observationError == null ? '' : `  observation_error=${fact.observationError}`;
-      console.log(`  ${holder}  ${state}${outcome}${ended}  ${mode}  ${correlation}  ${pids}  ${times}  ${bytes}  claim=${fact.claimPath}${error}`);
-      const described = describeSelfReport(fact);
-      if (described.kind === 'reported') {
-        // The agent's own account, never a measurement and never a gate: it sits
-        // next to the byte counters precisely so a reader can tell them apart.
-        const selfReport = described.progress!;
-        const reportedAt = Date.parse(selfReport.updatedAt);
-        const reportAge = Number.isFinite(reportedAt) ? formatDuration(Math.max(0, Date.now() - reportedAt)) : null;
-        const phase = selfReport.phase ?? selfReport.state ?? 'progress';
-        const current = selfReport.current == null ? '' : ` — ${truncateWithEllipsis(selfReport.current, 120)}`;
-        const stateNote = selfReport.state == null ? '' : ` (${selfReport.state})`;
-        console.log(
-          `    agent: "${phase}"${stateNote}${current}${reportAge == null ? '' : `, ${reportAge} ago`} (agent self-report, non-gating)`,
-        );
-      } else if (described.kind === 'configured_silent') {
-        // A READING, and printed only because it is one: this attempt was
-        // given a sidecar and the agent has not written anything readable to
-        // it. An attempt that was never given one prints nothing at all —
-        // there is no observation to report, and a blank line saying "no
-        // report" would be the harness's silence dressed as the agent's.
-        console.log('    agent: no self-report yet (sidecar configured, non-gating)');
-      }
-      if (fact.outputIdleWarning) {
-        const described = describeIdleOutput({
-          idleMs: fact.outputAgeMs ?? fact.runtimeMs ?? null,
-          progress: readClaimProgress(fact),
-          argv: fact.command,
-        });
-        console.log(`    WARNING: ${described.text}`);
-      }
-    }
-  }
-
-  if (projection.requests.length > 0) {
-    console.log('\nhost dispatches');
-    const byStep = new Map<string, typeof projection.requests>();
-    for (const request of projection.requests) {
-      const list = byStep.get(request.step) ?? [];
-      list.push(request);
-      byStep.set(request.step, list);
-    }
-    for (const [step, requests] of byStep) {
-      const counts = new Map<string, number>();
-      for (const request of requests) counts.set(request.state, (counts.get(request.state) ?? 0) + 1);
-      const summary = [...counts.entries()].map(([state, count]) => `${count} ${state}`).join(' · ');
-      console.log(`  ${step}  ${summary}`);
-      for (const request of requests) {
-        const member = request.actor ?? '(anonymous)';
-        const model = request.model != null && request.reasoningEffort != null ? `${request.model}/${request.reasoningEffort}` : request.executor;
-        const details: string[] = [request.state];
-        if (request.withdrawnReason != null) details.push(truncateWithEllipsis(request.withdrawnReason, 120));
-        // The agent working this dispatch is GONE. Pushed second, right behind
-        // the state it contradicts, because the state on its own reads
-        // `running` — which is what a dispatch whose agent a 429 had killed
-        // seven hours earlier used to say. It says only what was observed: an
-        // agent stopped, no receipt followed, and this much was sitting in its
-        // tree. Never that the work was unfinished; nothing knows that.
-        if (request.agentStopped != null) {
-          const stopped = request.agentStopped;
-          const tree = stopped.dirtyPaths == null
-            ? 'tree unknown (git could not answer)'
-            : stopped.dirtyPaths > 0
-              ? `${stopped.dirtyPaths} uncommitted path${stopped.dirtyPaths === 1 ? '' : 's'} in its tree`
-              : 'no uncommitted changes in its tree';
-          details.push(
-            `AGENT STOPPED — no terminal receipt (${stopped.agentType ?? 'unnamed agent'}` +
-              `${stopped.at != null ? ` at ${stopped.at}` : ''}; ${tree})`,
-          );
-        }
-        const runtime = formatDuration(request.runtimeMs);
-        if (runtime != null) details.push(runtime);
-        if (request.phase != null) details.push(request.phase);
-        if (request.summary != null) details.push(truncateWithEllipsis(request.summary, 120));
-        if (request.completed.length > 0) details.push(`${request.completed.length} checkpoint${request.completed.length === 1 ? '' : 's'}`);
-        if (request.current != null) details.push(truncateWithEllipsis(request.current, 120));
-        if (request.next != null) details.push(`next: ${truncateWithEllipsis(request.next, 100)}`);
-        if (request.progressSource != null) {
-          const progressAge = formatDuration(request.progressAgeMs);
-          details.push(`${request.progressSource}-attested semantic progress${progressAge == null ? '' : ` ${progressAge} ago`} (non-gating)`);
-        }
-        // Non-gating isolated workspace observability — never controls gates.
-        if (request.workspaceMode === 'isolated') {
-          const wsNote = request.workspace != null ? `workspace_mode: isolated workspace=${request.workspace}` : 'workspace_mode: isolated';
-          const baseNote = request.baseCommit != null ? ` base_commit=${request.baseCommit.slice(0, 8)}` : '';
-          const diffNote = request.diffSnapshot != null ? ` diff=${request.diffSnapshot} (${request.diffBytes ?? 0} B)` : '';
-          details.push(`${wsNote}${baseNote}${diffNote} (non-gating)`);
-        }
-        console.log(`      ${member}  ${model}  ${details.join(' · ')}`);
-      }
-    }
-  }
-
-  if (projection.active.length > 0) {
-    console.log('\nactive artifacts');
-    for (const art of projection.active) {
-      const memberNote = art.member != null ? ` · ${art.member}` : '';
-      const bytesNote = art.bytes != null ? ` · ${art.bytes} B` : '';
-      console.log(`  ${art.path}  (gen ${art.generation}${memberNote}${bytesNote})`);
-    }
-  }
-
-  if (projection.decisions.length > 0) {
-    console.log('\ndecisions');
-    for (const d of projection.decisions) console.log(`  ${d.step ?? '(run)'} → ${d.branch}`);
-  }
-
-  if (projection.failures.length > 0) {
-    console.log('\nfailures');
-    for (const f of projection.failures) console.log(`  ${f}`);
-  }
-}
-
-function printShow(repoRoot: string, result: ShowResult, rawTimeline: boolean): void {
-  const { run, mode, events, badLines, artifacts, projection } = result;
-  const dash = (value: string | null): string => value ?? '—';
-  const relDir = relative(repoRoot, run.dir) || run.dir;
-
-  console.log(`run ${run.runId}`);
-  console.log(`  playbook:  ${dash(run.playbook)}`);
-  console.log(`  task:      ${dash(run.task)}`);
-  console.log(`  status:    ${dash(run.status)}`);
-  console.log(`  host:      ${dash(run.host)}`);
-  console.log(`  started:   ${dash(run.startedAt)}`);
-  console.log(`  ended:     ${dash(run.endedAt)}`);
-  console.log(`  dir:       ${relDir}`);
-  if (mode !== 'current') {
-    console.log('\n  compatibility ledger (read via --legacy; not verifiable to 0.3 guarantees)');
-  }
-
-  if (projection != null && !rawTimeline) {
-    printProjection(projection);
-  } else {
-    const eventLabel = events.length === 1 ? 'event' : 'events';
-    console.log(`\ntimeline (${events.length} ${eventLabel})`);
-    for (const event of events) {
-      console.log(`  ${utcTime(event.timestamp)}  ${renderEvent(event)}`);
-    }
-  }
-  for (const lineNo of badLines) {
-    console.log(`  line ${lineNo}: unparseable event (skipped)`);
-  }
-
-  console.log(`\nartifacts (${artifacts.length})`);
-  for (const art of artifacts) {
-    console.log(`  ${art.path}  (${art.bytes} bytes)`);
-  }
-}
-
 const DIAL_SOURCE_TEXT: Record<string, string> = {
   binding: 'binding',
   session: 'session dial',
@@ -683,101 +254,6 @@ const DIAL_SOURCE_TEXT: Record<string, string> = {
   user: 'user dial',
   base: 'base',
 };
-
-function printBakeoffArm(arm: BakeoffArmMeasurement): void {
-  const id = arm.dispatchId != null ? arm.dispatchId.slice(0, 8) : '(missing)';
-  const identity = `${arm.executor ?? '(unresolved)'} (${arm.model ?? '?'}${arm.reasoningEffort != null ? `@${arm.reasoningEffort}` : ''})`;
-  console.log(`  ${arm.arm.padEnd(10)} ${id}  ${identity}`);
-  if (arm.refused != null) {
-    console.log(`    refused [${arm.refused.predicate}] ${arm.refused.message}`);
-    return;
-  }
-  const secs = arm.durationMs != null ? `${Math.round(arm.durationMs / 1000)}s` : '?';
-  console.log(`    exit ${arm.exitCode ?? '?'} in ${secs}, output ${arm.outputBytes ?? '?'} bytes`);
-  if (arm.diff != null) {
-    const gen = arm.diff.generatedFiles.length > 0
-      ? `  [${arm.diff.generatedFiles.length} generated: ${arm.diff.generatedFiles.slice(0, 3).join(', ')}]`
-      : '';
-    console.log(`    diff ${arm.diff.files} files +${arm.diff.insertions}/-${arm.diff.deletions} (${arm.diff.bytes} bytes)${gen}`);
-  }
-  if (arm.signals != null) {
-    console.log(`    introduced ${arm.signals.introduced.length} identifier(s)`);
-    if (arm.signals.unreached == null) {
-      console.log('    reach:      undeclared — no `surfaces:` in .fadeno/executors.yaml, so this is not claimed either way');
-    } else if (arm.signals.unreached.length === 0) {
-      console.log('    reach:      every introduced identifier appears on a declared surface');
-    } else {
-      console.log(`    reach:      ${arm.signals.unreached.length} never reach a surface: ${arm.signals.unreached.join(', ')}`);
-    }
-    if (arm.signals.redefined.length > 0) {
-      console.log(`    redefined:  already defined at baseline: ${arm.signals.redefined.join(', ')}`);
-    }
-  }
-}
-
-function printBakeoff(result: BakeoffResult): void {
-  const base = result.baselineCommit != null ? result.baselineCommit.slice(0, 8) : '(none)';
-  console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? '?'}  baseline ${base}`);
-  for (const arm of result.arms) printBakeoffArm(arm);
-  if (result.reachDifferential != null && result.reachDifferential.length > 0) {
-    console.log('  reach differential — both arms introduced these; only one wired them to a surface:');
-    for (const d of result.reachDifferential) {
-      console.log(`    ${d.identifier}: reached in ${d.reachedIn}, NEVER reached in ${d.unreachedIn}`);
-    }
-  }
-  if (result.confounds.length === 0) {
-    console.log('  confounds: none recorded');
-  } else {
-    console.log(`  confounds (${result.confounds.length}) — kernel-stamped, not judged:`);
-    for (const c of result.confounds) console.log(`    [${c.code}] ${c.arm}: ${c.detail}`);
-  }
-  if (result.measureOnly) {
-    console.log('  measured only — no verdict was formed and nothing was written.');
-    return;
-  }
-  console.log(`  verdict: ${result.verdict}`);
-  // The plan, not just the fact that there is one. `graft` means neither arm
-  // should be taken whole; printing only the verdict and a path says that and
-  // then withholds what to take.
-  if (result.graftPlan != null && result.graftPlan.length > 0) {
-    console.log('  graft plan:');
-    for (const step of result.graftPlan) {
-      const paths = step.paths != null && step.paths.length > 0 ? ` [${step.paths.join(', ')}]` : '';
-      console.log(`    from ${step.from_arm}: ${step.what} — ${step.why}${paths}`);
-    }
-  }
-  console.log(`  written: ${result.comparisonPath}`);
-  if (result.judgeDispatchIds != null) {
-    console.log(
-      `  judge dispatches: comparison ${result.judgeDispatchIds.comparison.slice(0, 8)}, ` +
-        `adversarial ${result.judgeDispatchIds.adversarial.slice(0, 8)}`,
-    );
-  } else {
-    console.log('  judge delivery: host — recorded from a file, no dispatch receipt (see Confounds)');
-  }
-}
-
-function printBakeoffPrepare(result: BakeoffPrepareResult): void {
-  const base = result.baselineCommit != null ? result.baselineCommit.slice(0, 8) : '(none)';
-  console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? '?'}  baseline ${base}`);
-  for (const arm of result.arms) printBakeoffArm(arm);
-  console.log('  prepared — no verdict was formed and nothing was written.');
-  if (result.armTrees != null) {
-    // Named even though the prompt already carries them: these are real
-    // directories on disk that `fadeno clean` will remove, and a caller who
-    // cannot see what was written cannot know what it is about to lose.
-    console.log(`  evidence: explored — each arm's tree was reconstructed on disk:`);
-    console.log(`    arm_a: ${result.armTrees.a.tree}/  (changes: ${result.armTrees.a.diff})`);
-    console.log(`    arm_b: ${result.armTrees.b.tree}/  (changes: ${result.armTrees.b.diff})`);
-  }
-  console.log(`  spawn a "${result.judgeArchetype}" subagent per prompt file, INDEPENDENTLY:`);
-  console.log(`    comparison prompt:  ${result.comparisonPromptPath}`);
-  console.log(`    adversarial prompt: ${result.adversarialPromptPath}`);
-  console.log(
-    `  then: fadeno bakeoff <pair-id> --record --comparison <file> --adversarial <file>` +
-      (result.evidenceMode === 'explored' ? ' --evidence explored' : ''),
-  );
-}
 
 function printStaleShadows(stale: Array<{ archetype: string; target: string }>): void {
   for (const item of stale) {
@@ -897,62 +373,6 @@ function printModelsVerify(result: ModelsVerifyResult): void {
   if (result.counts.not_listed > 0) {
     console.log('cached verification rows for the not-listed models were deleted.');
   }
-}
-
-function printPlaybookSummary(summary: PlaybooksListResult['playbooks'][number]): void {
-  console.log(`${summary.name}  [${summary.source}]`);
-  console.log(`  ${summary.description}`);
-  if (summary.when_to_use.length > 0) console.log(`  when: ${summary.when_to_use.join('; ')}`);
-  console.log(`  path: ${summary.path}`);
-}
-
-function printPlaybooksList(result: PlaybooksListResult): void {
-  console.log(`${result.playbooks.length} effective playbook${result.playbooks.length === 1 ? '' : 's'}:`);
-  for (const summary of result.playbooks) printPlaybookSummary(summary);
-}
-
-function printPlaybooksDetail(result: PlaybooksDetailResult): void {
-  printPlaybookSummary(result.playbook);
-  console.log(`\nworkflow\n${result.diagram}`);
-}
-
-/**
- * Name the delivery lane in the resolution echo, where it is not the one the
- * line's `[source]` implies.
- *
- * Two dials that print identically — `opus` and `opus@xhigh` differ by three
- * characters — now deliver differently: the unpinned one inherits the session
- * and runs in it, the pinned one goes out to the command lane whenever the
- * session is at some other effort. Worse, the same dial flips lanes when the
- * session's effort changes under it. Consecutive spawns behaving differently
- * with nothing on screen to explain it is what this replaces:
- *
- *     worker → opus@xhigh (opus) [session dial]
- *     worker → opus@xhigh (opus) [command lane: session is medium]
- *
- * The lane displaces the source label rather than crowding in beside it: when
- * a delivery leaves the session, *why it left* is the fact the reader needs,
- * and which layer held the dial is still one `fadeno dial` away (and stays in
- * `--json`, untouched).
- */
-function withLaneLabels(lines: string[], roles: unknown): string[] {
-  // `roles` and `echo` are built one-per-role in the same loop, so equal
-  // lengths mean equal positions. Anything else and this says nothing rather
-  // than labeling the wrong line.
-  if (!Array.isArray(roles) || roles.length !== lines.length) return lines;
-  const refs = roles.map((role) => (typeof role?.executor === 'string' ? role.executor : null));
-  const lanes = offHostLanes(refs, sessionEffort());
-  return lines.map((line, index) => {
-    const decision = lanes[index];
-    if (decision == null) return line;
-    // `restart_required` must not read as "command lane" — that would name a
-    // lane the same sentence says does not exist.
-    const label =
-      decision.lane === 'command'
-        ? `[command lane: ${decision.lane_reason}]`
-        : `[restart required: ${decision.lane_reason}]`;
-    return /\[[^\]]*\]$/.test(line) ? line.replace(/\[[^\]]*\]$/, label) : `${line} ${label}`;
-  });
 }
 
 /**
@@ -1084,73 +504,6 @@ function runShadowCommand(
       `so ${result.archetype} steps inside a playbook run are unpaired.`,
   );
   return 0;
-}
-
-function printDrive(result: DriveResult): number {
-  console.log('');
-  switch (result.outcome) {
-    case 'terminal':
-      console.log(`run ${result.run} is terminal (${result.status}).`);
-      return result.status === 'completed' ? 0 : 1;
-    case 'paused_human_gate': {
-      const d = result.decision!;
-      console.log(`paused at ${d.step} — ${d.prompt}`);
-      console.log(`  decision: ${d.decisionId}   options: ${d.options.join(' | ')}`);
-      if (d.artifact != null) {
-        console.log(`  artifact: ${d.artifact.path} (${d.artifact.bytes} B)`);
-        for (const heading of d.artifact.headings) console.log(`      ${heading}`);
-      }
-      console.log(`  resolve:  fadeno decide ${result.run} <option>   then re-run fadeno drive ${result.run}`);
-      return 0;
-    }
-    case 'awaiting_host_dispatch':
-      console.log(`awaiting ${result.requests.length} host dispatch(es) for run ${result.run}`);
-      for (const request of result.requests) {
-        const artifactType = request.artifactType == null ? '' : `  artifact_type=${request.artifactType}`;
-        console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ''}  ${request.model}/${request.reasoningEffort}${artifactType}`);
-        if (request.nodeInstanceId != null) console.log(`      instance: ${request.nodeInstanceId}`);
-        // One derivation, two consumers: this line and the command fallback's
-        // supervisor both ask `requestProgressRelPath` which of the two engine
-        // sidecar spellings this request uses. When it was written out here by
-        // hand, the fallback had no way to agree with it except by copying it.
-        console.log(`      progress: <workspace>/${requestProgressRelPath(request)}`);
-      }
-      return 0;
-    default:
-      console.error(`drive stopped (${result.outcome}): ${result.detail}`);
-      return 1;
-  }
-}
-
-function printVerify(result: VerifyResult): void {
-  const { run, findings, ok } = result;
-  console.log(`run ${run.runId}  [${run.status ?? '?'}]`);
-  console.log('');
-  for (const f of findings) {
-    // WARN is uppercased alongside FAIL because it is a finding, not a state
-    // of the checker: a lower-case token next to `ok` and `skip` is how an
-    // attestation reads as bookkeeping. It stays on stdout — a warning is
-    // part of the report, and stderr is the channel a recover-by-tag drops.
-    const token = f.status === 'fail' ? 'FAIL' : f.status === 'warn' ? 'WARN' : f.status;
-    const line = `  ${token.padEnd(4)}  ${f.check.padEnd(22)}  ${f.detail}`;
-    if (f.status === 'fail') console.error(line);
-    else console.log(line);
-  }
-
-  const counts = { ok: 0, skip: 0, fail: 0, warn: 0 };
-  for (const f of findings) counts[f.status] += 1;
-  const summary = `\nverify: ${counts.ok} ok, ${counts.skip} skipped, ${counts.warn} warned, ${counts.fail} failed`;
-  if (ok) console.log(summary);
-  else console.error(summary);
-  // A zero exit with warnings is the exact shape that let `concurrent_write`
-  // and `ignored_output_discarded` go unread, so the summary names them
-  // rather than leaving a reader to notice a count changed.
-  const warned = findings.filter((f) => f.status === 'warn');
-  if (warned.length > 0) {
-    console.log(
-      `  warnings (not failures — verify cannot adjudicate these): ${warned.map((f) => f.check).join(', ')}`,
-    );
-  }
 }
 
 type TargetFlags = { codex?: boolean; claude?: boolean; grok?: boolean; opencode?: boolean; omp?: boolean };
@@ -1420,10 +773,6 @@ function main(argv: string[]): number {
       console.log(`session: Skills and subagents are loaded at host session start; a fresh session is required to refresh them — no setup or refresh will update the current session.`);
       console.log(`integrations: ${(result as any).runtime.installedHarnesses.join(', ') || 'none'}`);
       {
-        const total = (result as any).definitions.playbooks.length;
-        const fromProject = (result as any).definitions.projectPlaybooks;
-        const origin = fromProject === 0 ? 'all bundled' : `${fromProject} from .fadeno/playbooks, ${total - fromProject} bundled`;
-        console.log(`definitions: ${total} effective playbooks (${origin})`);
       }
       // New dial-based status: show per-role rows resolved through cascade
       const r: any = result as any;
@@ -1463,7 +812,7 @@ function main(argv: string[]): number {
         if (values.verbose) console.log(JSON.stringify({ ompMaterialization: m }, null, 2));
       }
       if ((result as any).next) console.log(`next: ${(result as any).next}`);
-      if (values.verbose) console.log(JSON.stringify({ repoRoot: (result as any).repoRoot, paths: (result as any).definitions, roles: (result as any).roles }, null, 2));
+      if (values.verbose) console.log(JSON.stringify({ repoRoot: (result as any).repoRoot, roles: (result as any).roles }, null, 2));
       return 0;
     }
     case 'vendor': {
@@ -1560,13 +909,6 @@ function main(argv: string[]): number {
       for (const path of result.preserved) console.log(`preserved modified ${path}`);
       if (result.purged) console.log('purged Fadeno user configuration, state, and managed runtime.');
       return result.preserved.length === 0 ? 0 : 2;
-    }
-    case 'evidence': {
-      if (positionals[1] !== 'promote' || !positionals[2]) throw new Error('Usage: fadeno evidence promote <run>');
-      const result = runEvidencePromote({ run: positionals[2] });
-      console.log(`verified evidence promoted: ${result.destination}`);
-      console.log(`  ${result.files.length} immutable files; manifest ${result.manifest}`);
-      return 0;
     }
     case 'init': {
       const target = requireTarget(values);
@@ -1748,124 +1090,6 @@ function main(argv: string[]): number {
       }
       throw new Error('Usage: fadeno steering resolve|apply [...]');
     }
-    case 'validate': {
-      if (values.schema && !SCHEMA_KINDS.includes(values.schema as SchemaKind)) {
-        throw new Error(`Invalid --schema "${values.schema}". Use: ${SCHEMA_KINDS.join(', ')}.`);
-      }
-      const outcome = runValidate({
-        path: positionals[1],
-        schema: values.schema as SchemaKind | undefined,
-      });
-      printValidate(outcome);
-      return outcome.ok ? 0 : 1;
-    }
-    case 'playbooks': {
-      if (positionals.length > 2) throw new Error('Usage: fadeno playbooks [<name>] [--json]');
-      const result = runPlaybooks({ playbook: positionals[1] });
-      if (values.json) console.log(JSON.stringify(result, null, 2));
-      else if (result.kind === 'list') printPlaybooksList(result);
-      else printPlaybooksDetail(result);
-      return 0;
-    }
-    case 'diagram': {
-      const playbook = positionals[1];
-      if (!playbook) throw new Error('Usage: fadeno diagram <playbook> [--format ascii|mermaid]');
-      if (values.format && values.format !== 'ascii' && values.format !== 'mermaid') {
-        throw new Error(`Invalid --format "${values.format}". Use: ascii | mermaid.`);
-      }
-      console.log(runDiagram({ playbook, format: values.format as DiagramFormat | undefined }));
-      return 0;
-    }
-    case 'new-run': {
-      const [, playbook, task] = positionals;
-      if (!playbook || !task) {
-        throw new Error('Usage: fadeno new-run <playbook> "<task description>"');
-      }
-      const { runId, runDir, inputs, resolution } = (runNewRun as any)({
-        playbook,
-        task,
-        inputs: values.input,
-      });
-      console.log(`Created run ${runId}`);
-      console.log(`  ${runDir}`);
-      if (inputs.length > 0) console.log(`  inputs: ${inputs.join(', ')}`);
-      if (resolution != null && (resolution as any).echo?.length > 0) {
-        console.log(`\nresolution:`);
-        const lines = (resolution as any).echo as string[];
-        for (const line of withLaneLabels(lines, (resolution as any).roles)) console.log(`  ${line}`);
-      }
-      console.log('\nAdvance it with `fadeno drive` first (engine):');
-      console.log(`  fadeno drive ${runId}`);
-      console.log(`\nOr advance manually with the playbook cursor:`);
-      console.log(`  fadeno next ${runId}`);
-      console.log(`  fadeno run ${runId} --step <step-id>`);
-      console.log(`  fadeno run ${runId} --status completed`);
-      return 0;
-    }
-    case 'run': {
-      const run = positionals[1];
-      if (!run) throw new Error('Usage: fadeno run <run> [--step|--status|--event|--artifact|--member|--field]');
-      const result = runRun({
-        run,
-        step: values.step,
-        status: values.status,
-        event: values.event,
-        artifact: values.artifact,
-        member: values.member,
-        fields: values.field,
-      });
-      const parts: string[] = [];
-      if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(', ')}`);
-      if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(', ')}`);
-      console.log(`${relative(process.cwd(), result.runDir) || result.runDir}: ${parts.join('; ')}`);
-      if (result.manifest) {
-        const v = result.manifest.validation;
-        const note = v.schema ? `, ${v.schema}: ${v.ok ? 'valid' : 'INVALID'}` : '';
-        console.log(
-          `  ${result.manifest.artifact_id}  sha256 ${result.manifest.sha256.slice(0, 12)}…  ` +
-            `gen ${result.manifest.generation}${note}`,
-        );
-      }
-      return 0;
-    }
-    case 'tool-run': {
-      const run = positionals[1];
-      if (!run) {
-        throw new Error('Usage: fadeno tool-run <run> [--tool <name>]');
-      }
-      // No --command escape hatch
-      if (values.output != null) {
-        throw new Error('fadeno tool-run has no --output; it executes the registered tool and synthesizes the artifact.');
-      }
-      const result = runToolRun({ run, tool: values.tool });
-      // Print the path of the artifact that was actually written: `run` may be a
-      // unique prefix, so only the resolved run id names a directory on disk.
-      const repoRoot = findRepoRoot();
-      const runDir = join(repoRoot, '.fadeno', 'runs', result.run);
-      const absArtifact = join(runDir, result.artifact);
-      const rel = relative(process.cwd(), absArtifact) || absArtifact;
-      console.log(`${rel}: tool ${result.tool} → ${result.status} (exit ${result.exitCode ?? 'null'})`);
-      console.log(`  attempt ${result.attempt} duration ${result.durationMs ?? 0}ms`);
-      // CLI success after honestly recording either passed or failed; gate decides branch. Infra failures remain errors.
-      return result.status === 'passed' || result.status === 'failed' ? 0 : 1;
-    }
-    case 'tool-complete': {
-      const run = positionals[1];
-      if (!run || !values.output) {
-        throw new Error('Usage: fadeno tool-complete <run> --output <artifact-path>');
-      }
-      const result = runToolComplete({ run, output: values.output });
-      console.log(`${relative(process.cwd(), result.runDir) || result.runDir}: completed tool step ${result.step}`);
-      if (result.manifest) {
-        const validation = result.manifest.validation;
-        const note = validation.schema ? `, ${validation.schema}: ${validation.ok ? 'valid' : 'INVALID'}` : '';
-        console.log(
-          `  ${result.manifest.artifact_id}  sha256 ${result.manifest.sha256.slice(0, 12)}…  ` +
-            `gen ${result.manifest.generation}${note}`,
-        );
-      }
-      return 0;
-    }
     case 'plugin': {
       if (values.omp) {
         const { outDir, results } = runOmpPlugin({ outDir: positionals[1], force: values.force });
@@ -1905,146 +1129,6 @@ function main(argv: string[]): number {
       process.stdout.write(runCompletion());
       return 0;
     }
-    case 'gate': {
-      const [, run, condition] = positionals;
-      if (!run || !condition) throw new Error('Usage: fadeno gate <run> <condition>');
-      const result = runGate({ run, condition, artifact: values.artifact, report: values.report });
-      if (result.pass) {
-        if (result.condition === 'tests_pass') {
-          console.log(`PASS  ${result.condition} (status=${String(result.details.status)}, exit_code=${String(result.details.exitCode)})`);
-        } else if (result.condition === 'all_reviews_approved') {
-          const total = typeof result.details.total === 'number' ? result.details.total : result.blockingCount;
-          const approved = typeof result.details.approvedCount === 'number' ? result.details.approvedCount : total;
-          console.log(`PASS  ${result.condition} (${approved}/${total} approved, 0 blocking)`);
-        } else {
-          console.log(`PASS  ${result.condition} (0 blocking issues)`);
-        }
-      } else {
-        if (result.condition === 'tests_pass') {
-          console.error(`FAIL  ${result.condition} (status=${String(result.details.status)}, exit_code=${String(result.details.exitCode)})`);
-        } else if (result.condition === 'all_reviews_approved') {
-          const total = typeof result.details.total === 'number' ? result.details.total : result.blockingCount;
-          const approved = typeof result.details.approvedCount === 'number' ? result.details.approvedCount : 0;
-          const blocking = typeof result.details.blockingCount === 'number' ? result.details.blockingCount : result.blockingTitles.length;
-          console.error(`FAIL  ${result.condition} (${approved}/${total} approved, ${blocking} blocking)`);
-          const nonApproving = Array.isArray(result.details.nonApproving) ? result.details.nonApproving as Array<{ reviewer: string; verdict: string }> : [];
-          for (const entry of nonApproving) {
-            if (typeof entry.reviewer === 'string' && typeof entry.verdict === 'string') {
-              console.error(`        - ${entry.reviewer}: ${entry.verdict}`);
-            }
-          }
-          for (const title of result.blockingTitles) console.error(`        - blocking: ${title}`);
-        } else {
-          console.error(`FAIL  ${result.condition} (${result.blockingCount} blocking issue(s))`);
-          for (const title of result.blockingTitles) console.error(`        - ${title}`);
-        }
-      }
-      return result.pass ? 0 : 1;
-    }
-    case 'prompt': {
-      const [, run, step] = positionals;
-      if (!run || !step) {
-        throw new Error('Usage: fadeno prompt <run> <step> [--actor <role>] [--iteration <n>] [--inline] [--no-record] [--format text|json]');
-      }
-      if (values.format && values.format !== 'text' && values.format !== 'json') {
-        throw new Error(`Invalid --format "${values.format}". Use: text | json.`);
-      }
-      let iteration: number | undefined;
-      if (values.iteration != null) {
-        const n = Number(values.iteration);
-        if (!Number.isInteger(n) || n < 1) {
-          throw new Error(`Invalid --iteration "${values.iteration}". Use a positive integer.`);
-        }
-        iteration = n;
-      }
-      const result = runPrompt({
-        run,
-        step,
-        actor: values.actor,
-        iteration,
-        inline: values.inline,
-        record: !values['no-record'],
-      });
-      if (values.format === 'json') {
-        console.log(
-          JSON.stringify(
-            {
-              step,
-              actor: result.plan.actor,
-              iteration: result.plan.iteration,
-              invocation: result.plan.invocation,
-              recorded: result.recorded,
-              prompt_path: result.promptPath,
-              sha256: result.sha256,
-              prompt: result.prompt,
-            },
-            null,
-            2,
-          ),
-        );
-      } else {
-        console.log(result.prompt);
-      }
-      return 0;
-    }
-    case 'next': {
-      const run = positionals[1];
-      if (!run) throw new Error('Usage: fadeno next <run>');
-      const result = runNext({ run, legacy: values.legacy });
-      console.log(JSON.stringify(result, null, 2));
-      return 0;
-    }
-    case 'drive': {
-      const run = positionals[1];
-      if (!run) throw new Error('Usage: fadeno drive <run> [--bind role=executor] [--unbind role] [--max-transitions n] [--parallel n] [--diagnostics]');
-      let maxTransitions: number | undefined;
-      if (values['max-transitions'] != null) {
-        const n = Number(values['max-transitions']);
-        if (!Number.isInteger(n) || n < 1) {
-          throw new Error(`Invalid --max-transitions "${values['max-transitions']}". Use a positive integer.`);
-        }
-        maxTransitions = n;
-      }
-      let parallel: number | undefined;
-      if (values.parallel != null) {
-        const n = Number(String(values.parallel).trim());
-        if (!Number.isInteger(n) || n < DRIVE_PARALLEL_MIN || n > DRIVE_PARALLEL_MAX) {
-          throw new Error(`Invalid --parallel "${values.parallel}". Use an integer ${DRIVE_PARALLEL_MIN}–${DRIVE_PARALLEL_MAX} (default ${DRIVE_PARALLEL_DEFAULT}).`);
-        }
-        parallel = n;
-      }
-      const result = (runDrive as any)({
-        run,
-        bind: values.bind,
-        unbind: values.unbind,
-        maxTransitions,
-        parallel,
-        diagnostics: Boolean(values.diagnostics),
-        onAction: (line: string) => console.log(`  ${line}`),
-      });
-      return printDrive(result);
-    }
-    case 'cancel': {
-      const run = positionals[1];
-      if (!run) throw new Error('Usage: fadeno cancel <run> [--actor-call <id>]');
-      try {
-        const result = runCancel({ run, actorCallId: (values as any)['actor-call'] ?? null });
-        const by = result.resolvedBy === 'supervisor' ? 'supervisor' : result.resolvedBy === 'process_group' ? `process group ${-result.signalledPid}` : `executor ${result.signalledPid}`;
-        console.log(`cancel signalled: ${result.run} ${result.actorCallId}:a${result.attempt} — SIGTERM to ${by} (pid ${result.signalledPid})`);
-        console.log(`  supervisor_pid=${result.supervisorPid} process_group_id=${result.processGroupId ?? '—'} signalled_pid=${result.signalledPid} resolved_by=${result.resolvedBy}`);
-        console.log('  the executor and its children are being reaped; the engine will record the terminal receipt.');
-        console.log('  check the workspace before re-dispatching — a cancelled executor may have written already.');
-        return 0;
-      } catch (err) {
-        if (err instanceof CancelError) {
-          console.error(`Error: ${err.message}`);
-          return 1;
-        }
-        throw err;
-      }
-    }
-    // Top-level alias for `fadeno models ...` — same handler via grouped case
-    // labels, so the two spellings cannot drift apart.
     case 'model':
     case 'models': {
       if (positionals[1] === 'add') {
@@ -2340,102 +1424,6 @@ function main(argv: string[]): number {
       }
       return result.exitCode;
     }
-    case 'dispatch-fallback': {
-      const [, run, dispatchId] = positionals;
-      if (!run || !dispatchId) throw new Error('Usage: fadeno dispatch-fallback <run> <dispatch-id>');
-      const result = runDispatchFallback({
-        run,
-        dispatchId,
-        onEcho: (line) => console.error(line),
-      });
-      if (result.stdout.length > 0) process.stdout.write(result.stdout);
-      // The same unbounded write lived here, and a fix on `dispatch` alone
-      // would have left the flood reachable through the fallback lane.
-      //
-      // With one difference this lane must not lose: on an idempotent replay
-      // `result.stderr` is the KERNEL's recorded `failure_reason`, not an
-      // executor transcript — one decision-changing sentence, relayed whole.
-      // `transcript.bytes > 0` is what tells the two apart, and only a real
-      // transcript is excerpted.
-      if (result.transcript.bytes > 0) {
-        const fallbackStderr = renderExecutorStderr({
-          stderr: result.stderr,
-          transcript: result.transcript,
-          actionable: result.exitCode !== 0 || result.transcript.path == null,
-        });
-        if (fallbackStderr != null) process.stderr.write(fallbackStderr);
-      } else if (result.stderr.length > 0) {
-        process.stderr.write(result.stderr);
-      }
-      if (result.exitCode !== 0) console.error(`dispatch-fallback: executor ${result.executor} exited ${result.exitCode}`);
-      return result.exitCode;
-    }
-    case 'dispatch-start': {
-      const [, run, dispatchId] = positionals;
-      if (!run || !dispatchId || !values['agent-id']) {
-        throw new Error('Usage: fadeno dispatch-start <run> <dispatch-id> --agent-id <host-agent-id> [--workspace <path>] [--branch <branch>]');
-      }
-      const result = runDispatchStart({
-        run,
-        dispatchId,
-        agentId: values['agent-id'],
-        workspace: values.workspace,
-        branch: values.branch,
-      });
-      console.log(`${result.dispatchId} started${result.idempotent ? ' (idempotent)' : ''}`);
-      return 0;
-    }
-    case 'dispatch-prompt': {
-      const [, run, dispatchId] = positionals;
-      if (!run || !dispatchId) throw new Error('Usage: fadeno dispatch-prompt <run> <dispatch-id>');
-      const result = runDispatchPrompt({ run, dispatchId });
-      process.stdout.write(result.envelope);
-      return 0;
-    }
-    case 'dispatch-complete': {
-      const [, run, dispatchId] = positionals;
-      if (!run || !dispatchId || !values.output) {
-        throw new Error('Usage: fadeno dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit <sha>] (use --output - for stdin)');
-      }
-      let stdinBytes: Buffer | undefined;
-      if (values.output === '-') {
-        // Binary-safe stdin read for --output -; host-dispatch's complete path uses same validation/placement as a temp file
-        try {
-          stdinBytes = readFileSync(0);
-        } catch (err) {
-          throw new Error(`failed to read stdin for --output -: ${(err as Error).message}`);
-        }
-      }
-      const result = runDispatchComplete({ run, dispatchId, output: String(values.output), commit: values.commit != null ? String(values.commit) : undefined, stdinBytes });
-      console.log(`${result.dispatchId} completed${result.idempotent ? ' (idempotent)' : ''}`);
-      return 0;
-    }
-    case 'dispatch-progress': {
-      const [, run, dispatchId] = positionals;
-      if (!run || !dispatchId || !values.file) {
-        throw new Error('Usage: fadeno dispatch-progress <run> <dispatch-id> --file <status.json> [--source agent|harness|director]');
-      }
-      if (values.source && !['agent', 'harness', 'director'].includes(values.source)) {
-        throw new Error(`Invalid --source "${values.source}". Use: agent | harness | director.`);
-      }
-      const result = runDispatchProgress({
-        run,
-        dispatchId,
-        file: values.file,
-        source: values.source as DispatchProgressSource | undefined,
-      });
-      console.log(
-        `${result.dispatchId} progress: ${result.state} (${result.source})${result.idempotent ? ' (idempotent)' : ''}`,
-      );
-      return 0;
-    }
-    case 'dispatch-prepare': {
-      const [, run, dispatchId] = positionals;
-      if (!run || !dispatchId) throw new Error('Usage: fadeno dispatch-prepare <run> <dispatch-id> --isolate');
-      const result = runDispatchPrepare({ run, dispatchId, isolate: Boolean(values.isolate) });
-      console.log(`${result.dispatchId} prepared isolated at ${result.workspace} (base ${result.baseCommit.slice(0, 8)})${result.idempotent ? ' (idempotent)' : ''}`);
-      return 0;
-    }
     case 'dispatch-open': {
       const result = runDispatchOpen({
         archetype: values.archetype,
@@ -2520,60 +1508,6 @@ function main(argv: string[]): number {
       } else if (result.workspaceRemoved) {
         console.log('  worktree removed; the work is in this workspace.');
       }
-      return 0;
-    }
-    case 'dispatch-fail': {
-      const [, run, dispatchId] = positionals;
-      if (!run || !dispatchId || !values.reason) {
-        throw new Error('Usage: fadeno dispatch-fail <run> <dispatch-id> --reason <text>');
-      }
-      const result = runDispatchFail({ run, dispatchId, reason: values.reason });
-      console.log(`${result.dispatchId} failed${result.idempotent ? ' (idempotent)' : ''}`);
-      return 0;
-    }
-    case 'dispatch-withdraw': {
-      const [, run, dispatchId] = positionals;
-      if (!run || !dispatchId || !values.reason) {
-        throw new Error('Usage: fadeno dispatch-withdraw <run> <dispatch-id> --reason <text>');
-      }
-      const result = runDispatchWithdraw({ run, dispatchId, reason: values.reason });
-      console.log(
-        `${result.dispatchId} withdrawn${result.idempotent ? ' (idempotent)' : ''}` +
-          `${result.workspaceRemoved ? '; isolated workspace removed' : ''}`,
-      );
-      if (result.workspaceError != null) console.error(result.workspaceError);
-      console.log(`Resume with \`fadeno drive ${run}\`.`);
-      return 0;
-    }
-    case 'attempt-accept': {
-      const [, run, actorCallId] = positionals;
-      if (!run || !actorCallId) throw new Error('Usage: fadeno attempt-accept <run> <actor-call-id>');
-      const result = runAttemptAccept({ run, actorCallId, onAction: (line) => console.error(line) });
-      console.log(
-        `accepted ${result.actorCallId}: attempt ${result.attempt} (host_resolved) merged ${result.diffBytes} bytes into the workspace` +
-          `${result.mergeBack.rebased_onto != null ? ` (rebased onto ${result.mergeBack.rebased_onto.slice(0, 12)} first)` : ''} and wrote ${result.output}; ` +
-          `the worktree ${result.workspace} is removed.`,
-      );
-      console.log(`Resume with \`fadeno drive ${result.runId}\`.`);
-      return 0;
-    }
-    case 'decide': {
-      const [, run, option] = positionals;
-      if (!run || !option) {
-        throw new Error('Usage: fadeno decide <run> <option> [--decision <id>] [--feedback <text>]');
-      }
-      const result = runDecide({ run, option, decision: values.decision, feedback: values.feedback });
-      if (result.recorded === 'idempotent') {
-        console.log(`${result.decisionId} was already resolved as "${result.option}" (idempotent, nothing recorded).`);
-      } else {
-        console.log(`${result.decisionId} resolved: ${result.option}${result.step ? `  (step ${result.step})` : ''}`);
-        console.log(`Resume with \`fadeno drive ${result.run}\`.`);
-      }
-      return 0;
-    }
-    case 'runs': {
-      const { runs } = runRuns();
-      printRuns(runs);
       return 0;
     }
     case 'attest': {
@@ -2855,95 +1789,6 @@ function main(argv: string[]): number {
       }
       printDispatches(result);
       return 0;
-    }
-    case 'shadow-apply': {
-      const ref = positionals[1];
-      if (!ref) {
-        throw new Error('Usage: fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]');
-      }
-      const result = runShadowApply({ ref, arm: values.arm, check: Boolean(values.check) });
-      const pairId8 = result.pairId.slice(0, 8);
-      const dispatchId8 = result.dispatchId ? result.dispatchId.slice(0, 8) : '(unknown)';
-      const bytes = result.diffBytes != null ? ` (${result.diffBytes} bytes)` : '';
-      if (result.check) {
-        console.log(
-          `pair ${pairId8} ${result.arm} arm (dispatch ${dispatchId8}): ` +
-            `${result.clean ? 'would apply cleanly' : 'would NOT apply cleanly'} — ${result.artifact}${bytes}`,
-        );
-        if (!result.clean) console.log(`  ${result.detail}`);
-        return result.clean ? 0 : 1;
-      }
-      console.log(
-        `applied pair ${pairId8}'s ${result.arm} diff (dispatch ${dispatchId8})${bytes} from ${result.artifact} ` +
-          '— evidence recorded.',
-      );
-      return 0;
-    }
-    case 'bakeoff': {
-      const ref = positionals[1];
-      const usage =
-        'Usage: fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--harness <id>] [--evidence inlined|explored]\n' +
-        '   or: fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]\n' +
-        '   or: fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file> [--evidence inlined|explored]';
-      if (!ref) throw new Error(usage);
-      // Rejected here rather than defaulted: a typo'd `--evidence explored`
-      // that silently fell back to `inlined` would stamp the artifact with a
-      // mode the caller did not choose, which is the one thing this field
-      // exists to make legible.
-      const evidence = ((): EvidenceMode | undefined => {
-        if (values.evidence == null) return undefined;
-        if (isEvidenceMode(values.evidence)) return values.evidence;
-        throw new Error(`--evidence must be one of: ${EVIDENCE_MODES.join(', ')} (got "${values.evidence}")`);
-      })();
-      if (values.prepare) {
-        const result = runBakeoffPrepare({ ref, evidence });
-        if (values.json) {
-          console.log(JSON.stringify(result, null, 2));
-          return 0;
-        }
-        printBakeoffPrepare(result);
-        return 0;
-      }
-      if (values.record) {
-        if (!values.comparison || !values.adversarial) throw new Error(usage);
-        const result = runBakeoffRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial, evidence });
-        if (values.json) {
-          console.log(JSON.stringify(result, null, 2));
-          return 0;
-        }
-        printBakeoff(result);
-        return 0;
-      }
-      const result = runBakeoff({
-        ref,
-        measureOnly: Boolean(values['measure-only']),
-        judgeModel: values.judge ?? null,
-        judgeHarness: values.harness ?? null,
-        evidence,
-      });
-      if (values.json) {
-        console.log(JSON.stringify(result, null, 2));
-        return 0;
-      }
-      printBakeoff(result);
-      return 0;
-    }
-    case 'show': {
-      const run = positionals[1];
-      if (!run) throw new Error('Usage: fadeno show <run> [--events] [--legacy]');
-      const result = runShow({ run, legacy: values.legacy });
-      printShow(findRepoRoot(), result, Boolean(values.events));
-      return 0;
-    }
-    case 'verify': {
-      const result = runVerify({
-        run: positionals[1],
-        latest: values.latest,
-        allowFailed: values['allow-failed'],
-        legacy: values.legacy,
-      });
-      printVerify(result);
-      return result.ok ? 0 : 1;
     }
     default:
       console.error(`Unknown command: ${command}\n`);

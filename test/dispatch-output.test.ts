@@ -8,7 +8,7 @@ import { DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
 import { formatElapsed } from '../src/commands/dispatches.ts';
 import { DispatchCommandError } from '../src/commands/dispatch.ts';
 import { runDispatchesOutput } from '../src/commands/dispatches.ts';
-import { sha256Hex } from '../src/lib/artifact-manifest.ts';
+import { sha256Hex } from '../src/lib/fsutil.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { echoedStdin, tempRepo } from './helpers.ts';
 

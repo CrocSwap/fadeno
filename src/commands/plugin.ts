@@ -16,24 +16,14 @@ export interface PluginResult {
   results: EmitResult[];
 }
 
-// Plugin skill dirs are short (namespaced as fadeno:runner, fadeno:builder,
-// fadeno:driver) and are generated from the same shared SKILL.md bodies used by
-// `fadeno init`. They stay model-invocable; the matching commands/ entries give
-// explicit /fadeno:runner, /fadeno:builder, /fadeno:driver slash handles (plugin
-// skills are not reliably slash-invocable on their own).
+// Plugin skill dirs are short (namespaced as fadeno:host, fadeno:setup) and are
+// generated from the same shared SKILL.md bodies used by `fadeno init`. They
+// stay model-invocable; the matching commands/ entries give explicit
+// /fadeno:host, /fadeno:setup slash handles (plugin skills are not reliably
+// slash-invocable on their own).
 const SKILLS = [
-  { src: 'fadeno-runner', dst: 'runner' },
-  { src: 'fadeno-builder', dst: 'builder' },
-  { src: 'fadeno-driver', dst: 'driver' },
   { src: 'fadeno-host', dst: 'host' },
   { src: 'fadeno-setup', dst: 'setup' },
-  // Named `compare`, never `judge`: the plugin already ships a SUBAGENT
-  // named `judge` (`fadeno:judge`, the evaluator role this skill spawns), and
-  // a skill answering to the same identifier would put two different things
-  // behind one name across two tool surfaces. Named for the command it drives,
-  // like the four above are named for their workflow rather than a role — so
-  // the rule stays "strip the prefix", with no entry needing an exception.
-  { src: 'fadeno-bakeoff', dst: 'bakeoff' },
 ] as const;
 
 /**
@@ -132,10 +122,10 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
       {
         name: 'fadeno',
         description:
-          'Run and author Fadeno playbooks — repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --claude --data-only`.',
+          'A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.',
         version: packageVersion(),
         author: { name: 'Fadeno' },
-        keywords: ['ai', 'agents', 'playbook', 'workflow', 'skills'],
+        keywords: ['ai', 'agents', 'subagents', 'workflow', 'skills'],
       },
       null,
       2,
@@ -255,10 +245,10 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
 }
 
 // Codex plugin skills keep their full `fadeno-` names — Codex invokes them as
-// `$fadeno-runner` / `$fadeno-builder` / `$fadeno-driver` (the openai.yaml
-// policies reference those handles), unlike the Claude plugin which shortens to
-// the `fadeno:runner` namespace form.
-const CODEX_SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-host', 'fadeno-setup', 'fadeno-bakeoff'] as const;
+// `$fadeno-host` / `$fadeno-setup` (the openai.yaml policies reference those
+// handles), unlike the Claude plugin which shortens to the `fadeno:host`
+// namespace form.
+const CODEX_SKILLS = ['fadeno-host', 'fadeno-setup'] as const;
 
 /**
  * Emit a Codex CLI plugin (`.codex-plugin/plugin.json` + `skills/`) from the
@@ -286,11 +276,11 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
         name: 'fadeno',
         version: packageVersion(),
         description:
-          'Run and author Fadeno playbooks — repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --codex --data-only`.',
+          'A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.',
         author: { name: 'Fadeno' },
         repository: 'https://github.com/CrocSwap/fadeno',
         license: 'MIT',
-        keywords: ['ai', 'agents', 'codex', 'playbook', 'workflow', 'skills'],
+        keywords: ['ai', 'agents', 'codex', 'subagents', 'workflow', 'skills'],
         skills: './skills/',
         interface: {
           displayName: 'Fadeno',
@@ -423,7 +413,7 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
 // omp deduplicates skills by name across providers and hands every skill a
 // native `/skill:<name>` command, so the Claude plugin's shortened names would
 // buy nothing here while risking collisions with unrelated plugins.
-const OMP_SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-bakeoff'] as const;
+const OMP_SKILLS = ['fadeno-host'] as const;
 
 /**
  * Emit an omp plugin (`package.json` manifest + `skills/` + `agents/`) from the
@@ -457,10 +447,10 @@ export function runOmpPlugin(opts: PluginOptions = {}): PluginResult {
         name: 'fadeno',
         version: packageVersion(),
         description:
-          'Run and author Fadeno playbooks — repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --omp --data-only`.',
+          'A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.',
         license: 'MIT',
         repository: 'https://github.com/CrocSwap/fadeno',
-        keywords: ['ai', 'agents', 'omp', 'playbook', 'workflow', 'skills'],
+        keywords: ['ai', 'agents', 'omp', 'subagents', 'workflow', 'skills'],
         omp: { extensions: ['./extensions/fadeno-steering.ts'] },
       },
       null,

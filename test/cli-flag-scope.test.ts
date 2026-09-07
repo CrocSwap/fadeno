@@ -106,7 +106,7 @@ test('a retired flag is tolerated on the commands that used to take it, and adve
   // mode a Fadeno failure stops the work, so hard-failing on a stale flag
   // turns an out-of-date skill into a stopped campaign. The catalog loader
   // already tolerates a stale `timeout_ms` key for exactly this reason.
-  for (const command of ['dispatch', 'drive', 'tool-run']) {
+  for (const command of ['dispatch']) {
     assert.deepEqual(unknownFlagsFor(command, undefined, ['timeout']), [], `${command} must tolerate --timeout`);
     assert.ok(retiredFlagFor(command, '--timeout'), `${command} must name it retired`);
   }
@@ -114,7 +114,7 @@ test('a retired flag is tolerated on the commands that used to take it, and adve
   // Tolerated is not the same as offered. `knownFlagsFor` drives --help, tab
   // completion and the did-you-mean; a retired flag in any of them advertises
   // a feature that does not exist.
-  for (const command of ['dispatch', 'drive', 'tool-run']) {
+  for (const command of ['dispatch']) {
     assert.ok(!knownFlagsFor(command, undefined)!.has('--timeout'), `${command} must not advertise --timeout`);
   }
 

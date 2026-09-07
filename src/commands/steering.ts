@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import {
   BARE_IDENTIFIER_RE,
   activeHarness,
@@ -9,13 +9,13 @@ import {
   commandRoutable,
   explainPairRoutability,
   pairRoutabilityFields,
-  eligibilityFor,
+  
   formatDialRef,
   hostCandidateOf,
-  knownArchetypes,
+  
   loadExecutorProfile,
   parseDialRef,
-  parseSnapshotDocument,
+  
   readLocalDialState,
   callerPromptDigest,
   resolveDialCascade,
@@ -37,9 +37,8 @@ import {
 } from '../lib/executors.ts';
 import { readUserDials } from '../lib/user-paths.ts';
 import { type EmitResult } from '../lib/fsutil.ts';
-import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequest, type HostDispatchRequestLookup } from '../lib/host-dispatch.ts';
 import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
-import { sha256Hex } from '../lib/artifact-manifest.ts';
+import { sha256Hex } from '../lib/fsutil.ts';
 import { codexUserAgentDir, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 import { ensureOpenCodeFadenoIgnore, ensureOmpFadenoIgnore } from '../lib/source-control.ts';
 import { OMP_PROJECT_EXTENSION_ENTRY } from '../lib/omp-steering.ts';
@@ -68,24 +67,6 @@ export class SteeringError extends Error {}
 const HOST_SURFACE_SET: ReadonlySet<string> = new Set(['worker', 'reviewer', 'judge']);
 
 export const NEUTRAL_HOST_EXECUTOR = 'current-host';
-
-/**
- * A `current-host` + `agent_type: "*"` request is already assigned to a
- * concrete host agent; the caller needs no `--host-executor` marker to prove it.
- */
-export function isReferenceFrameNeutralHostRequest(
-  request: HostDispatchRequest,
-  spec: ExecutorSpec,
-): boolean {
-  return (
-    request.executor === NEUTRAL_HOST_EXECUTOR &&
-    request.agentType === '*' &&
-    spec.adapter === 'host' &&
-    spec.agentType === '*' &&
-    spec.model === NEUTRAL_HOST_EXECUTOR
-  );
-}
-
 
 /**
  * `write_conflict` is a command slot the resolver refuses to present as
@@ -358,279 +339,6 @@ export interface SteeringResolveOptions extends CommonOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-function snapshotProfileForRequest(lookup: HostDispatchRequestLookup): SnapshotDocument {
-  const snapshots = lookup.events.filter((event) => event.type === 'profile_snapshotted');
-  if (snapshots.length !== 1) {
-    throw new SteeringError(
-      `run "${lookup.runId}" must contain exactly one profile_snapshotted event for a locked host request; ` +
-        `found ${snapshots.length}.`,
-    );
-  }
-  const snapshot = snapshots[0]!;
-  const profileRel = typeof snapshot.extra.profile === 'string' && snapshot.extra.profile.length > 0
-    ? snapshot.extra.profile
-    : 'profile.yaml';
-  const runAbsolute = resolve(lookup.runDir);
-  const profilePath = isAbsolute(profileRel) ? resolve(profileRel) : resolve(runAbsolute, profileRel);
-  const profileRelative = relative(runAbsolute, profilePath).split('\\').join('/');
-  if (
-    profileRelative === '' || profileRelative === '..' || profileRelative.startsWith('../') || isAbsolute(profileRelative)
-  ) {
-    throw new SteeringError(`run "${lookup.runId}" profile snapshot escapes the run directory: ${profileRel}`);
-  }
-  if (!existsSync(profilePath)) throw new SteeringError(`run "${lookup.runId}" profile snapshot is missing: ${profileRel}`);
-  const profileRealRelative = relative(realpathSync(runAbsolute), realpathSync(profilePath)).split('\\').join('/');
-  if (profileRealRelative === '..' || profileRealRelative.startsWith('../') || isAbsolute(profileRealRelative)) {
-    throw new SteeringError(`run "${lookup.runId}" profile snapshot escapes the run directory through a symlink: ${profileRel}`);
-  }
-  const text = readFileSync(profilePath, 'utf8');
-  const digest = snapshot.extra.sha256;
-  if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
-    throw new SteeringError(`run "${lookup.runId}" profile snapshot is missing or has an invalid sha256 digest.`);
-  }
-  if (digest !== sha256Hex(text)) {
-    throw new SteeringError(`run "${lookup.runId}" profile snapshot digest does not match its recorded sha256.`);
-  }
-  try {
-    return parseSnapshotDocument(text, `${profileRel} (run snapshot)`);
-  } catch (err) {
-    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
-    throw err;
-  }
-}
-
-// Shadow pairing is deliberately not applied here: a locked engine request is
-// an immutable dispatch with its own receipts contract, and changing its
-// delivery mode out from under that contract is out of scope for phase 5.
-function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: string, role: string | null, hostExecutor: string | null): SteeringResolution {
-  const repoRoot = rootOf(opts);
-  const run = opts.run?.trim() ?? '';
-  const dispatchId = opts.dispatchId?.trim() ?? '';
-  if (run === '' || dispatchId === '') {
-    throw new SteeringError('locked steering resolution requires both --run and --dispatch-id.');
-  }
-  let lookup: HostDispatchRequestLookup;
-  try {
-    lookup = readHostDispatchRequest({ repoRoot, cwd: opts.cwd, run, dispatchId });
-  } catch (err) {
-    if (err instanceof HostDispatchError) throw new SteeringError(err.message);
-    throw err;
-  }
-  const request = lookup.request;
-  if (lookup.terminal != null) {
-    throw new SteeringError(`host dispatch "${dispatchId}" already has a terminal receipt; it cannot be delivered as a live request.`);
-  }
-  const requestedIdentity = lookup.event.extra.requested_identity;
-  if (
-    !Array.isArray(requestedIdentity) ||
-    !['model', 'reasoning_effort', 'agent_type'].every((field) => requestedIdentity.includes(field))
-  ) {
-    throw new SteeringError(
-      `host dispatch "${dispatchId}" does not declare the requested model, effort, and agent type.`,
-    );
-  }
-  if (request.actor == null) {
-    throw new SteeringError(`host dispatch "${dispatchId}" has no actor identity for locked steering.`);
-  }
-  // `*` is an immutable wildcard, not the literal name of an agent surface.
-  // Archetyped roles are concretized when drive mints the request; an
-  // archetype-free role (notably the starter coordinator) intentionally keeps
-  // `*` so any concrete host surface may claim it. The run snapshot still
-  // locks model, effort, executor, and the fact that the type was wildcard.
-  if (request.agentType !== '*' && request.agentType !== archetype) {
-    throw new SteeringError(
-      `host dispatch "${dispatchId}" requests agent_type "${request.agentType}", not archetype "${archetype}".`,
-    );
-  }
-  if (role != null && role !== request.actor) {
-    throw new SteeringError(
-      `host dispatch "${dispatchId}" requests actor "${request.actor}", not role "${role}".`,
-    );
-  }
-  const profile = snapshotProfileForRequest(lookup);
-  // Specialization is a WILDCARD-only concern, and it asks whether the claimed
-  // name is an archetype this profile knows — never whether the policy overlay
-  // happens to carry an entry for it. Both halves of that were wrong here:
-  //
-  // The check ran on every request, so a CONCRETE `agent_type` was re-validated
-  // after the equality check above had already settled it, against a map that
-  // cannot answer the question. And `profile.archetypes` lists only archetypes
-  // with non-default posture, so `reviewer` and `judge` — silent in the builtin
-  // catalog precisely because they need nothing said — were refused as
-  // "undeclared". A managed Codex reviewer agent that correctly consulted
-  // steering was thrown to the command lane with `host_attested: false`
-  // (2026-08-21, polymarket-quoter, hd-ac-review-g1-*-a1).
-  //
-  // Every fixture in the suite writes `archetypes: { worker: {}, reviewer: {},
-  // judge: {} }` — enumerating the roster the way a test author would rather
-  // than the way the catalog does — so the bug was unreachable from the tests.
-  if (request.agentType === '*' && !knownArchetypes(profile.archetypes).has(archetype)) {
-    throw new SteeringError(
-      `host dispatch "${dispatchId}" cannot specialize wildcard identity to unknown archetype "${archetype}".`,
-    );
-  }
-  // The archetype this locked request is being specialized TO, so a
-  // policy-chosen variant's snapshot entry is the one checked.
-  const executor = snapshotExecutor(profile, request.executor, archetype);
-  if (executor == null || executor.adapter !== 'host') {
-    throw new SteeringError(
-      `host dispatch "${dispatchId}" requests executor "${request.executor}", which is not a host executor in the run profile snapshot.`,
-    );
-  }
-  if (
-    request.model !== executor.model ||
-    request.reasoningEffort !== executor.reasoningEffort ||
-    (executor.agentType !== '*' && request.agentType !== executor.agentType)
-  ) {
-    throw new SteeringError(
-      `host dispatch "${dispatchId}" request identity does not match executor "${request.executor}" in the run profile snapshot.`,
-    );
-  }
-  if (eligibilityFor(executor, archetype) === 'forbidden') {
-    throw new SteeringError(
-      `host dispatch "${dispatchId}" cannot specialize to archetype "${archetype}": executor "${request.executor}" declares it eligibility: forbidden.`,
-    );
-  }
-  const matchesHost = hostExecutor === request.executor;
-  const hasFallback = executor.fallbackCommand != null;
-  const neutral = isReferenceFrameNeutralHostRequest(request, executor);
-  // Advisory, and only for a caller that could not prove a host identity of
-  // its own. `hostExecutor == null` is what distinguishes an unidentified
-  // caller from a materialized agent that asked and did not match.
-  //
-  // Gated on `hasFallback`, i.e. only where the resolution is `mode: command`.
-  // A spawn would also help when there is NO fallback — that resolution is
-  // `restart_required`, whose advice ("start a matching session") is needless
-  // if the caller can just spawn one — but `cli.ts` exits 2 on that mode, so a
-  // shell-driven coordinator would abort while being told to proceed. Advice
-  // that contradicts the process's own exit status is worse than none. Making
-  // it useful there means changing the mode vocabulary, which frozen brokers
-  // (they STOP on `restart_required`) do not permit today.
-  //
-  // Never for the reference-frame-neutral sentinel: `current-host` is not a
-  // model id, and `renderCodexHostAgent` writes no identity lines at all for
-  // such a slot. Such a request is deliverable by whatever session is running
-  // and needs no model-specific spawn to begin with.
-  //
-  // The agent named here must be one whose FILE already carries the locked
-  // model and effort, because on Codex the file is what runs (see
-  // `findSpawnableCodexAgent`). A managed agent for this role and executor
-  // whose file says something else is named as stale in `detail` instead.
-  //
-  // The file's baked host executor is matched for a separate reason — it
-  // controls what the agent's developer instructions pass back to this
-  // resolver. A command broker passes none, and a role agent cut for a
-  // different executor passes the wrong one; either would repeat this same
-  // delegate advice instead of executing the assignment.
-  //
-  // The mode is deliberately NOT changed to `host` here. A command broker also
-  // passes no `--host-executor` (`renderCodexCommandBroker`), is frozen on
-  // disk, and STOPS on `mode: host` — so an unidentified caller must keep
-  // seeing the mode it sees today, and the new capability rides on the
-  // payload. Only a caller that can spawn acts on `delegate_to`.
-  let delegateTo: SteeringResolution['delegate_to'];
-  /** The role+executor agent that exists but cannot deliver: named, never offered. */
-  let staleAgent: { path: string; identity: string } | null = null;
-  if (
-    !matchesHost && !neutral && hasFallback && hostExecutor == null
-    && executor.adapter === 'host' && request.model !== NEUTRAL_HOST_EXECUTOR
-  ) {
-    const candidates = effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions);
-    const target = findSpawnableCodexAgent(candidates, archetype, request.executor, {
-      model: request.model,
-      reasoningEffort: request.reasoningEffort,
-    });
-    if (target != null) {
-      delegateTo = {
-        archetype: target.state.name ?? target.archetype,
-        model: request.model,
-        reasoning_effort: request.reasoningEffort,
-        executor: request.executor,
-        agent_file: target.path,
-        scope: target.scope,
-      };
-    } else {
-      // The same search without the identity clause: a managed agent for this
-      // role and executor that a caller can SEE on disk and would otherwise
-      // reach for. The advisory has to explain why it is not being offered.
-      const installed = findSpawnableCodexAgent(candidates, archetype, request.executor);
-      if (installed != null) {
-        staleAgent = { path: installed.path, identity: describeCodexAgentFileIdentity(installed.state) };
-      }
-    }
-  }
-  const detail = matchesHost
-    ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute in-host`
-    : neutral
-      ? `host request ${dispatchId} is locked to the reference-frame-neutral executor current-host; execute in-host`
-      : hasFallback
-        ? delegateTo != null
-          ? `host request ${dispatchId} is locked to ${request.executor}; spawn the ${delegateTo.archetype} Codex agent (${delegateTo.agent_file}) and hand it this engine assignment envelope — its file carries exactly this identity, ${delegateTo.model} at effort ${delegateTo.reasoning_effort}, so it delivers the locked identity in-host rather than through the executor's command fallback`
-          : staleAgent != null
-            ? `host request ${dispatchId} is locked to ${request.executor}; the managed ${archetype} Codex agent (${staleAgent.path}) is stale: its file carries ${staleAgent.identity}, while this request is locked to ${request.model} at effort ${request.reasoningEffort}, and on Codex the file wins over any spawn value — run \`fadeno steering apply --codex\` and start a fresh Codex session to re-cut it, or deliver it now through that executor's declared command fallback`
-            : `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback`
-        : `host request ${dispatchId} requires host executor ${request.executor}; this session is materialized for ${hostExecutor ?? 'no host executor'}, so start a matching Codex session`;
-  // For locked, dial is the executor ref itself
-  let dial: DialRef;
-  try { dial = parseDialRef(request.executor, 'locked'); } catch { dial = { model: request.executor }; }
-  const compiled = (() => { try { return resolveDelivery(dial, profile as unknown as ExecutorProfile); } catch { return null; } })();
-  // Structured wildcard specialization: report both the immutable requested "*" and the concrete delivered archetype
-  // without upgrading identity_evidence. This is advisory routing, not a new attestation.
-  const requestedAgentType = request.agentType;
-  const deliveredArchetype = requestedAgentType === '*' ? archetype : undefined;
-  // The lane predicate deliberately does NOT run here. A locked engine
-  // request is an immutable dispatch with its own receipts contract, and its
-  // delivery was decided when the run snapshot was taken — re-deciding it
-  // against whatever effort *this* session happens to be running at would
-  // change an identity the snapshot already froze. Same reasoning as shadow
-  // pairing above. The lane fields still report faithfully: they mirror the
-  // locked mode, and `effort_pinned` reads the snapshotted executor ref.
-  const lockedLane: DeliveryLane =
-    matchesHost || neutral ? 'host' : hasFallback ? 'command' : 'restart_required';
-  const base: SteeringResolution = {
-    mode: matchesHost || neutral ? 'host' : hasFallback ? 'command' : 'restart_required',
-    effort_pinned: dial.effort != null,
-    effective_effort: request.reasoningEffort,
-    session_effort: readSessionEffort(opts.env ?? process.env),
-    lane: lockedLane,
-    lane_reason: 'locked to the run snapshot',
-    // Reported here too, so the field is on every resolution and a reader
-    // never has to branch on the path to know whether it may trust `lane` as a
-    // property of the dial. `in_agent_*` is null on purpose: the lane above
-    // came from the snapshot, not from the predicate, so there is no
-    // counterfactual to run and a fabricated one would be the third answer
-    // this whole change exists to remove. `detail` and `delegate_to` already
-    // carry the "a native agent could deliver this" story on this path.
-    host_frame: {
-      identity: hostFrameOf({ hostExecutor, executor: request.executor, neutralIdentity: neutral }),
-      in_agent_lane: null,
-      in_agent_lane_reason: null,
-    },
-    archetype,
-    role,
-    executor: request.executor,
-    adapter: 'host',
-    model: request.model,
-    effort: request.reasoningEffort,
-    harness: (executor as { harness?: string }).harness ?? compiled?.harness ?? null,
-    variant: (executor as { variant?: string }).variant ?? compiled?.variant ?? null,
-    source: 'host-request',
-    dial,
-    hostExecutor,
-    detail,
-    resolved_via: null,
-    requested_agent_type: requestedAgentType,
-    identity_evidence: 'requested_only',
-    ...(deliveredArchetype != null ? { delivered_archetype: deliveredArchetype } : {}),
-    ...(delegateTo != null ? { delegate_to: delegateTo } : {}),
-  };
-  // A wildcard request is already assigned to a concrete host agent. That
-  // agent may claim the locked request as `director` (or another declared,
-  // compatible archetype) without a separately materialized subagent surface.
-  // Concrete requests still require the ordinary host-surface contract.
-  return decorateSteering(base, profile, null, requestedAgentType === '*');
-}
-
 /**
  * The digest the shadow roll is keyed on — the CALLER's, always. `promptSha256`
  * wins if given; otherwise a `promptFile` is read and hashed here, over the
@@ -712,12 +420,6 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   const archetype = validateArchetype(opts.archetype);
   const role = opts.role?.trim() ? opts.role.trim() : null;
   const hostExecutor = opts.hostExecutor?.trim() ? opts.hostExecutor.trim() : null;
-  const hasRun = opts.run != null;
-  const hasDispatchId = opts.dispatchId != null;
-  if (hasRun !== hasDispatchId || (hasRun && (opts.run!.trim() === '' || opts.dispatchId!.trim() === ''))) {
-    throw new SteeringError('locked steering resolution requires both --run and --dispatch-id.');
-  }
-  if (hasRun && hasDispatchId) return runLockedSteeringResolve(opts, archetype, role, hostExecutor);
 
   const { profile } = profileOf(repoRoot, opts.userPathOptions);
   let hostSpec: ExecutorSpec | null = null;

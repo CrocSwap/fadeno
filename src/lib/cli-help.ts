@@ -67,12 +67,7 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     '--windows deletes nothing: it compacts .fadeno/local/dispatch-windows.jsonl, dropping torn rows and closed windows that can no longer overlap anything, and keeping every open one. Use it when doctor reports the write-window log degraded — `--force` would delete that log along with the open windows of deliveries writing right now.',
   ]),
   unvendor: page('Remove lock-owned vendored files.', 'fadeno unvendor [--force]'),
-  evidence: page('Promote a verified run receipt.', 'fadeno evidence promote <run>'),
   init: page('Scaffold project-owned Fadeno capability.', 'fadeno init --codex|--claude|--grok|--opencode|--omp [options]'),
-  validate: page('Validate playbooks and run documents.', 'fadeno validate [file] [--schema <kind>]'),
-  playbooks: page('Browse effective bundled and project workflows.', ['fadeno playbooks', 'fadeno playbooks <name> [--json]']),
-  diagram: page('Render a playbook workflow as ASCII or Mermaid.', 'fadeno diagram <playbook> [--format ascii|mermaid]'),
-  'new-run': page('Create a run ledger from a playbook.', 'fadeno new-run <playbook> <task> [--input Name=path]...'),
   models: MODELS_PAGE,
   model: aliasPage(MODELS_PAGE, [
     'fadeno model [<name>]',
@@ -99,7 +94,6 @@ const TOP_LEVEL: Record<string, PageSeed> = {
   shadow: aliasPage(SHADOW_PAGE, ['fadeno shadow', 'fadeno shadow <archetype> <model>[@effort] [options]', 'fadeno shadow clear [<archetype>]'], '`fadeno shadow` is an alias for `fadeno dial shadow`, and `fadeno shadow clear` for `fadeno dial clear-shadow`.'),
   steering: page('Resolve dials or materialize harness steering.', ['fadeno steering resolve --archetype <name> [options]', 'fadeno steering apply --codex|--claude|--opencode|--omp [options]']),
   dispatch: page('Resolve an archetype and invoke it once.', ['fadeno dispatch --archetype <name> [options]', 'fadeno dispatch --model <ref> [options]'], ['Read prompt text from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted.', 'Dispatches isolate by default and merge a successful primary diff back. `--isolate` withholds merge-back; `--shadow <ref>` adds a one-shot challenger.', 'A failed relay-fidelity check refuses the dispatch before the executor spawns; `--allow-relay-mismatch` proceeds and records `relay_mismatch_allowed: true`.', 'Recover output with `fadeno dispatches --output tag:<tag> --wait 120`.']),
-  'dispatch-prepare': page('Prepare an isolated workspace for a pending host dispatch.', 'fadeno dispatch-prepare <run> <dispatch-id> --isolate'),
   'dispatch-open': page(
     'Open a runless host dispatch: an isolated worktree, an id, and a receipt to come.',
     'fadeno dispatch-open [--archetype <name>] [--tag <handle>] [--note <text>]',
@@ -118,45 +112,13 @@ const TOP_LEVEL: Record<string, PageSeed> = {
       'The worktree is removed on exactly one condition: the work landed in this tree. Every other ending retains it and the command says where it is.',
     ],
   ),
-  'dispatch-prompt': page('Emit the canonical host-dispatch envelope.', 'fadeno dispatch-prompt <run> <dispatch-id>'),
-  'dispatch-fallback': page('Deliver a locked host request through its declared fallback.', 'fadeno dispatch-fallback <run> <dispatch-id>'),
-  'dispatch-start': page('Record a host dispatch start.', 'fadeno dispatch-start <run> <dispatch-id> --agent-id <host-agent-id> [options]'),
-  'dispatch-progress': page('Record an attested host progress observation.', 'fadeno dispatch-progress <run> <dispatch-id> --file <status.json> [options]'),
-  'dispatch-complete': page('Submit a host dispatch result.', 'fadeno dispatch-complete <run> <dispatch-id> --output <path|-> [options]'),
-  'dispatch-fail': page('Submit a host dispatch failure.', 'fadeno dispatch-fail <run> <dispatch-id> --reason <text>'),
-  'dispatch-withdraw': page(
-    'Retire a host request that was minted and never started.',
-    'fadeno dispatch-withdraw <run> <dispatch-id> --reason <text>',
-    [
-      'Records a terminal receipt with no start; the next `fadeno drive` mints the next attempt under the current cascade or binding.',
-      'Refuses after `dispatch-start` (use `dispatch-fail`). Repeating the same `--reason` is idempotent.',
-    ],
-  ),
-  run: page('Append attested updates to a run ledger.', 'fadeno run <run> [options]'),
-  'tool-run': page('Execute a registered ready tool step.', 'fadeno tool-run <run> [--tool <name>]', ['The registered tool determines its output artifact; there is no `--output` override. Tools run without a deadline; end one with `fadeno cancel`.']),
-  'tool-complete': page('Record a manually produced tool result.', 'fadeno tool-complete <run> --output <artifact-path>'),
-  gate: page('Evaluate a deterministic gate from an artifact.', 'fadeno gate <run> <condition> [--artifact <path>]'),
-  prompt: page('Assemble and optionally record an actor prompt.', 'fadeno prompt <run> <step> [options]'),
-  next: page('Emit the next actionable run step.', 'fadeno next <run> [--legacy]'),
-  drive: page('Advance a run until it is terminal or paused.', 'fadeno drive <run> [options]', [
-    'Release a role bound by an earlier `--bind` of this run with `--unbind <role>`. Without it, an invocation that would start new work for a bound role on a different executor is refused.',
-  ]),
-  cancel: page('Cancel a live engine attempt.', 'fadeno cancel <run> [--actor-call <id>]', ['Sends SIGTERM to the single live engine command claim; the engine records the terminal receipt.']),
-  decide: page('Resolve a pending named human decision.', 'fadeno decide <run> <option> [options]'),
-  'attempt-accept': page('Accept a hand-resolved isolated attempt.', 'fadeno attempt-accept <run> <actor-call>'),
-  runs: page('List run ledgers under `.fadeno/runs`.', 'fadeno runs'),
   attest: page('Record this subagent delivery as evidence.', 'fadeno attest --archetype <name>'),
   dispatches: page('Inspect or recover command dispatches.', ['fadeno dispatches [--tail <count>] [--stops] [--json] [--bakeoffs]', 'fadeno dispatches --output <id|last|tag:<tag>> [--wait <seconds>]', 'fadeno dispatches --cancel <id|tag:<tag>> | --merge <id|tag:<tag>>', 'fadeno dispatches --withdraw <id|tag:<tag>> --reason <text> [--work-left <path>]'], ['`--output` writes the saved snapshot bytes verbatim to stdout; use `--wait` only for a completion row.', '`--cancel` signals a live executor. `--withdraw` is the second move for one nothing can signal: it records the terminal receipt, signals nothing, and removes no workspace. It is refused while any process behind the claim is alive.', 'A `relay_attested: false` dispatch is quarantined: `--output` prefixes the bytes with the failure, and `--merge` refuses without `--allow-relay-mismatch`.', 'The listing ranks agent-stop rows by what each one says is at risk, and collapses to a counted summary the ones that left nothing unaccounted for — a settled dispatch, a final message from the agent, or a tree git found clean. Collapsed is not a verdict on the work: `--stops` lists every stop row with the reading that collapsed it.']),
-  'shadow-apply': page('Apply a selected shadow arm diff.', 'fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]'),
-  bakeoff: page('Measure or adjudicate a shadow pair.', ['fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--harness <id>] [--evidence inlined|explored]', 'fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]', 'fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file> [--evidence inlined|explored]'], ['`--measure-only` records no adjudication; `--prepare` writes blinded prompts; `--record` requires both host-delivered judgment files.']),
-  show: page('Show a run step projection and artifacts.', 'fadeno show <run> [--events] [--legacy]'),
-  verify: page('Re-audit a run’s deterministic claims.', ['fadeno verify <run> [options]', 'fadeno verify --latest [options]']),
   plugin: page('Generate a harness plugin from this checkout.', 'fadeno plugin [dir] [--codex|--omp] [--force]', ['Claude Code is the default plugin; `--codex` and `--omp` select their generators. OpenCode and Grok use `fadeno init` instead.']),
   completion: page('Emit sourceable Bash completion.', 'fadeno completion bash'),
 };
 
 const NESTED: Record<string, PageSeed> = {
-  'evidence promote': page('Promote a verified run receipt.', 'fadeno evidence promote <run>'),
   'models add': MODEL_ADD_PAGE,
   'model add': aliasPage(MODEL_ADD_PAGE, 'fadeno model add <alias> <provider/id>', '`fadeno model add` is an alias for `fadeno models add`.'),
   'models remove': MODEL_REMOVE_PAGE,
@@ -251,48 +213,19 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   uninstall: withGlobals('--codex', '--claude', '--all', '--purge-user-data', '--force'),
   clean: withGlobals('--force', '--windows'),
   unvendor: withGlobals('--force'),
-  evidence: withGlobals(),
   init: withGlobals('--codex', '--claude', '--grok', '--opencode', '--omp', '--with-hooks', '--with-steering', '--no-steering', '--data-only', '--force'),
-  validate: withGlobals('--schema'),
-  playbooks: withGlobals('--json'),
-  diagram: withGlobals('--format'),
-  'new-run': withGlobals('--input'),
   models: withGlobals('--harness', '--json'),
   model: withGlobals('--harness', '--json'),
   dial: withGlobals('--harness', '--session', '--user', '--repo', '--json'),
   shadow: withGlobals('--harness', '--rate', '--n', '--json'),
   steering: withGlobals(),
   dispatch: withGlobals('--archetype', '--model', '--role', '--harness', '--prompt-file', '--tag', '--shadow', '--isolate', '--shared', '--ignored-output', '--diagnostics', '--no-brief', '--allow-relay-mismatch'),
-  'dispatch-prepare': withGlobals('--isolate'),
   'dispatch-open': withGlobals('--archetype', '--tag', '--note'),
   'dispatch-close': withGlobals('--reason', '--no-merge', '--tag', '--agent-id'),
-  'dispatch-prompt': withGlobals(),
-  'dispatch-fallback': withGlobals(),
-  'dispatch-start': withGlobals('--agent-id', '--workspace', '--branch'),
-  'dispatch-progress': withGlobals('--file', '--source'),
-  'dispatch-complete': withGlobals('--output', '--commit'),
-  'dispatch-fail': withGlobals('--reason'),
-  'dispatch-withdraw': withGlobals('--reason'),
-  run: withGlobals('--step', '--status', '--event', '--artifact', '--member', '--field'),
-  'tool-run': withGlobals('--tool'),
-  'tool-complete': withGlobals('--output'),
-  gate: withGlobals('--artifact'),
-  prompt: withGlobals('--actor', '--iteration', '--inline', '--no-record', '--format'),
-  next: withGlobals('--legacy'),
-  drive: withGlobals('--bind', '--unbind', '--max-transitions', '--parallel', '--diagnostics'),
-  cancel: withGlobals('--actor-call'),
-  decide: withGlobals('--decision', '--feedback'),
-  'attempt-accept': withGlobals(),
-  runs: withGlobals(),
   attest: withGlobals('--archetype'),
   dispatches: withGlobals('--tail', '--stops', '--json', '--bakeoffs', '--output', '--wait', '--tag', '--cancel', '--withdraw', '--work-left', '--reason', '--merge', '--allow-relay-mismatch'),
-  'shadow-apply': withGlobals('--arm', '--check'),
-  bakeoff: withGlobals('--measure-only', '--evidence', '--prepare', '--record', '--comparison', '--adversarial', '--json', '--judge', '--harness'),
-  show: withGlobals('--events', '--legacy'),
-  verify: withGlobals('--latest', '--allow-failed', '--legacy'),
   plugin: withGlobals('--codex', '--omp', '--force'),
   completion: withGlobals(),
-  'evidence promote': withGlobals(),
   'models add': withGlobals('--json'),
   'model add': withGlobals('--json'),
   'models remove': withGlobals('--force', '--json'),
@@ -343,10 +276,7 @@ const PATH_OPTION_FORMS: Record<string, Record<string, string>> = {
     '--work-left': '--work-left <path>',
     '--merge': '--merge <id|tag:<tag>>',
   },
-  'dispatch-complete': { '--output': '--output <path|->' },
   dispatch: { '--ignored-output': '--ignored-output <kept|discardable>' },
-  'dispatch-progress': { '--source': '--source <agent|harness|director>' },
-  prompt: { '--actor': '--actor <role>', '--format': '--format <text|json>' },
 };
 
 export const HELP_PATHS: readonly string[] = Object.freeze([...Object.keys(TOP_LEVEL), ...Object.keys(NESTED)].sort());
@@ -401,25 +331,16 @@ export function renderGlobalHelp(): string {
 Usage: fadeno <command> [options]
 
 Get started
-  init        Scaffold project capability
-  playbooks   Browse workflows
-  new-run     Create a run
-  drive       Advance a run
-
-Workflows and evidence
-  validate, diagram, prompt, gate, run, tool-run, tool-complete, next,
-  cancel, decide, attempt-accept, show, verify, runs, evidence, attest
+  setup       Link the CLI and install host integration
+  status      Effective routing and runtime state
+  dial        Show, set and resolve archetype bindings
 
 Models and delivery
-  dial, shadow, models (model), steering, dispatch, dispatches, shadow-apply, bakeoff
-
-Host dispatch protocol
-  dispatch-prepare, dispatch-prompt, dispatch-start, dispatch-progress,
-  dispatch-complete, dispatch-fail, dispatch-withdraw, dispatch-fallback
-  dispatch-open, dispatch-close  (runless: no playbook run required)
+  dial, shadow, models (model), steering, dispatch, dispatches, attest
+  dispatch-open, dispatch-close  (runless host lane)
 
 Setup and maintenance
-  setup, status, vendor, unvendor, clean, uninstall, plugin, completion
+  setup, status, init, vendor, unvendor, clean, uninstall, plugin, completion
 
 Global options
   -h, --help       Show this page or focused command help

@@ -7,7 +7,7 @@ import { runCodexPlugin } from '../src/commands/plugin.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const REPO = join(import.meta.dirname, '..');
-const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-host', 'fadeno-setup', 'fadeno-bakeoff'] as const;
+const SKILLS = ['fadeno-host', 'fadeno-setup'] as const;
 
 // Same escape hatch as test/plugin.test.ts: `FADENO_SKIP_DRIFT=1` skips only the
 // committed-vs-fresh comparison so a work-in-progress template edit doesn't block
@@ -69,15 +69,8 @@ test('codex plugin: skills are the shared bodies + in-plugin invocation policy',
     assert.notEqual(statSync(launcher).mode & 0o111, 0, `${skill} CLI launcher must be executable`);
   }
 
-  // Policy correctness: runner fires implicitly; builder/driver are explicit-only.
-  assert.match(read(outDir, 'skills/fadeno-runner/agents/openai.yaml'), /allow_implicit_invocation:\s*true/);
-  assert.match(read(outDir, 'skills/fadeno-builder/agents/openai.yaml'), /allow_implicit_invocation:\s*false/);
-  assert.match(read(outDir, 'skills/fadeno-driver/agents/openai.yaml'), /allow_implicit_invocation:\s*false/);
+  // Policy correctness: host mode is explicit-only.
   assert.match(read(outDir, 'skills/fadeno-host/agents/openai.yaml'), /allow_implicit_invocation:\s*false/);
-
-  // References carry over; the driver reference exists.
-  assert.ok(exists(outDir, 'skills/fadeno-runner/references/runtime.md'));
-  assert.ok(exists(outDir, 'skills/fadeno-driver/references/README.md'));
 });
 
 test('codex plugin: carries setup, host-mode hooks, bundled CLI, and built-in definitions', (t) => {
@@ -138,7 +131,7 @@ test('codex plugin: carries setup, host-mode hooks, bundled CLI, and built-in de
   assert.ok(guard.includes(`const HOOK_VERSION = '${guardVersion}';`));
   assert.ok(!guard.includes("HOOK_VERSION = 'dev'"));
   assert.ok(exists(outDir, 'bin/fadeno'), 'codex plugin must bundle a binary');
-  assert.ok(exists(outDir, 'bin/templates/common/fadeno/playbooks/code-change-review.yaml'));
+  assert.ok(exists(outDir, 'bin/templates/common/fadeno/executors.yaml'));
   const binary = join(outDir, 'bin', 'fadeno');
   assert.notEqual(statSync(binary).mode & 0o111, 0, 'generated Codex plugin CLI must be executable');
   const expectedVersion = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;

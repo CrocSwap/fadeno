@@ -13,7 +13,7 @@ import {
   truncateTranscript,
   TRANSCRIPT_MAX_BYTES,
 } from '../src/lib/diagnostics.ts';
-import { sha256Hex } from '../src/lib/artifact-manifest.ts';
+import { sha256Hex } from '../src/lib/fsutil.ts';
 import { tempRepo } from './helpers.ts';
 
 /**

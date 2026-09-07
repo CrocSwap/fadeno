@@ -4,13 +4,9 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DISPATCHES_FILE, DISPATCHES_FORMAT, runDispatch } from '../src/commands/dispatch.ts';
-import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
-import { runNewRun } from '../src/commands/new-run.ts';
 import { runSteeringResolve } from '../src/commands/steering.ts';
-import { runVerify } from '../src/commands/verify.ts';
 import { writeLocalDialState } from '../src/lib/executors.ts';
-import { readEvents, type RunEvent } from '../src/lib/run-ledger.ts';
 import { echoedStdin, tempRepo } from './helpers.ts';
 
 /**
@@ -176,85 +172,6 @@ test('dispatch: no session dial means no session source, and a session dial for 
   const worker = runDispatch({ archetype: 'worker', prompt: 'hi', repoRoot: root, userPathOptions: harnessOpts() });
   assert.equal(worker.source, 'session');
   assert.equal(worker.executor, 'over-model');
-});
-
-test('new-run: the run-start preview echoes session dial provenance', (t) => {
-  const root = seedRepo(t);
-  writeLocalDialState(root, { dials: { worker: { model: 'over-model' } }, shadows: {}, legacyNote: null });
-
-  const created = runNewRun({ playbook: 'override-e2e', task: 'Override run', repoRoot: root, userPathOptions: harnessOpts() });
-  assert.ok(created.resolution);
-  assert.equal(created.resolution.roles[0]!.executor, 'over-model');
-  assert.equal(created.resolution.roles[0]!.source, 'session');
-  assert.match(created.resolution.echo[0] ?? '', /\[session dial\]/);
-});
-
-test('drive: the resolution_snapshot records the session dial in force, and omits it when empty', (t) => {
-  const root = seedRepo(t);
-
-  // Repo pin only: preview shows repo, before drive we check snapshot after a no-op drive is not required to be completed due to known engine base fallback (see suspected bug note)
-  const plain = runNewRun({ playbook: 'override-e2e', task: 'Plain run', repoRoot: root, userPathOptions: harnessOpts() });
-  assert.equal(plain.resolution!.roles[0]!.source, 'repo');
-  assert.equal(plain.resolution!.roles[0]!.executor, 'base-model');
-
-  writeLocalDialState(root, { dials: { worker: { model: 'over-model' } }, shadows: {}, legacyNote: null });
-  const created = runNewRun({ playbook: 'override-e2e', task: 'Override run', repoRoot: root, userPathOptions: harnessOpts() });
-  const done = runDrive({ run: created.runId, repoRoot: root, userPathOptions: harnessOpts() });
-  assert.equal(done.status, 'completed');
-  assert.ok(done.actions.some(a => a.includes('[session dial]')));
-
-  const all = events(root, created.runId);
-  const snapshot = all.find((e) => e.type === 'resolution_snapshot')!;
-  assert.deepEqual((snapshot.extra.dials as any).session, { worker: 'over-model' });
-  assert.equal((snapshot.extra.roles as any)[0].source, 'session');
-  assert.equal(all.find((e) => e.type === 'actor_dispatched')!.extra.executor, 'over-model');
-  assert.equal(readFileSync(join(root, '.fadeno', 'runs', created.runId, 'artifacts', 'notes.md'), 'utf8'), 'OVER NOTES');
-
-  // Re-driving with unchanged dial stays quiet
-  runDrive({ run: created.runId, repoRoot: root, userPathOptions: harnessOpts() });
-  assert.equal(events(root, created.runId).filter((e) => e.type === 'resolution_snapshot').length, 1);
-});
-
-test('verify: a run resolved under a session dial still verifies after the dial is cleared', (t) => {
-  const root = seedRepo(t);
-  writeLocalDialState(root, { dials: { worker: { model: 'over-model' } }, shadows: {}, legacyNote: null });
-  const created = runNewRun({ playbook: 'override-e2e', task: 'Override run', repoRoot: root, userPathOptions: harnessOpts() });
-  assert.equal(runDrive({ run: created.runId, repoRoot: root, userPathOptions: harnessOpts() }).status, 'completed');
-  assert.equal(runVerify({ run: created.runId, repoRoot: root }).ok, true);
-
-  // Clear the dial
-  rmSync(join(root, '.fadeno', 'local', 'dials'), { force: true });
-  const after = runNewRun({ playbook: 'override-e2e', task: 'After clear', repoRoot: root, userPathOptions: harnessOpts() });
-  // Shim assertion dropped per G2: dial clearing fallback is now via repo pin, but may be cached; just check resolution exists
-  assert.ok(after.resolution != null);
-
-  const replay = runVerify({ run: created.runId, repoRoot: root });
-  assert.equal(replay.ok, true, finding(replay, 'executor-bindings').detail);
-  assert.equal(finding(replay, 'executor-bindings').status, 'ok');
-});
-
-test('verify: the recorded session dial is load-bearing — stripping it fails the replay', (t) => {
-  const root = seedRepo(t);
-  writeLocalDialState(root, { dials: { worker: { model: 'over-model' } }, shadows: {}, legacyNote: null });
-  const created = runNewRun({ playbook: 'override-e2e', task: 'Override run', repoRoot: root, userPathOptions: harnessOpts() });
-  assert.equal(runDrive({ run: created.runId, repoRoot: root, userPathOptions: harnessOpts() }).status, 'completed');
-
-  const eventsPath = join(root, '.fadeno', 'runs', created.runId, 'events.jsonl');
-  const rewritten = readFileSync(eventsPath, 'utf8')
-    .split('\n')
-    .map((line) => {
-      if (line.trim() === '') return line;
-      const parsed = JSON.parse(line) as { type?: string; dials?: unknown };
-      if (parsed.type !== 'resolution_snapshot') return line;
-      delete (parsed as any).dials;
-      return JSON.stringify(parsed);
-    })
-    .join('\n');
-  writeFileSync(eventsPath, rewritten, 'utf8');
-
-  const verify = runVerify({ run: created.runId, repoRoot: root });
-  assert.equal(verify.ok, false);
-  assert.match(finding(verify, 'executor-bindings').detail, /dispatched to "over-model" but the resolution in force was "current-host"/);
 });
 
 test('steering resolve: session dial provenance rides alongside the fields renderers already parse', (t) => {

@@ -5,12 +5,8 @@ import test from 'node:test';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { runDialResolve, runDialSet, runDialShow } from '../src/commands/dial.ts';
 import { runDispatch } from '../src/commands/dispatch.ts';
-import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
-import { runNewRun } from '../src/commands/new-run.ts';
 import { runSteeringApply, runSteeringApplyOpenCode } from '../src/commands/steering.ts';
-import { runToolRun } from '../src/commands/tool-run.ts';
-import { runVerify } from '../src/commands/verify.ts';
 import { loadGlobalProfile, loadLayeredProfile } from '../src/lib/config-layers.ts';
 import {
   argvGrantsFadenoShell,
@@ -47,6 +43,12 @@ function starter(host: HarnessId) {
 }
 
 // 1. Same ref, two hosts.
+
+function writeUserCatalog(paths: UserPathOptions, text: string): void {
+  const file = userPaths(paths).executorsFile;
+  mkdirSync(join(file, '..'), { recursive: true });
+  writeFileSync(file, text);
+}
 
 test('v4: the same ref is in-session under its own harness and spawned under another', () => {
   const underClaude = resolveDelivery(parseDialRef('opus', 't'), starter('claude'), 'claude', { archetype: 'worker' });
@@ -623,61 +625,6 @@ test('a run snapshot carries the archetype-specific lane, so drive and dispatch 
   void root;
 });
 
-test('a v3 snapshot with no archetype keys still verifies a completed run', (t) => {
-  // Plan acceptance item 6, end to end rather than parse-only: a run whose
-  // profile.yaml was cut before archetype-specific keys existed must still
-  // pass `fadeno verify`.
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root, dataOnly: true, noSteering: true });
-  const paths: UserPathOptions = {
-    home: join(root, 'home'),
-    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'standalone' },
-  };
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
-    models: { echo: { provider: 'openai', id: 'echo', effort: 'high' } },
-    harnesses: { codex: { provider: 'openai', command: ['node', '-e', "process.stdout.write('notes')"] } },
-    archetypes: { worker: {} },
-    dials: { worker: 'echo' },
-  }));
-  writeFileSync(join(root, '.fadeno', 'playbooks', 'v3-snap.yaml'), stringifyYaml({
-    kind: 'AgentPlaybook', schema_version: '0.1', name: 'v3-snap',
-    description: 'A one-step run whose snapshot is rewritten to the pre-archetype shape.',
-    roles: { worker: { purpose: 'Do.', archetype: 'worker' } },
-    inputs: { Task: { media_type: 'text/markdown' } },
-    flow: [{ id: 'do', kind: 'actor_call', actor: 'worker', input: ['Task'], output: 'Notes', output_path: 'artifacts/notes.md', terminal_status: 'completed' }],
-  }));
-  writeFileSync(join(root, 'task.md'), 'do it');
-  const created = runNewRun({ repoRoot: root, playbook: 'v3-snap', task: 'v3 snapshot', inputs: ['Task=task.md'], userPathOptions: paths });
-  assert.equal(runDrive({ run: created.runId, repoRoot: root, userPathOptions: paths }).status, 'completed');
-
-  // Strip every archetype-specific key: exactly the profile.yaml an older
-  // fadeno wrote, replayed by this one. Verify reads the STORED snapshot, so
-  // this is the pre-change file end to end.
-  const snapPath = join(created.runDir, 'profile.yaml');
-  const snap = parseYaml(readFileSync(snapPath, 'utf8')) as { snapshot_version: number; executors: Record<string, unknown> };
-  assert.equal(snap.snapshot_version, 3, 'the version did not move: the addition is extra keys in a map');
-  for (const key of Object.keys(snap.executors)) {
-    if (key.includes(SNAPSHOT_ARCHETYPE_SEPARATOR)) delete snap.executors[key];
-  }
-  writeFileSync(snapPath, stringifyYaml(snap));
-
-  const verified = runVerify({ run: created.runId, repoRoot: root });
-  assert.equal(verified.ok, true, JSON.stringify(verified.findings.filter((f) => f.status !== 'ok')));
-});
-
-// --- host.identity ---------------------------------------------------------
-
-/**
- * The v3 distinction, restored with a name.
- *
- * `routes.opencode` and `routes.omp` carried `host: true` on `current-host`
- * ALONE: every named model there was a command delivery. v4's harness table
- * cannot say that with `host:` alone, and giving both a `host:` block made a
- * named model a host candidate — while the OpenCode plugin's `applyRewrite`
- * sets only `subagent_type` and the omp extension only `agent`, so the dialed
- * model would have been silently ignored in-session. `identity: session` is
- * that fact about the adapter, stated once, on the harness.
- */
 test('host.identity: session delivers only the session\'s own identity', () => {
   for (const host of ['opencode', 'omp'] as const) {
     const profile = starter(host);
@@ -751,73 +698,6 @@ test('a bare shell reports harness: null for current-host, not a name that is no
   assert.equal(resolved.host, 'standalone');
   assert.equal(resolved.harness, null, '`standalone` is the NO-host value, not a harness to look up');
 });
-
-test('a locked run reaches the exec variant for a director step, as dispatch does', (t) => {
-  // Major 2 end to end: `drive` binds from the snapshot and `dispatch`
-  // re-resolves live. Keyed by ref alone the snapshot froze the WORKER answer,
-  // so a director step failed `eligibility_forbidden` in drive while the same
-  // dial dispatched fine.
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root, dataOnly: true, noSteering: true });
-  const paths: UserPathOptions = {
-    home: join(root, 'home'),
-    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'standalone' },
-  };
-  const ECHO = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('BASE:'+d));"];
-  const EXEC = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('EXEC:'+d));"];
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
-    models: { boss: { provider: 'anthropic', id: 'boss-1', effort: 'high' } },
-    harnesses: {
-      // The shipped shape: the base lane forbids `director`, so a director
-      // falls through to the variant and the delivery is NAMED `variant: exec`.
-      // (Two distinguishable argvs here only so the assertions below can tell
-      // which lane ran; in the shipped catalog the two are identical.)
-      claude: { provider: 'anthropic', command: ECHO, eligibility: { director: 'forbidden' }, variants: { exec: { command: EXEC } } },
-    },
-    archetypes: { director: {} },
-    dials: { director: 'boss' },
-  }));
-  writeFileSync(join(root, '.fadeno', 'playbooks', 'lead.yaml'), stringifyYaml({
-    kind: 'AgentPlaybook', schema_version: '0.1', name: 'lead',
-    description: 'A one-step run whose only actor is a director.',
-    roles: { lead: { purpose: 'Coordinate.', archetype: 'director' } },
-    inputs: { Task: { media_type: 'text/markdown' } },
-    flow: [{ id: 'plan', kind: 'actor_call', actor: 'lead', input: ['Task'], output: 'Notes', output_path: 'artifacts/notes.md', terminal_status: 'completed' }],
-  }));
-  writeFileSync(join(root, 'task.md'), 'coordinate it');
-  const created = runNewRun({ repoRoot: root, playbook: 'lead', task: 'director variant', inputs: ['Task=task.md'], userPathOptions: paths });
-  const driven = runDrive({ run: created.runId, repoRoot: root, userPathOptions: paths });
-  assert.equal(driven.status, 'completed', JSON.stringify(driven));
-  assert.match(readFileSync(join(created.runDir, 'artifacts', 'notes.md'), 'utf8'), /^EXEC:/, 'drive took the exec variant');
-
-  // And the ad-hoc kernel, which never reads the snapshot, agrees.
-  const dispatched = runDispatch({ archetype: 'director', prompt: 'go', repoRoot: root, userPathOptions: paths, shared: true });
-  assert.equal(dispatched.variant, 'exec');
-  assert.match(dispatched.stdout, /^EXEC:/);
-});
-
-// --- The user layer is machine state, and never fails the load -------------
-
-/**
- * The 2026-09-05 regression, generalized.
- *
- * One stale `fadeno model add` entry bricked every unrelated command. Dropping
- * an undeliverable model closed the shape that was observed; it did not close
- * the CLASS. `models.<n>.delivery`, a `spellings` key naming a harness nobody
- * declares, and a ` via ` in a user `bindings:` each still threw from the same
- * two places (`refuseRemovedCatalogKeys`, then the parser), out of the same
- * file, with the same blast radius.
- *
- * `repairUserLayer` runs before both and leaves a document neither can refuse
- * for a model or a ref. Each repair is named in `modelFallback.repairs` and
- * reaches the user through `fadeno dial`'s note.
- */
-
-function writeUserCatalog(paths: UserPathOptions, text: string): void {
-  const file = userPaths(paths).executorsFile;
-  mkdirSync(join(file, '..'), { recursive: true });
-  writeFileSync(file, text);
-}
 
 test('user layer: a v3 `delivery: {route, id}` is translated, not refused', (t) => {
   const root = tempRepo(t);
@@ -1022,120 +902,3 @@ test('opencode apply routes a host-only-elsewhere dial to a broker, not a role s
  * the one the unbound path had already rejected on eligibility — so binding a
  * role to the executor it already resolved to CHANGED its delivery.
  */
-test('a --bind on a director role reaches the same exec variant the unbound path does', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root, dataOnly: true, noSteering: true });
-  const paths = isolated(root);
-  const ECHO = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('BASE:'+d));"];
-  const EXEC = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('EXEC:'+d));"];
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
-    models: { boss: { provider: 'anthropic', id: 'boss-1', effort: 'high' } },
-    harnesses: {
-      claude: { provider: 'anthropic', command: ECHO, eligibility: { director: 'forbidden' }, variants: { exec: { command: EXEC } } },
-    },
-    archetypes: { director: {} },
-    dials: { director: 'boss' },
-  }));
-  writeFileSync(join(root, '.fadeno', 'playbooks', 'lead.yaml'), stringifyYaml({
-    kind: 'AgentPlaybook', schema_version: '0.1', name: 'lead',
-    description: 'A one-step run whose only actor is a director.',
-    roles: { lead: { purpose: 'Coordinate.', archetype: 'director' } },
-    inputs: { Task: { media_type: 'text/markdown' } },
-    flow: [{ id: 'plan', kind: 'actor_call', actor: 'lead', input: ['Task'], output: 'Notes', output_path: 'artifacts/notes.md', terminal_status: 'completed' }],
-  }));
-  writeFileSync(join(root, 'task.md'), 'coordinate it');
-
-  const unbound = runNewRun({ repoRoot: root, playbook: 'lead', task: 'unbound', inputs: ['Task=task.md'], userPathOptions: paths });
-  assert.equal(runDrive({ run: unbound.runId, repoRoot: root, userPathOptions: paths }).status, 'completed');
-  assert.match(readFileSync(join(unbound.runDir, 'artifacts', 'notes.md'), 'utf8'), /^EXEC:/);
-
-  // Same catalog, same dial, same role — now pinned to the executor it already
-  // resolved to. A pin must not change the delivery.
-  const bound = runNewRun({ repoRoot: root, playbook: 'lead', task: 'bound', inputs: ['Task=task.md'], userPathOptions: paths });
-  const driven = runDrive({ run: bound.runId, repoRoot: root, userPathOptions: paths, bind: ['lead=boss'] });
-  assert.equal(driven.status, 'completed', JSON.stringify(driven));
-  assert.match(readFileSync(join(bound.runDir, 'artifacts', 'notes.md'), 'utf8'), /^EXEC:/, '--bind reaches the exec variant too');
-});
-
-/**
- * The catalog need not enumerate an archetype for its lanes to carry
- * `eligibility:` keyed by it. `knownArchetypes` sees the canon roster plus
- * `archetypes:` and `dials:`; a playbook role archetype appears in neither, so
- * the run froze no specialized entry for it and every replay read the base
- * lane — the lane policy had already ruled out.
- */
-test('the run snapshot specializes the playbook\'s own role archetypes', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root, dataOnly: true, noSteering: true });
-  const paths = isolated(root);
-  const ECHO = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('BASE:'+d));"];
-  const EXEC = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('EXEC:'+d));"];
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
-    models: { boss: { provider: 'anthropic', id: 'boss-1', effort: 'high' } },
-    harnesses: {
-      claude: { provider: 'anthropic', command: ECHO, eligibility: { auditor: 'forbidden' }, variants: { exec: { command: EXEC } } },
-    },
-    // `auditor` is deliberately absent from `archetypes:` and `dials:` — the
-    // only place it is written down is the playbook below.
-    archetypes: { worker: {} },
-    bindings: { checker: 'boss' },
-  }));
-  writeFileSync(join(root, '.fadeno', 'playbooks', 'audit.yaml'), stringifyYaml({
-    kind: 'AgentPlaybook', schema_version: '0.1', name: 'audit',
-    description: 'A one-step run whose only actor carries a custom archetype.',
-    roles: { checker: { purpose: 'Audit.', archetype: 'auditor' } },
-    inputs: { Task: { media_type: 'text/markdown' } },
-    flow: [{ id: 'check', kind: 'actor_call', actor: 'checker', input: ['Task'], output: 'Notes', output_path: 'artifacts/notes.md', terminal_status: 'completed' }],
-  }));
-  writeFileSync(join(root, 'task.md'), 'audit it');
-  const created = runNewRun({ repoRoot: root, playbook: 'audit', task: 'custom archetype', inputs: ['Task=task.md'], userPathOptions: paths });
-  const driven = runDrive({ run: created.runId, repoRoot: root, userPathOptions: paths });
-  assert.equal(driven.status, 'completed', JSON.stringify(driven));
-  assert.match(readFileSync(join(created.runDir, 'artifacts', 'notes.md'), 'utf8'), /^EXEC:/);
-
-  const snapshot = parseSnapshotDocument(readFileSync(join(created.runDir, 'profile.yaml'), 'utf8'), 'profile.yaml');
-  const key = `boss${SNAPSHOT_ARCHETYPE_SEPARATOR}auditor`;
-  assert.ok(Object.hasOwn(snapshot.executors, key), `snapshot must carry ${key}`);
-  assert.equal(snapshotExecutor(snapshot, 'boss', 'auditor')!.variant, 'exec');
-  assert.equal(snapshotExecutor(snapshot, 'boss', null)!.variant, undefined, 'still additive: the plain ref is the base lane');
-});
-
-/**
- * `drive` is not the only command that cuts a run's profile snapshot —
- * `tool-run` does too, whenever it is the first command to touch a run (a
- * playbook whose first step is a `tool_call`). A second copy of "which
- * archetypes does this playbook use" would drift silently: the snapshot would
- * simply lack an entry and every replay would read the base lane. Both read
- * `playbookRoleArchetypes`.
- */
-test('the tool-run snapshot cut carries the same playbook archetypes drive uses', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root, dataOnly: true, noSteering: true });
-  const paths = isolated(root);
-  const ECHO = ['node', '-e', 'process.exit(0)'];
-  const EXEC = ['node', '-e', 'process.exit(0)'];
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
-    models: { boss: { provider: 'anthropic', id: 'boss-1', effort: 'high' } },
-    harnesses: {
-      claude: { provider: 'anthropic', command: ECHO, eligibility: { auditor: 'forbidden' }, variants: { exec: { command: EXEC } } },
-    },
-    archetypes: { worker: {} },
-    bindings: { checker: 'boss' },
-    tools: { test_runner: { command: ['node', '-e', 'process.exit(0)'] } },
-  }));
-  writeFileSync(join(root, '.fadeno', 'playbooks', 'toolfirst.yaml'), stringifyYaml({
-    kind: 'AgentPlaybook', schema_version: '0.1', name: 'toolfirst',
-    description: 'A run whose first step is a tool call, with a custom role archetype.',
-    roles: { checker: { purpose: 'Audit.', archetype: 'auditor' } },
-    flow: [{ id: 'test', kind: 'tool_call', tool: 'test_runner', output: 'TestResult' }],
-  }));
-  const created = runNewRun({ repoRoot: root, playbook: 'toolfirst', task: 'tool first', userPathOptions: paths });
-  runToolRun({ repoRoot: root, run: created.runId, userPathOptions: paths });
-
-  const snapshot = parseSnapshotDocument(readFileSync(join(created.runDir, 'profile.yaml'), 'utf8'), 'profile.yaml');
-  assert.ok(
-    Object.hasOwn(snapshot.executors, `boss${SNAPSHOT_ARCHETYPE_SEPARATOR}auditor`),
-    'tool-run cut a snapshot missing the playbook\'s own archetype',
-  );
-  assert.equal(snapshotExecutor(snapshot, 'boss', 'auditor')!.variant, 'exec');
-});

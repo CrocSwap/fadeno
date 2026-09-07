@@ -1,6 +1,6 @@
 {
   "name": "fadeno",
-  "description": "Run and author Fadeno playbooks — repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --claude --data-only`.",
+  "description": "A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.",
   "version": "0.6.1",
   "author": {
     "name": "Fadeno"
@@ -8,7 +8,7 @@
   "keywords": [
     "ai",
     "agents",
-    "playbook",
+    "subagents",
     "workflow",
     "skills"
   ]

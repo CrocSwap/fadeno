@@ -45,10 +45,6 @@ test('help routing uses the longest public path and preserves aliases', () => {
 });
 
 test('focused help uses semantic options and preserves safety-critical modes', () => {
-  const toolRun = renderFocusedHelp('tool-run');
-  assert.doesNotMatch(toolRun, /\n  --output/);
-  assert.match(toolRun, /no `--output` override/);
-
   const plugin = renderFocusedHelp('plugin');
   assert.doesNotMatch(plugin, /\n  --grok|\n  --opencode/);
   assert.match(plugin, /Claude Code is the default plugin/);
@@ -67,10 +63,6 @@ test('focused help uses semantic options and preserves safety-critical modes', (
   assert.match(renderFocusedHelp('dispatches'), /--output <id\|last\|tag:<tag>>/);
   assert.match(renderFocusedHelp('dispatches'), /--cancel <id\|tag:<tag>>/);
   assert.match(renderFocusedHelp('dispatches'), /--merge <id\|tag:<tag>>/);
-  assert.match(renderFocusedHelp('dispatch-complete'), /--output <path\|->/);
-  assert.match(renderFocusedHelp('prompt'), /--actor <role>/);
-  assert.match(renderFocusedHelp('bakeoff'), /--record --comparison <file> --adversarial <file>/);
-  assert.match(renderFocusedHelp('bakeoff'), /`--measure-only`.*`--prepare`.*`--record`/s);
   assert.match(renderFocusedHelp('models add'), /direct OpenCode.*OpenCode\/OpenRouter/s);
   assert.match(renderFocusedHelp('model'), /--harness <id>/);
   for (const path of ['models add', 'model add', 'dial clear-shadow']) {
@@ -80,10 +72,6 @@ test('focused help uses semantic options and preserves safety-critical modes', (
   assert.match(renderFocusedHelp('unvendor'), /remove modified lock-owned files/);
   assert.match(renderFocusedHelp('steering apply'), /Overwrite managed steering files/);
   assert.doesNotMatch(renderFocusedHelp('completion'), /private protocol/);
-  assert.match(renderFocusedHelp('prompt'), /--format <text\|json>/);
-  assert.match(renderFocusedHelp('dispatch-progress'), /--source <agent\|harness\|director>/);
-  assert.match(renderFocusedHelp('dispatch-start'), /--agent-id <host-agent-id>/);
-  assert.match(renderFocusedHelp('dispatch-progress'), /--file <status\.json>/);
   assert.match(renderFocusedHelp('uninstall'), /--purge-user-data --force/);
   assert.match(renderFocusedHelp('init'), /Deprecated compatibility alias; steering is already default/);
 });
@@ -117,8 +105,8 @@ test('global help stays concise and focused help does not run command bodies', (
   assert.doesNotMatch(global, /--timeout/);
 
   const root = tempRepo(t);
-  const output = run(process.execPath, [SOURCE, 'drive', '--help'], root);
-  assert.match(output, /fadeno drive — Advance a run/);
+  const output = run(process.execPath, [SOURCE, 'dispatch', '--help'], root);
+  assert.match(output, /^fadeno dispatch — /);
   assert.equal(existsSync(join(root, '.fadeno')), false, 'help must short-circuit before command/preflight work');
 });
 

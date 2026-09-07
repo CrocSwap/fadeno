@@ -27,7 +27,11 @@
  */
 
 import { basename } from 'node:path';
-import { progressSidecarPath } from './prompt.ts';
+/** Workspace-relative cooperative status path embedded in the immutable prompt. */
+function progressSidecarPath(runId: string, step: string, actor: string | null): string {
+  const safe = (value: string): string => value.replace(/[^A-Za-z0-9_.-]+/g, '_');
+  return `.fadeno/progress/${safe(runId)}/${safe(step)}--${safe(actor ?? 'anonymous')}.json`;
+}
 
 /**
  * What the agent said about itself, as mirrored onto a claim.

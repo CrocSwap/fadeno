@@ -36,46 +36,21 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.equal(manifest.name, 'fadeno');
   assert.equal(typeof manifest.version, 'string');
 
-  // skills use short dir names → /fadeno:runner, /fadeno:builder, /fadeno:driver
-  assert.ok(exists(outDir, 'skills/runner/SKILL.md'));
-  assert.ok(exists(outDir, 'skills/runner/references/runtime.md'));
-  assert.ok(exists(outDir, 'skills/builder/SKILL.md'));
-  assert.ok(exists(outDir, 'skills/driver/SKILL.md'));
+  // skills use short dir names → /fadeno:host, /fadeno:setup
   assert.ok(exists(outDir, 'skills/host/SKILL.md'));
   assert.ok(exists(outDir, 'skills/setup/SKILL.md'));
-  // `fadeno-bakeoff`'s template shortens to `bakeoff`, never `judge` — the plugin
-  // already ships a SUBAGENT named `judge` (checked below), and a skill and a
-  // subagent sharing one identifier across two different tool surfaces would
-  // be ambiguous to a coordinator choosing between them.
-  assert.ok(exists(outDir, 'skills/bakeoff/SKILL.md'));
-  assert.ok(!exists(outDir, 'skills/judge/SKILL.md'), 'the judge skill must not collide with the judge subagent');
-  for (const skill of ['runner', 'builder', 'driver', 'host', 'setup', 'bakeoff']) {
+  assert.ok(!exists(outDir, 'skills/judge/SKILL.md'), 'no skill may collide with the judge subagent');
+  for (const skill of ['host', 'setup']) {
     const launcher = join(outDir, 'skills', skill, 'scripts', 'fadeno.cjs');
     assert.ok(existsSync(launcher), `${skill} must carry its private CLI launcher`);
     assert.notEqual(statSync(launcher).mode & 0o111, 0, `${skill} CLI launcher must be executable`);
   }
 
-  const runner = readFileSync(join(outDir, 'skills/runner/SKILL.md'), 'utf8');
-  const builder = readFileSync(join(outDir, 'skills/builder/SKILL.md'), 'utf8');
-  const driver = readFileSync(join(outDir, 'skills/driver/SKILL.md'), 'utf8');
   const host = readFileSync(join(outDir, 'skills/host/SKILL.md'), 'utf8');
-  const bakeoff = readFileSync(join(outDir, 'skills/bakeoff/SKILL.md'), 'utf8');
-  assert.match(bakeoff, /^name: bakeoff$/m);
-  assert.match(runner, /^name: runner$/m);
-  assert.doesNotMatch(runner, /disable-model-invocation/);
-  assert.match(builder, /^name: builder$/m);
-  // Builder stays model-invocable — a builder gated with disable-model-invocation
-  // was uninvocable (plugin skills aren't reliably slash-invocable).
-  assert.doesNotMatch(builder, /disable-model-invocation/);
-  assert.match(driver, /^name: driver$/m);
-  assert.match(driver, /fadeno next/);
   assert.match(host, /^name: host$/m);
   assert.match(host, /host coordinator/i);
 
-  // slash-command entry points → /fadeno:runner, /fadeno:builder, /fadeno:driver
-  assert.ok(exists(outDir, 'commands/runner.md'));
-  assert.ok(exists(outDir, 'commands/builder.md'));
-  assert.ok(exists(outDir, 'commands/driver.md'));
+  // slash-command entry points → /fadeno:host, /fadeno:setup
   assert.ok(exists(outDir, 'commands/host.md'));
   assert.ok(exists(outDir, 'commands/setup.md'));
 
@@ -92,7 +67,7 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.ok(exists(outDir, 'agents/judge.md'));
 
   // the plugin carries no per-repo definitions
-  assert.ok(!exists(outDir, 'skills/runner/playbooks'));
+  assert.ok(!exists(outDir, 'skills/host/playbooks'));
 });
 
 test('the committed plugin/ matches a fresh generation (no drift)', { skip: SKIP_DRIFT }, (t) => {
@@ -144,7 +119,7 @@ test('the committed plugin ships a self-contained CJS binary + templates', () =>
   const reported = execFileSync(bin, ['--version'], { encoding: 'utf8' }).trim();
   assert.equal(reported, version, 'plugin/bin/fadeno is stale — run `npm run build:bin`');
   // Templates travel with the binary so `fadeno init` works with no node_modules.
-  assert.ok(existsSync(join(binDir, 'templates', 'common', 'fadeno', 'vocabulary.md')));
+  assert.ok(existsSync(join(binDir, 'templates', 'common', 'fadeno', 'executors.yaml')));
 });
 
 test('the bundled CLI carries the Grok adapter templates', () => {
@@ -155,7 +130,6 @@ test('the bundled CLI carries the Grok adapter templates', () => {
     assert.ok(existsSync(agent), `bundled Grok ${role} agent template missing`);
     assert.match(readFileSync(agent, 'utf8'), new RegExp(`^name: ${role}$`, 'm'));
   }
-  assert.match(readFileSync(join(grokDir, 'AGENTS.md'), 'utf8'), /\/fadeno-runner/);
 });
 
 test('the bundled CLI carries the OpenCode adapter templates', () => {
@@ -167,10 +141,6 @@ test('the bundled CLI carries the OpenCode adapter templates', () => {
     const body = readFileSync(agent, 'utf8');
     assert.match(body, /^mode: subagent$/m, `bundled OpenCode ${role} agent must be a subagent`);
   }
-  // OpenCode has no invocation sigil — its bootstrap names skills bare.
-  const bootstrap = readFileSync(join(opencodeDir, 'AGENTS.md'), 'utf8');
-  assert.match(bootstrap, /fadeno-runner/);
-  assert.doesNotMatch(bootstrap, /\$fadeno-runner/);
 });
 
 test('every skill template declares the name of the directory it lives in', () => {
@@ -185,7 +155,7 @@ test('every skill template declares the name of the directory it lives in', () =
   // the precondition the generator now throws on, and the drift starts here.
   const skillsDir = join(templatesDir(), 'common', 'skills');
   const dirs = readdirSync(skillsDir).filter((d) => statSync(join(skillsDir, d)).isDirectory());
-  assert.ok(dirs.length >= 5, 'expected the shipped skill set');
+  assert.ok(dirs.length >= 2, 'expected the shipped skill set');
   for (const dir of dirs) {
     const md = readFileSync(join(skillsDir, dir, 'SKILL.md'), 'utf8');
     assert.match(md, new RegExp(`^name: ${dir}$`, 'm'), `${dir}/SKILL.md must declare name: ${dir}`);

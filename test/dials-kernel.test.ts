@@ -24,7 +24,6 @@ import {
   type ExecutorProfile,
   type LocalDialState,
 } from '../src/lib/executors.ts';
-import { roleArchetype, semanticChecks } from '../src/lib/playbook-validate.ts';
 import { readUserDials, userPaths, UserDialsError, writeUserDials, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
@@ -389,7 +388,6 @@ test('archetypes: strict validation names the offending path', () => {
   );
 });
 
-
 // --- pin v3 ---
 
 test('pin v4: write and read round-trip (dial keys sorted)', (t) => {
@@ -496,7 +494,6 @@ test('cascade: fallback chain via archetypes', () => {
   const direct = resolveDialCascade('r', 'worker', { bindings: {}, archetypes: profile.archetypes }, { session: {}, repo: profile.dials, user: {} });
   assert.equal(direct.resolvedVia, null);
 });
-
 
 test('cascade: prototype hardening (hasOwn)', () => {
   const profile = parseDoc({
@@ -615,16 +612,4 @@ test('snapshot eligibility round-trip', () => {
   assert.equal(doc.executors['sol']!.eligibility['worker'], 'forbidden');
 });
 
-test('playbook roles: archetype validation', () => {
-  const issues = semanticChecks({ kind: 'AgentPlaybook', roles: { implementer: { purpose: 'x', archetype: 'worker' } }, flow: [{ id: 'a', kind: 'actor_call', actor: 'implementer', terminal_status: 'completed' }] }, 'pb.yaml');
-  assert.deepEqual(issues, []);
-  const bad = semanticChecks({ kind: 'AgentPlaybook', roles: { implementer: { purpose: 'x', archetype: 'Worker' } }, flow: [{ id: 'a', kind: 'actor_call', actor: 'implementer', terminal_status: 'completed' }] }, 'pb.yaml');
-  assert.equal(bad.length, 1);
-  assert.match(bad[0]!.message, /must be a bare lowercase identifier/);
-});
 
-test('roleArchetype accessor', () => {
-  const pb = { kind: 'AgentPlaybook', roles: { implementer: { purpose: 'x', archetype: 'worker' } }, flow: [{ id: 'a', kind: 'actor_call', actor: 'implementer', terminal_status: 'completed' }] };
-  assert.equal(roleArchetype(pb, 'implementer'), 'worker');
-  assert.equal(roleArchetype(pb, 'ghost'), null);
-});

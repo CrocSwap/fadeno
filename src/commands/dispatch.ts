@@ -1,10 +1,9 @@
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { sha256Hex } from '../lib/artifact-manifest.ts';
-import { dispatchProgressRelPath, requestProgressRelPath } from '../lib/attempt-progress.ts';
+import { sha256Hex } from '../lib/fsutil.ts';
+import { dispatchProgressRelPath } from '../lib/attempt-progress.ts';
 import {
   ConstraintError,
   evaluateConstraint,
@@ -25,7 +24,7 @@ import {
   reserveShadowAttachmentTrigger,
   resolveRole,
   resolveDelivery,
-  snapshotExecutor,
+  
   parseDialRef,
   formatDialRef,
   roleResolutionEchoLabel,
@@ -48,22 +47,8 @@ import {
 import { explainLane, readSessionEffort } from '../lib/lane.ts';
 import { spawnMarkerIsFresh, spawnMarkerLines, spawnMarkerRow } from '../lib/spawn-markers.ts';
 import { readUserDials } from '../lib/user-paths.ts';
-import {
-  completeHostDispatch,
-  failHostDispatch,
-  hostRequestProfile,
-  progressHostDispatch,
-  readHostDispatchRequest,
-  startHostDispatch,
-  type DispatchCompleteOptions,
-  type DispatchFailOptions,
-  type DispatchProgressOptions,
-  type DispatchStartOptions,
-  type HostDispatchReceipt,
-  type HostDispatchProgressReceipt,
-} from '../lib/host-dispatch.ts';
 import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
-import { fallbackClaimRelPath, INFLIGHT_DIR, readSupervisorStatus, sleepSync, superviseArgv, supervisedSpawnError, supervisorCanStillReport } from '../lib/supervisor.ts';
+import { INFLIGHT_DIR, readSupervisorStatus, sleepSync, superviseArgv, supervisedSpawnError, supervisorCanStillReport } from '../lib/supervisor.ts';
 import {
   carryDeclaredPaths,
   carryMutationStamp,
@@ -1102,49 +1087,6 @@ export interface AdHocDispatchResult {
   /** Repo-relative path of the evidence log that received the row pair. */
   evidencePath: string;
   transport: 'command' | 'host-command-fallback';
-}
-
-export interface DispatchFallbackOptions {
-  run: string;
-  dispatchId: string;
-  cwd?: string;
-  repoRoot?: string;
-  now?: Date;
-  onEcho?: (line: string) => void;
-}
-
-export interface DispatchFallbackResult {
-  dispatchId: string;
-  executor: string;
-  model: string;
-  exitCode: number;
-  stdout: string;
-  /**
-   * Two different things wear this field, and a caller must not treat them
-   * alike. On the live spawn it is the executor's raw transcript, unbounded,
-   * and `transcript` says where it was retained. On an idempotent replay it is
-   * the KERNEL's own recorded `failure_reason` — one sentence, decision-
-   * changing, and never excerpted. `transcript.bytes > 0` is the discriminator.
-   */
-  stderr: string;
-  /** Set only when an executor actually ran; `NO_EXECUTOR_TRANSCRIPT` otherwise. */
-  transcript: ExecutorTranscript;
-  idempotent: boolean;
-}
-
-function lockedRunFile(runDir: string, value: string, label: string): string {
-  const runAbsolute = resolve(runDir);
-  const path = isAbsolute(value) ? resolve(value) : resolve(runAbsolute, value);
-  const rel = relative(runAbsolute, path).split('\\').join('/');
-  if (rel === '' || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
-    throw new DispatchCommandError(`locked request ${label} escapes its run directory: ${value}.`);
-  }
-  if (!existsSync(path)) throw new DispatchCommandError(`locked request ${label} is missing: ${value}.`);
-  const realRel = relative(realpathSync(runAbsolute), realpathSync(path)).split('\\').join('/');
-  if (realRel === '..' || realRel.startsWith('../') || isAbsolute(realRel)) {
-    throw new DispatchCommandError(`locked request ${label} escapes its run directory through a symlink: ${value}.`);
-  }
-  return path;
 }
 
 function loadProfileOrThrow(
@@ -3735,206 +3677,5 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // while persisting its completion receipt). Always reap and collect the
     // shadow once so its worktree cannot leak on that exceptional path.
     finishPendingShadow();
-  }
-}
-
-/** Deliver one immutable engine host request through its declared command fallback. */
-export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFallbackResult {
-  const cwd = opts.cwd ?? process.cwd();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const lookup = readHostDispatchRequest({ repoRoot, run: opts.run, dispatchId: opts.dispatchId });
-  const request = lookup.request;
-  const profile = hostRequestProfile(lookup);
-  // The archetype the locked request was cut for, so a policy-chosen variant's
-  // snapshot entry is the one this fallback delivers — the same read
-  // `runLockedSteeringResolve` and `verify` make of the same request.
-  const spec = snapshotExecutor(profile, request.executor, request.agentType === '*' ? null : request.agentType);
-  if (spec == null || spec.adapter !== 'host') {
-    throw new DispatchCommandError(`locked request executor "${request.executor}" is not a host executor.`);
-  }
-  if (spec.fallbackCommand == null) {
-    throw new DispatchCommandError(`host executor "${request.executor}" has no fallback_command.`);
-  }
-  if (spec.model !== request.model || spec.reasoningEffort !== request.reasoningEffort || (spec.agentType !== '*' && spec.agentType !== request.agentType)) {
-    throw new DispatchCommandError(`locked request identity no longer matches executor "${request.executor}" in its profile snapshot.`);
-  }
-  if (lookup.terminal != null) {
-    if (
-      lookup.terminal.extra.delivery_transport !== 'command-fallback' ||
-      JSON.stringify(lookup.terminal.extra.fallback_command ?? null) !== JSON.stringify(spec.fallbackCommand)
-    ) {
-      throw new DispatchCommandError(`host dispatch "${request.dispatchId}" was not delivered through its declared command fallback.`);
-    }
-    if (lookup.terminal.type === 'actor_completed' && typeof lookup.terminal.extra.output === 'string') {
-      const output = lockedRunFile(lookup.runDir, lookup.terminal.extra.output, 'completed output');
-      const stdout = readFileSync(output, 'utf8');
-      if (lookup.terminal.extra.output_sha256 !== sha256Hex(stdout)) {
-        throw new DispatchCommandError('locked request completed output no longer matches its receipt digest.');
-      }
-      return {
-        dispatchId: request.dispatchId,
-        executor: request.executor,
-        model: request.model,
-        exitCode: 0,
-        stdout,
-        stderr: '',
-        transcript: NO_EXECUTOR_TRANSCRIPT,
-        idempotent: true,
-      };
-    }
-    return {
-      dispatchId: request.dispatchId,
-      executor: request.executor,
-      model: request.model,
-      exitCode: 1,
-      stdout: '',
-      stderr: String(lookup.terminal.extra.failure_reason ?? 'fallback dispatch already failed'),
-      // No executor ran on this path: the line above is the kernel's, and it
-      // is relayed whole.
-      transcript: NO_EXECUTOR_TRANSCRIPT,
-      idempotent: true,
-    };
-  }
-  const promptPath = lockedRunFile(lookup.runDir, request.promptPath, 'prompt');
-  const prompt = readFileSync(promptPath, 'utf8');
-  if (sha256Hex(prompt) !== request.promptSha256) {
-    throw new DispatchCommandError(`locked request prompt digest does not match ${request.promptPath}.`);
-  }
-  const command = substitutePromptFile(spec.fallbackCommand, promptPath);
-  opts.onEcho?.(`locked host fallback: ${request.executor} (${command.join(' ')})`);
-  startHostDispatch({
-    repoRoot,
-    run: request.run,
-    dispatchId: request.dispatchId,
-    agentId: `command-fallback:${request.executor}`,
-    transport: 'command-fallback',
-    command,
-    now: opts.now,
-  });
-  const fallbackClaimAbs = join(
-    repoRoot,
-    ...fallbackClaimRelPath(lookup.runId, request.dispatchId).split('/'),
-  );
-  mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
-  // The ENGINE sidecar, not a runless one. This lane delivers an immutable
-  // engine request whose prompt was rendered by the engine and whose digest is
-  // verified against the locked request a few lines above — so the bytes
-  // cannot be touched, and they do not need to be: that prompt already names a
-  // sidecar path, and this is the one it names. Deriving it through
-  // `requestProgressRelPath` rather than by hand is what keeps it the same
-  // answer `cli.ts` prints for a person to `cat`; two copies of that branch is
-  // how the two spellings drift and the supervisor watches a file no agent
-  // writes. cwd is the repo root here, so the request's workspace-relative
-  // path resolves against it.
-  const fallbackProgressAbs = join(repoRoot, ...requestProgressRelPath(request).split('/'));
-  mkdirSync(dirname(fallbackProgressAbs), { recursive: true });
-  const spawned = (() => {
-    try {
-      // A command fallback has the same orphan risk as every other command
-      // delivery. Its host-dispatch lease is intentionally NOT handed to the
-      // supervisor: that durable reservation remains held until the terminal
-      // complete/fail receipt below, per the host protocol.
-      return spawnSync(process.execPath, superviseArgv(command, fallbackClaimAbs, '', undefined, fallbackProgressAbs), {
-        input: prompt,
-        encoding: 'utf8',
-        cwd: repoRoot,
-        // The env var is redundant here — this executor's prompt already spells
-        // the path out — and it is set anyway because it is the same string,
-        // computed once. An agent that follows either instruction lands on one
-        // file, which is the property worth having.
-        env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), repoRoot), {
-          dispatchId: request.dispatchId,
-          archetype: request.agentType,
-          progressSidecar: fallbackProgressAbs,
-        }),
-        maxBuffer: SPAWN_MAX_BUFFER,
-      });
-    } finally {
-      rmSync(fallbackClaimAbs, { force: true });
-    }
-  })();
-  const stdout = spawned.stdout ?? '';
-  const stderr = spawned.stderr ?? '';
-  // Same rule as the ad-hoc lane: an executor's transcript is retained, not
-  // relayed. The fallback lane had the identical unbounded write in `cli.ts`,
-  // so fixing only the ad-hoc one would have left the flood reachable by
-  // another door.
-  const transcript = retainExecutorStderr({
-    repoRoot,
-    rel: `.fadeno/local/outputs/fallback-${request.dispatchId.slice(0, 8)}.err`,
-    stderr,
-  });
-  const fallbackNotice = executorTranscriptNotice(transcript);
-  if (fallbackNotice != null) opts.onEcho?.(fallbackNotice);
-  const fallbackSpawnFailure = spawned.error?.message ?? supervisedSpawnError(spawned.status, stderr);
-  if (fallbackSpawnFailure != null || spawned.status !== 0 || spawned.signal != null) {
-    const reason = fallbackSpawnFailure ?? (spawned.signal != null
-      ? `fallback command was terminated by ${spawned.signal}`
-      : `fallback command exited ${spawned.status ?? 1}${stderr ? `: ${stderr.trim()}` : ''}`);
-    failHostDispatch({ repoRoot, run: request.run, dispatchId: request.dispatchId, reason, now: opts.now });
-    return {
-      dispatchId: request.dispatchId,
-      executor: request.executor,
-      model: request.model,
-      exitCode: spawned.status ?? 1,
-      stdout,
-      stderr,
-      transcript,
-      idempotent: false,
-    };
-  }
-  const temporaryDir = mkdtempSync(join(tmpdir(), 'fadeno-fallback-'));
-  const temporaryOutput = join(temporaryDir, 'output');
-  try {
-    writeFileSync(temporaryOutput, stdout, 'utf8');
-    completeHostDispatch({ repoRoot, run: request.run, dispatchId: request.dispatchId, output: temporaryOutput, now: opts.now });
-  } finally {
-    rmSync(temporaryDir, { recursive: true, force: true });
-  }
-  return {
-    dispatchId: request.dispatchId,
-    executor: request.executor,
-    model: request.model,
-    exitCode: 0,
-    stdout,
-    stderr,
-    transcript,
-    idempotent: false,
-  };
-}
-
-export function runDispatchStart(opts: DispatchStartOptions): HostDispatchReceipt {
-  try {
-    return startHostDispatch(opts);
-  } catch (err) {
-    if (err instanceof Error) throw new DispatchCommandError(err.message);
-    throw err;
-  }
-}
-
-export function runDispatchComplete(opts: DispatchCompleteOptions): HostDispatchReceipt {
-  try {
-    return completeHostDispatch(opts);
-  } catch (err) {
-    if (err instanceof Error) throw new DispatchCommandError(err.message);
-    throw err;
-  }
-}
-
-export function runDispatchFail(opts: DispatchFailOptions): HostDispatchReceipt {
-  try {
-    return failHostDispatch(opts);
-  } catch (err) {
-    if (err instanceof Error) throw new DispatchCommandError(err.message);
-    throw err;
-  }
-}
-
-export function runDispatchProgress(opts: DispatchProgressOptions): HostDispatchProgressReceipt {
-  try {
-    return progressHostDispatch(opts);
-  } catch (err) {
-    if (err instanceof Error) throw new DispatchCommandError(err.message);
-    throw err;
   }
 }

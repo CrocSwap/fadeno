@@ -40,8 +40,6 @@
     "focus": "node --test",
     "probe": "node",
     "eval:summary": "node evals/scripts/summarize-results.mjs --results-dir evals/results --valid-only",
-    "validate:self": "node scripts/validate-self.mjs",
-    "tamper": "node scripts/tamper-matrix.mjs",
     "prepublishOnly": "npm run build",
     "test:fast": "node scripts/test-fast.mjs",
     "test:fast:regen": "node scripts/test-fast-regen.mjs"

@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { sha256Hex } from '../src/lib/artifact-manifest.ts';
+import { sha256Hex } from '../src/lib/fsutil.ts';
 import { DISPATCHES_FILE, DISPATCHES_FORMAT, runDispatch } from '../src/commands/dispatch.ts';
 import {
   DispatchesCommandError,

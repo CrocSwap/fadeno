@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { sha256Hex } from '../lib/artifact-manifest.ts';
+import { sha256Hex } from '../lib/fsutil.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
   formatBakeoffDuration,

@@ -320,53 +320,6 @@ test('dial CLI: the effort column shows the pin, and `inherit` where there is no
   assert.match(run(['dial', 'worker']), /sol\s+inherit\s/);
 });
 
-test('new-run echo: an out-of-session pin names the lane and why', (t) => {
-  // Inside a host: `current-host` is a host lane only when there is a session
-  // to be in. (The bare-shell answer — restart_required whatever the pin says
-  // — is asserted at the end.)
-  const root = seedCatalog(t, {
-    harnesses: {
-      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: ['node', '-e', '0'] },
-      grok: { provider: 'xai', command: ['node', '-e', '0'] },
-    },
-  });
-  const paths: UserPathOptions = {
-    home: join(root, 'home-codex'),
-    env: { FADENO_CONFIG_HOME: join(root, 'cfg-codex'), FADENO_STATE_HOME: join(root, 'state-codex'), FADENO_HARNESS: 'codex' },
-  };
-  const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
-  // CLAUDE_EFFORT is set explicitly on every spawn: this suite must never
-  // read the effort of the session that happens to be running it.
-  const run = (args: string[], effort: string | null) => {
-    const env: NodeJS.ProcessEnv = { ...process.env, ...paths.env, HOME: paths.home! };
-    if (effort == null) delete env.CLAUDE_EFFORT;
-    else env.CLAUDE_EFFORT = effort;
-    return execFileSync(process.execPath, [cli, ...args], { cwd: root, env, encoding: 'utf8', stdio: 'pipe' });
-  };
-
-  run(['dial', 'worker', 'current-host@xhigh', '--session'], null);
-  const outOfSession = run(['new-run', 'code-change-review', 'lane echo'], 'medium');
-  assert.match(outOfSession, /implementer → current-host@xhigh \(current-host\) \[restart required: no command fallback\]/);
-  // Same dial, matching session: it stays in-session and keeps its source label.
-  const inSession = run(['new-run', 'code-change-review', 'lane echo'], 'xhigh');
-  assert.match(inSession, /implementer → current-host@xhigh \(current-host\) \[session dial\]/);
-  // An unmeasurable session effort is the ABSENCE OF PROOF, and a pin loses on
-  // it. We cannot show the host lane would deliver xhigh, so we do not claim
-  // it — the same way `shadow.routable` degrades to the safe answer rather
-  // than the optimistic one. Treating "cannot say" as "matches" is exactly the
-  // silent wrong-effort delivery this whole design exists to end.
-  assert.match(
-    run(['new-run', 'code-change-review', 'lane echo'], null),
-    /implementer → current-host@xhigh \(current-host\) \[restart required: no command fallback\]/,
-  );
-
-  // A bare shell has no session at all, so the same dial is restart_required
-  // whatever the effort says — the pin never even gets to be the reason.
-  const bare = isolated(root);
-  const bareEnv: NodeJS.ProcessEnv = { ...process.env, ...bare.env, HOME: bare.home!, CLAUDE_EFFORT: 'xhigh' };
-  const bareOut = execFileSync(process.execPath, [cli, 'new-run', 'code-change-review', 'lane echo'], { cwd: root, env: bareEnv, encoding: 'utf8', stdio: 'pipe' });
-  assert.match(bareOut, /implementer → current-host@xhigh \(current-host\) \[restart required: no command fallback\]/);
-});
 
 // --- The lane column ---
 //

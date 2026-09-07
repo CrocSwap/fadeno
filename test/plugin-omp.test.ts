@@ -9,7 +9,7 @@ import { exists, read, tempRepo } from './helpers.ts';
 const REPO = join(import.meta.dirname, '..');
 // `fadeno-setup` is deliberately absent: `<cli> setup` supports only
 // --codex/--claude, and that skill teaches using only the current host's line.
-const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-bakeoff'] as const;
+const SKILLS = ['fadeno-host'] as const;
 const AGENTS = [
   'worker.md',
   'reviewer.md',
@@ -70,10 +70,6 @@ test('omp plugin: skills are full-named shared bodies with per-skill launchers',
     assert.match(readFileSync(launcher, 'utf8'), /FADENO_HARNESS: 'omp'/);
   }
 
-  // References carry over; bakeoff has none (guarded in the generator).
-  assert.ok(exists(outDir, 'skills/fadeno-runner/references/runtime.md'));
-  assert.ok(exists(outDir, 'skills/fadeno-driver/references/README.md'));
-  assert.ok(!exists(outDir, 'skills/fadeno-bakeoff/references'));
 
   // No commands/: omp registers /skill:<name> natively for every skill.
   assert.ok(!exists(outDir, 'commands'));
@@ -113,7 +109,7 @@ test('omp plugin: bundles a self-contained CLI used by its steering extension', 
   assert.ok(!exists(outDir, 'hooks'), 'omp steering ships as an extension, not a hooks directory');
   assert.ok(exists(outDir, 'bin/fadeno'), 'omp plugin must bundle a binary');
   assert.match(read(outDir, 'extensions/fadeno-steering.ts'), /import\.meta\.dirname, '\.\.', 'bin', 'fadeno'/);
-  assert.ok(exists(outDir, 'bin/templates/common/fadeno/playbooks/code-change-review.yaml'));
+  assert.ok(exists(outDir, 'bin/templates/common/fadeno/executors.yaml'));
   const binary = join(outDir, 'bin', 'fadeno');
   assert.notEqual(statSync(binary).mode & 0o111, 0, 'generated omp plugin CLI must be executable');
   const expectedVersion = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;

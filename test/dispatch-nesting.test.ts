@@ -4,9 +4,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DispatchCommandError, runDispatch } from '../src/commands/dispatch.ts';
-import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
-import { runNewRun } from '../src/commands/new-run.ts';
 import {
   COORDINATING_ARCHETYPES,
   DISPATCH_NESTING_ENV,
@@ -144,26 +142,3 @@ flow:
     terminal_status: completed
 `;
 
-test('an engine-dispatched actor is an executor too, and carries deny', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root });
-  writeFileSync(join(root, '.fadeno', 'playbooks', 'nesting-probe.yaml'), PROBE_PLAYBOOK);
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 4,
-    models: { probe: { provider: 'probe_p', id: 'probe', effort: 'high' } },
-    // Every harness lane, so the run snapshot resolves whatever ambient
-    // harness the suite happens to run under.
-    // One table, whatever ambient harness the suite happens to run under —
-    // that is exactly what catalog v4 collapsed the six host families into.
-    harnesses: { probe_p: { provider: 'probe_p', command: REPORT_ENV } },
-    archetypes: { worker: {} },
-    dials: { worker: 'probe' },
-    bindings: { worker: 'probe', '*': 'probe' },
-  }));
-  const { runId } = runNewRun({ playbook: 'nesting-probe', task: 'report the environment', repoRoot: root });
-  const result = runDrive({ run: runId, repoRoot: root });
-  assert.equal(result.outcome, 'terminal');
-  const notes = readFileSync(join(root, '.fadeno', 'runs', runId, 'artifacts', 'notes.md'), 'utf8');
-  // The engine names its executor by actor call and attempt, not a dispatch id.
-  assert.match(notes, /^ac-report-g1-worker:a1 deny$/);
-});

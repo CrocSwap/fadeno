@@ -145,8 +145,7 @@ test('plugin surface descriptions carry the version stamp', (t) => {
   for (const rel of [
     'agents/dispatch-worker.md',
     'agents/worker.md',
-    'skills/runner/SKILL.md',
-    'skills/driver/SKILL.md',
+    'skills/host/SKILL.md',
   ]) {
     const description = read(outDir, rel).match(/^description:.*$/m)?.[0];
     assert.ok(description?.endsWith(stamp), `${rel} description must end with "${stamp}"`);

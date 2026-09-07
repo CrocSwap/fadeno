@@ -15,7 +15,6 @@ import {
   runDispatchOpen,
 } from '../src/commands/dispatch-adhoc.ts';
 import { runDispatches } from '../src/commands/dispatches.ts';
-import { runVerify, VerifyError } from '../src/commands/verify.ts';
 import { hostWorktreePath, readHostWorkspaceState } from '../src/lib/host-workspace.ts';
 import { closeDispatchWindow, openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
 
@@ -53,9 +52,17 @@ function evidenceRows(root: string): Record<string, unknown>[] {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+function seedIgnoringRepo(t: import('node:test').TestContext): string {
+  const root = seedRepo(t);
+  writeFileSync(join(root, '.gitignore'), 'data*/\n');
+  git(root, ['add', '-A']);
+  git(root, ['commit', '-m', 'ignore data']);
+  return root;
+}
+
 test('adhoc scope can never collide with a run id', () => {
   assert.equal(adhocScopeIsUnreachableByRuns(), true);
-  // `runNewRun` builds `YYYY-MM-DD-HHMM-slug`; the scope must not look like one.
+  // Run ids used to be `YYYY-MM-DD-HHMM-slug`; the scope must never look like one.
   assert.equal(/^\d{4}-\d{2}-\d{2}-/.test(ADHOC_HOST_SCOPE), false);
 });
 
@@ -297,66 +304,6 @@ test('there is no preparation mode but isolated — the state reader refuses any
     /invalid workspace_mode/,
   );
 });
-
-test('fadeno verify says something true when handed an ad-hoc host dispatch id', (t) => {
-  const root = seedRepo(t);
-  const opened = runDispatchOpen({ repoRoot: root, tag: 'audit-me' });
-
-  assert.equal(findAdhocHostDispatch(root, opened.dispatchId)?.dispatchId, opened.dispatchId);
-  assert.equal(findAdhocHostDispatch(root, opened.dispatchId.slice(0, 8))?.dispatchId, opened.dispatchId);
-
-  assert.throws(
-    () => runVerify({ repoRoot: root, cwd: root, run: opened.dispatchId }),
-    (err: unknown) => {
-      assert.ok(err instanceof VerifyError);
-      const message = (err as Error).message;
-      // Not "No run matching": that reads as "your evidence is gone".
-      assert.match(message, /is an ad-hoc host dispatch/);
-      assert.match(message, /still open/);
-      assert.match(message, /no run ledger/);
-      assert.match(message, /\.fadeno\/dispatches\.jsonl/);
-      assert.match(message, /tag: audit-me/);
-      return true;
-    },
-  );
-
-  // A genuinely unknown id still gets the ordinary run-lookup error.
-  assert.throws(
-    () => runVerify({ repoRoot: root, cwd: root, run: 'not-a-dispatch-or-run' }),
-    (err: unknown) => {
-      assert.doesNotMatch((err as Error).message, /ad-hoc host dispatch/);
-      return true;
-    },
-  );
-
-  runDispatchClose({ repoRoot: root, dispatchId: opened.dispatchId, reason: 'abandoned' });
-  assert.throws(
-    () => runVerify({ repoRoot: root, cwd: root, run: opened.dispatchId }),
-    (err: unknown) => {
-      assert.match((err as Error).message, /closed \(failed: abandoned\)/);
-      return true;
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Gitignored output on the host lane
-// ---------------------------------------------------------------------------
-//
-// The command lane at least RECORDED the loss (`ignored_output_discarded`);
-// this lane did not look at all, and an absent stamp from a lane that never
-// looked is byte for byte an absent stamp from a lane that looked and found
-// nothing. Fadeno steers work toward the host lane, so this is where a
-// gitignored deliverable was quietest.
-
-/** A seeded repo carrying the field report's own ignore rule, `data*` + slash. */
-function seedIgnoringRepo(t: import('node:test').TestContext): string {
-  const root = seedRepo(t);
-  writeFileSync(join(root, '.gitignore'), 'data*/\n');
-  git(root, ['add', '-A']);
-  git(root, ['commit', '-m', 'ignore data']);
-  return root;
-}
 
 test('dispatch-close keeps a merged worktree that still holds gitignored output, and says so', (t) => {
   const root = seedIgnoringRepo(t);

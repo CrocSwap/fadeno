@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -101,4 +102,8 @@ export function emitBootstrap(
   const separator = existing.endsWith('\n') ? '\n' : '\n\n';
   writeFileSync(absPath, existing + separator + block, 'utf8');
   results.push({ path: absPath, status: 'appended' });
+}
+
+export function sha256Hex(data: string | Buffer): string {
+  return createHash('sha256').update(data).digest('hex');
 }

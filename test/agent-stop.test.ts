@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { DISPATCHES_FILE, DISPATCHES_FORMAT } from '../src/commands/dispatch.ts';
 import { runDispatches } from '../src/commands/dispatches.ts';
-import { runShow } from '../src/commands/show.ts';
 import { tempRepo } from './helpers.ts';
 
 /**
@@ -834,52 +833,3 @@ function seedRunWithHostDispatch(t: TestContext, dispatchId: string): { root: st
   return { root, runId };
 }
 
-test('show: a host dispatch whose agent stopped no longer reads as merely running', (t) => {
-  const id = 'd10c8f9a-1111-2222-3333-444455556666';
-  const { root, runId } = seedRunWithHostDispatch(t, id);
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(
-    join(root, DISPATCHES_FILE),
-    `${JSON.stringify(
-      stopRow({
-        workspace: {
-          tree: `.fadeno/local/host-worktrees/${runId}/${id}`,
-          git: 'dirty',
-          entries: ['M src/a.ts'],
-          entry_count: 3,
-          truncated: false,
-          note: null,
-        },
-        dispatch_correlation: { dispatch_id: id, scope: runId, basis: 'host_worktree_path' },
-      }),
-    )}\n`,
-    'utf8',
-  );
-
-  const shown = runShow({ repoRoot: root, run: runId });
-  const request = shown.projection!.requests.find((candidate) => candidate.dispatchId === id)!;
-  // `state` stays the run ledger's own vocabulary: an outside observation about
-  // an agent must not masquerade as a lifecycle event the ledger never wrote.
-  assert.equal(request.state, 'requested');
-  assert.equal(request.agentStopped?.basis, 'host_worktree_path');
-  assert.equal(request.agentStopped?.agentType, 'fadeno:worker');
-  assert.equal(request.agentStopped?.dirtyPaths, 3);
-  assert.equal(request.agentStopped?.scope, runId);
-});
-
-test('show: a dispatch no stop row named is left alone', (t) => {
-  const { root, runId } = seedRunWithHostDispatch(t, 'd10c8f9a-1111-2222-3333-444455556666');
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(join(root, DISPATCHES_FILE), `${JSON.stringify(stopRow())}\n`, 'utf8');
-  const shown = runShow({ repoRoot: root, run: runId });
-  // An uncorrelated stop is real evidence and renders in `fadeno dispatches`;
-  // it simply has nothing to say about any particular run dispatch, and
-  // pinning it on the only open one would be the guess this refuses to make.
-  assert.equal(shown.projection!.requests[0]!.agentStopped, null);
-});
-
-test('show: an absent dispatch ledger is a silence, not a crash', (t) => {
-  const { root, runId } = seedRunWithHostDispatch(t, 'd10c8f9a-1111-2222-3333-444455556666');
-  const shown = runShow({ repoRoot: root, run: runId });
-  assert.equal(shown.projection!.requests[0]!.agentStopped, null);
-});
