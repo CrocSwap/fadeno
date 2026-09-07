@@ -159,24 +159,30 @@ test('status answers with the routing dial prints, and nothing needs attention o
   assert.ok(result.attention.every((item) => /has no lane from here/.test(item)), result.attention.join('\n'));
 });
 
-test('status names an unlinked CLI, a hand-written agent file, and open work', (t) => {
+test('status names an unlinked CLI, an agent file that answers an archetype, and open work', (t) => {
   const { root, user } = seed(t);
   // No setup ran, so there is no link.
   mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
   writeFileSync(join(root, '.claude', 'agents', 'worker.md'), '---\nname: worker\nmodel: haiku\n---\nmine\n', 'utf8');
   mkdirSync(join(root, 'home', '.codex', 'agents'), { recursive: true });
-  writeFileSync(join(root, 'home', '.codex', 'agents', 'reviewer.toml'), 'model = "gpt-5"\n', 'utf8');
+  // The filename says `fadeno-reviewer`; the file says `name = "reviewer"`,
+  // and the name is what a spawn asks for. A check that probed filenames
+  // missed exactly these — every file an earlier Fadeno wrote at user scope.
+  writeFileSync(join(root, 'home', '.codex', 'agents', 'fadeno-reviewer.toml'), 'name = "reviewer"\nmodel = "gpt-5"\n', 'utf8');
+  // Nobody's archetype, so nobody's business.
+  writeFileSync(join(root, 'home', '.codex', 'agents', 'note-taker.toml'), 'name = "note-taker"\n', 'utf8');
 
   const result = runStatus({ repoRoot: root, userPathOptions: user });
   assert.equal(result.link.state, 'missing');
   assert.deepEqual(
     result.agentFiles.map((file) => [file.archetype, file.harness, file.scope]),
-    [['reviewer', 'codex', 'user'], ['worker', 'claude', 'project']],
+    [['worker', 'claude', 'project'], ['reviewer', 'codex', 'user']],
   );
   const attention = result.attention.join('\n');
   assert.match(attention, /no `fadeno` linked at .*run `fadeno setup`/);
-  assert.match(attention, /reviewer.toml defines "reviewer" by hand \(user scope, codex\)\. A Codex agent file wins over the model a spawn passes/);
-  assert.match(attention, /worker\.md defines "worker" by hand \(project scope, claude\)/);
+  assert.match(attention, /fadeno-reviewer\.toml defines the agent "reviewer" \(user scope, codex\)\. A Codex agent file wins over the model a spawn passes/);
+  assert.match(attention, /worker\.md defines the agent "worker" \(project scope, claude\)/);
+  assert.doesNotMatch(attention, /note-taker/);
 });
 
 test('status refuses in one voice with dial when the machine-local dials cannot be read', (t) => {

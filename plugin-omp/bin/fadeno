@@ -12197,6 +12197,17 @@ function linkState(path) {
     return { path, target: null, state: "missing" };
   }
 }
+function declaredAgentName(path, ext) {
+  const fallback = (0, import_node_path15.basename)(path, ext);
+  let text;
+  try {
+    text = (0, import_node_fs16.readFileSync)(path, "utf8").slice(0, 4096);
+  } catch {
+    return fallback;
+  }
+  const declared = ext === ".toml" ? /^\s*name\s*=\s*["']([^"'\n]+)["']/m.exec(text) : /^name:\s*([^\n]+)$/m.exec(text);
+  return declared?.[1]?.trim() || fallback;
+}
 function shadowingAgentFiles(repoRoot, archetypes, options) {
   const home = options?.home ?? (0, import_node_os3.homedir)();
   const env = options?.env ?? process.env;
@@ -12207,11 +12218,21 @@ function shadowingAgentFiles(repoRoot, archetypes, options) {
     { dir: codexUserAgentDir(options), harness: "codex", scope: "user", ext: ".toml" },
     { dir: (0, import_node_path15.join)(repoRoot, ".codex", "agents"), harness: "codex", scope: "project", ext: ".toml" }
   ];
+  const routed = /* @__PURE__ */ new Set([...archetypes, "dispatch"]);
   const found = [];
-  for (const name of [...archetypes, "dispatch"]) {
-    for (const root of roots) {
-      const path = (0, import_node_path15.join)(root.dir, `${name}${root.ext}`);
-      if ((0, import_node_fs16.existsSync)(path)) found.push({ path, archetype: name, harness: root.harness, scope: root.scope });
+  for (const root of roots) {
+    let entries;
+    try {
+      entries = (0, import_node_fs16.readdirSync)(root.dir).sort();
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(root.ext)) continue;
+      const path = (0, import_node_path15.join)(root.dir, entry);
+      const archetype = declaredAgentName(path, root.ext);
+      if (!routed.has(archetype)) continue;
+      found.push({ path, archetype, harness: root.harness, scope: root.scope });
     }
   }
   return found;
@@ -12250,7 +12271,7 @@ function runStatus(opts = {}) {
   }
   for (const file of agentFiles) {
     attention.push(
-      `${file.path} defines "${file.archetype}" by hand (${file.scope} scope, ${file.harness}). ` + (file.harness === "codex" ? "A Codex agent file wins over the model a spawn passes, so it overrides the dial." : "It supplies the prompt and tools for that spawn, whatever the dial says.")
+      `${file.path} defines the agent "${file.archetype}" (${file.scope} scope, ${file.harness}). ` + (file.harness === "codex" ? "A Codex agent file wins over the model a spawn passes, so it overrides the dial." : "It supplies the prompt and tools for that spawn, whatever the dial says.")
     );
   }
   if (worktrees.length > 0) {

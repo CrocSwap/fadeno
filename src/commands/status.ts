@@ -1,6 +1,6 @@
-import { existsSync, lstatSync, readlinkSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { activeHarness } from '../lib/executors.ts';
 import { unclosedDispatches } from '../lib/ledger.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
@@ -67,8 +67,33 @@ function linkState(path: string): StatusResult['link'] {
 }
 
 /**
- * Hand-written agent files whose name Fadeno routes, in the four places the
- * two hook-capable harnesses read them from.
+ * The agent name a definition file DECLARES, which is not always its filename.
+ *
+ * The one that matters: `~/.codex/agents/fadeno-worker.toml` declares
+ * `name = "worker"`, so it answers a `worker` spawn while looking, from the
+ * directory listing, like it could not. A check that probed filenames missed
+ * exactly the files an earlier Fadeno had written.
+ */
+function declaredAgentName(path: string, ext: string): string {
+  const fallback = basename(path, ext);
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8').slice(0, 4096);
+  } catch {
+    return fallback;
+  }
+  const declared = ext === '.toml'
+    ? /^\s*name\s*=\s*["']([^"'\n]+)["']/m.exec(text)
+    : /^name:\s*([^\n]+)$/m.exec(text);
+  return declared?.[1]?.trim() || fallback;
+}
+
+/**
+ * Agent files whose name Fadeno routes, in the four places the two
+ * hook-capable harnesses read them from.
+ *
+ * The directory is listed rather than probed, and each file is asked what it
+ * calls itself — see `declaredAgentName`.
  */
 function shadowingAgentFiles(
   repoRoot: string,
@@ -84,14 +109,24 @@ function shadowingAgentFiles(
     { dir: codexUserAgentDir(options), harness: 'codex', scope: 'user', ext: '.toml' },
     { dir: join(repoRoot, '.codex', 'agents'), harness: 'codex', scope: 'project', ext: '.toml' },
   ];
-  const found: ShadowingAgentFile[] = [];
   // `dispatch` is on the list because the spawn hook prefers a bare `dispatch`
   // agent where one exists: a file by that name is not shadowing the proxy, it
   // IS the proxy, and a person should know which one is running.
-  for (const name of [...archetypes, 'dispatch']) {
-    for (const root of roots) {
-      const path = join(root.dir, `${name}${root.ext}`);
-      if (existsSync(path)) found.push({ path, archetype: name, harness: root.harness, scope: root.scope });
+  const routed = new Set([...archetypes, 'dispatch']);
+  const found: ShadowingAgentFile[] = [];
+  for (const root of roots) {
+    let entries: string[];
+    try {
+      entries = readdirSync(root.dir).sort();
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(root.ext)) continue;
+      const path = join(root.dir, entry);
+      const archetype = declaredAgentName(path, root.ext);
+      if (!routed.has(archetype)) continue;
+      found.push({ path, archetype, harness: root.harness, scope: root.scope });
     }
   }
   return found;
@@ -144,7 +179,7 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   }
   for (const file of agentFiles) {
     attention.push(
-      `${file.path} defines "${file.archetype}" by hand (${file.scope} scope, ${file.harness}). ` +
+      `${file.path} defines the agent "${file.archetype}" (${file.scope} scope, ${file.harness}). ` +
         (file.harness === 'codex'
           ? 'A Codex agent file wins over the model a spawn passes, so it overrides the dial.'
           : 'It supplies the prompt and tools for that spawn, whatever the dial says.'),
