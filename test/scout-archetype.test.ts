@@ -15,7 +15,7 @@ import {
 import { tempRepo } from './helpers.ts';
 
 /**
- * Starter-catalog `generator` — the fourth canon — plus the parse / resolve /
+ * Starter-catalog `scout` — the fourth canon — plus the parse / resolve /
  * conflict / dial contracts it depends on.
  */
 
@@ -39,34 +39,36 @@ function seedProfile(t: TestContext, doc: Record<string, unknown>): string {
   return root;
 }
 
-test('starter catalog: generator stands alone — no fallback, and no policy left to carry', () => {
+test('starter catalog: scout stands alone — no fallback, and carries only its description', () => {
   // Both stay LISTED with empty policy: their only key was a write posture,
   // but membership in this map is itself meaningful — it is the canon set a
   // self-contained project is measured against. What they no longer carry is
   // any permission claim.
   const profile = parseStarter();
-  assert.deepEqual(profile.archetypes.generator, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
-  assert.deepEqual(profile.archetypes.worker, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.equal(profile.archetypes.scout?.fallback, null);
+  assert.match(profile.archetypes.scout?.description ?? '', /Explores and reports/);
+  assert.equal(profile.archetypes.worker?.fallback, null);
+  assert.match(profile.archetypes.worker?.description ?? '', /Implements a described change/);
   assert.doesNotMatch(JSON.stringify(profile.archetypes), /requiresWrite/);
 });
 
-test('starter catalog: an undialed generator resolves to the host-native base, never through worker', () => {
+test('starter catalog: an undialed scout resolves to the host-native base, never through worker', () => {
   const profile = parseStarter();
   const baseLayers = { session: {}, repo: {}, user: {} };
-  const native = resolveRole('prover', 'generator', profile, baseLayers as any);
+  const native = resolveRole('prover', 'scout', profile, baseLayers as any);
   assert.equal(native.delivery.model, 'current-host');
   assert.equal(native.source, 'base');
   assert.equal(native.resolvedVia, null);
 
-  // A worker dial no longer leaks into generator: it stays on base.
+  // A worker dial no longer leaks into scout: it stays on base.
   const lunaLayers = { session: {}, repo: { worker: { model: 'luna' } }, user: {} };
-  const stillBase = resolveRole('prover', 'generator', profile, lunaLayers as any);
+  const stillBase = resolveRole('prover', 'scout', profile, lunaLayers as any);
   assert.equal(stillBase.delivery.model, 'current-host');
   assert.equal(stillBase.source, 'base');
   assert.equal(stillBase.resolvedVia, null);
 
   // Its own dial works like any archetype's.
-  const own = resolveRole('prover', 'generator', profile, { session: {}, repo: {}, user: { generator: { model: 'luna' } } } as any);
+  const own = resolveRole('prover', 'scout', profile, { session: {}, repo: {}, user: { scout: { model: 'luna' } } } as any);
   assert.equal(own.delivery.model, 'luna');
   assert.equal(own.source, 'user');
 });
@@ -116,6 +118,6 @@ test('archetypes: boolean aliases parse to required/none', () => {
     harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.stdout.write(\'x\')'] } },
     archetypes: { worker: { }, reviewer: { } },
   });
-  assert.deepEqual(profile.archetypes.worker, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
-  assert.deepEqual(profile.archetypes.reviewer, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.worker, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null, description: null });
+  assert.deepEqual(profile.archetypes.reviewer, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null, description: null });
 });

@@ -371,8 +371,8 @@ test('archetypes: requires_write parses; an absent block is an empty map', () =>
     archetypes: { worker: { }, reviewer: { } },
   });
   assert.deepEqual(profile.archetypes, {
-    worker: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
-    reviewer: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
+    worker: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null, description: null },
+    reviewer: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null, description: null },
   });
   assert.deepEqual(parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'] } } }).archetypes, {});
 });

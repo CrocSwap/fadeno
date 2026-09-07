@@ -160,7 +160,7 @@ test('suppressedCanonArchetypes: computed only when a self-contained project sup
   assert.deepEqual(loadLayeredProfile(onlyProject.root, onlyProject.paths).layers, ['project']);
   // Project suppresses builtin layering when self-contained; canon set includes worker etc.
   const suppressed = loadLayeredProfile(onlyProject.root, onlyProject.paths).suppressedCanonArchetypes;
-  assert.ok(suppressed.includes('generator'));
+  assert.ok(suppressed.includes('scout'));
   assert.ok(suppressed.includes('worker'));
 
   const withWorker = seedProject(t, { ...V3_BASE, archetypes: { worker: { } } });

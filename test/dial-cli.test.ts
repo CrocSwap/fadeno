@@ -75,14 +75,14 @@ test('dial show: rows follow the canon power order, extras alphabetical after', 
       reviewer: { },
       judge: { },
       director: { },
-      generator: { },
       scout: {},
+      auditor: {},
     },
   });
   const result = runDialShow({ repoRoot: root, userPathOptions: isolated(root) });
   assert.deepEqual(
     result.rows.map((r) => r.archetype),
-    ['director', 'judge', 'reviewer', 'generator', 'worker', 'scout'],
+    ['director', 'judge', 'reviewer', 'scout', 'worker', 'auditor'],
   );
 });
 

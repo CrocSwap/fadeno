@@ -374,7 +374,7 @@ harnesses:
 # now error at load. See docs/experimental/harness-neutral-dials.md and
 # docs/experimental/permissions-and-isolation.md before reintroducing anything
 # of that shape.
-# `generator` is divergent artifact-producing work that must not mutate the
+# `scout` is divergent artifact-producing work that must not mutate the
 # workspace. It is its own archetype: undialed it resolves to the host-native
 # base (current-host) like any other, never through another archetype's dial.
 # (`fallback` remains available for custom archetypes: binding-only — an
@@ -393,21 +393,21 @@ harnesses:
 # `argvGrantsFadenoShell`; it knows both vocabularies, and a new harness whose
 # lane spells approval some third way must be taught there or the column will
 # quietly answer `false` for it.
+# The canonical archetypes. The set is open: add your own entry here with a
+# `description:` and a director will know when to reach for it. A description
+# is what a director reads when choosing what to spawn next, so write it as
+# the sentence that tells one archetype from another.
 archetypes:
-  # `worker` and `generator` declare no policy — their only key was a write
-  # posture, which no longer exists. They stay listed because membership in
-  # this map is itself meaningful: it is the canon set a self-contained
-  # project is measured against (`suppressedCanonArchetypes`), so deleting the
-  # entries would silently shrink that warning.
-  worker: {}
-  generator: {}
+  worker:
+    description: Implements a described change in its own worktree, commits it on its branch, and reports what the tree holds.
+  reviewer:
+    description: Reviews a change, diff, or artifact for correctness, edge cases, safety, and tests; reports findings and changes nothing.
+  judge:
+    description: Evaluates and scores candidate attempts or artifacts against stated criteria and picks a winner.
+  scout:
+    description: Explores and reports; searches code and documents, gathers facts, produces a summary, and changes nothing.
   director:
-    # Composed ahead of every director dispatch (briefs/director.md): teaches
-    # the spawned model to coordinate through fadeno instead of doing the
-    # work itself. Lanes without fadeno capability declare
-    # `eligibility: { director: forbidden }` — the block is structural, so it
-    # also covers unregistered models falling through to those lanes.
-    brief: director
+    description: Coordinates a whole task; decomposes it, spawns the other archetypes, integrates their work, and reports. Never does the work itself.
 
 # Where a model nobody registered goes. Its id is passed verbatim, so this must
 # name a harness that can accept an arbitrary id — OpenCode via OpenRouter.

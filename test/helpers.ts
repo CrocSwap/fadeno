@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
@@ -202,4 +203,26 @@ const STARTER_CATALOG = join(import.meta.dirname, '..', 'templates', 'common', '
 export function seedStarterCatalog(root: string): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   copyFileSync(STARTER_CATALOG, join(root, '.fadeno', 'executors.yaml'));
+}
+
+/** Run git in `root`, throwing on failure — for test setup only. */
+export function git(root: string, args: string[]): string {
+  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
+  return result.stdout;
+}
+
+/**
+ * A throwaway git repository with one commit on `main`, identity configured
+ * locally so the developer's global git config is never consulted.
+ */
+export function gitRepo(t: TestContext): string {
+  const root = tempRepo(t);
+  git(root, ['init', '-q', '-b', 'main']);
+  git(root, ['config', 'user.email', 'fadeno-test@example.invalid']);
+  git(root, ['config', 'user.name', 'fadeno test']);
+  writeFileSync(join(root, 'base.txt'), 'base\n');
+  git(root, ['add', '-A']);
+  git(root, ['commit', '-q', '-m', 'init']);
+  return root;
 }

@@ -8157,7 +8157,7 @@ function argvGrantsFadenoShell(argv) {
   }
   return false;
 }
-var ARCHETYPE_DISPLAY_ORDER = ["director", "judge", "reviewer", "generator", "worker"];
+var ARCHETYPE_DISPLAY_ORDER = ["director", "judge", "reviewer", "scout", "worker"];
 var ROLE_ARCHETYPES = ["worker", "reviewer", "judge"];
 function knownArchetypes(archetypes, ...extra) {
   const names = new Set(ROLE_ARCHETYPES);
@@ -8367,7 +8367,8 @@ var CATALOG_TOP_LEVEL_KEYS = [
   "unregistered_model_harness",
   "tools",
   "worktree_carry",
-  "surfaces"
+  "surfaces",
+  "unclosed_limit"
 ];
 var V4_REMOVED_CATALOG_KEYS = {
   routes: "harnesses: (one table keyed by harness id; `host: true` is gone \u2014 the host is discovered at dispatch time)",
@@ -8451,9 +8452,10 @@ var ARCHETYPE_POLICY_KEYS = [
   "ignored_output",
   "fallback",
   "distinct_provider_from_inputs",
-  "brief"
+  "brief",
+  "description"
 ];
-var ARCHETYPE_POLICY_KEY_FORMS = "`ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief`";
+var ARCHETYPE_POLICY_KEY_FORMS = "`ignored_output`, `fallback`, `distinct_provider_from_inputs`, `brief`, and `description`";
 function unknownArchetypeKeys(rawPolicy) {
   return Object.keys(rawPolicy).filter((key) => !ARCHETYPE_POLICY_KEYS.includes(key));
 }
@@ -8786,6 +8788,14 @@ function parseExecutorProfile(text2, source, host = "standalone") {
       bindings[role] = parseDialRef(rawRef, `bindings.${role}`);
     }
   }
+  let unclosedLimit = null;
+  if (doc.unclosed_limit !== void 0 && doc.unclosed_limit !== null) {
+    const raw = doc.unclosed_limit;
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+      throw new ExecutorProfileError(`${source}: \`unclosed_limit\` must be a positive integer; found ${JSON.stringify(raw)}.`);
+    }
+    unclosedLimit = raw;
+  }
   if (doc.unregistered_model_driver !== void 0) throw v4MigrationError(source, "unregistered_model_driver");
   let unregisteredModelHarness = "opencode";
   if (doc.unregistered_model_harness !== void 0) {
@@ -8840,7 +8850,14 @@ function parseExecutorProfile(text2, source, host = "standalone") {
         }
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief };
+      let description = null;
+      if (rawPolicy.description != null) {
+        if (typeof rawPolicy.description !== "string" || rawPolicy.description.trim().length === 0) {
+          throw new ExecutorProfileError(`${source}: \`archetypes.${name}.description\` must be a non-empty string.`);
+        }
+        description = rawPolicy.description.trim();
+      }
+      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief, description };
     }
     for (const start of Object.keys(archetypes)) {
       const path = [];
@@ -8982,6 +8999,7 @@ function parseExecutorProfile(text2, source, host = "standalone") {
     archetypes,
     constraints,
     unregisteredModelHarness,
+    unclosedLimit,
     host,
     schemaVersion: 4,
     notes,

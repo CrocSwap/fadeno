@@ -305,7 +305,7 @@ export function argvGrantsFadenoShell(argv: readonly string[]): boolean {
  * Canon archetype display order — most→least powerful model typically slotted
  * into the role. Non-canon archetypes sort alphabetically after.
  */
-export const ARCHETYPE_DISPLAY_ORDER = ['director', 'judge', 'reviewer', 'generator', 'worker'] as const;
+export const ARCHETYPE_DISPLAY_ORDER = ['director', 'judge', 'reviewer', 'scout', 'worker'] as const;
 
 /**
  * The three role archetypes every profile has whether or not it says so:
@@ -319,7 +319,7 @@ export const ROLE_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
  *
  * `profile.archetypes` is a policy overlay: an archetype earns an entry by
  * having something non-default to say (`requires_write`, `brief`, `fallback`).
- * The builtin catalog therefore declares `worker`, `director` and `generator`
+ * The builtin catalog therefore declares `worker`, `director` and `scout`
  * and stays silent about `reviewer` and `judge`, whose posture is entirely
  * default — they are no less real for it.
  *
@@ -399,6 +399,12 @@ export interface ArchetypePolicy {
    * input producer's. Absent YAML is `null` (no check).
    */
   distinctProviderFromInputs: ProviderDistinctness | null;
+  /**
+   * What this archetype is for, in a sentence a director reads when choosing
+   * what to spawn next. Null when the catalog declares none; the canonical
+   * five fall back to the builtin text in `lib/contracts.ts`.
+   */
+  description: string | null;
 }
 
 // --- Dial / model registry types ---
@@ -798,6 +804,11 @@ export interface ExecutorProfile {
   archetypes: Record<string, ArchetypePolicy>;
   constraints: { command: string[] } | null;
   unregisteredModelHarness: string;
+  /**
+   * How many unclosed dispatches this repository tolerates before the next
+   * spawn is refused (spec §05). Repo-scoped policy; `null` means the default.
+   */
+  unclosedLimit: number | null;
   /** The HOST: the harness this call is running inside. */
   host?: HarnessId;
   schemaVersion?: 4;
@@ -1036,6 +1047,7 @@ export const CATALOG_TOP_LEVEL_KEYS = [
   'tools',
   'worktree_carry',
   'surfaces',
+  'unclosed_limit',
 ] as const;
 
 export type CatalogTopLevelKey = (typeof CATALOG_TOP_LEVEL_KEYS)[number];
@@ -1177,11 +1189,12 @@ const ARCHETYPE_POLICY_KEYS: readonly string[] = [
   'fallback',
   'distinct_provider_from_inputs',
   'brief',
+  'description',
 ];
 
 /** The same list as prose, for the catalog parser's messages. */
 const ARCHETYPE_POLICY_KEY_FORMS =
-  '`ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief`';
+  '`ignored_output`, `fallback`, `distinct_provider_from_inputs`, `brief`, and `description`';
 
 function unknownArchetypeKeys(rawPolicy: Record<string, unknown>): string[] {
   return Object.keys(rawPolicy).filter((key) => !ARCHETYPE_POLICY_KEYS.includes(key));
@@ -1602,6 +1615,15 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
     }
   }
 
+  // unclosed_limit
+  let unclosedLimit: number | null = null;
+  if (doc.unclosed_limit !== undefined && doc.unclosed_limit !== null) {
+    const raw = doc.unclosed_limit;
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
+      throw new ExecutorProfileError(`${source}: \`unclosed_limit\` must be a positive integer; found ${JSON.stringify(raw)}.`);
+    }
+    unclosedLimit = raw;
+  }
   // unregistered_model_harness
   if (doc.unregistered_model_driver !== undefined) throw v4MigrationError(source, 'unregistered_model_driver');
   let unregisteredModelHarness = 'opencode';
@@ -1666,7 +1688,14 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
         }
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief };
+      let description: string | null = null;
+      if (rawPolicy.description != null) {
+        if (typeof rawPolicy.description !== 'string' || rawPolicy.description.trim().length === 0) {
+          throw new ExecutorProfileError(`${source}: \`archetypes.${name}.description\` must be a non-empty string.`);
+        }
+        description = rawPolicy.description.trim();
+      }
+      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief, description };
     }
     for (const start of Object.keys(archetypes)) {
       const path: string[] = [];
@@ -1860,6 +1889,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
     archetypes,
     constraints,
     unregisteredModelHarness,
+    unclosedLimit,
     host,
     schemaVersion: 4,
     notes,
@@ -3302,7 +3332,14 @@ export function parseSnapshotDocument(text: string, source: string): SnapshotDoc
         if (typeof rawPolicy.brief !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.brief)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.brief\` must be a bare lowercase identifier.`);
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief };
+      let description: string | null = null;
+      if (rawPolicy.description != null) {
+        if (typeof rawPolicy.description !== 'string' || rawPolicy.description.trim().length === 0) {
+          throw new ExecutorProfileError(`${source}: \`archetypes.${name}.description\` must be a non-empty string.`);
+        }
+        description = rawPolicy.description.trim();
+      }
+      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief, description };
     }
     for (const start of Object.keys(archetypes)) {
       const path: string[] = [];

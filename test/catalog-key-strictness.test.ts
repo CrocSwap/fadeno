@@ -230,6 +230,10 @@ const SURVIVES_THE_MERGE: Record<string, { declare: Record<string, unknown>; che
     declare: { surfaces: ['src/cli.ts'] },
     check: (p) => assert.deepEqual(p.surfaces, ['src/cli.ts']),
   },
+  unclosed_limit: {
+    declare: { unclosed_limit: 8 },
+    check: (p) => assert.equal(p.unclosedLimit, 8),
+  },
 };
 
 test('every advertised top-level key survives the merge and reaches the parsed profile', (t) => {
