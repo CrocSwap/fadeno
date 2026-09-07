@@ -272,6 +272,17 @@ function refreshProgress() {
   }
   if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) { clear(); return; }
   if (typeof raw.updated_at !== 'string' || raw.updated_at === '') { clear(); return; }
+  // Not this attempt's words. A run+step+actor sidecar path is shared by every
+  // attempt of that actor, so the file we just opened may be the one the
+  // PREVIOUS attempt left behind — and mirroring it would put a finished
+  // attempt's last phase on a live attempt's claim, aged honestly, reading as
+  // one stuck agent. A report stamped before we spawned is not ours.
+  // Unparsable time clears too: a record that cannot be aged cannot be shown
+  // to belong here. Same rule as \`progressBelongsToAttempt\` in
+  // attempt-progress.ts, which is where it is explained and tested; it is
+  // restated here because this source is a \`-e\` string and cannot import.
+  const reportedMs = Date.parse(raw.updated_at);
+  if (!Number.isFinite(reportedMs) || reportedMs < startedMs) { clear(); return; }
   const str = (value) => (typeof value === 'string' && value !== '' ? value : null);
   progressState = str(raw.state);
   progressPhase = str(raw.phase);
@@ -304,6 +315,12 @@ function writeClaim() {
       // reader would have to re-derive the command from the ledger to say
       // anything honest about the silence.
       command: [cmd, ...args],
+      // Whether anyone ever pointed us at a sidecar. Without this the reader
+      // cannot tell an attempt that had nowhere to look from one that looked
+      // and found the agent saying nothing — the first is a fact about the
+      // dispatch, the second is a fact about the agent, and only one of them
+      // is worth printing next to the byte counters.
+      progress_configured: !!progressPath,
       // Omitted entirely when the agent has said nothing, so "no sidecar yet"
       // and "a sidecar that says nothing" stay distinguishable to a reader.
       ...(progressUpdatedAt != null ? {
@@ -504,11 +521,22 @@ export function superviseArgv(
   statusPath = '',
   claimOwner?: SupervisorClaimOwner,
   /**
-   * Absolute path of the attempt's cooperative progress sidecar, when the
-   * caller has a run context to name one — `<workspace>/` +
-   * `attemptProgressRelPath(runId, stepExecutionId)`. Given it, the supervisor
-   * mirrors the agent's self-report onto its claim once a second. Omitted for
-   * ad-hoc dispatches, which have no actor call and therefore no sidecar.
+   * Absolute path of the attempt's cooperative progress sidecar. Given it, the
+   * supervisor mirrors the agent's self-report onto its claim once a second
+   * and stamps `progress_configured: true`.
+   *
+   * Two derivations feed this, and which one applies is decided by whether the
+   * attempt has a run. An engine attempt uses `<workspace>/` +
+   * `attemptProgressRelPath(runId, step, actor)` — the path its own rendered
+   * prompt named. A runless ad-hoc dispatch uses `<repoRoot>/` +
+   * `dispatchProgressRelPath(dispatchId)`, and learns it from the
+   * `FADENO_PROGRESS_SIDECAR` environment variable rather than from its prompt
+   * bytes; see `DISPATCH_PROGRESS_FOOTER` in dispatch.ts for why it cannot
+   * come through the prompt.
+   *
+   * Omit it only where there is genuinely no agent to write one — a registered
+   * tool step, for instance. Omitting it where an agent WAS told a path is the
+   * silent failure this whole path exists to remove.
    */
   progressPath?: string | null,
 ): string[] {
@@ -670,6 +698,12 @@ export interface InflightClaim {
   progressUpdatedAt: string | null;
   progressSource: string | null;
   /**
+   * Whether this attempt was pointed at a sidecar at all. `null` on a claim
+   * written before the field existed. It is what separates the two silences —
+   * see `describeSelfReport` in `attempt-progress.ts`.
+   */
+  progressConfigured: boolean | null;
+  /**
    * The executor's argv, so a reader can tell a stalled streaming executor
    * from a healthy print-at-exit one. Null on claims written before this
    * field existed. Feed it to `isPrintAtExitArgv` / `describeIdleOutput`.
@@ -817,6 +851,12 @@ export function readInflightClaim(path: string, read: (p: string) => string): In
     progressCurrent: text(parsed.progress_current),
     progressUpdatedAt: text(parsed.progress_updated_at),
     progressSource: text(parsed.progress_source),
+    // Tri-state on purpose. `null` is a claim from a supervisor that predates
+    // the field, which genuinely does not say whether a sidecar was
+    // configured; coercing that to `false` would invent a reading.
+    progressConfigured: typeof parsed.progress_configured === 'boolean'
+      ? (parsed.progress_configured as boolean)
+      : null,
     command: Array.isArray(parsed.command) && parsed.command.every((part) => typeof part === 'string')
       ? (parsed.command as string[])
       : null,

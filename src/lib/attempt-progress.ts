@@ -60,6 +60,51 @@ export interface ClaimProgressFields {
   progressCurrent?: string | null;
   progressUpdatedAt?: string | null;
   progressSource?: string | null;
+  /**
+   * Whether this attempt was given a sidecar path at all.
+   *
+   * Without it the two silences collapse. An attempt nobody configured a
+   * sidecar for and an attempt whose agent has written nothing both produce a
+   * claim with no progress fields, and a reader shown the same blank for both
+   * cannot tell "there was never anywhere to look" from "we looked and the
+   * agent is saying nothing" — which are different facts about the dispatch,
+   * and only the second is about the agent. `null` on a claim written before
+   * this field existed: a third state, and honestly a third state, because
+   * such a claim genuinely does not say.
+   */
+  progressConfigured?: boolean | null;
+}
+
+/** What a reader can honestly say about an attempt's self-report. */
+export type SelfReportKind =
+  /** A sidecar was configured and the agent has written to it. */
+  | 'reported'
+  /** A sidecar was configured; the agent has not written anything readable to it. */
+  | 'configured_silent'
+  /** No sidecar was configured, so there is nothing to have read. */
+  | 'unconfigured';
+
+export interface SelfReportDescription {
+  kind: SelfReportKind;
+  /** The record itself, present only on `reported`. */
+  progress: AttemptProgress | null;
+}
+
+/**
+ * Which of the three things a claim's progress fields mean.
+ *
+ * Split out from the renderers so that every surface answers the question the
+ * same way, and so the distinction that matters — configured-and-silent is a
+ * READING, unconfigured is the absence of one — cannot be lost by a caller
+ * that only checked for a record. "Never write a positive claim without a
+ * reading behind it" cuts both ways: `configured_silent` is a positive claim
+ * about the agent and is only reachable when a sidecar path was actually set.
+ */
+export function describeSelfReport(claim: ClaimProgressFields | null | undefined): SelfReportDescription {
+  const progress = readClaimProgress(claim);
+  if (progress != null) return { kind: 'reported', progress };
+  if (claim?.progressConfigured === true) return { kind: 'configured_silent', progress: null };
+  return { kind: 'unconfigured', progress: null };
 }
 
 /**
@@ -82,6 +127,91 @@ export interface ClaimProgressFields {
  */
 export function attemptProgressRelPath(runId: string, step: string, actor: string | null): string {
   return progressSidecarPath(runId, step, actor);
+}
+
+/**
+ * The engine sidecar an ENGINE REQUEST names, for either prompt shape.
+ *
+ * There are two spellings and the choice between them is not a preference: a
+ * compositional request is prompted by `assembleCompositePrompt`, which names
+ * `<run>/<step_execution_id>.json`, and a plain one by `renderStepPrompt`,
+ * which names `<run>/<step>--<actor>.json`. Picking the wrong one finds no
+ * file and reports a working agent as silent.
+ *
+ * That branch used to be written out at each place that needed it — `cli.ts`
+ * printed one for a person to `cat`, and nothing else derived it at all. It is
+ * a function now because the command fallback needs the SAME answer `cli.ts`
+ * prints, and two hand-copied branches is how the two drift.
+ */
+export function requestProgressRelPath(request: {
+  run: string;
+  step: string;
+  actor: string | null;
+  stepExecutionId: string;
+  nodeInstanceId?: string | null;
+}): string {
+  if (request.nodeInstanceId == null) {
+    return attemptProgressRelPath(request.run, request.step, request.actor);
+  }
+  const safe = (value: string): string => value.replace(/[^A-Za-z0-9_.-]+/g, '_');
+  return `.fadeno/progress/${safe(request.run)}/${safe(request.stepExecutionId)}.json`;
+}
+
+/**
+ * Where a RUNLESS attempt's sidecar lives, relative to the repository root.
+ *
+ * An ad-hoc `fadeno dispatch` has no run, no step and no actor, so
+ * `attemptProgressRelPath` has nothing to key on. What it does have is the
+ * uuid on its own evidence rows, and that uuid is already the identity every
+ * other machine-local artifact of the dispatch is filed under — the prompt
+ * snapshot, the stdout snapshot, the in-flight claim. The sidecar joins them.
+ *
+ * REPOSITORY-ROOT-relative, not workspace-relative, and that is the one real
+ * decision here. An ad-hoc dispatch may run in the shared tree, in a
+ * kernel-isolated worktree, or as one blinded arm of a pair, and which of
+ * those it is gets settled AFTER this path has to exist. Anchoring at the repo
+ * root means the kernel derives it once, before the isolation decision, and
+ * the answer stays true whatever that decision turns out to be. It also keeps
+ * a live agent's status file out of the worktree whose diff becomes the
+ * delivery: a sidecar written inside an isolated arm would be one more
+ * untracked file in the thing being merged back.
+ *
+ * `.fadeno/local/` because this is machine-local bookkeeping — gitignored,
+ * never ledger evidence, never gating — which is the same rule that put
+ * `prompts/`, `outputs/` and `inflight/` there.
+ */
+export function dispatchProgressRelPath(dispatchId: string): string {
+  const safe = dispatchId.replace(/[^A-Za-z0-9_.-]+/g, '_');
+  return `.fadeno/local/progress/${safe}.json`;
+}
+
+/**
+ * Whether a self-report belongs to the attempt that is reading it.
+ *
+ * A sidecar path keyed by run+step+actor is shared by every attempt of that
+ * actor, so attempt 3 opens the file attempt 2 left behind and mirrors its
+ * last words onto its own claim. Observed 2026-09-06: `fadeno show` rendered
+ * `(running) — Auditing the integrated diff…, 1h 45m 25s ago` against a live
+ * v3 attempt, quoting text a COMPLETED v2 attempt had written. Nothing gated
+ * and the age was honest, which is exactly what made it hard to see: it reads
+ * as one stuck agent rather than two attempts sharing a file.
+ *
+ * The rule is the only one available to a reader that cannot re-key the path:
+ * a report timestamped before this attempt started is not this attempt's.
+ * `startedAtMs` is the supervisor's own spawn instant, so the comparison is
+ * one process's clock against a file written on the same machine.
+ *
+ * Unparsable `updated_at` returns false. A record that cannot be aged cannot
+ * be shown to belong here, and "do not claim to know" is the standing rule.
+ *
+ * The supervisor applies this same rule inline (it runs as a `-e` source
+ * string and cannot import), so any change here must be made there too — see
+ * `refreshProgress` in supervisor.ts.
+ */
+export function progressBelongsToAttempt(updatedAt: string, startedAtMs: number): boolean {
+  const parsed = Date.parse(updatedAt);
+  if (!Number.isFinite(parsed)) return false;
+  return parsed >= startedAtMs;
 }
 
 /**

@@ -928,6 +928,25 @@ export const IN_DISPATCH_ENV = 'FADENO_IN_DISPATCH';
 export const DISPATCH_NESTING_ENV = 'FADENO_DISPATCH_NESTING';
 
 /**
+ * Absolute path of the cooperative status sidecar this executor should keep.
+ *
+ * The ENVIRONMENT, and not the prompt, because a runless dispatch's prompt
+ * cannot carry a per-dispatch value. An ad-hoc dispatch relays the caller's
+ * bytes verbatim plus a FIXED protocol footer, and the two arms of a shadow
+ * pair are handed the very same snapshot file by fd — so a path written into
+ * those bytes would be one path shared by both arms, and the challenger's
+ * self-report would land on the primary's sidecar. It would also put the
+ * primary's dispatch id in front of a challenger that is supposed to be blind
+ * to which arm it is.
+ *
+ * Environment is per-process, so each arm gets its own value, nothing in the
+ * prompt bytes moves, and no digest anywhere shifts. The prompt still carries
+ * the INSTRUCTION — constant text naming this variable — because an agent
+ * reads prompts, not environments; only the value rides here.
+ */
+export const PROGRESS_SIDECAR_ENV = 'FADENO_PROGRESS_SIDECAR';
+
+/**
  * Archetypes whose executor is *told* to coordinate through fadeno, so a
  * nested dispatch from inside their workspace is the design rather than an
  * accident. `director` earns it through its brief
@@ -948,13 +967,30 @@ export const COORDINATING_ARCHETYPES: ReadonlySet<string> = new Set(['director']
  */
 export function withDispatchProvenance(
   env: NodeJS.ProcessEnv,
-  identity: { dispatchId: string; archetype: string | null },
+  identity: {
+    dispatchId: string;
+    archetype: string | null;
+    /**
+     * Absolute path of this executor's status sidecar, when one was derived.
+     * Set here rather than at each spawn site so that every lane stamps the
+     * same variable, and so the value handed to the executor is the very
+     * expression handed to `superviseArgv` — the producer and the watcher
+     * cannot disagree about a string neither of them re-derives.
+     */
+    progressSidecar?: string | null;
+  },
 ): NodeJS.ProcessEnv {
   return {
     ...env,
     [IN_DISPATCH_ENV]: identity.dispatchId,
     [DISPATCH_NESTING_ENV]:
       identity.archetype != null && COORDINATING_ARCHETYPES.has(identity.archetype) ? 'allow' : 'deny',
+    // Absent, not empty, when there is no sidecar: the footer's instruction is
+    // conditional on the variable being SET, and an empty value would ask an
+    // agent to write to nowhere.
+    ...(identity.progressSidecar != null && identity.progressSidecar !== ''
+      ? { [PROGRESS_SIDECAR_ENV]: identity.progressSidecar }
+      : {}),
   };
 }
 

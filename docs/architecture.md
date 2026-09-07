@@ -403,6 +403,31 @@ back to ordinary file completion when no specialized candidates apply.
   observed and never ledger evidence, and — this is the whole discipline — it
   is the agent's SELF-REPORT, not a measurement: it is labelled as such
   wherever it is printed and it never gates.
+  Two further rules keep it honest. **A report older than the attempt reading
+  it is refused**: the engine path is keyed by run+step+actor and so is shared
+  by every attempt of that actor, which is how a live v3 attempt came to be
+  rendered with a completed v2's `Auditing the integrated diff…, 1h 45m ago`
+  (2026-09-06). The supervisor compares `updated_at` against its own spawn
+  instant and clears the fields when the report predates it —
+  `progressBelongsToAttempt` states the rule, the supervisor restates it inline
+  because its source is a `-e` string that cannot import. And **the two
+  silences stay apart**: `progress_configured` records whether a sidecar path
+  was ever handed over, so `describeSelfReport` can distinguish `unconfigured`
+  (nowhere to look — print nothing) from `configured_silent` (looked, agent
+  saying nothing — a reading, and printable as one).
+- **Runless progress** — an ad-hoc `fadeno dispatch` has no run, step or actor,
+  and relays the caller's prompt verbatim, so it can neither key
+  `attemptProgressRelPath` nor name a path in bytes it does not author.
+  `dispatchProgressRelPath(dispatchId)` gives it an identity
+  (`.fadeno/local/progress/<dispatch-id>.json`, alongside the same dispatch's
+  prompt, output and claim), and the contract reaches the executor **split**: a
+  constant `DISPATCH_PROGRESS_FOOTER` naming the environment variable, and the
+  per-dispatch path in `FADENO_PROGRESS_SIDECAR`. The split is forced, not
+  stylistic — a shadow pair's two arms read one snapshot file between them, so
+  a literal path in the footer would cross their sidecars and leak the
+  primary's id to a challenger that is meant to be blind. `caller_prompt_sha256`
+  is pinned above both footers and is unaffected; the footers being constant
+  keeps `prompt_sha256` a function of prompt content alone.
 - **`collective.ts`** — `reduceCollective`, the one reduction of a map's member
   parts into its collective. `drive` writes a collective through it and
   receipts the reduction (`collective_assembled`: parts in order, digest,

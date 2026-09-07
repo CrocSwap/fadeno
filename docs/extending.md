@@ -632,9 +632,37 @@ supervises an **actor call** must build the path as
 `join(spawnCwd, ...attemptProgressRelPath(runId, stepId, role).split('/'))`
 (`src/commands/drive.ts`, `beginCommandAttempt`) and never restate the sidecar
 spelling — `attemptProgressRelPath` delegates to `prompt.ts`'s
-`progressSidecarPath`, which is what told the agent where to write. Ad-hoc
-dispatches (`tool-exec.ts`, `dispatch.ts`) have no actor call and so no sidecar;
-they pass nothing.
+`progressSidecarPath`, which is what told the agent where to write.
+
+A **runless** dispatch has no actor call, and gets one anyway.
+`dispatchProgressRelPath(dispatchId)` files it at
+`.fadeno/local/progress/<dispatch-id>.json` — repo-root-relative, derived
+before the isolation decision so it stays right whether the dispatch runs
+shared, kernel-isolated, or as one arm of a pair. The ad-hoc lane
+(`runDispatch`), the shadow arm and the command fallback all pass one; the
+fallback passes the **engine** path via `requestProgressRelPath(request)`,
+because its prompt is the locked engine prompt (digest-verified, bytes
+untouchable) and that prompt already names a sidecar.
+
+**How a runless executor learns the path: the environment, never the prompt.**
+An ad-hoc dispatch relays the caller's bytes verbatim plus two FIXED footers,
+so the path cannot be written into them. Two things break if you try. Both arms
+of a shadow pair are handed the *same* prompt snapshot by fd, so one path in
+those bytes is one path for two executors and the challenger's self-report
+lands on the primary's claim; and the primary's dispatch id would then be
+visible to a challenger that can compare it against its own
+`FADENO_IN_DISPATCH`, undoing pair blinding. So `DISPATCH_PROGRESS_FOOTER`
+carries only the constant *instruction* — "if `FADENO_PROGRESS_SIDECAR` is set,
+keep your status there" — and `withDispatchProvenance` puts the per-dispatch
+*value* on the executor's environment. Constant footer bytes also keep
+`prompt_sha256` a function of prompt content alone; `caller_prompt_sha256` is
+pinned above both footers and is untouched either way.
+
+`tool-exec.ts` passes **nothing**, deliberately. A registered tool is a fixed
+argv with an empty stdin, not an agent: there is no prompt to carry the
+instruction and nothing on the other end to read one. Configuring a sidecar
+there would stamp `progress_configured: true` on a claim whose executor cannot
+write one, turning "nobody was asked" into "we asked and got silence".
 
 **No writer lock; overlap is detected, not prevented.** Fadeno used to hold a
 machine-local, repo-wide single-writer lease: a live `shared` writer blocked

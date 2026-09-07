@@ -88,7 +88,7 @@ test('dispatch: request-before-spawn pairing with 1.1 row shape', (t) => {
   assert.ok(!('exit_code' in req));
   assert.ok(!('output_sha256' in req));
   assert.ok(!('duration_ms' in req));
-  assert.equal(req.prompt_sha256, sha256Hex(`hello\n${DISPATCH_RESULT_FOOTER}`));
+  assert.equal(req.prompt_sha256, sha256Hex(echoedStdin('hello')));
   assert.equal(comp.timestamp, new Date(now.getTime() + (comp.duration_ms as number)).toISOString());
   assert.equal(req.prompt_source, 'stdin');
   assert.equal(result.promptSource, 'stdin');
@@ -476,7 +476,7 @@ test('dispatch: --prompt-file dispatches get a kernel snapshot of the composed b
   // The kernel composes the result footer onto every prompt, so it owns the
   // snapshot even for a --prompt-file dispatch — and the digest attests the
   // composed bytes, not the caller's file.
-  const composed = `from-a-file\n${DISPATCH_RESULT_FOOTER}`;
+  const composed = echoedStdin('from-a-file');
   assert.match(result.promptSnapshot, /^\.fadeno\/local\/prompts\/worker-[0-9a-f]{8}\.md$/);
   const row = evidenceRows(root).at(-1)!;
   assert.equal(row.prompt_source, 'file');

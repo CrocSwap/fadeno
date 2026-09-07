@@ -3,16 +3,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { DISPATCH_RESULT_FOOTER } from '../src/commands/dispatch.ts';
+import { DISPATCH_PROGRESS_FOOTER, DISPATCH_RESULT_FOOTER } from '../src/commands/dispatch.ts';
 
 /**
  * What an executor that echoes its stdin back (the common test-executor shape)
- * writes to stdout, given the kernel now appends the fixed result-footer to
- * every dispatch prompt. One indirection point so a footer rewording cannot
- * scatter literal bytes across the suite.
+ * writes to stdout, given the kernel appends two fixed footers — the result
+ * protocol and the progress protocol — to every dispatch prompt. One
+ * indirection point so a footer rewording cannot scatter literal bytes across
+ * the suite.
+ *
+ * Both footers are CONSTANT. That is not incidental: a per-dispatch value in
+ * these bytes would fork a shadow pair's two arms, which read one snapshot
+ * file between them. The progress protocol therefore names an environment
+ * variable and lets the environment carry the path.
  */
 export function echoedStdin(echoed: string): string {
-  return `${echoed}\n${DISPATCH_RESULT_FOOTER}`;
+  return `${echoed}\n${DISPATCH_RESULT_FOOTER}\n\n${DISPATCH_PROGRESS_FOOTER}`;
 }
 
 // Hermetic user scope for the whole suite: a developer's real `fadeno setup`

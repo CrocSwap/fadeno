@@ -5,6 +5,7 @@ import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import {
   DISPATCHES_FILE,
+  DISPATCH_PROGRESS_FOOTER,
   DISPATCH_RESULT_FOOTER,
   deriveDispatchOutcome,
   runDispatch,
@@ -101,12 +102,12 @@ test('the result footer is a fixed constant appended to every prompt, so digests
   // what keeps shadow-pair arms byte-identical to each other.
   assert.equal(rows[0]!.prompt_sha256, rows[1]!.prompt_sha256);
   assert.notEqual(rows[0]!.prompt_sha256, sha256Hex('same task'));
-  const expectedComposed = `same task\n${DISPATCH_RESULT_FOOTER}`;
+  const expectedComposed = echoedStdin('same task');
   assert.equal(rows[0]!.prompt_sha256, sha256Hex(expectedComposed));
   for (const row of rows) {
     const snapshot = readFileSync(join(root, row.prompt_snapshot as string), 'utf8');
     assert.equal(snapshot, expectedComposed);
-    assert.ok(snapshot.endsWith(DISPATCH_RESULT_FOOTER));
+    assert.ok(snapshot.endsWith(DISPATCH_PROGRESS_FOOTER));
   }
   void first; void second;
 });

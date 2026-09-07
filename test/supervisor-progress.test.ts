@@ -6,8 +6,10 @@ import test from 'node:test';
 import {
   attemptProgressRelPath,
   describeIdleOutput,
+  describeSelfReport,
   isPrintAtExitArgv,
   parseProgressSidecar,
+  progressBelongsToAttempt,
   readClaimProgress,
 } from '../src/lib/attempt-progress.ts';
 import {
@@ -108,10 +110,79 @@ test('supervisor given no sidecar path leaves the claim free of progress fields'
   assert.equal(readClaimProgress(claim), null, 'no sidecar path means nothing to report, not an empty report');
   assert.equal(claim.progressUpdatedAt, null);
   assert.equal(claim.progressSource, null);
+  // And the reader can tell WHICH silence this is: nobody was asked.
+  assert.equal(claim.progressConfigured, false);
+  assert.equal(describeSelfReport(claim).kind, 'unconfigured');
   // The argv rides on every claim, sidecar or not: it is what tells a reader
   // whether this executor's silence means anything.
   assert.deepEqual(claim.command, ['node', '-e', 'setTimeout(() => process.exit(0), 2500)']);
   assert.equal(isPrintAtExitArgv(claim.command), false);
+});
+
+test('a configured sidecar nobody has written to is a different silence from no sidecar at all', async (t) => {
+  // Both leave the claim without progress fields, and a reader shown the same
+  // blank for each cannot tell "there was nowhere to look" from "we looked and
+  // the agent is saying nothing". Only the second is a fact about the agent,
+  // and only the second may be printed as one.
+  const root = tempRepo(t);
+  const { workspace, sidecar } = attemptWorkspace(root);
+  const claimPath = join(root, 'claim.json');
+  const statusPath = join(root, 'status.json');
+  assert.equal(existsSync(sidecar), false, 'the agent has written nothing');
+
+  const child = spawn(
+    process.execPath,
+    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 3000)'], claimPath, statusPath, undefined, sidecar),
+    { cwd: workspace, stdio: 'ignore' },
+  );
+  await sleep(1_500);
+  const claim = readInflightClaim(claimPath, (p) => readFileSync(p, 'utf8'));
+  child.kill('SIGTERM');
+  await new Promise((resolve) => child.on('close', resolve));
+
+  assert.ok(claim != null);
+  assert.equal(readClaimProgress(claim), null, 'still no record: the agent has said nothing');
+  assert.equal(claim.progressConfigured, true, 'but a sidecar WAS configured, and the claim says so');
+  assert.equal(describeSelfReport(claim).kind, 'configured_silent');
+});
+
+test('a report predating the attempt is refused, so one attempt never speaks for another', async (t) => {
+  // The 2026-09-06 sighting: a run+step+actor sidecar is shared by every
+  // attempt of that actor, so a live attempt opened the file its predecessor
+  // had finished writing and mirrored those words onto its own claim, aged
+  // honestly — reading as one stuck agent rather than two attempts.
+  const root = tempRepo(t);
+  const { workspace, sidecar } = attemptWorkspace(root);
+  const claimPath = join(root, 'claim.json');
+  const statusPath = join(root, 'status.json');
+  // A finished predecessor's last words, already on disk before we spawn.
+  writeFileSync(sidecar, JSON.stringify({
+    state: 'running',
+    phase: 'auditing the integrated diff',
+    current: 'auditing the integrated diff',
+    updated_at: new Date(Date.now() - 105 * 60_000).toISOString(),
+  }), 'utf8');
+
+  const child = spawn(
+    process.execPath,
+    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 4500)'], claimPath, statusPath, undefined, sidecar),
+    { cwd: workspace, stdio: 'ignore' },
+  );
+  await sleep(1_500);
+  const stale = readInflightClaim(claimPath, (p) => readFileSync(p, 'utf8'));
+  // Now this attempt writes its own, at the very same path.
+  writeFileSync(sidecar, sidecarBody({ state: 'running', phase: 'my own phase' }), 'utf8');
+  await sleep(1_500);
+  const fresh = readInflightClaim(claimPath, (p) => readFileSync(p, 'utf8'));
+  child.kill('SIGTERM');
+  await new Promise((resolve) => child.on('close', resolve));
+
+  assert.ok(stale != null);
+  assert.equal(readClaimProgress(stale), null, 'a predecessor\'s report must not be mirrored onto a live claim');
+  assert.equal(stale.progressConfigured, true, 'refusing the content never retracts that a sidecar exists');
+  // The rule rejects staleness rather than having simply stopped reading.
+  assert.equal(readClaimProgress(fresh)?.phase, 'my own phase');
+  assert.equal(progressBelongsToAttempt(new Date().toISOString(), Date.now() - 1_000), true);
 });
 
 test('the claim carries the executor argv, so a reader can name silence correctly', async (t) => {
@@ -144,14 +215,18 @@ test('supervisor clears the mirrored self-report when the sidecar goes unparsabl
   const { workspace, sidecar } = attemptWorkspace(root);
   const claimPath = join(root, 'claim.json');
   const statusPath = join(root, 'status.json');
-  writeFileSync(sidecar, sidecarBody({ state: 'running', phase: 'first phase' }), 'utf8');
 
   const child = spawn(
     process.execPath,
-    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 4500)'], claimPath, statusPath, undefined, sidecar),
+    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 5500)'], claimPath, statusPath, undefined, sidecar),
     { cwd: workspace, stdio: 'ignore' },
   );
-  await sleep(1_200);
+  // Written AFTER the spawn, which is the only way a real agent can write it —
+  // and now the only way the supervisor will accept it, since a report stamped
+  // before this attempt started belongs to the attempt before it.
+  await sleep(300);
+  writeFileSync(sidecar, sidecarBody({ state: 'running', phase: 'first phase' }), 'utf8');
+  await sleep(1_500);
   // The mirror is live first, so the clearing below is a transition and not a
   // report that never arrived.
   const live = readClaimProgress(readInflightClaim(claimPath, (p) => readFileSync(p, 'utf8')));
@@ -178,14 +253,16 @@ test('supervisor clears the mirrored self-report when the sidecar disappears', a
   const { workspace, sidecar } = attemptWorkspace(root);
   const claimPath = join(root, 'claim.json');
   const statusPath = join(root, 'status.json');
-  writeFileSync(sidecar, sidecarBody({ state: 'running', phase: 'first phase' }), 'utf8');
 
   const child = spawn(
     process.execPath,
-    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 4500)'], claimPath, statusPath, undefined, sidecar),
+    superviseArgv(['node', '-e', 'setTimeout(() => process.exit(0), 5500)'], claimPath, statusPath, undefined, sidecar),
     { cwd: workspace, stdio: 'ignore' },
   );
-  await sleep(1_200);
+  // After the spawn: see the note in the unparsable case above.
+  await sleep(300);
+  writeFileSync(sidecar, sidecarBody({ state: 'running', phase: 'first phase' }), 'utf8');
+  await sleep(1_500);
   const live = readClaimProgress(readInflightClaim(claimPath, (p) => readFileSync(p, 'utf8')));
   rmSync(sidecar, { force: true });
   await sleep(1_500);

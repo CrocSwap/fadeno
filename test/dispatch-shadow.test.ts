@@ -716,7 +716,7 @@ test('the pair roll keys on the caller bytes, not on the brief-and-footer snapsh
   initGit(root);
 
   const B = 'the caller wrote exactly this, and nothing else';
-  const decorated = `${BRIEF.trimEnd()}\n\n${B}\n${DISPATCH_RESULT_FOOTER}`;
+  const decorated = echoedStdin(`${BRIEF.trimEnd()}\n\n${B}`);
   const callerRoll = shadowSampleRoll(sha256Hex(B), 'worker', 'luna-worker');
   const snapshotRoll = shadowSampleRoll(sha256Hex(decorated), 'worker', 'luna-worker');
   assert.notEqual(callerRoll, snapshotRoll, 'fixture is vacuous: both digests roll the same');

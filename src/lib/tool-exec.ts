@@ -704,6 +704,16 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
     outFd = openSync(outputSnapshotAbs, 'w');
     errFd = openSync(stderrSnapshotAbs, 'w');
     const argv = params.command;
+    // Deliberately NO progress sidecar on this lane, and it is the one spawn
+    // site where that is the right answer. A registered tool is a fixed argv —
+    // `npm test`, a linter, a build — not an agent: its stdin is the empty
+    // file opened above, there is no prompt to carry an instruction, and
+    // nothing on the other end can read one. Configuring a sidecar here would
+    // stamp `progress_configured: true` on a claim whose executor is
+    // structurally incapable of writing one, which converts "nobody was asked"
+    // into "we asked and got silence". Those are different facts and the
+    // reader is built to keep them apart; manufacturing the second is a
+    // positive claim with no reading behind it.
     child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, claimOwner), {
       stdio: [promptFd, outFd, errFd],
       cwd: params.repoRoot,

@@ -88,7 +88,6 @@ import { runClean, runCleanWindows } from './commands/clean.ts';
 import { runUnvendor } from './commands/unvendor.ts';
 import { runCancel, CancelError } from './commands/cancel.ts';
 import type { DiagramFormat } from './lib/diagram.ts';
-import { progressSidecarPath } from './lib/prompt.ts';
 import type { EmitResult } from './lib/fsutil.ts';
 import { SCHEMA_KINDS as SCHEMA_KIND_LIST } from './lib/playbook-validate.ts';
 import type { SchemaKind, ValidationIssue } from './lib/playbook-validate.ts';
@@ -96,7 +95,7 @@ import { findRepoRoot, packageVersion } from './lib/paths.ts';
 import type { RunEvent, RunSummary } from './lib/run-ledger.ts';
 import type { DispatchProgressSource } from './lib/host-dispatch.ts';
 import { describeCodexAgentIdentityRow } from './lib/codex-agent-file.ts';
-import { describeIdleOutput, readClaimProgress } from './lib/attempt-progress.ts';
+import { describeIdleOutput, describeSelfReport, readClaimProgress, requestProgressRelPath } from './lib/attempt-progress.ts';
 import type { ValidateOutcome } from './commands/validate.ts';
 import type { ShowProjection, ShowResult, StepView } from './commands/show.ts';
 import { readInstallationManifest, syncManagedRuntime } from './lib/installations.ts';
@@ -531,10 +530,11 @@ function printProjection(projection: ShowProjection): void {
       const ended = fact.endedAt == null ? '' : ` ended_at=${fact.endedAt}`;
       const error = fact.observationError == null ? '' : `  observation_error=${fact.observationError}`;
       console.log(`  ${holder}  ${state}${outcome}${ended}  ${mode}  ${correlation}  ${pids}  ${times}  ${bytes}  claim=${fact.claimPath}${error}`);
-      const selfReport = readClaimProgress(fact);
-      if (selfReport != null) {
+      const described = describeSelfReport(fact);
+      if (described.kind === 'reported') {
         // The agent's own account, never a measurement and never a gate: it sits
         // next to the byte counters precisely so a reader can tell them apart.
+        const selfReport = described.progress!;
         const reportedAt = Date.parse(selfReport.updatedAt);
         const reportAge = Number.isFinite(reportedAt) ? formatDuration(Math.max(0, Date.now() - reportedAt)) : null;
         const phase = selfReport.phase ?? selfReport.state ?? 'progress';
@@ -543,6 +543,13 @@ function printProjection(projection: ShowProjection): void {
         console.log(
           `    agent: "${phase}"${stateNote}${current}${reportAge == null ? '' : `, ${reportAge} ago`} (agent self-report, non-gating)`,
         );
+      } else if (described.kind === 'configured_silent') {
+        // A READING, and printed only because it is one: this attempt was
+        // given a sidecar and the agent has not written anything readable to
+        // it. An attempt that was never given one prints nothing at all —
+        // there is no observation to report, and a blank line saying "no
+        // report" would be the harness's silence dressed as the agent's.
+        console.log('    agent: no self-report yet (sidecar configured, non-gating)');
       }
       if (fact.outputIdleWarning) {
         const described = describeIdleOutput({
@@ -1103,10 +1110,11 @@ function printDrive(result: DriveResult): number {
         const artifactType = request.artifactType == null ? '' : `  artifact_type=${request.artifactType}`;
         console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ''}  ${request.model}/${request.reasoningEffort}${artifactType}`);
         if (request.nodeInstanceId != null) console.log(`      instance: ${request.nodeInstanceId}`);
-        const progress = request.nodeInstanceId == null
-          ? progressSidecarPath(request.run, request.step, request.actor)
-          : `.fadeno/progress/${request.run}/${request.stepExecutionId}.json`;
-        console.log(`      progress: <workspace>/${progress}`);
+        // One derivation, two consumers: this line and the command fallback's
+        // supervisor both ask `requestProgressRelPath` which of the two engine
+        // sidecar spellings this request uses. When it was written out here by
+        // hand, the fallback had no way to agree with it except by copying it.
+        console.log(`      progress: <workspace>/${requestProgressRelPath(request)}`);
       }
       return 0;
     default:

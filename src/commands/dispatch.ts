@@ -4,6 +4,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
+import { dispatchProgressRelPath, requestProgressRelPath } from '../lib/attempt-progress.ts';
 import {
   ConstraintError,
   evaluateConstraint,
@@ -236,6 +237,50 @@ export const DISPATCH_RESULT_FOOTER = [
   'if you completed the task, or `FADENO-DISPATCH-RESULT: failed — <one-line reason>`',
   'if you did not or could not. That line — not the exit code — is how the dispatcher',
   'learns the outcome: a failure MUST be reported as failed even if the process will exit 0.',
+].join('\n');
+
+/**
+ * The FIXED progress-protocol footer, appended after the result footer.
+ *
+ * A host watching a command-lane dispatch sees "0 bytes" for the whole run:
+ * `claude -p` and `codex exec` print only at exit, so a 40-minute agentic task
+ * is indistinguishable from a hung one. The engine lane solved this by naming
+ * a sidecar path in the prompt it renders. An ad-hoc dispatch renders no
+ * prompt — it relays the caller's bytes — so the contract has to arrive some
+ * other way.
+ *
+ * It arrives split: the INSTRUCTION here, in constant bytes, and the PATH in
+ * `FADENO_PROGRESS_SIDECAR` on the executor's environment. That split is the
+ * whole design, and the alternative is a live bug rather than a style choice.
+ * Writing the path into these bytes would break two things at once:
+ *
+ *  - Both arms of a shadow pair are handed the SAME snapshot file (the
+ *    challenger opens `promptFileAbs` by fd). One path in those bytes is one
+ *    path for two executors, so the challenger's self-report would be
+ *    mirrored onto the primary's claim — a silent wrong answer of exactly the
+ *    shape this workstream exists to remove.
+ *  - The primary's dispatch id would then sit in the challenger's prompt,
+ *    which can compare it against its own `FADENO_IN_DISPATCH` and learn which
+ *    arm it is. Pair blinding is deliberate down to the shape of the worktree
+ *    paths; this would undo it in one line.
+ *
+ * Constant text costs neither. It is identical for every dispatch, so
+ * `promptSha256` stays a function of prompt content alone and both arms keep
+ * receiving byte-identical prompts. Every example is inside backticks and
+ * prose, so an executor echoing this footer never trips the result regex.
+ */
+export const DISPATCH_PROGRESS_FOOTER = [
+  '--- dispatch progress protocol (optional, non-gating) ---',
+  'If the environment variable `FADENO_PROGRESS_SIDECAR` is set, treat its value as an',
+  'absolute file path and keep a short JSON status object there, rewriting it whenever you',
+  'finish a meaningful phase or become blocked. Read the path first (e.g. `echo',
+  '"$FADENO_PROGRESS_SIDECAR"`), create parent directories if needed, and write:',
+  '`{"state": "running | waiting_input | blocked | idle", "phase": "short phase name",',
+  '"current": "what is happening now", "updated_at": "<ISO-8601 timestamp>"}`.',
+  'This is how someone watching the dispatch can tell you are working while your harness',
+  'buffers its output until exit. It is your own account of yourself: it is never checked,',
+  'never gates anything, and never replaces your final report. Omit secrets, credentials,',
+  'raw prompts and private reasoning. If the variable is unset, skip this entirely.',
 ].join('\n');
 
 /**
@@ -1759,7 +1804,18 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // it is deliberately not deterministic per *caller* prompt: a `--brief`
   // dispatch and a `--no-brief` one of the same task differ here. Nothing that
   // has to agree with another process may key on it.
-  prompt = `${prompt}\n${DISPATCH_RESULT_FOOTER}`;
+  prompt = `${prompt}\n${DISPATCH_RESULT_FOOTER}\n\n${DISPATCH_PROGRESS_FOOTER}`;
+
+  // Where this dispatch's agent will report its own progress, and the value
+  // `FADENO_PROGRESS_SIDECAR` carries to it. Derived HERE, next to the footer
+  // that tells the executor to look for it, and BEFORE the isolation decision:
+  // it is anchored at the repo root, so it stays correct whether this dispatch
+  // ends up running in the shared tree, in a kernel-isolated worktree, or as
+  // one arm of a pair. Nothing below re-derives it — the same binding is
+  // handed to the supervisor and to the environment, which is what makes the
+  // producing and watching spellings incapable of drifting apart.
+  const progressRel = dispatchProgressRelPath(dispatchId);
+  const progressAbs = join(repoRoot, ...progressRel.split('/'));
 
   // The kernel owns the prompt snapshot for every dispatch: with the result
   // footer composed ahead of the spawn, the sent bytes differ from whatever
@@ -2786,7 +2842,20 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       requestRecorded = true;
 
       const startedMs = Date.now();
-      const child = spawn(process.execPath, superviseArgv(shadowCommand, shadowInflightAbs, statusAbs, undefined), {
+      // The challenger's OWN sidecar, keyed by its own dispatch id. Both arms
+      // read the identical prompt snapshot, so this is only safe because the
+      // path travels in the environment: the shared bytes say "look at
+      // `FADENO_PROGRESS_SIDECAR`" and each arm's environment answers with a
+      // different file. Had the footer carried a literal path, both arms would
+      // write the primary's, and a pair would be adjudicated with one arm's
+      // progress attributed to the other.
+      //
+      // Wired rather than skipped because a challenger is exactly as blind as
+      // a primary and runs exactly as long; leaving it dark would make the
+      // slower arm of every pair the unexplainable one.
+      const shadowProgressAbs = join(repoRoot, ...dispatchProgressRelPath(shadowDispatchId).split('/'));
+      mkdirSync(dirname(shadowProgressAbs), { recursive: true });
+      const child = spawn(process.execPath, superviseArgv(shadowCommand, shadowInflightAbs, statusAbs, undefined, shadowProgressAbs), {
         cwd: shadowWorktreeAbs,
         // Without `atCwd` the shadow escapes its worktree and edits the real
         // workspace. FADENO_IN_SHADOW rides along so any fadeno the challenger
@@ -2795,6 +2864,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
           ...withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs), {
             dispatchId: shadowDispatchId,
             archetype,
+            progressSidecar: shadowProgressAbs,
           }),
           FADENO_IN_SHADOW: '1',
         },
@@ -3056,6 +3126,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   try {
     mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
     mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
+    // The agent is told to create parents itself, but making the directory
+    // here means a sandboxed or cautious executor only has to write one file.
+    mkdirSync(dirname(progressAbs), { recursive: true });
     outputFd = openSync(outputAbs, 'w');
     // The supervisor is handed no lease descriptor: there is no lease for it
     // to re-stamp or release. It still owns the in-flight CLAIM, which is what
@@ -3064,7 +3137,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       supervisorAttempted = true;
       const result = spawnSync(
         process.execPath,
-        superviseArgv(command, inflightAbs, statusAbs),
+        // The sidecar the footer just told this executor to keep. Handing the
+        // same path to the supervisor is what turns the agent's file into
+        // something a reader of `fadeno show` can see WHILE the dispatch runs
+        // — which is the entire complaint: a print-at-exit executor shows 0
+        // bytes for forty minutes and looks hung.
+        superviseArgv(command, inflightAbs, statusAbs, undefined, progressAbs),
         {
         input: prompt,
         encoding: 'utf8',
@@ -3075,6 +3153,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), spawnCwd), {
           dispatchId,
           archetype,
+          progressSidecar: progressAbs,
         }),
         maxBuffer: SPAWN_MAX_BUFFER,
         stdio: ['pipe', outputFd, 'pipe'],
@@ -3737,19 +3816,36 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
     ...fallbackClaimRelPath(lookup.runId, request.dispatchId).split('/'),
   );
   mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
+  // The ENGINE sidecar, not a runless one. This lane delivers an immutable
+  // engine request whose prompt was rendered by the engine and whose digest is
+  // verified against the locked request a few lines above — so the bytes
+  // cannot be touched, and they do not need to be: that prompt already names a
+  // sidecar path, and this is the one it names. Deriving it through
+  // `requestProgressRelPath` rather than by hand is what keeps it the same
+  // answer `cli.ts` prints for a person to `cat`; two copies of that branch is
+  // how the two spellings drift and the supervisor watches a file no agent
+  // writes. cwd is the repo root here, so the request's workspace-relative
+  // path resolves against it.
+  const fallbackProgressAbs = join(repoRoot, ...requestProgressRelPath(request).split('/'));
+  mkdirSync(dirname(fallbackProgressAbs), { recursive: true });
   const spawned = (() => {
     try {
       // A command fallback has the same orphan risk as every other command
       // delivery. Its host-dispatch lease is intentionally NOT handed to the
       // supervisor: that durable reservation remains held until the terminal
       // complete/fail receipt below, per the host protocol.
-      return spawnSync(process.execPath, superviseArgv(command, fallbackClaimAbs), {
+      return spawnSync(process.execPath, superviseArgv(command, fallbackClaimAbs, '', undefined, fallbackProgressAbs), {
         input: prompt,
         encoding: 'utf8',
         cwd: repoRoot,
+        // The env var is redundant here — this executor's prompt already spells
+        // the path out — and it is set anyway because it is the same string,
+        // computed once. An agent that follows either instruction lands on one
+        // file, which is the property worth having.
         env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), repoRoot), {
           dispatchId: request.dispatchId,
           archetype: request.agentType,
+          progressSidecar: fallbackProgressAbs,
         }),
         maxBuffer: SPAWN_MAX_BUFFER,
       });
