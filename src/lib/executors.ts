@@ -889,7 +889,6 @@ export function withoutHarnessIdentity(env: NodeJS.ProcessEnv): NodeJS.ProcessEn
   const next: NodeJS.ProcessEnv = { ...env };
   delete next.FADENO_HARNESS;
   delete next.FADENO_BUNDLED_RUNTIME;
-  delete next.FADENO_INVOCATION_SOURCE;
   for (const entry of AMBIENT_HARNESS_MARKERS) {
     for (const name of entry.variables) delete next[name];
   }

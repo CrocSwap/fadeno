@@ -3992,10 +3992,10 @@ var require_resolve_block_map = __commonJS({
       let offset = bm.offset;
       let commentEnd = null;
       for (const collItem of bm.items) {
-        const { start, key, sep: sep2, value } = collItem;
+        const { start, key, sep, value } = collItem;
         const keyProps = resolveProps.resolveProps(start, {
           indicator: "explicit-key-ind",
-          next: key ?? sep2?.[0],
+          next: key ?? sep?.[0],
           offset,
           onError,
           parentIndent: bm.indent,
@@ -4009,7 +4009,7 @@ var require_resolve_block_map = __commonJS({
             else if ("indent" in key && key.indent !== bm.indent)
               onError(offset, "BAD_INDENT", startColMsg);
           }
-          if (!keyProps.anchor && !keyProps.tag && !sep2) {
+          if (!keyProps.anchor && !keyProps.tag && !sep) {
             commentEnd = keyProps.end;
             if (keyProps.comment) {
               if (map.comment)
@@ -4033,7 +4033,7 @@ var require_resolve_block_map = __commonJS({
         ctx.atKey = false;
         if (utilMapIncludes.mapIncludes(ctx, map.items, keyNode))
           onError(keyStart, "DUPLICATE_KEY", "Map keys must be unique");
-        const valueProps = resolveProps.resolveProps(sep2 ?? [], {
+        const valueProps = resolveProps.resolveProps(sep ?? [], {
           indicator: "map-value-ind",
           next: value,
           offset: keyNode.range[2],
@@ -4049,7 +4049,7 @@ var require_resolve_block_map = __commonJS({
             if (ctx.options.strict && keyProps.start < valueProps.found.offset - 1024)
               onError(keyNode.range, "KEY_OVER_1024_CHARS", "The : indicator must be at most 1024 chars after the start of an implicit block mapping key");
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep2, null, valueProps, onError);
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep, null, valueProps, onError);
           if (ctx.schema.compat)
             utilFlowIndentCheck.flowIndentCheck(bm.indent, value, onError);
           offset = valueNode.range[2];
@@ -4140,7 +4140,7 @@ var require_resolve_end = __commonJS({
       let comment = "";
       if (end) {
         let hasSpace = false;
-        let sep2 = "";
+        let sep = "";
         for (const token of end) {
           const { source, type } = token;
           switch (type) {
@@ -4154,13 +4154,13 @@ var require_resolve_end = __commonJS({
               if (!comment)
                 comment = cb;
               else
-                comment += sep2 + cb;
-              sep2 = "";
+                comment += sep + cb;
+              sep = "";
               break;
             }
             case "newline":
               if (comment)
-                sep2 += source;
+                sep += source;
               hasSpace = true;
               break;
             default:
@@ -4203,18 +4203,18 @@ var require_resolve_flow_collection = __commonJS({
       let offset = fc.offset + fc.start.source.length;
       for (let i = 0; i < fc.items.length; ++i) {
         const collItem = fc.items[i];
-        const { start, key, sep: sep2, value } = collItem;
+        const { start, key, sep, value } = collItem;
         const props = resolveProps.resolveProps(start, {
           flow: fcName,
           indicator: "explicit-key-ind",
-          next: key ?? sep2?.[0],
+          next: key ?? sep?.[0],
           offset,
           onError,
           parentIndent: fc.indent,
           startOnNewline: false
         });
         if (!props.found) {
-          if (!props.anchor && !props.tag && !sep2 && !value) {
+          if (!props.anchor && !props.tag && !sep && !value) {
             if (i === 0 && props.comma)
               onError(props.comma, "UNEXPECTED_TOKEN", `Unexpected , in ${fcName}`);
             else if (i < fc.items.length - 1)
@@ -4268,8 +4268,8 @@ var require_resolve_flow_collection = __commonJS({
             }
           }
         }
-        if (!isMap && !sep2 && !props.found) {
-          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep2, null, props, onError);
+        if (!isMap && !sep && !props.found) {
+          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep, null, props, onError);
           coll.items.push(valueNode);
           offset = valueNode.range[2];
           if (isBlock(value))
@@ -4281,7 +4281,7 @@ var require_resolve_flow_collection = __commonJS({
           if (isBlock(key))
             onError(keyNode.range, "BLOCK_IN_FLOW", blockMsg);
           ctx.atKey = false;
-          const valueProps = resolveProps.resolveProps(sep2 ?? [], {
+          const valueProps = resolveProps.resolveProps(sep ?? [], {
             flow: fcName,
             indicator: "map-value-ind",
             next: value,
@@ -4292,8 +4292,8 @@ var require_resolve_flow_collection = __commonJS({
           });
           if (valueProps.found) {
             if (!isMap && !props.found && ctx.options.strict) {
-              if (sep2)
-                for (const st of sep2) {
+              if (sep)
+                for (const st of sep) {
                   if (st === valueProps.found)
                     break;
                   if (st.type === "newline") {
@@ -4310,7 +4310,7 @@ var require_resolve_flow_collection = __commonJS({
             else
               onError(valueProps.start, "MISSING_CHAR", `Missing , or : between ${fcName} items`);
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep2, null, valueProps, onError) : null;
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep, null, valueProps, onError) : null;
           if (valueNode) {
             if (isBlock(value))
               onError(valueNode.range, "BLOCK_IN_FLOW", blockMsg);
@@ -4490,7 +4490,7 @@ var require_resolve_block_scalar = __commonJS({
           chompStart = i + 1;
       }
       let value = "";
-      let sep2 = "";
+      let sep = "";
       let prevMoreIndented = false;
       for (let i = 0; i < contentStart; ++i)
         value += lines[i][0].slice(trimIndent) + "\n";
@@ -4507,24 +4507,24 @@ var require_resolve_block_scalar = __commonJS({
           indent = "";
         }
         if (type === Scalar.Scalar.BLOCK_LITERAL) {
-          value += sep2 + indent.slice(trimIndent) + content;
-          sep2 = "\n";
+          value += sep + indent.slice(trimIndent) + content;
+          sep = "\n";
         } else if (indent.length > trimIndent || content[0] === "	") {
-          if (sep2 === " ")
-            sep2 = "\n";
-          else if (!prevMoreIndented && sep2 === "\n")
-            sep2 = "\n\n";
-          value += sep2 + indent.slice(trimIndent) + content;
-          sep2 = "\n";
+          if (sep === " ")
+            sep = "\n";
+          else if (!prevMoreIndented && sep === "\n")
+            sep = "\n\n";
+          value += sep + indent.slice(trimIndent) + content;
+          sep = "\n";
           prevMoreIndented = true;
         } else if (content === "") {
-          if (sep2 === "\n")
+          if (sep === "\n")
             value += "\n";
           else
-            sep2 = "\n";
+            sep = "\n";
         } else {
-          value += sep2 + content;
-          sep2 = " ";
+          value += sep + content;
+          sep = " ";
           prevMoreIndented = false;
         }
       }
@@ -4706,25 +4706,25 @@ var require_resolve_flow_scalar = __commonJS({
       if (!match)
         return source;
       let res = match[1];
-      let sep2 = " ";
+      let sep = " ";
       let pos = first.lastIndex;
       line.lastIndex = pos;
       while (match = line.exec(source)) {
         if (match[1] === "") {
-          if (sep2 === "\n")
-            res += sep2;
+          if (sep === "\n")
+            res += sep;
           else
-            sep2 = "\n";
+            sep = "\n";
         } else {
-          res += sep2 + match[1];
-          sep2 = " ";
+          res += sep + match[1];
+          sep = " ";
         }
         pos = line.lastIndex;
       }
       const last = /[ \t]*(.*)/sy;
       last.lastIndex = pos;
       match = last.exec(source);
-      return res + sep2 + (match?.[1] ?? "");
+      return res + sep + (match?.[1] ?? "");
     }
     function doubleQuotedValue(source, onError) {
       let res = "";
@@ -5534,14 +5534,14 @@ var require_cst_stringify = __commonJS({
         }
       }
     }
-    function stringifyItem({ start, key, sep: sep2, value }) {
+    function stringifyItem({ start, key, sep, value }) {
       let res = "";
       for (const st of start)
         res += st.source;
       if (key)
         res += stringifyToken(key);
-      if (sep2)
-        for (const st of sep2)
+      if (sep)
+        for (const st of sep)
           res += st.source;
       if (value)
         res += stringifyToken(value);
@@ -6708,18 +6708,18 @@ var require_parser = __commonJS({
         if (this.type === "map-value-ind") {
           const prev = getPrevProps(this.peek(2));
           const start = getFirstKeyStartProps(prev);
-          let sep2;
+          let sep;
           if (scalar.end) {
-            sep2 = scalar.end;
-            sep2.push(this.sourceToken);
+            sep = scalar.end;
+            sep.push(this.sourceToken);
             delete scalar.end;
           } else
-            sep2 = [this.sourceToken];
+            sep = [this.sourceToken];
           const map = {
             type: "block-map",
             offset: scalar.offset,
             indent: scalar.indent,
-            items: [{ start, key: scalar, sep: sep2 }]
+            items: [{ start, key: scalar, sep }]
           };
           this.onKeyLine = true;
           this.stack[this.stack.length - 1] = map;
@@ -6872,15 +6872,15 @@ var require_parser = __commonJS({
                 } else if (isFlowToken(it.key) && !includesToken(it.sep, "newline")) {
                   const start2 = getFirstKeyStartProps(it.start);
                   const key = it.key;
-                  const sep2 = it.sep;
-                  sep2.push(this.sourceToken);
+                  const sep = it.sep;
+                  sep.push(this.sourceToken);
                   delete it.key;
                   delete it.sep;
                   this.stack.push({
                     type: "block-map",
                     offset: this.offset,
                     indent: this.indent,
-                    items: [{ start: start2, key, sep: sep2 }]
+                    items: [{ start: start2, key, sep }]
                   });
                 } else if (start.length > 0) {
                   it.sep = it.sep.concat(start, this.sourceToken);
@@ -7074,13 +7074,13 @@ var require_parser = __commonJS({
             const prev = getPrevProps(parent);
             const start = getFirstKeyStartProps(prev);
             fixFlowSeqItems(fc);
-            const sep2 = fc.end.splice(1, fc.end.length);
-            sep2.push(this.sourceToken);
+            const sep = fc.end.splice(1, fc.end.length);
+            sep.push(this.sourceToken);
             const map = {
               type: "block-map",
               offset: fc.offset,
               indent: fc.indent,
-              items: [{ start, key: fc, sep: sep2 }]
+              items: [{ start, key: fc, sep }]
             };
             this.onKeyLine = true;
             this.stack[this.stack.length - 1] = map;
@@ -7361,14 +7361,11 @@ var require_dist = __commonJS({
 // src/cli.ts
 var cli_exports = {};
 __export(cli_exports, {
-  KNOWN_CLI_COMMANDS: () => KNOWN_CLI_COMMANDS,
-  maybeRunRuntimePreflight: () => maybeRunRuntimePreflight,
-  resolveRuntimeSyncCandidate: () => resolveRuntimeSyncCandidate,
-  shouldRunPreflight: () => shouldRunPreflight
+  KNOWN_CLI_COMMANDS: () => KNOWN_CLI_COMMANDS
 });
 module.exports = __toCommonJS(cli_exports);
-var import_node_fs18 = require("node:fs");
-var import_node_path17 = require("node:path");
+var import_node_fs17 = require("node:fs");
+var import_node_path16 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/commands/dispatches.ts
@@ -7740,7 +7737,7 @@ function userPaths(options = {}) {
   const configDir = (0, import_node_path3.join)(configHome, "fadeno");
   const stateDir = (0, import_node_path3.join)(stateHome, "fadeno");
   const dataDir = (0, import_node_path3.join)(dataHome, "fadeno");
-  const managedRuntimeDir = (0, import_node_path3.join)(dataDir, "runtime");
+  const binDir = env.FADENO_BIN_DIR?.trim() || (windows ? (0, import_node_path3.join)(dataDir, "bin") : (0, import_node_path3.join)(home, ".local", "bin"));
   return {
     configHome,
     stateHome,
@@ -7750,15 +7747,24 @@ function userPaths(options = {}) {
     dataDir,
     executorsFile: (0, import_node_path3.join)(configDir, "executors.yaml"),
     configFile: (0, import_node_path3.join)(configDir, "config.yaml"),
-    installationsFile: (0, import_node_path3.join)(stateDir, "installations.json"),
-    managedRuntimeDir,
-    managedCli: (0, import_node_path3.join)(managedRuntimeDir, windows ? "fadeno.cmd" : "fadeno"),
+    binDir,
+    linkPath: (0, import_node_path3.join)(binDir, windows ? "fadeno.cmd" : "fadeno"),
     dialsFile: (0, import_node_path3.join)(stateDir, "dials.json"),
     modelVerificationsFile: (0, import_node_path3.join)(stateDir, "model-verifications.json")
   };
 }
 function retiredStateFiles(paths) {
-  return [(0, import_node_path3.join)(paths.stateDir, "harness"), (0, import_node_path3.join)(paths.stateDir, "loadout")];
+  return [
+    (0, import_node_path3.join)(paths.stateDir, "harness"),
+    (0, import_node_path3.join)(paths.stateDir, "loadout"),
+    // The installation manifest: it recorded which files a managed-runtime
+    // COPY had installed and at what version. `setup` links now, so there is
+    // no copy to reconcile and nothing left to record.
+    (0, import_node_path3.join)(paths.stateDir, "installations.json")
+  ];
+}
+function retiredStateDirs(paths) {
+  return [(0, import_node_path3.join)(paths.dataDir, "runtime")];
 }
 function writeUserFileAtomic(path, text) {
   (0, import_node_fs3.mkdirSync)((0, import_node_path3.join)(path, ".."), { recursive: true });
@@ -8137,9 +8143,6 @@ function qualifyListedModelId(harness, modelId) {
   if (prefix == null || modelId.startsWith(prefix)) return modelId;
   return `${prefix}${modelId}`;
 }
-function hostCandidateOf(compiled, spec) {
-  return compiled != null ? compiled.hostCandidate : spec.adapter === "host";
-}
 function activeHarness(explicit, options = {}) {
   if (explicit != null) return explicit;
   const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
@@ -8163,7 +8166,6 @@ function withoutHarnessIdentity(env) {
   const next = { ...env };
   delete next.FADENO_HARNESS;
   delete next.FADENO_BUNDLED_RUNTIME;
-  delete next.FADENO_INVOCATION_SOURCE;
   for (const entry of AMBIENT_HARNESS_MARKERS) {
     for (const name of entry.variables) delete next[name];
   }
@@ -11935,8 +11937,8 @@ var MODELS_SPEC = command(
   }
 );
 var COMMANDS = {
-  setup: command({ "--codex": NONE, "--claude": NONE, "--non-interactive": NONE, "--from": PATH, "--reset-runtime": NONE }),
-  status: command({ "--verbose": NONE, "--codex": NONE, "--claude": NONE, "--opencode": NONE, "--omp": NONE }),
+  setup: command({ "--codex": NONE, "--claude": NONE, "--from": PATH, "--force": NONE, "--json": NONE }),
+  status: command({ "--verbose": NONE, "--codex": NONE, "--claude": NONE, "--opencode": NONE, "--omp": NONE, "--json": NONE }),
   models: MODELS_SPEC,
   // Top-level alias for `models` — same handler in cli.ts, same flags.
   model: MODELS_SPEC,
@@ -12274,444 +12276,9 @@ function suggestFlag(command2, subcommand, flag) {
 
 // src/commands/setup.ts
 var import_node_child_process5 = require("node:child_process");
-var import_node_fs16 = require("node:fs");
-var import_node_os2 = require("node:os");
-var import_node_path15 = require("node:path");
-
-// src/lib/installations.ts
-var import_node_crypto4 = require("node:crypto");
 var import_node_fs15 = require("node:fs");
+var import_node_os2 = require("node:os");
 var import_node_path14 = require("node:path");
-var InstallationError = class extends Error {
-};
-function emptyInstallationManifest() {
-  return { schema_version: 1, runtime: null, harnesses: {} };
-}
-function validateInstallationManifestDocument(doc) {
-  const error = (detail) => ({ severity: "error", detail });
-  if (doc == null || typeof doc !== "object" || Array.isArray(doc)) return error("is not a JSON object");
-  const manifest = doc;
-  if (manifest.schema_version !== 1) return error(`has schema_version ${JSON.stringify(manifest.schema_version)}, and only 1 is supported`);
-  if (manifest.harnesses == null || typeof manifest.harnesses !== "object" || Array.isArray(manifest.harnesses)) {
-    return error("has no `harnesses` mapping, so it records no installation at all");
-  }
-  return null;
-}
-function readInstallationManifest(options = {}) {
-  const path = userPaths(options).installationsFile;
-  if (!(0, import_node_fs15.existsSync)(path)) return emptyInstallationManifest();
-  try {
-    const parsed = JSON.parse((0, import_node_fs15.readFileSync)(path, "utf8"));
-    const defect = validateInstallationManifestDocument(parsed);
-    if (defect != null) {
-      throw new InstallationError(`unsupported or malformed installation manifest at ${path}: it ${defect.detail}`);
-    }
-    return parsed;
-  } catch (err) {
-    if (err instanceof InstallationError) throw err;
-    throw new InstallationError(`could not parse installation manifest ${path}: ${err.message}`);
-  }
-}
-function writeInstallationManifest(paths, manifest) {
-  (0, import_node_fs15.mkdirSync)((0, import_node_path14.dirname)(paths.installationsFile), { recursive: true });
-  const tmp = `${paths.installationsFile}.tmp-${process.pid}-${Date.now()}`;
-  (0, import_node_fs15.writeFileSync)(tmp, `${JSON.stringify(manifest, null, 2)}
-`, "utf8");
-  (0, import_node_fs15.renameSync)(tmp, paths.installationsFile);
-}
-function fileDigest(path) {
-  return (0, import_node_crypto4.createHash)("sha256").update((0, import_node_fs15.readFileSync)(path)).digest("hex");
-}
-var VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/;
-function compareFadenoVersions(a, b) {
-  const ma = VERSION_RE.exec(a.trim());
-  const mb = VERSION_RE.exec(b.trim());
-  if (!ma || !mb) return null;
-  const aMajor = Number(ma[1]), aMinor = Number(ma[2]), aPatch = Number(ma[3]);
-  const bMajor = Number(mb[1]), bMinor = Number(mb[2]), bPatch = Number(mb[3]);
-  if (aMajor !== bMajor) return aMajor > bMajor ? 1 : -1;
-  if (aMinor !== bMinor) return aMinor > bMinor ? 1 : -1;
-  if (aPatch !== bPatch) return aPatch > bPatch ? 1 : -1;
-  const aRc = ma[4] !== void 0 ? Number(ma[4]) : null;
-  const bRc = mb[4] !== void 0 ? Number(mb[4]) : null;
-  if (aRc === null && bRc === null) return 0;
-  if (aRc === null && bRc !== null) return 1;
-  if (aRc !== null && bRc === null) return -1;
-  if (aRc !== bRc) return aRc > bRc ? 1 : -1;
-  return 0;
-}
-function sourceBundleVersion(sourceDir) {
-  const candidates = [
-    (0, import_node_path14.join)((0, import_node_path14.dirname)(sourceDir), ".claude-plugin", "plugin.json"),
-    (0, import_node_path14.join)((0, import_node_path14.dirname)(sourceDir), ".codex-plugin", "plugin.json")
-  ];
-  for (const candidate of candidates) {
-    try {
-      if (!(0, import_node_fs15.existsSync)(candidate)) continue;
-      const parsed = JSON.parse((0, import_node_fs15.readFileSync)(candidate, "utf8"));
-      if (parsed.name !== "fadeno") continue;
-      if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
-        return parsed.version.trim();
-      }
-    } catch {
-    }
-  }
-  try {
-    const pkg = (0, import_node_path14.join)(sourceDir, "package.json");
-    if ((0, import_node_fs15.existsSync)(pkg)) {
-      const parsed = JSON.parse((0, import_node_fs15.readFileSync)(pkg, "utf8"));
-      if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
-        if (parsed.name === "fadeno-runtime" || parsed.name === "fadeno") {
-          return parsed.version.trim();
-        }
-      }
-    }
-  } catch {
-  }
-  return null;
-}
-function readRuntimeVersionAt(binDir) {
-  try {
-    const pkgPath = (0, import_node_path14.join)(binDir, "package.json");
-    if ((0, import_node_fs15.existsSync)(pkgPath)) {
-      const parsed = JSON.parse((0, import_node_fs15.readFileSync)(pkgPath, "utf8"));
-      if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
-        if (parsed.name === "fadeno-runtime" || parsed.name === "fadeno") {
-          return { version: parsed.version.trim(), source: "observed" };
-        }
-      }
-    }
-  } catch {
-  }
-  return { version: null, source: "assumed" };
-}
-var LOCK_STALE_MS = 12e4;
-function isStaleLock(lockPath) {
-  try {
-    const st = (0, import_node_fs15.statSync)(lockPath);
-    return Date.now() - st.mtimeMs > LOCK_STALE_MS;
-  } catch {
-    try {
-      const lst = (0, import_node_fs15.lstatSync)(lockPath);
-      return Date.now() - lst.mtimeMs > LOCK_STALE_MS;
-    } catch {
-      return false;
-    }
-  }
-}
-function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
-  const allowInstall = opts.allowInstall ?? false;
-  const trustSource = opts.trustSource ?? false;
-  const force = opts.force ?? false;
-  const copyFn = opts.copyFn ?? import_node_fs15.cpSync;
-  const digestFn = opts.digestFn ?? fileDigest;
-  const renameFn = opts.renameFn ?? import_node_fs15.renameSync;
-  const rmFn = opts.rmFn ?? import_node_fs15.rmSync;
-  const managedDir = paths.managedRuntimeDir;
-  const managedCli = paths.managedCli;
-  const dataDir = paths.dataDir;
-  const lockPath = (0, import_node_path14.join)(dataDir, ".runtime.lock");
-  const stagingPath = (0, import_node_path14.join)(dataDir, "runtime.staging");
-  const oldPath = (0, import_node_path14.join)(dataDir, "runtime.old");
-  const fromVersion = manifest.runtime?.version ?? null;
-  if (sourceDir == null || !(0, import_node_fs15.existsSync)((0, import_node_path14.join)(sourceDir, "fadeno"))) {
-    if (manifest.runtime != null) {
-      return { outcome: "skipped-no-source", from: fromVersion, to: fromVersion };
-    }
-    return { outcome: "absent", from: null, to: null };
-  }
-  try {
-    if ((0, import_node_path14.resolve)(sourceDir) === (0, import_node_path14.resolve)(managedDir)) {
-      const observed = readRuntimeVersionAt(sourceDir);
-      const ver = observed.version ?? packageVersion();
-      const src = observed.version != null ? "observed" : "assumed";
-      if (manifest.runtime != null) {
-        if (manifest.runtime.version !== ver) {
-          manifest.runtime = { version: ver, path: managedCli, source: manifest.runtime.source, version_source: src, installed_at: (/* @__PURE__ */ new Date()).toISOString() };
-          try {
-            writeInstallationManifest(paths, manifest);
-          } catch {
-          }
-        }
-      } else {
-        manifest.runtime = { version: ver, path: managedCli, source: null, version_source: src, installed_at: (/* @__PURE__ */ new Date()).toISOString() };
-        try {
-          writeInstallationManifest(paths, manifest);
-        } catch {
-        }
-      }
-      return { outcome: "current", from: fromVersion, to: ver };
-    }
-  } catch {
-  }
-  if (manifest.runtime == null) {
-    if (!allowInstall) {
-      return { outcome: "absent", from: null, to: null };
-    }
-    let srcVer = sourceBundleVersion(sourceDir);
-    let srcSource = "observed";
-    if (srcVer == null && trustSource) {
-      srcVer = packageVersion();
-      srcSource = "assumed";
-    }
-    if (srcVer == null) {
-      return { outcome: "kept-newer", from: null, to: null };
-    }
-    (0, import_node_fs15.mkdirSync)(dataDir, { recursive: true });
-    try {
-      (0, import_node_fs15.mkdirSync)(lockPath);
-    } catch (err) {
-      if (err.code === "EEXIST") {
-        if (isStaleLock(lockPath)) {
-          try {
-            rmFn(lockPath, { recursive: true, force: true });
-          } catch {
-          }
-          try {
-            (0, import_node_fs15.mkdirSync)(lockPath);
-          } catch {
-            return { outcome: "locked", from: null, to: srcVer };
-          }
-        } else {
-          return { outcome: "locked", from: null, to: srcVer };
-        }
-      } else {
-        throw err;
-      }
-    }
-    let staged2 = false;
-    try {
-      try {
-        rmFn(stagingPath, { recursive: true, force: true });
-      } catch {
-      }
-      try {
-        rmFn(oldPath, { recursive: true, force: true });
-      } catch {
-      }
-      copyFn(sourceDir, stagingPath, { recursive: true });
-      staged2 = true;
-      if (!(0, import_node_fs15.existsSync)((0, import_node_path14.join)(stagingPath, "fadeno"))) throw new InstallationError(`staged runtime missing fadeno binary`);
-      if ((0, import_node_fs15.existsSync)((0, import_node_path14.join)(sourceDir, "templates")) && !(0, import_node_fs15.existsSync)((0, import_node_path14.join)(stagingPath, "templates"))) {
-        throw new InstallationError(`staged runtime missing templates`);
-      }
-      if (managedCli.endsWith(".cmd")) {
-        (0, import_node_fs15.writeFileSync)((0, import_node_path14.join)(stagingPath, "fadeno.cmd"), '@echo off\r\nnode "%~dp0fadeno" %*\r\n', "utf8");
-      }
-      renameFn(stagingPath, managedDir);
-      staged2 = false;
-      manifest.runtime = { version: srcVer, path: managedCli, source: sourceDir, version_source: srcSource, installed_at: (/* @__PURE__ */ new Date()).toISOString() };
-      writeInstallationManifest(paths, manifest);
-      return { outcome: "installed", from: null, to: srcVer };
-    } catch (e) {
-      if (staged2) try {
-        rmFn(stagingPath, { recursive: true, force: true });
-      } catch {
-      }
-      try {
-        rmFn(stagingPath, { recursive: true, force: true });
-      } catch {
-      }
-      try {
-        rmFn(oldPath, { recursive: true, force: true });
-      } catch {
-      }
-      throw e;
-    } finally {
-      try {
-        rmFn(lockPath, { recursive: true, force: true });
-      } catch {
-      }
-      try {
-        if ((0, import_node_fs15.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
-      } catch {
-      }
-      try {
-        if ((0, import_node_fs15.existsSync)(oldPath)) rmFn(oldPath, { recursive: true, force: true });
-      } catch {
-      }
-    }
-  }
-  const currentVersion = manifest.runtime.version;
-  let sourceVersion = sourceBundleVersion(sourceDir);
-  let sourceVersionSource = "observed";
-  if (sourceVersion == null && trustSource) {
-    sourceVersion = packageVersion();
-    sourceVersionSource = "assumed";
-  } else if (sourceVersion == null) {
-    return { outcome: "kept-newer", from: currentVersion, to: currentVersion };
-  }
-  const cmp = sourceVersion != null ? compareFadenoVersions(sourceVersion, currentVersion) : null;
-  if (cmp === 0) {
-    let srcDigest = null;
-    let dstDigest = null;
-    try {
-      srcDigest = digestFn((0, import_node_path14.join)(sourceDir, "fadeno"));
-      dstDigest = digestFn((0, import_node_path14.join)(managedDir, "fadeno"));
-    } catch {
-      srcDigest = "missing-src";
-      dstDigest = "missing-dst";
-    }
-    if (srcDigest === dstDigest) {
-      return { outcome: "current", from: currentVersion, to: currentVersion };
-    }
-  } else if (cmp === -1) {
-    if (!force) {
-      return { outcome: "kept-newer", from: currentVersion, to: currentVersion };
-    }
-  } else if (cmp === null) {
-    if (!trustSource) {
-      return { outcome: "kept-newer", from: currentVersion, to: currentVersion };
-    }
-    let srcDigest = null;
-    let dstDigest = null;
-    try {
-      srcDigest = digestFn((0, import_node_path14.join)(sourceDir, "fadeno"));
-      dstDigest = digestFn((0, import_node_path14.join)(managedDir, "fadeno"));
-    } catch {
-      srcDigest = "missing-src";
-      dstDigest = "missing-dst";
-    }
-    if (srcDigest === dstDigest) {
-      return { outcome: "current", from: currentVersion, to: currentVersion };
-    }
-  }
-  (0, import_node_fs15.mkdirSync)(dataDir, { recursive: true });
-  try {
-    (0, import_node_fs15.mkdirSync)(lockPath);
-  } catch (err) {
-    if (err.code === "EEXIST") {
-      if (isStaleLock(lockPath)) {
-        try {
-          rmFn(lockPath, { recursive: true, force: true });
-        } catch {
-        }
-        try {
-          (0, import_node_fs15.mkdirSync)(lockPath);
-        } catch (e) {
-          if (e.code === "EEXIST") return { outcome: "locked", from: currentVersion, to: sourceVersion };
-          throw e;
-        }
-      } else {
-        return { outcome: "locked", from: currentVersion, to: sourceVersion };
-      }
-    } else {
-      throw err;
-    }
-  }
-  let staged = false;
-  let renamed = false;
-  let restoreFailed = false;
-  try {
-    try {
-      rmFn(stagingPath, { recursive: true, force: true });
-    } catch {
-    }
-    try {
-      rmFn(oldPath, { recursive: true, force: true });
-    } catch {
-    }
-    copyFn(sourceDir, stagingPath, { recursive: true });
-    staged = true;
-    if (!(0, import_node_fs15.existsSync)((0, import_node_path14.join)(stagingPath, "fadeno"))) throw new InstallationError(`staged runtime missing fadeno binary`);
-    if ((0, import_node_fs15.existsSync)((0, import_node_path14.join)(sourceDir, "templates")) && !(0, import_node_fs15.existsSync)((0, import_node_path14.join)(stagingPath, "templates"))) {
-      throw new InstallationError(`staged runtime missing templates`);
-    }
-    if (managedCli.endsWith(".cmd")) {
-      (0, import_node_fs15.writeFileSync)((0, import_node_path14.join)(stagingPath, "fadeno.cmd"), '@echo off\r\nnode "%~dp0fadeno" %*\r\n', "utf8");
-    }
-    if ((0, import_node_fs15.existsSync)(managedDir)) {
-      renameFn(managedDir, oldPath);
-      renamed = true;
-    }
-    renameFn(stagingPath, managedDir);
-    staged = false;
-    try {
-      rmFn(oldPath, { recursive: true, force: true });
-    } catch {
-    }
-    renamed = false;
-    manifest.runtime = {
-      version: sourceVersion,
-      path: managedCli,
-      source: sourceDir,
-      version_source: sourceVersionSource,
-      installed_at: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    writeInstallationManifest(paths, manifest);
-    return { outcome: "refreshed", from: currentVersion, to: sourceVersion };
-  } catch (e) {
-    if (renamed) {
-      let restored = false;
-      try {
-        if ((0, import_node_fs15.existsSync)(oldPath) && !(0, import_node_fs15.existsSync)(managedDir)) {
-          try {
-            renameFn(oldPath, managedDir);
-            restored = true;
-          } catch {
-            restoreFailed = true;
-          }
-        } else if ((0, import_node_fs15.existsSync)(oldPath) && (0, import_node_fs15.existsSync)(managedDir)) {
-          try {
-            rmFn(managedDir, { recursive: true, force: true });
-          } catch {
-          }
-          try {
-            renameFn(oldPath, managedDir);
-            restored = true;
-          } catch {
-            restoreFailed = true;
-          }
-        }
-      } catch {
-        restoreFailed = true;
-      }
-      if (restored) renamed = false;
-      else restoreFailed = true;
-    }
-    if (staged) {
-      try {
-        rmFn(stagingPath, { recursive: true, force: true });
-      } catch {
-      }
-    }
-    try {
-      if ((0, import_node_fs15.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
-    } catch {
-    }
-    throw e;
-  } finally {
-    try {
-      rmFn(lockPath, { recursive: true, force: true });
-    } catch {
-    }
-    try {
-      if ((0, import_node_fs15.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
-    } catch {
-    }
-    if (!restoreFailed) {
-      try {
-        if ((0, import_node_fs15.existsSync)(oldPath)) rmFn(oldPath, { recursive: true, force: true });
-      } catch {
-      }
-    } else {
-      try {
-        console.error(`fadeno: runtime rollback preserved at ${oldPath}; restore to ${managedDir} failed \u2014 recover manually`);
-      } catch {
-      }
-    }
-  }
-}
-function recordHarnessInstallation(paths, harness, files, manifest, permissionRules = []) {
-  manifest.harnesses[harness] = {
-    version: packageVersion(),
-    files: files.filter(import_node_fs15.existsSync).map((path) => ({ path, sha256: fileDigest(path) })),
-    ...permissionRules.length > 0 ? { permissionRules } : {}
-  };
-  writeInstallationManifest(paths, manifest);
-}
-
-// src/commands/setup.ts
 var SetupError = class extends Error {
 };
 var PROBES = [
@@ -12729,29 +12296,86 @@ function probe(command2) {
     version: output.length > 0 ? output.split(/\r?\n/, 1)[0] ?? null : null
   };
 }
-function isRegularFile(path) {
-  try {
-    return (0, import_node_fs16.lstatSync)(path).isFile();
-  } catch {
-    return false;
-  }
-}
-function removeRetiredState(paths, notices) {
+function sweepRetiredState(paths) {
+  const removed = [];
   for (const path of retiredStateFiles(paths)) {
-    if (!isRegularFile(path)) continue;
-    (0, import_node_fs16.rmSync)(path, { force: true });
-    notices.push(`Removed retired state ${path} (nothing reads it; there is no stored default harness).`);
+    try {
+      if (!(0, import_node_fs15.lstatSync)(path).isFile()) continue;
+    } catch {
+      continue;
+    }
+    (0, import_node_fs15.rmSync)(path, { force: true });
+    removed.push(path);
+  }
+  for (const dir of retiredStateDirs(paths)) {
+    try {
+      if (!(0, import_node_fs15.lstatSync)(dir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    (0, import_node_fs15.rmSync)(dir, { recursive: true, force: true });
+    removed.push(dir);
+  }
+  return removed;
+}
+function runningCli(env) {
+  const bundled = env.FADENO_BUNDLED_RUNTIME?.trim();
+  if (bundled && (0, import_node_fs15.existsSync)((0, import_node_path14.join)(bundled, "fadeno"))) return (0, import_node_path14.join)(bundled, "fadeno");
+  const argv1 = process.argv[1];
+  if (argv1 == null) return null;
+  try {
+    return (0, import_node_fs15.realpathSync)((0, import_node_path14.resolve)(argv1));
+  } catch {
+    return (0, import_node_path14.resolve)(argv1);
   }
 }
-function ensureClaudePermission(paths, options, notices) {
-  if (!(0, import_node_fs16.existsSync)(paths.managedCli)) return null;
-  const env = options?.env ?? process.env;
-  const settingsPath = (0, import_node_path15.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path15.join)(options?.home ?? (0, import_node_os2.homedir)(), ".claude"), "settings.json");
-  const createdFile = !(0, import_node_fs16.existsSync)(settingsPath);
-  let data = {};
-  if (!createdFile) {
+function onPath(dir, env) {
+  const entries = (env.PATH ?? "").split(import_node_path14.delimiter).filter((part) => part.length > 0);
+  return entries.some((entry) => {
     try {
-      const parsed = JSON.parse((0, import_node_fs16.readFileSync)(settingsPath, "utf8"));
+      return (0, import_node_fs15.realpathSync)(entry) === (0, import_node_fs15.realpathSync)(dir);
+    } catch {
+      return (0, import_node_path14.resolve)(entry) === (0, import_node_path14.resolve)(dir);
+    }
+  });
+}
+function windowsShim(target) {
+  return ["@echo off", `"${process.execPath}" "${target}" %*`, ""].join("\r\n");
+}
+function linkCli(paths, target, options, force) {
+  const windows = (options?.platform ?? process.platform) === "win32";
+  const path = paths.linkPath;
+  (0, import_node_fs15.mkdirSync)(paths.binDir, { recursive: true });
+  const env = options?.env ?? process.env;
+  const FOREIGN = " foreign";
+  const current = (() => {
+    try {
+      const stat = (0, import_node_fs15.lstatSync)(path);
+      if (windows) return stat.isFile() ? (0, import_node_fs15.readFileSync)(path, "utf8") : FOREIGN;
+      return stat.isSymbolicLink() ? (0, import_node_fs15.readlinkSync)(path) : FOREIGN;
+    } catch {
+      return null;
+    }
+  })();
+  const want = windows ? windowsShim(target) : target;
+  if (current === want) return { path, target, action: "unchanged", onPath: onPath(paths.binDir, env) };
+  if (current === FOREIGN && !force) {
+    throw new SetupError(
+      `${path} exists and is not something Fadeno wrote. Remove it, choose another directory with FADENO_BIN_DIR, or rerun with --force to replace it.`
+    );
+  }
+  if (current != null) (0, import_node_fs15.rmSync)(path, { force: true });
+  if (windows) (0, import_node_fs15.writeFileSync)(path, want, "utf8");
+  else (0, import_node_fs15.symlinkSync)(target, path);
+  return { path, target, action: current == null ? "created" : "retargeted", onPath: onPath(paths.binDir, env) };
+}
+function ensureClaudePermission(options, notices) {
+  const env = options?.env ?? process.env;
+  const settingsPath = (0, import_node_path14.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path14.join)(options?.home ?? (0, import_node_os2.homedir)(), ".claude"), "settings.json");
+  let data = {};
+  if ((0, import_node_fs15.existsSync)(settingsPath)) {
+    try {
+      const parsed = JSON.parse((0, import_node_fs15.readFileSync)(settingsPath, "utf8"));
       if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
         notices.push(`Claude user settings ${settingsPath} are not an object; permission setup left them untouched.`);
         return null;
@@ -12768,282 +12392,141 @@ function ensureClaudePermission(paths, options, notices) {
     return null;
   }
   const allow = [...permissions.allow ?? []];
-  if (/[\r\n)]/.test(paths.managedCli)) {
-    notices.push(`Managed runtime path ${paths.managedCli} cannot be represented safely in a Claude permission rule.`);
-    return null;
-  }
-  const rule = `Bash(${paths.managedCli}:*)`;
-  if (allow.includes(rule)) return null;
+  const rule = "Bash(fadeno:*)";
+  if (allow.includes(rule)) return { path: settingsPath, rule };
   allow.push(rule);
   permissions.allow = allow;
   data.permissions = permissions;
-  (0, import_node_fs16.mkdirSync)((0, import_node_path15.dirname)(settingsPath), { recursive: true });
-  (0, import_node_fs16.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
+  (0, import_node_fs15.mkdirSync)((0, import_node_path14.dirname)(settingsPath), { recursive: true });
+  (0, import_node_fs15.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
 `, "utf8");
-  notices.push(`Claude user permission added for the managed Fadeno runtime only: ${rule}`);
-  return { path: settingsPath, rule, createdFile };
-}
-function inferBundledRuntimeForRemediation(userPathOptions) {
-  const env = userPathOptions?.env ?? process.env;
-  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs16.existsSync)((0, import_node_path15.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
-    return env.FADENO_BUNDLED_RUNTIME;
-  }
-  try {
-    const argv1 = process.argv[1];
-    if (argv1) {
-      const dir = (0, import_node_path15.dirname)((0, import_node_path15.resolve)(argv1));
-      if ((0, import_node_fs16.existsSync)((0, import_node_path15.join)(dir, "fadeno")) && (0, import_node_fs16.existsSync)((0, import_node_path15.join)(dir, "package.json"))) {
-        return dir;
-      }
-      try {
-        const real = (0, import_node_fs16.realpathSync)(argv1);
-        const realDir = (0, import_node_path15.dirname)((0, import_node_path15.resolve)(real));
-        if ((0, import_node_fs16.existsSync)((0, import_node_path15.join)(realDir, "fadeno"))) return realDir;
-      } catch {
-      }
-    }
-  } catch {
-  }
-  return null;
+  notices.push(`Claude user permission added so agents can run the CLI without a prompt each time: ${rule} in ${settingsPath}`);
+  return { path: settingsPath, rule };
 }
 function runSetup(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const paths = userPaths(opts.userPathOptions);
+  const env = opts.userPathOptions?.env ?? process.env;
   const probeCommand = opts.probeCommand ?? probe;
   const probes = PROBES.map((item) => probeCommand(item.command));
-  const created = [];
-  const setupNotices = [];
-  const manifestExisted = (0, import_node_fs16.existsSync)(paths.installationsFile);
-  const manifest = readInstallationManifest(opts.userPathOptions);
-  const runtimeSource = opts.runtimeSource !== void 0 ? opts.runtimeSource : (opts.userPathOptions?.env ?? process.env).FADENO_BUNDLED_RUNTIME ?? null;
-  let syncOutcome = "absent";
-  let syncFrom = null;
-  let syncTo = null;
-  try {
-    const res = syncManagedRuntime(paths, runtimeSource, manifest, {
-      allowInstall: true,
-      trustSource: true,
-      force: Boolean(opts.resetRuntime)
-    });
-    syncOutcome = res.outcome;
-    syncFrom = res.from;
-    syncTo = res.to;
-    if (res.outcome === "installed" || res.outcome === "refreshed") {
-      if (!created.includes(paths.managedRuntimeDir)) created.push(paths.managedRuntimeDir);
-    }
-  } catch (err) {
-    throw err;
-  }
-  removeRetiredState(paths, setupNotices);
+  const notices = [];
   try {
     loadExecutorProfile(repoRoot, opts.userPathOptions).profile;
   } catch (err) {
     throw new SetupError(err.message);
   }
-  const priorPermissionRules = opts.target == null ? [] : manifest.harnesses[opts.target]?.permissionRules ?? [];
-  const addedPermission = opts.target === "claude" ? ensureClaudePermission(paths, opts.userPathOptions, setupNotices) : null;
-  if (opts.target != null) {
-    const managedFiles = [];
-    const permissionRules = (addedPermission == null ? priorPermissionRules : [...priorPermissionRules, addedPermission]).filter((item, index, all) => all.findIndex((other) => other.path === item.path && other.rule === item.rule) === index);
-    recordHarnessInstallation(
-      paths,
-      opts.target,
-      managedFiles,
-      manifest,
-      permissionRules
+  const source = opts.source !== void 0 ? opts.source : runningCli(env);
+  if (source == null || !(0, import_node_fs15.existsSync)(source)) {
+    throw new SetupError(
+      `cannot find the CLI to link${source == null ? "" : ` at ${source}`} \u2014 run \`fadeno setup\` from the plugin's own CLI, or pass --from <bin-dir>.`
     );
-    if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
-  } else if (manifest.runtime != null) {
-    if (!(0, import_node_fs16.existsSync)(paths.installationsFile)) {
-      writeInstallationManifest(paths, manifest);
-      if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
-    }
   }
-  const invokingVersion = packageVersion();
-  const managedVersion = manifest.runtime?.version ?? null;
-  const remediationDir = inferBundledRuntimeForRemediation(opts.userPathOptions);
-  const fromFlag = remediationDir ? ` --from ${remediationDir}` : " --from <bin-dir>";
-  const targetFlag = opts.target ? ` --${opts.target}` : "";
-  const notices = [
-    `Fadeno ${invokingVersion} is using bundled definitions; project files remain optional.`,
-    `User configuration and state live under ${paths.configDir} and ${paths.stateDir}; project files were not changed.`
-  ];
-  if (syncOutcome === "installed") {
-    notices.push(`Managed runtime installed at ${manifest.runtime.path} (${manifest.runtime.version})`);
-  } else if (syncOutcome === "refreshed") {
-    notices.push(`Managed runtime refreshed ${syncFrom} -> ${syncTo} at ${manifest.runtime.path}`);
-  } else if (syncOutcome === "current") {
-    if (manifest.runtime) notices.push(`Managed runtime: ${manifest.runtime.path} (${manifest.runtime.version})`);
-  } else if (syncOutcome === "kept-newer") {
-    let sourceReadable = null;
-    try {
-      sourceReadable = runtimeSource ? sourceBundleVersion(runtimeSource) : null;
-    } catch {
-    }
-    if (sourceReadable == null && runtimeSource != null) {
-      notices.push(`source version unreadable or unparseable at ${runtimeSource}; managed runtime ${managedVersion} kept \u2014 use --from <bin-dir> with a valid source or --reset-runtime to mirror this plugin`);
-    } else {
-      notices.push(`managed runtime ${managedVersion} is newer than this plugin ${invokingVersion}; kept \u2014 use --reset-runtime to mirror this plugin`);
-    }
-  } else if (syncOutcome === "locked") {
-    notices.push(`another fadeno process is refreshing the managed runtime; rerun if status still reports skew`);
-  } else if (syncOutcome === "skipped-no-source") {
-    if (managedVersion) {
-      notices.push(`managed runtime NOT refreshed \u2014 it is ${managedVersion} and this CLI is ${invokingVersion}. Run: fadeno setup${targetFlag}${fromFlag}`);
-    } else if (remediationDir) {
-      notices.push(`managed runtime not installed \u2014 run: fadeno setup${targetFlag}${fromFlag}`);
-    } else {
-      notices.push(`managed runtime not installed \u2014 no source available; run from a plugin bundle or use --from <bin-dir>`);
-    }
-  } else if (syncOutcome === "absent") {
-    if (manifest.runtime) notices.push(`Managed runtime: ${manifest.runtime.path}`);
+  const link = linkCli(paths, source, opts.userPathOptions, opts.force ?? false);
+  const removed = sweepRetiredState(paths);
+  const permission = opts.target === "claude" ? ensureClaudePermission(opts.userPathOptions, notices) : null;
+  notices.unshift(
+    `Fadeno ${packageVersion()} linked at ${link.path} -> ${link.target}. It is a link, so it follows the plugin: there is no second copy to keep in step.`
+  );
+  if (!link.onPath) {
+    notices.push(`${paths.binDir} is not on this shell's PATH \u2014 add it, or the \`fadeno\` command will not be found.`);
   }
-  notices.push(...setupNotices);
-  if (opts.target === "claude") {
-    notices.push("Claude steering is installed by the plugin and remains inert while the host-native base is active.");
-  }
-  if (!opts.nonInteractive) notices.push("External command dials remain opt-in; setup selected safe host-native base.");
-  notices.push("Skills and subagents are loaded at host session start; a fresh session is required to refresh them \u2014 no setup or refresh will update the current session.");
-  return {
-    target: opts.target ?? null,
-    repoRoot,
-    paths,
-    probes,
-    created,
-    activeLoadout: "host-native base",
-    restartRequired: false,
-    notices,
-    runtimeRefresh: { outcome: syncOutcome, from: syncFrom, to: syncTo }
-  };
+  notices.push(`User configuration and state live under ${paths.configDir} and ${paths.stateDir}; project files were not changed.`);
+  for (const path of removed) notices.push(`Removed retired state ${path} (nothing reads it).`);
+  notices.push("Skills and subagents are loaded at host session start; a fresh session is required to pick up a new plugin version.");
+  return { target: opts.target ?? null, repoRoot, paths, probes, link, removed, permission, notices };
 }
 
 // src/commands/status.ts
-var import_node_fs17 = require("node:fs");
-var import_node_path16 = require("node:path");
+var import_node_fs16 = require("node:fs");
+var import_node_os3 = require("node:os");
+var import_node_path15 = require("node:path");
 var StatusError = class extends Error {
 };
-function harnessOf(target, userPathOptions) {
-  return activeHarness(target ?? void 0, userPathOptions);
+function linkState(path) {
+  try {
+    const stat = (0, import_node_fs16.lstatSync)(path);
+    if (!stat.isSymbolicLink()) return { path, target: null, state: "foreign" };
+    const target = (0, import_node_fs16.readlinkSync)(path);
+    return { path, target, state: (0, import_node_fs16.existsSync)(target) ? "linked" : "foreign" };
+  } catch {
+    return { path, target: null, state: "missing" };
+  }
+}
+function shadowingAgentFiles(repoRoot, archetypes, options) {
+  const home = options?.home ?? (0, import_node_os3.homedir)();
+  const env = options?.env ?? process.env;
+  const claudeHome = env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path15.join)(home, ".claude");
+  const roots = [
+    { dir: (0, import_node_path15.join)(claudeHome, "agents"), harness: "claude", scope: "user", ext: ".md" },
+    { dir: (0, import_node_path15.join)(repoRoot, ".claude", "agents"), harness: "claude", scope: "project", ext: ".md" },
+    { dir: (0, import_node_path15.join)(home, ".codex", "agents"), harness: "codex", scope: "user", ext: ".toml" },
+    { dir: (0, import_node_path15.join)(repoRoot, ".codex", "agents"), harness: "codex", scope: "project", ext: ".toml" }
+  ];
+  const found = [];
+  for (const name of [...archetypes, "dispatch"]) {
+    for (const root of roots) {
+      const path = (0, import_node_path15.join)(root.dir, `${name}${root.ext}`);
+      if ((0, import_node_fs16.existsSync)(path)) found.push({ path, archetype: name, harness: root.harness, scope: root.scope });
+    }
+  }
+  return found;
+}
+function holdsWork(tree) {
+  if (tree.dirty === "unavailable" || tree.unmerged === "unavailable") return true;
+  return tree.dirty.paths.length > 0 || tree.unmerged > 0;
 }
 function runStatus(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
-  const harness = harnessOf(opts.target, opts.userPathOptions);
-  let layered;
+  const harness = activeHarness(opts.target ?? void 0, opts.userPathOptions);
+  let shown;
   try {
-    layered = loadLayeredProfile(repoRoot, opts.userPathOptions, harness ?? "standalone");
+    shown = runDialShow({ repoRoot, userPathOptions: opts.userPathOptions });
   } catch (err) {
     throw new StatusError(err.message);
   }
-  const profile = layered.profile;
-  let dialState;
-  try {
-    dialState = readLocalDialState(repoRoot);
-  } catch (err) {
-    throw new StatusError(err.message);
+  const link = linkState(userPaths(opts.userPathOptions).linkPath);
+  const agentFiles = shadowingAgentFiles(repoRoot, shown.rows.map((row) => row.archetype), opts.userPathOptions);
+  const worktrees = runWorktrees({ repoRoot }).filter(holdsWork);
+  const unclosed = unclosedDispatches(repoRoot).length;
+  const attention = [];
+  for (const stale of shown.staleDials) {
+    attention.push(`${stale.archetype} does not resolve \u2014 ${stale.reason}`);
   }
-  const userDials = readUserDials(opts.userPathOptions);
-  const sessionDials = dialState.dials;
-  const repoDials = profile.dials;
-  const roles = [];
-  const hostSlots = /* @__PURE__ */ new Map();
-  const archetypes = archetypeDisplaySort(/* @__PURE__ */ new Set(["worker", "reviewer", "judge", ...Object.keys(profile.archetypes)]));
-  const layers = { session: sessionDials, repo: repoDials, user: userDials };
-  for (const archetype of archetypes) {
-    try {
-      const resolved = resolveRole(archetype, archetype, profile, layers);
-      const spec = resolved.delivery.spec;
-      hostSlots.set(archetype, hostCandidateOf(resolved.delivery, spec));
-      roles.push({
-        archetype,
-        executor: resolved.delivery.refString,
-        adapter: spec.adapter,
-        model: resolved.delivery.model,
-        source: resolved.source,
-        command: spec.adapter === "command" ? spec.command : null
-      });
-    } catch {
-    }
+  for (const row of shown.rows) {
+    if (row.deliverable) continue;
+    attention.push(
+      `${row.archetype} has no lane from here: it routes to ${row.model}, which this session can neither deliver in-session nor run as a process.`
+    );
   }
-  const external = roles.filter((r) => r.adapter === "command");
-  const installation = readInstallationManifest(opts.userPathOptions);
-  const upaths = userPaths(opts.userPathOptions);
-  const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim() || (installation.runtime != null && (0, import_node_path16.resolve)(process.argv[1] ?? "") === (0, import_node_path16.resolve)(installation.runtime.path) ? "managed" : "path");
-  const next = external.length > 0 ? "review the external sandbox boundary before driving" : null;
-  const invokingVersion = packageVersion();
-  let observedVersion = null;
-  let observedSource = null;
-  try {
-    if ((0, import_node_fs17.existsSync)(upaths.managedRuntimeDir)) {
-      const obs = readRuntimeVersionAt(upaths.managedRuntimeDir);
-      if (obs.version != null) {
-        observedVersion = obs.version;
-        observedSource = obs.source;
-      }
-    }
-  } catch {
+  if (link.state === "missing") {
+    attention.push(`no \`fadeno\` linked at ${link.path} \u2014 run \`fadeno setup\` to link it onto PATH.`);
+  } else if (link.state === "foreign") {
+    attention.push(`${link.path} is not a link Fadeno wrote, or points at a CLI that is gone \u2014 rerun \`fadeno setup\`.`);
   }
-  const managedVersion = observedVersion ?? installation.runtime?.version ?? null;
-  if (observedVersion == null && installation.runtime?.version != null) {
-    observedSource = installation.runtime.version_source ?? "assumed";
+  for (const file of agentFiles) {
+    attention.push(
+      `${file.path} defines "${file.archetype}" by hand (${file.scope} scope, ${file.harness}). ` + (file.harness === "codex" ? "A Codex agent file wins over the model a spawn passes, so it overrides the dial." : "It supplies the prompt and tools for that spawn, whatever the dial says.")
+    );
   }
-  const versionCurrent = installation.runtime == null || installation.runtime.version === invokingVersion;
-  let skew = null;
-  if (managedVersion != null && invokingVersion != null) {
-    const cmp = compareFadenoVersions(managedVersion, invokingVersion);
-    if (cmp === 1) skew = "managed-newer";
-    else if (cmp === -1) skew = "managed-older";
-    else if (cmp === 0) skew = null;
-    else skew = "divergent";
-  } else if (managedVersion == null) {
-    skew = null;
-  } else {
-    skew = "divergent";
+  if (worktrees.length > 0) {
+    attention.push(`${worktrees.length} worktree(s) hold work that is not on HEAD \u2014 \`fadeno worktrees\` lists them.`);
   }
-  let preferredCli;
-  let preferredReason = null;
-  const invokingPath = (0, import_node_path16.resolve)(process.argv[1] ?? "fadeno");
-  if (managedVersion != null && managedVersion === invokingVersion && installation.runtime?.path) {
-    preferredCli = installation.runtime.path;
-  } else {
-    preferredCli = invokingPath;
-    if (installation.runtime == null) {
-      preferredReason = `managed runtime not installed; using invoking CLI`;
-    } else if (skew === "managed-older") {
-      preferredReason = `managed runtime ${managedVersion} is older than this CLI ${invokingVersion}; refreshes at next plugin-launched command, or run fadeno setup --from <bin-dir>`;
-    } else if (skew === "managed-newer") {
-      preferredReason = `managed runtime ${managedVersion} is newer than this CLI ${invokingVersion}; update this CLI via your package manager \u2014 do not rerun setup from this older CLI`;
-    } else if (skew === "divergent") {
-      preferredReason = `versions diverge (managed ${managedVersion} vs invoking ${invokingVersion}); using invoking CLI`;
-    } else {
-      preferredReason = `managed version differs; using invoking CLI`;
-    }
+  if (unclosed > 0) {
+    attention.push(`${unclosed} dispatch(es) are still open \u2014 \`fadeno dispatches\` lists them.`);
   }
   return {
     repoRoot,
-    version: invokingVersion,
+    version: packageVersion(),
     harness,
-    dials: { session: sessionDials, repo: repoDials, user: userDials },
-    roles,
-    external,
-    projectCustomized: (0, import_node_fs17.existsSync)((0, import_node_path16.join)(repoRoot, ".fadeno")),
+    routing: shown.rows,
+    unresolved: shown.staleDials,
+    link,
+    agentFiles,
+    worktrees,
+    unclosed,
+    projectCustomized: (0, import_node_fs16.existsSync)((0, import_node_path15.join)(repoRoot, ".fadeno")),
     verbose: Boolean(opts.verbose),
-    next,
-    runtime: {
-      invocationSource,
-      managedVersion,
-      managedPath: installation.runtime?.path ?? null,
-      versionCurrent,
-      installedHarnesses: Object.keys(installation.harnesses).sort(),
-      skew,
-      preferredCli,
-      preferredReason,
-      observedVersion,
-      observedSource
-    },
-    activeLoadout: null,
-    staleProjectPin: null,
-    staleUserPin: null,
-    pinOverrides: {}
+    attention
   };
 }
 
@@ -13084,8 +12567,15 @@ var MODEL_VERIFY_PAGE = page(
   ]
 );
 var TOP_LEVEL = {
-  setup: page("Install safe user-scoped integration.", "fadeno setup [--codex|--claude] [options]"),
-  status: page("Show effective definitions, routing, and runtime state.", "fadeno status [options]"),
+  setup: page("Link the CLI onto PATH.", "fadeno setup [--codex|--claude] [--from <bin-dir>] [--force] [--json]", [
+    "A symlink, never a copy: it follows whatever the plugin holds, so there is no second CLI to keep in step and no version to compare.",
+    "Links into `~/.local/bin` unless `FADENO_BIN_DIR` says otherwise, and says so when that directory is not on PATH. `--claude` also grants `Bash(fadeno:*)` in your Claude settings so agents can run the CLI without a prompt each time.",
+    "`--force` replaces a `fadeno` at the link path that Fadeno did not write."
+  ]),
+  status: page("Show effective routing, harness integration, and whatever needs attention.", "fadeno status [--verbose] [--json]", [
+    "Routing comes from the same table `fadeno dial` prints, so the two cannot tell different stories about one repo.",
+    "The attention list is what a person has to act on: a dial that does not resolve or has no lane, a missing CLI link, a hand-written agent file that overrides a dial, worktrees holding unmerged work, and dispatches still open."
+  ]),
   models: MODELS_PAGE,
   clean: page("Remove machine-local scratch: worktrees of closed dispatches and command-lane transcripts.", "fadeno clean [--force]", [
     "Previews by default. A worktree holding uncommitted work, or belonging to a dispatch that is not closed, is kept and the reason printed. Prompts and the ledger are never touched; branches are left behind."
@@ -13180,7 +12670,6 @@ var OPTION_HINTS = {
   "--message-file": "File holding the agent\u2019s final message",
   "--model": "Direct model reference",
   "--name": "Semantic dispatch name; also the branch",
-  "--non-interactive": "Never prompt during setup",
   "--note": "Free text recorded on the decision",
   "--omp": "Target omp",
   "--opencode": "Target OpenCode",
@@ -13188,7 +12677,6 @@ var OPTION_HINTS = {
   "--parent": "Dispatch id this spawn belongs to",
   "--prompt-file": "Read prompt from file",
   "--repo": "Repository scope",
-  "--reset-runtime": "Allow runtime downgrade",
   "--scope": "Installation scope",
   "--session": "Local session scope",
   "--session-id": "Host session the spawn came from",
@@ -13259,8 +12747,8 @@ var OPTION_FORMS = {
 };
 var withGlobals = (...flags) => ["--help", "--version", ...flags];
 var PAGE_OPTIONS = {
-  setup: withGlobals("--codex", "--claude", "--from", "--reset-runtime"),
-  status: withGlobals("--verbose", "--codex", "--claude", "--opencode", "--omp"),
+  setup: withGlobals("--codex", "--claude", "--from", "--force", "--json"),
+  status: withGlobals("--verbose", "--codex", "--claude", "--opencode", "--omp", "--json"),
   models: withGlobals("--harness", "--json"),
   model: withGlobals("--harness", "--json"),
   dial: withGlobals("--harness", "--session", "--user", "--repo", "--json"),
@@ -13287,6 +12775,7 @@ var PAGE_OPTIONS = {
 };
 var PATH_OPTION_HINTS = {
   clean: { "--force": "Remove what the preview listed" },
+  setup: { "--force": "Replace a `fadeno` Fadeno did not write", "--from": "Directory holding the CLI to link" },
   plugin: { "--force": "Overwrite generated plugin files" },
   "models remove": { "--force": "Remove despite live dials, naming each stranded" },
   "model remove": { "--force": "Remove despite live dials, naming each stranded" }
@@ -13383,84 +12872,6 @@ function renderFocusedHelp(path) {
 // src/cli.ts
 var import_meta2 = {};
 var KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
-function shouldRunPreflight(command2) {
-  if (!command2) return false;
-  const excluded = /* @__PURE__ */ new Set(["status", "setup", "uninstall"]);
-  if (excluded.has(command2)) return false;
-  if (!KNOWN_CLI_COMMANDS.has(command2)) return false;
-  return true;
-}
-function resolveRuntimeSyncCandidate(env, argv1, paths, manifest) {
-  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs18.existsSync)((0, import_node_path17.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
-    return { sourceDir: env.FADENO_BUNDLED_RUNTIME, trustSource: true };
-  }
-  if (argv1) {
-    try {
-      const dir = (0, import_node_path17.dirname)((0, import_node_path17.resolve)(argv1));
-      const parent = (0, import_node_path17.dirname)(dir);
-      const candidates = [(0, import_node_path17.join)(parent, ".claude-plugin", "plugin.json"), (0, import_node_path17.join)(parent, ".codex-plugin", "plugin.json")];
-      let isFadeno = false;
-      for (const cand of candidates) {
-        try {
-          if ((0, import_node_fs18.existsSync)(cand)) {
-            const p = JSON.parse((0, import_node_fs18.readFileSync)(cand, "utf8"));
-            if (p.name === "fadeno") {
-              isFadeno = true;
-              break;
-            }
-          }
-        } catch {
-        }
-      }
-      if (isFadeno && (0, import_node_fs18.existsSync)((0, import_node_path17.join)(dir, "fadeno"))) {
-        return { sourceDir: dir, trustSource: true };
-      }
-    } catch {
-    }
-  }
-  if (argv1) {
-    try {
-      const resolvedArgv = (0, import_node_path17.resolve)(argv1);
-      const managedDir = (0, import_node_path17.resolve)(paths.managedRuntimeDir);
-      const isManaged = resolvedArgv === (0, import_node_path17.resolve)(paths.managedCli) || (0, import_node_path17.dirname)(resolvedArgv) === managedDir || resolvedArgv.startsWith(managedDir + import_node_path17.sep);
-      if (isManaged) {
-        const src = manifest.runtime?.source;
-        if (src && (0, import_node_fs18.existsSync)(src) && (0, import_node_fs18.existsSync)((0, import_node_path17.join)(src, "fadeno"))) {
-          return { sourceDir: src, trustSource: false };
-        }
-        return null;
-      }
-    } catch {
-    }
-  }
-  return null;
-}
-function maybeRunRuntimePreflight(_argv, command2, deps = {}) {
-  if (!shouldRunPreflight(command2)) return;
-  try {
-    const env = deps.env ?? process.env;
-    const argv1 = deps.argv1 ?? process.argv[1];
-    const paths = deps.paths ?? userPaths();
-    const manifest = deps.manifest ?? readInstallationManifest();
-    const candidate = resolveRuntimeSyncCandidate(env, argv1, paths, manifest);
-    if (!candidate) return;
-    if (manifest.runtime == null) return;
-    const sync = deps.syncFn ?? syncManagedRuntime;
-    const res = sync(paths, candidate.sourceDir, manifest, {
-      allowInstall: false,
-      trustSource: candidate.trustSource,
-      force: false
-    });
-    if (res.outcome === "refreshed") {
-      console.error(`fadeno: managed runtime ${res.from} -> ${res.to} refreshed at ${paths.managedRuntimeDir}`);
-    }
-  } catch (err) {
-    try {
-      console.error(`fadeno: managed runtime sync warning: ${err.message}`);
-    } catch {
-    }
-  }
-}
 function printStaleDials(stale) {
   for (const item of stale) {
     console.error(
@@ -13628,9 +13039,6 @@ async function main(argv) {
         grok: { type: "boolean" },
         opencode: { type: "boolean" },
         omp: { type: "boolean" },
-        // setup
-        "non-interactive": { type: "boolean" },
-        "reset-runtime": { type: "boolean" },
         // dial and models
         harness: { type: "string" },
         user: { type: "boolean" },
@@ -13705,46 +13113,51 @@ async function main(argv) {
     console.log(renderGlobalHelp());
     return 1;
   }
-  maybeRunRuntimePreflight(argv, command2);
   switch (command2) {
     case "setup": {
       const target = optionalTarget(values);
-      if (target === "grok" || target === "opencode" || target === "omp") throw new Error("`fadeno setup` supports --codex or --claude; Grok, OpenCode, and omp have no user-scoped setup.");
-      const runtimeSource = values.from != null ? String(values.from) : void 0;
-      const result = runSetup({ target: target ?? null, nonInteractive: values["non-interactive"], runtimeSource, resetRuntime: Boolean(values["reset-runtime"]) });
+      if (target === "grok" || target === "opencode" || target === "omp") {
+        throw new Error("`fadeno setup` supports --codex or --claude; Grok, OpenCode, and omp have no user-scoped setup.");
+      }
+      const from = values.from != null ? (0, import_node_path16.join)(String(values.from), "fadeno") : void 0;
+      const result = runSetup({ target: target ?? null, source: from, force: Boolean(values.force) });
+      if (values.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
       console.log(`Fadeno setup (${result.target ?? "standalone"})`);
-      for (const probe2 of result.probes) console.log(`  ${probe2.name}: ${probe2.available ? `available${probe2.version ? ` (${probe2.version})` : ""}` : "not found"}`);
-      for (const path of result.created) console.log(`  created ${path}`);
+      console.log(`  link ${result.link.action}: ${result.link.path} -> ${result.link.target}`);
+      for (const probe2 of result.probes) {
+        console.log(`  ${probe2.name}: ${probe2.available ? `available${probe2.version ? ` (${probe2.version})` : ""}` : "not found"}`);
+      }
       for (const notice of result.notices) console.log(`  ${notice}`);
-      if (result.restartRequired) console.log("  restart required: managed host integration changed.");
       return 0;
     }
     case "status": {
       const target = optionalTarget(values);
-      const result = runStatus({ verbose: values.verbose, target: target ?? null });
-      console.log(`Fadeno ${result.version} \xB7 harness ${result.harness ?? "unknown"}`);
-      console.log(`runtime: ${result.runtime.invocationSource}; managed ${result.runtime.managedVersion ?? "not installed"}${result.runtime.managedPath ? ` at ${result.runtime.managedPath}` : ""}${result.runtime.versionCurrent ? "" : " (version skew)"}`);
-      {
-        const rt = result.runtime;
-        if (rt.skew) console.log(`skew: ${rt.skew}`);
-        console.log(`use: ${rt.preferredCli}${rt.preferredReason ? ` (${rt.preferredReason})` : ""}`);
+      if (target === "grok") throw new Error("`fadeno status` reports the host it is inside; --grok names no host integration.");
+      const result = runStatus({ verbose: Boolean(values.verbose), target: target ?? null });
+      if (values.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
       }
-      console.log(`session: Skills and subagents are loaded at host session start; a fresh session is required to refresh them \u2014 no setup or refresh will update the current session.`);
-      console.log(`integrations: ${result.runtime.installedHarnesses.join(", ") || "none"}`);
-      {
+      console.log(`Fadeno ${result.version} \xB7 host ${result.harness ?? "unknown"} \xB7 ${result.repoRoot}`);
+      console.log(
+        `cli: ${result.link.state === "linked" ? `${result.link.path} -> ${result.link.target}` : `${result.link.state} at ${result.link.path}`}`
+      );
+      console.log("routing:");
+      for (const row of result.routing) {
+        const effort = row.pinned_effort != null ? `@${row.pinned_effort}` : "";
+        const lane = row.deliverable ? row.lane : "no lane";
+        console.log(`  ${row.archetype.padEnd(12)} ${`${row.model}${effort}`.padEnd(20)} ${lane.padEnd(8)} ${roleResolutionEchoLabel(row.source)}`);
       }
-      const r = result;
-      if (r.dials) {
-        const d = r.dials;
-        console.log(`dials: ${Object.keys(d.session).length} session, ${Object.keys(d.repo).length} repo, ${Object.keys(d.user).length} user`);
-        for (const role of r.roles ?? []) console.log(`  ${role.archetype} \u2192 ${role.executor} (${role.adapter}) [${role.source ?? "base"}]`);
-      } else if (r.roles) {
-        for (const role of r.roles) console.log(`  ${role.archetype} \u2192 ${role.executor} (${role.adapter})`);
+      if (result.attention.length === 0) {
+        console.log("attention: nothing");
+      } else {
+        console.log("attention:");
+        for (const item of result.attention) console.log(`  - ${item}`);
       }
-      if (result.staleProjectPin) console.log(`stale project pin: ${result.staleProjectPin}`);
-      if (result.staleUserPin) console.log(`stale user pin: ${result.staleUserPin}`);
-      if (result.next) console.log(`next: ${result.next}`);
-      if (values.verbose) console.log(JSON.stringify({ repoRoot: result.repoRoot, roles: result.roles }, null, 2));
+      if (result.verbose) console.log(JSON.stringify(result, null, 2));
       return 0;
     }
     case "clean": {
@@ -13773,7 +13186,7 @@ async function main(argv) {
       if (codex) {
         console.log("\nTest it: `codex plugin marketplace add . && codex plugin add fadeno@fadeno`");
       } else {
-        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path17.relative)(process.cwd(), outDir) + "`");
+        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path16.relative)(process.cwd(), outDir) + "`");
       }
       return 0;
     }
@@ -13927,7 +13340,7 @@ async function main(argv) {
         shared: Boolean(values.shared),
         from: values.from ?? null,
         promptFile,
-        prompt: promptFile == null ? (0, import_node_fs18.readFileSync)(0, "utf8") : void 0,
+        prompt: promptFile == null ? (0, import_node_fs17.readFileSync)(0, "utf8") : void 0,
         session: values["session-id"] ?? null,
         parent: values.parent,
         onEcho: (line) => console.error(line),
@@ -13963,7 +13376,7 @@ async function main(argv) {
         shared: Boolean(values.shared),
         from: values.from ?? null,
         promptFile,
-        prompt: promptFile == null ? (0, import_node_fs18.readFileSync)(0, "utf8") : void 0,
+        prompt: promptFile == null ? (0, import_node_fs17.readFileSync)(0, "utf8") : void 0,
         session: values["session-id"] ?? null,
         parent: values.parent,
         harness: values.harness ?? null,
@@ -14008,7 +13421,7 @@ async function main(argv) {
           ref: ref ?? null,
           transcript,
           messageFile,
-          message: messageFile == null && !process.stdin.isTTY ? (0, import_node_fs18.readFileSync)(0, "utf8") : null,
+          message: messageFile == null && !process.stdin.isTTY ? (0, import_node_fs17.readFileSync)(0, "utf8") : null,
           agentCwd: values["agent-cwd"] ?? null
         });
       } catch (err) {
@@ -14135,8 +13548,5 @@ if (_isMain) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  KNOWN_CLI_COMMANDS,
-  maybeRunRuntimePreflight,
-  resolveRuntimeSyncCandidate,
-  shouldRunPreflight
+  KNOWN_CLI_COMMANDS
 });

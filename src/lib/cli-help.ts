@@ -49,8 +49,15 @@ const MODEL_VERIFY_PAGE = page(
 );
 
 const TOP_LEVEL: Record<string, PageSeed> = {
-  setup: page('Install safe user-scoped integration.', 'fadeno setup [--codex|--claude] [options]'),
-  status: page('Show effective definitions, routing, and runtime state.', 'fadeno status [options]'),
+  setup: page('Link the CLI onto PATH.', 'fadeno setup [--codex|--claude] [--from <bin-dir>] [--force] [--json]', [
+    'A symlink, never a copy: it follows whatever the plugin holds, so there is no second CLI to keep in step and no version to compare.',
+    'Links into `~/.local/bin` unless `FADENO_BIN_DIR` says otherwise, and says so when that directory is not on PATH. `--claude` also grants `Bash(fadeno:*)` in your Claude settings so agents can run the CLI without a prompt each time.',
+    '`--force` replaces a `fadeno` at the link path that Fadeno did not write.',
+  ]),
+  status: page('Show effective routing, harness integration, and whatever needs attention.', 'fadeno status [--verbose] [--json]', [
+    'Routing comes from the same table `fadeno dial` prints, so the two cannot tell different stories about one repo.',
+    'The attention list is what a person has to act on: a dial that does not resolve or has no lane, a missing CLI link, a hand-written agent file that overrides a dial, worktrees holding unmerged work, and dispatches still open.',
+  ]),
   models: MODELS_PAGE,
   clean: page('Remove machine-local scratch: worktrees of closed dispatches and command-lane transcripts.', 'fadeno clean [--force]', [
     'Previews by default. A worktree holding uncommitted work, or belonging to a dispatch that is not closed, is kept and the reason printed. Prompts and the ledger are never touched; branches are left behind.',
@@ -147,7 +154,6 @@ const OPTION_HINTS: Record<string, string> = {
   '--message-file': 'File holding the agent\u2019s final message',
   '--model': 'Direct model reference',
   '--name': 'Semantic dispatch name; also the branch',
-  '--non-interactive': 'Never prompt during setup',
   '--note': 'Free text recorded on the decision',
   '--omp': 'Target omp',
   '--opencode': 'Target OpenCode',
@@ -155,7 +161,6 @@ const OPTION_HINTS: Record<string, string> = {
   '--parent': 'Dispatch id this spawn belongs to',
   '--prompt-file': 'Read prompt from file',
   '--repo': 'Repository scope',
-  '--reset-runtime': 'Allow runtime downgrade',
   '--scope': 'Installation scope',
   '--session': 'Local session scope',
   '--session-id': 'Host session the spawn came from',
@@ -198,8 +203,8 @@ const withGlobals = (...flags: string[]): readonly string[] => ['--help', '--ver
  * usage carry options whose meaning depends on the selected mode.
  */
 const PAGE_OPTIONS: Record<string, readonly string[]> = {
-  setup: withGlobals('--codex', '--claude', '--from', '--reset-runtime'),
-  status: withGlobals('--verbose', '--codex', '--claude', '--opencode', '--omp'),
+  setup: withGlobals('--codex', '--claude', '--from', '--force', '--json'),
+  status: withGlobals('--verbose', '--codex', '--claude', '--opencode', '--omp', '--json'),
   models: withGlobals('--harness', '--json'),
   model: withGlobals('--harness', '--json'),
   dial: withGlobals('--harness', '--session', '--user', '--repo', '--json'),
@@ -227,6 +232,7 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
 
 const PATH_OPTION_HINTS: Record<string, Record<string, string>> = {
   clean: { '--force': 'Remove what the preview listed' },
+  setup: { '--force': 'Replace a `fadeno` Fadeno did not write', '--from': 'Directory holding the CLI to link' },
   plugin: { '--force': 'Overwrite generated plugin files' },
   'models remove': { '--force': 'Remove despite live dials, naming each stranded' },
   'model remove': { '--force': 'Remove despite live dials, naming each stranded' },

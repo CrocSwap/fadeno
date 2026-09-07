@@ -1,19 +1,16 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { loadExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
-import { retiredStateFiles, userPaths, type FadenoUserPaths, type UserPathOptions } from '../lib/user-paths.ts';
 import {
-  syncManagedRuntime,
-  readInstallationManifest,
-  recordHarnessInstallation,
-  writeInstallationManifest,
-  sourceBundleVersion,
-  type ManagedPermissionRule,
-  type RuntimeSyncOutcome,
-} from '../lib/installations.ts';
+  retiredStateDirs,
+  retiredStateFiles,
+  userPaths,
+  type FadenoUserPaths,
+  type UserPathOptions,
+} from '../lib/user-paths.ts';
 
 export class SetupError extends Error {}
 
@@ -21,15 +18,18 @@ export type SetupTarget = 'codex' | 'claude' | null;
 
 export interface SetupOptions {
   target?: SetupTarget;
-  nonInteractive?: boolean;
   cwd?: string;
   repoRoot?: string;
   userPathOptions?: UserPathOptions;
   probeCommand?: (command: string) => CommandProbe;
-  /** Plugin `bin/` directory; normally supplied by its launcher environment. */
-  runtimeSource?: string | null;
-  /** Explicit flag to allow downgrade */
-  resetRuntime?: boolean;
+  /**
+   * The CLI to link. Normally the one running this command — the plugin's
+   * bundled `bin/fadeno`, published to the launcher environment as
+   * `FADENO_BUNDLED_RUNTIME`.
+   */
+  source?: string | null;
+  /** Replace a `fadeno` at the link path that Fadeno did not put there. */
+  force?: boolean;
 }
 
 export interface CommandProbe {
@@ -39,20 +39,24 @@ export interface CommandProbe {
   version: string | null;
 }
 
+export interface SetupLink {
+  path: string;
+  target: string;
+  action: 'created' | 'retargeted' | 'unchanged';
+  /** Whether the link's directory is on this shell's PATH. */
+  onPath: boolean;
+}
+
 export interface SetupResult {
   target: SetupTarget;
   repoRoot: string;
   paths: FadenoUserPaths;
   probes: CommandProbe[];
-  created: string[];
-  activeLoadout: string;
-  restartRequired: boolean;
+  link: SetupLink;
+  /** Retired state this setup swept, if any. */
+  removed: string[];
+  permission: { path: string; rule: string } | null;
   notices: string[];
-  runtimeRefresh: {
-    outcome: RuntimeSyncOutcome;
-    from: string | null;
-    to: string | null;
-  };
 }
 
 const PROBES: Array<{ name: string; command: string }> = [
@@ -74,38 +78,118 @@ function probe(command: string): CommandProbe {
 
 /**
  * Setup used to record its `--codex`/`--claude` target as "your harness", and
- * `activeHarness` used to read it back. Both are gone: a harness is only the
- * one you are inside right now. Sweep the leftovers so an upgraded install
- * carries no state nothing consults.
+ * to copy the CLI into a managed runtime directory it then version-compared
+ * against the plugin. Both are gone. A file nothing consults is a lie on disk
+ * waiting to be believed, so removing the readers was only half the change.
  */
-/** Only a plain file is swept: a directory at a retired path is not Fadeno's and is left alone. */
-function isRegularFile(path: string): boolean {
-  try {
-    return lstatSync(path).isFile();
-  } catch {
-    return false;
-  }
-}
-
-function removeRetiredState(paths: FadenoUserPaths, notices: string[]): void {
+function sweepRetiredState(paths: FadenoUserPaths): string[] {
+  const removed: string[] = [];
   for (const path of retiredStateFiles(paths)) {
-    if (!isRegularFile(path)) continue;
+    try {
+      if (!lstatSync(path).isFile()) continue;
+    } catch {
+      continue;
+    }
     rmSync(path, { force: true });
-    notices.push(`Removed retired state ${path} (nothing reads it; there is no stored default harness).`);
+    removed.push(path);
+  }
+  for (const dir of retiredStateDirs(paths)) {
+    try {
+      if (!lstatSync(dir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    rmSync(dir, { recursive: true, force: true });
+    removed.push(dir);
+  }
+  return removed;
+}
+
+/** The CLI this process is running, resolved through any symlink. */
+function runningCli(env: NodeJS.ProcessEnv): string | null {
+  const bundled = env.FADENO_BUNDLED_RUNTIME?.trim();
+  if (bundled && existsSync(join(bundled, 'fadeno'))) return join(bundled, 'fadeno');
+  const argv1 = process.argv[1];
+  if (argv1 == null) return null;
+  try {
+    return realpathSync(resolve(argv1));
+  } catch {
+    return resolve(argv1);
   }
 }
 
+function onPath(dir: string, env: NodeJS.ProcessEnv): boolean {
+  const entries = (env.PATH ?? '').split(delimiter).filter((part) => part.length > 0);
+  return entries.some((entry) => {
+    try {
+      return realpathSync(entry) === realpathSync(dir);
+    } catch {
+      return resolve(entry) === resolve(dir);
+    }
+  });
+}
+
+/** A Windows shim: it NAMES the CLI rather than duplicating it. */
+function windowsShim(target: string): string {
+  return ['@echo off', `"${process.execPath}" "${target}" %*`, ''].join('\r\n');
+}
+
+/**
+ * Point `<binDir>/fadeno` at the CLI that is running.
+ *
+ * A LINK, never a copy. Two copies of one CLI on disk is a version-skew
+ * problem, and the machinery that reconciled them — version comparison, an
+ * installation manifest, a preferred-cli line in `status` — was fifteen
+ * hundred lines answering a question this one call removes: the link is
+ * whatever the plugin currently holds, always.
+ *
+ * Windows gets a shim instead, for the same reason and because symlinks there
+ * need privileges.
+ */
+function linkCli(paths: FadenoUserPaths, target: string, options: UserPathOptions | undefined, force: boolean): SetupLink {
+  const windows = (options?.platform ?? process.platform) === 'win32';
+  const path = paths.linkPath;
+  mkdirSync(paths.binDir, { recursive: true });
+  const env = options?.env ?? process.env;
+  const FOREIGN = ' foreign';
+  const current = (() => {
+    try {
+      const stat = lstatSync(path);
+      if (windows) return stat.isFile() ? readFileSync(path, 'utf8') : FOREIGN;
+      return stat.isSymbolicLink() ? readlinkSync(path) : FOREIGN;
+    } catch {
+      return null;
+    }
+  })();
+  const want = windows ? windowsShim(target) : target;
+  if (current === want) return { path, target, action: 'unchanged', onPath: onPath(paths.binDir, env) };
+  if (current === FOREIGN && !force) {
+    throw new SetupError(
+      `${path} exists and is not something Fadeno wrote. Remove it, choose another directory with FADENO_BIN_DIR, or rerun with --force to replace it.`,
+    );
+  }
+  if (current != null) rmSync(path, { force: true });
+  if (windows) writeFileSync(path, want, 'utf8');
+  else symlinkSync(target, path);
+  return { path, target, action: current == null ? 'created' : 'retargeted', onPath: onPath(paths.binDir, env) };
+}
+
+/**
+ * Let Claude run `fadeno` without asking each time.
+ *
+ * Scoped to the one command, added to the user's own settings, and named in
+ * the notice so the grant is never silent. Every Fadeno subcommand is a read
+ * or a record; the one that removes anything (`clean --force`) refuses a
+ * worktree holding uncommitted work.
+ */
 function ensureClaudePermission(
-  paths: FadenoUserPaths,
   options: UserPathOptions | undefined,
   notices: string[],
-): ManagedPermissionRule | null {
-  if (!existsSync(paths.managedCli)) return null;
+): { path: string; rule: string } | null {
   const env = options?.env ?? process.env;
   const settingsPath = join(env.CLAUDE_CONFIG_DIR?.trim() || join(options?.home ?? homedir(), '.claude'), 'settings.json');
-  const createdFile = !existsSync(settingsPath);
   let data: Record<string, unknown> = {};
-  if (!createdFile) {
+  if (existsSync(settingsPath)) {
     try {
       const parsed: unknown = JSON.parse(readFileSync(settingsPath, 'utf8'));
       if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -128,167 +212,53 @@ function ensureClaudePermission(
     return null;
   }
   const allow = [...(permissions.allow as unknown[] | undefined ?? [])];
-  if (/[\r\n)]/.test(paths.managedCli)) {
-    notices.push(`Managed runtime path ${paths.managedCli} cannot be represented safely in a Claude permission rule.`);
-    return null;
-  }
-  const rule = `Bash(${paths.managedCli}:*)`;
-  if (allow.includes(rule)) return null;
+  const rule = 'Bash(fadeno:*)';
+  if (allow.includes(rule)) return { path: settingsPath, rule };
   allow.push(rule);
   permissions.allow = allow;
   data.permissions = permissions;
   mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(settingsPath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
-  notices.push(`Claude user permission added for the managed Fadeno runtime only: ${rule}`);
-  return { path: settingsPath, rule, createdFile };
+  notices.push(`Claude user permission added so agents can run the CLI without a prompt each time: ${rule} in ${settingsPath}`);
+  return { path: settingsPath, rule };
 }
 
-function inferBundledRuntimeForRemediation(userPathOptions?: UserPathOptions): string | null {
-  const env = userPathOptions?.env ?? process.env;
-  if (env.FADENO_BUNDLED_RUNTIME && existsSync(join(env.FADENO_BUNDLED_RUNTIME, 'fadeno'))) {
-    return env.FADENO_BUNDLED_RUNTIME;
-  }
-  try {
-    const argv1 = process.argv[1];
-    if (argv1) {
-      const dir = dirname(resolve(argv1));
-      // check if dir contains fadeno and package.json marker
-      if (existsSync(join(dir, 'fadeno')) && existsSync(join(dir, 'package.json'))) {
-        return dir;
-      }
-      // also check realpath
-      try {
-        const real = realpathSync(argv1);
-        const realDir = dirname(resolve(real));
-        if (existsSync(join(realDir, 'fadeno'))) return realDir;
-      } catch {}
-    }
-  } catch {}
-  return null;
-}
-
-/** One explicit, read-only-probe setup action for user-scoped integration. */
+/** Link the CLI onto PATH, and probe the harnesses this machine can reach. */
 export function runSetup(opts: SetupOptions = {}): SetupResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const paths = userPaths(opts.userPathOptions);
+  const env = opts.userPathOptions?.env ?? process.env;
   const probeCommand = opts.probeCommand ?? probe;
   const probes = PROBES.map((item) => probeCommand(item.command));
-  const created: string[] = [];
-  const setupNotices: string[] = [];
-  const manifestExisted = existsSync(paths.installationsFile);
-  const manifest = readInstallationManifest(opts.userPathOptions);
-  const runtimeSource = opts.runtimeSource !== undefined
-    ? opts.runtimeSource
-    : (opts.userPathOptions?.env ?? process.env).FADENO_BUNDLED_RUNTIME ?? null;
-  let syncOutcome: RuntimeSyncOutcome = 'absent';
-  let syncFrom: string | null = null;
-  let syncTo: string | null = null;
-  try {
-    const res = syncManagedRuntime(paths, runtimeSource, manifest, {
-      allowInstall: true,
-      trustSource: true,
-      force: Boolean(opts.resetRuntime),
-    });
-    syncOutcome = res.outcome;
-    syncFrom = res.from;
-    syncTo = res.to;
-    if (res.outcome === 'installed' || res.outcome === 'refreshed') {
-      if (!created.includes(paths.managedRuntimeDir)) created.push(paths.managedRuntimeDir);
-    }
-  } catch (err) {
-    throw err;
-  }
-  removeRetiredState(paths, setupNotices);
+  const notices: string[] = [];
 
+  // The catalog is read before anything is written: a setup that links a CLI
+  // which then refuses to load this repo's config has helped nobody.
   try {
     loadExecutorProfile(repoRoot, opts.userPathOptions).profile;
   } catch (err) {
     throw new SetupError((err as Error).message);
   }
 
-  const priorPermissionRules = opts.target == null ? [] : manifest.harnesses[opts.target]?.permissionRules ?? [];
-  const addedPermission = opts.target === 'claude'
-    ? ensureClaudePermission(paths, opts.userPathOptions, setupNotices)
-    : null;
-  if (opts.target != null) {
-    const managedFiles: string[] = [];
-    const permissionRules = (addedPermission == null ? priorPermissionRules : [...priorPermissionRules, addedPermission])
-      .filter((item, index, all) => all.findIndex((other) => other.path === item.path && other.rule === item.rule) === index);
-    recordHarnessInstallation(
-      paths,
-      opts.target,
-      managedFiles,
-      manifest,
-      permissionRules,
+  const source = opts.source !== undefined ? opts.source : runningCli(env);
+  if (source == null || !existsSync(source)) {
+    throw new SetupError(
+      `cannot find the CLI to link${source == null ? '' : ` at ${source}`} — run \`fadeno setup\` from the plugin's own CLI, or pass --from <bin-dir>.`,
     );
-    if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
-  } else if (manifest.runtime != null) {
-    if (!existsSync(paths.installationsFile)) {
-      writeInstallationManifest(paths, manifest);
-      if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
-    }
   }
+  const link = linkCli(paths, source, opts.userPathOptions, opts.force ?? false);
+  const removed = sweepRetiredState(paths);
+  const permission = opts.target === 'claude' ? ensureClaudePermission(opts.userPathOptions, notices) : null;
 
-  const invokingVersion = packageVersion();
-  const managedVersion = manifest.runtime?.version ?? null;
-  const remediationDir = inferBundledRuntimeForRemediation(opts.userPathOptions);
-  const fromFlag = remediationDir ? ` --from ${remediationDir}` : ' --from <bin-dir>';
-  const targetFlag = opts.target ? ` --${opts.target}` : '';
-
-  const notices: string[] = [
-    `Fadeno ${invokingVersion} is using bundled definitions; project files remain optional.`,
-    `User configuration and state live under ${paths.configDir} and ${paths.stateDir}; project files were not changed.`,
-  ];
-
-  if (syncOutcome === 'installed') {
-    notices.push(`Managed runtime installed at ${manifest.runtime!.path} (${manifest.runtime!.version})`);
-  } else if (syncOutcome === 'refreshed') {
-    notices.push(`Managed runtime refreshed ${syncFrom} -> ${syncTo} at ${manifest.runtime!.path}`);
-  } else if (syncOutcome === 'current') {
-    if (manifest.runtime) notices.push(`Managed runtime: ${manifest.runtime.path} (${manifest.runtime.version})`);
-  } else if (syncOutcome === 'kept-newer') {
-    let sourceReadable: string | null = null;
-    try {
-      sourceReadable = runtimeSource ? sourceBundleVersion(runtimeSource) : null;
-    } catch {}
-    if (sourceReadable == null && runtimeSource != null) {
-      notices.push(`source version unreadable or unparseable at ${runtimeSource}; managed runtime ${managedVersion} kept — use --from <bin-dir> with a valid source or --reset-runtime to mirror this plugin`);
-    } else {
-      notices.push(`managed runtime ${managedVersion} is newer than this plugin ${invokingVersion}; kept — use --reset-runtime to mirror this plugin`);
-    }
-  } else if (syncOutcome === 'locked') {
-    notices.push(`another fadeno process is refreshing the managed runtime; rerun if status still reports skew`);
-  } else if (syncOutcome === 'skipped-no-source') {
-    if (managedVersion) {
-      notices.push(`managed runtime NOT refreshed — it is ${managedVersion} and this CLI is ${invokingVersion}. Run: fadeno setup${targetFlag}${fromFlag}`);
-    } else if (remediationDir) {
-      notices.push(`managed runtime not installed — run: fadeno setup${targetFlag}${fromFlag}`);
-    } else {
-      notices.push(`managed runtime not installed — no source available; run from a plugin bundle or use --from <bin-dir>`);
-    }
-  } else if (syncOutcome === 'absent') {
-    if (manifest.runtime) notices.push(`Managed runtime: ${manifest.runtime.path}`);
+  notices.unshift(
+    `Fadeno ${packageVersion()} linked at ${link.path} -> ${link.target}. It is a link, so it follows the plugin: there is no second copy to keep in step.`,
+  );
+  if (!link.onPath) {
+    notices.push(`${paths.binDir} is not on this shell's PATH — add it, or the \`fadeno\` command will not be found.`);
   }
+  notices.push(`User configuration and state live under ${paths.configDir} and ${paths.stateDir}; project files were not changed.`);
+  for (const path of removed) notices.push(`Removed retired state ${path} (nothing reads it).`);
+  notices.push('Skills and subagents are loaded at host session start; a fresh session is required to pick up a new plugin version.');
 
-  notices.push(...setupNotices);
-
-  if (opts.target === 'claude') {
-    notices.push('Claude steering is installed by the plugin and remains inert while the host-native base is active.');
-  }
-  if (!opts.nonInteractive) notices.push('External command dials remain opt-in; setup selected safe host-native base.');
-
-  // Add session definitions notice (point 7)
-  notices.push('Skills and subagents are loaded at host session start; a fresh session is required to refresh them — no setup or refresh will update the current session.');
-
-  return {
-    target: opts.target ?? null,
-    repoRoot,
-    paths,
-    probes,
-    created,
-    activeLoadout: 'host-native base',
-    restartRequired: false,
-    notices,
-    runtimeRefresh: { outcome: syncOutcome, from: syncFrom, to: syncTo },
-  };
+  return { target: opts.target ?? null, repoRoot, paths, probes, link, removed, permission, notices };
 }

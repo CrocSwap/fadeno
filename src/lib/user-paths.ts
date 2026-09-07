@@ -43,9 +43,10 @@ export interface FadenoUserPaths {
   dataDir: string;
   executorsFile: string;
   configFile: string;
-  installationsFile: string;
-  managedRuntimeDir: string;
-  managedCli: string;
+  /** Directory `fadeno setup` links the CLI into; expected to be on PATH. */
+  binDir: string;
+  /** The link itself: `<binDir>/fadeno`. */
+  linkPath: string;
   dialsFile: string;
   modelVerificationsFile: string;
 }
@@ -71,7 +72,11 @@ export function userPaths(options: UserPathOptions = {}): FadenoUserPaths {
   const configDir = join(configHome, 'fadeno');
   const stateDir = join(stateHome, 'fadeno');
   const dataDir = join(dataHome, 'fadeno');
-  const managedRuntimeDir = join(dataDir, 'runtime');
+  // `~/.local/bin` is where a user-scoped executable belongs on macOS and
+  // Linux, and is on PATH in most shells; `setup` says so when it is not.
+  // Windows has no such convention, so Fadeno keeps its own directory and
+  // tells the user to add it.
+  const binDir = env.FADENO_BIN_DIR?.trim() || (windows ? join(dataDir, 'bin') : join(home, '.local', 'bin'));
   return {
     configHome,
     stateHome,
@@ -81,9 +86,8 @@ export function userPaths(options: UserPathOptions = {}): FadenoUserPaths {
     dataDir,
     executorsFile: join(configDir, 'executors.yaml'),
     configFile: join(configDir, 'config.yaml'),
-    installationsFile: join(stateDir, 'installations.json'),
-    managedRuntimeDir,
-    managedCli: join(managedRuntimeDir, windows ? 'fadeno.cmd' : 'fadeno'),
+    binDir,
+    linkPath: join(binDir, windows ? 'fadeno.cmd' : 'fadeno'),
     dialsFile: join(stateDir, 'dials.json'),
     modelVerificationsFile: join(stateDir, 'model-verifications.json'),
   };
@@ -107,7 +111,25 @@ export type FadenoHarness = 'codex' | 'claude';
  * the readers is only half the change — the bytes have to go too.
  */
 export function retiredStateFiles(paths: FadenoUserPaths): string[] {
-  return [join(paths.stateDir, 'harness'), join(paths.stateDir, 'loadout')];
+  return [
+    join(paths.stateDir, 'harness'),
+    join(paths.stateDir, 'loadout'),
+    // The installation manifest: it recorded which files a managed-runtime
+    // COPY had installed and at what version. `setup` links now, so there is
+    // no copy to reconcile and nothing left to record.
+    join(paths.stateDir, 'installations.json'),
+  ];
+}
+
+/**
+ * Directories in the same category — swept whole, for the same reason.
+ *
+ * `<data>/fadeno/runtime` held a byte-for-byte copy of the CLI that a version
+ * comparison kept in step with the plugin's. The copy is gone; a stale one
+ * left on disk is a second Fadeno someone's PATH could still find.
+ */
+export function retiredStateDirs(paths: FadenoUserPaths): string[] {
+  return [join(paths.dataDir, 'runtime')];
 }
 
 // --- atomic writes ---

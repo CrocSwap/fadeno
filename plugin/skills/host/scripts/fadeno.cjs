@@ -11,7 +11,6 @@ const result = spawnSync(process.execPath, [join(binDir, 'fadeno'), ...process.a
   env: {
     ...process.env,
     FADENO_BUNDLED_RUNTIME: binDir,
-    FADENO_INVOCATION_SOURCE: 'plugin',
     FADENO_HARNESS: 'claude',
   },
 });

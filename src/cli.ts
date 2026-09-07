@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import {
   renderClean,
@@ -38,100 +38,9 @@ import { runStatus } from './commands/status.ts';
 import { roleResolutionEchoLabel } from './lib/executors.ts';
 import { modelAgrees } from './lib/ledger.ts';
 import { packageVersion } from './lib/paths.ts';
-import { readInstallationManifest, syncManagedRuntime } from './lib/installations.ts';
-import { userPaths } from './lib/user-paths.ts';
 import { renderFocusedHelp, renderGlobalHelp, resolveHelpPath } from './lib/cli-help.ts';
 
 export const KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
-
-export function shouldRunPreflight(command: string | undefined): boolean {
-  if (!command) return false;
-  const excluded = new Set(['status', 'setup', 'uninstall']);
-  if (excluded.has(command)) return false;
-  if (!KNOWN_CLI_COMMANDS.has(command)) return false;
-  return true;
-}
-
-export function resolveRuntimeSyncCandidate(
-  env: NodeJS.ProcessEnv,
-  argv1: string | undefined,
-  paths: ReturnType<typeof userPaths>,
-  manifest: ReturnType<typeof readInstallationManifest>,
-): { sourceDir: string; trustSource: boolean } | null {
-  if (env.FADENO_BUNDLED_RUNTIME && existsSync(join(env.FADENO_BUNDLED_RUNTIME, 'fadeno'))) {
-    return { sourceDir: env.FADENO_BUNDLED_RUNTIME, trustSource: true };
-  }
-  if (argv1) {
-    try {
-      const dir = dirname(resolve(argv1));
-      const parent = dirname(dir);
-      const candidates = [join(parent, '.claude-plugin', 'plugin.json'), join(parent, '.codex-plugin', 'plugin.json')];
-      let isFadeno = false;
-      for (const cand of candidates) {
-        try {
-          if (existsSync(cand)) {
-            const p = JSON.parse(readFileSync(cand, 'utf8')) as { name?: unknown };
-            if (p.name === 'fadeno') { isFadeno = true; break; }
-          }
-        } catch {}
-      }
-      if (isFadeno && existsSync(join(dir, 'fadeno'))) {
-        return { sourceDir: dir, trustSource: true };
-      }
-    } catch {}
-  }
-  if (argv1) {
-    try {
-      const resolvedArgv = resolve(argv1);
-      const managedDir = resolve(paths.managedRuntimeDir);
-      const isManaged = resolvedArgv === resolve(paths.managedCli) || dirname(resolvedArgv) === managedDir || resolvedArgv.startsWith(managedDir + sep);
-      if (isManaged) {
-        const src = manifest.runtime?.source;
-        if (src && existsSync(src) && existsSync(join(src, 'fadeno'))) {
-          return { sourceDir: src, trustSource: false };
-        }
-        return null;
-      }
-    } catch {}
-  }
-  return null;
-}
-
-export function maybeRunRuntimePreflight(
-  _argv: string[],
-  command: string | undefined,
-  deps: {
-    env?: NodeJS.ProcessEnv;
-    argv1?: string;
-    paths?: ReturnType<typeof userPaths>;
-    manifest?: ReturnType<typeof readInstallationManifest>;
-    syncFn?: typeof syncManagedRuntime;
-  } = {},
-): void {
-  if (!shouldRunPreflight(command)) return;
-  try {
-    const env = deps.env ?? process.env;
-    const argv1 = deps.argv1 ?? process.argv[1];
-    const paths = deps.paths ?? userPaths();
-    const manifest = deps.manifest ?? readInstallationManifest();
-    const candidate = resolveRuntimeSyncCandidate(env, argv1, paths, manifest);
-    if (!candidate) return;
-    if (manifest.runtime == null) return;
-    const sync = deps.syncFn ?? syncManagedRuntime;
-    const res = sync(paths, candidate.sourceDir, manifest, {
-      allowInstall: false,
-      trustSource: candidate.trustSource,
-      force: false,
-    });
-    if (res.outcome === 'refreshed') {
-      console.error(`fadeno: managed runtime ${res.from} -> ${res.to} refreshed at ${paths.managedRuntimeDir}`);
-    }
-  } catch (err) {
-    try {
-      console.error(`fadeno: managed runtime sync warning: ${(err as Error).message}`);
-    } catch {}
-  }
-}
 
 function printStaleDials(stale: Array<{ archetype: string; reason: string }>): void {
   for (const item of stale) {
@@ -353,9 +262,6 @@ async function main(argv: string[]): Promise<number> {
         grok: { type: 'boolean' },
         opencode: { type: 'boolean' },
         omp: { type: 'boolean' },
-        // setup
-        'non-interactive': { type: 'boolean' },
-        'reset-runtime': { type: 'boolean' },
         // dial and models
         harness: { type: 'string' },
         user: { type: 'boolean' },
@@ -457,49 +363,53 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
-  // Best-effort runtime maintenance preflight for operational commands
-  maybeRunRuntimePreflight(argv, command);
-
   switch (command) {
     case 'setup': {
       const target = optionalTarget(values);
-      if (target === 'grok' || target === 'opencode' || target === 'omp') throw new Error('`fadeno setup` supports --codex or --claude; Grok, OpenCode, and omp have no user-scoped setup.');
-      const runtimeSource = values.from != null ? String(values.from) : undefined;
-      const result = runSetup({ target: target ?? null, nonInteractive: values['non-interactive'], runtimeSource: runtimeSource as any, resetRuntime: Boolean(values['reset-runtime']) });
+      if (target === 'grok' || target === 'opencode' || target === 'omp') {
+        throw new Error('`fadeno setup` supports --codex or --claude; Grok, OpenCode, and omp have no user-scoped setup.');
+      }
+      // `--from <bin-dir>` names the directory the CLI lives in, the same
+      // shape the plugin launcher publishes; the link points at the file.
+      const from = values.from != null ? join(String(values.from), 'fadeno') : undefined;
+      const result = runSetup({ target: target ?? null, source: from, force: Boolean(values.force) });
+      if (values.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
       console.log(`Fadeno setup (${result.target ?? 'standalone'})`);
-      for (const probe of result.probes) console.log(`  ${probe.name}: ${probe.available ? `available${probe.version ? ` (${probe.version})` : ''}` : 'not found'}`);
-      for (const path of result.created) console.log(`  created ${path}`);
+      console.log(`  link ${result.link.action}: ${result.link.path} -> ${result.link.target}`);
+      for (const probe of result.probes) {
+        console.log(`  ${probe.name}: ${probe.available ? `available${probe.version ? ` (${probe.version})` : ''}` : 'not found'}`);
+      }
       for (const notice of result.notices) console.log(`  ${notice}`);
-      if (result.restartRequired) console.log('  restart required: managed host integration changed.');
       return 0;
     }
     case 'status': {
       const target = optionalTarget(values);
-      const result = runStatus({ verbose: values.verbose, target: target ?? null } as any);
-      console.log(`Fadeno ${(result as any).version} · harness ${(result as any).harness ?? 'unknown'}`);
-      console.log(`runtime: ${(result as any).runtime.invocationSource}; managed ${(result as any).runtime.managedVersion ?? 'not installed'}${(result as any).runtime.managedPath ? ` at ${(result as any).runtime.managedPath}` : ''}${(result as any).runtime.versionCurrent ? '' : ' (version skew)'}`);
-      {
-        const rt: any = (result as any).runtime;
-        if (rt.skew) console.log(`skew: ${rt.skew}`);
-        console.log(`use: ${rt.preferredCli}${rt.preferredReason ? ` (${rt.preferredReason})` : ''}`);
+      if (target === 'grok') throw new Error('`fadeno status` reports the host it is inside; --grok names no host integration.');
+      const result = runStatus({ verbose: Boolean(values.verbose), target: target ?? null });
+      if (values.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
       }
-      console.log(`session: Skills and subagents are loaded at host session start; a fresh session is required to refresh them — no setup or refresh will update the current session.`);
-      console.log(`integrations: ${(result as any).runtime.installedHarnesses.join(', ') || 'none'}`);
-      {
+      console.log(`Fadeno ${result.version} · host ${result.harness ?? 'unknown'} · ${result.repoRoot}`);
+      console.log(
+        `cli: ${result.link.state === 'linked' ? `${result.link.path} -> ${result.link.target}` : `${result.link.state} at ${result.link.path}`}`,
+      );
+      console.log('routing:');
+      for (const row of result.routing) {
+        const effort = row.pinned_effort != null ? `@${row.pinned_effort}` : '';
+        const lane = row.deliverable ? row.lane : 'no lane';
+        console.log(`  ${row.archetype.padEnd(12)} ${`${row.model}${effort}`.padEnd(20)} ${lane.padEnd(8)} ${roleResolutionEchoLabel(row.source)}`);
       }
-      // New dial-based status: show per-role rows resolved through cascade
-      const r: any = result as any;
-      if (r.dials) {
-        const d = r.dials as { session: Record<string, unknown>; repo: Record<string, unknown>; user: Record<string, unknown> };
-        console.log(`dials: ${Object.keys(d.session).length} session, ${Object.keys(d.repo).length} repo, ${Object.keys(d.user).length} user`);
-        for (const role of r.roles ?? []) console.log(`  ${role.archetype} → ${role.executor} (${role.adapter}) [${role.source ?? 'base'}]`);
-      } else if (r.roles) {
-        for (const role of r.roles) console.log(`  ${role.archetype} → ${role.executor} (${role.adapter})`);
+      if (result.attention.length === 0) {
+        console.log('attention: nothing');
+      } else {
+        console.log('attention:');
+        for (const item of result.attention) console.log(`  - ${item}`);
       }
-      if ((result as any).staleProjectPin) console.log(`stale project pin: ${(result as any).staleProjectPin}`);
-      if ((result as any).staleUserPin) console.log(`stale user pin: ${(result as any).staleUserPin}`);
-      if ((result as any).next) console.log(`next: ${(result as any).next}`);
-      if (values.verbose) console.log(JSON.stringify({ repoRoot: (result as any).repoRoot, roles: (result as any).roles }, null, 2));
+      if (result.verbose) console.log(JSON.stringify(result, null, 2));
       return 0;
     }
     case 'clean': {

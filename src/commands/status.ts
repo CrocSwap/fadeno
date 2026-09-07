@@ -1,214 +1,174 @@
-import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import {
-  activeHarness,
-  archetypeDisplaySort,
-  hostCandidateOf,
-  resolveRole,
-  readLocalDialState,
-} from '../lib/executors.ts';
+import { existsSync, lstatSync, readlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { activeHarness } from '../lib/executors.ts';
+import { unclosedDispatches } from '../lib/ledger.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
-import { readUserDials, type UserPathOptions, userPaths } from '../lib/user-paths.ts';
-import { loadLayeredProfile } from '../lib/config-layers.ts';
-import { readInstallationManifest, compareFadenoVersions, readRuntimeVersionAt } from '../lib/installations.ts';
-import type { DialRef } from '../lib/executors.ts';
+import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import { runDialShow, type EffectiveRow } from './dial.ts';
+import { runWorktrees, type WorktreeEntry } from './dispatches.ts';
 
 export class StatusError extends Error {}
 
 export interface StatusOptions {
   verbose?: boolean;
-  // 'opencode' is accepted since OpenCode steering materialization exists and
-  // the harness has an adapter tree; 'grok' stays excluded — it has no
-  // steering surface to report on.
   target?: 'codex' | 'claude' | 'opencode' | 'omp' | null;
   cwd?: string;
   repoRoot?: string;
-  env?: string | null;
   userPathOptions?: UserPathOptions;
 }
 
-export interface StatusRole {
+/**
+ * An agent definition someone wrote by hand whose name Fadeno also routes.
+ *
+ * Fadeno materializes nothing, so any file here is the user's own. It is
+ * reported rather than touched, because on a harness whose agent file wins
+ * over the value a spawn passes — Codex — such a file silently overrides the
+ * dial, which is the one integration failure a person cannot see from
+ * outside.
+ */
+export interface ShadowingAgentFile {
+  path: string;
   archetype: string;
-  executor: string;
-  adapter: 'command' | 'host';
-  model: string | null;
-  source: 'binding' | 'session' | 'repo' | 'user' | 'base';
-  command: string[] | null;
+  harness: 'claude' | 'codex';
+  scope: 'user' | 'project';
 }
 
 export interface StatusResult {
   repoRoot: string;
   version: string;
+  /** The host this session is inside; `standalone` from a bare shell. */
   harness: 'codex' | 'claude' | 'grok' | 'opencode' | 'omp' | 'standalone' | null;
-  dials: { session: Record<string, DialRef>; repo: Record<string, DialRef>; user: Record<string, DialRef> };
-  roles: StatusRole[];
-  external: StatusRole[];
+  /** Effective routing, from the same table `fadeno dial` prints. */
+  routing: EffectiveRow[];
+  /** Archetypes whose dial no longer resolves, with the resolver's reason. */
+  unresolved: Array<{ archetype: string; reason: string }>;
+  /** Where the CLI is linked, and whether that link still leads anywhere. */
+  link: { path: string; target: string | null; state: 'linked' | 'missing' | 'foreign' };
+  agentFiles: ShadowingAgentFile[];
+  /** Worktrees holding work that is not on HEAD, or that could not be read. */
+  worktrees: WorktreeEntry[];
+  unclosed: number;
   projectCustomized: boolean;
   verbose: boolean;
-  next: string | null;
-  runtime: {
-    invocationSource: string;
-    managedVersion: string | null;
-    managedPath: string | null;
-    versionCurrent: boolean;
-    installedHarnesses: string[];
-    // New fields
-    skew: 'managed-older' | 'managed-newer' | 'divergent' | null;
-    preferredCli: string;
-    preferredReason: string | null;
-    observedVersion: string | null;
-    observedSource: 'observed' | 'assumed' | null;
-  };
-  // Legacy aliases for cli
-  activeLoadout?: any;
-  staleProjectPin?: string | null;
-  staleUserPin?: string | null;
-  pinOverrides?: Record<string, string>;
+  /** Everything above that needs a person, in the order to deal with it. */
+  attention: string[];
 }
 
-function harnessOf(target: StatusOptions['target'], userPathOptions?: UserPathOptions): StatusResult['harness'] {
-  return activeHarness(target ?? undefined, userPathOptions);
+function linkState(path: string): StatusResult['link'] {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isSymbolicLink()) return { path, target: null, state: 'foreign' };
+    const target = readlinkSync(path);
+    return { path, target, state: existsSync(target) ? 'linked' : 'foreign' };
+  } catch {
+    return { path, target: null, state: 'missing' };
+  }
 }
 
+/**
+ * Hand-written agent files whose name Fadeno routes, in the four places the
+ * two hook-capable harnesses read them from.
+ */
+function shadowingAgentFiles(
+  repoRoot: string,
+  archetypes: readonly string[],
+  options: UserPathOptions | undefined,
+): ShadowingAgentFile[] {
+  const home = options?.home ?? homedir();
+  const env = options?.env ?? process.env;
+  const claudeHome = env.CLAUDE_CONFIG_DIR?.trim() || join(home, '.claude');
+  const roots: Array<{ dir: string; harness: 'claude' | 'codex'; scope: 'user' | 'project'; ext: string }> = [
+    { dir: join(claudeHome, 'agents'), harness: 'claude', scope: 'user', ext: '.md' },
+    { dir: join(repoRoot, '.claude', 'agents'), harness: 'claude', scope: 'project', ext: '.md' },
+    { dir: join(home, '.codex', 'agents'), harness: 'codex', scope: 'user', ext: '.toml' },
+    { dir: join(repoRoot, '.codex', 'agents'), harness: 'codex', scope: 'project', ext: '.toml' },
+  ];
+  const found: ShadowingAgentFile[] = [];
+  // `dispatch` is on the list because the spawn hook prefers a bare `dispatch`
+  // agent where one exists: a file by that name is not shadowing the proxy, it
+  // IS the proxy, and a person should know which one is running.
+  for (const name of [...archetypes, 'dispatch']) {
+    for (const root of roots) {
+      const path = join(root.dir, `${name}${root.ext}`);
+      if (existsSync(path)) found.push({ path, archetype: name, harness: root.harness, scope: root.scope });
+    }
+  }
+  return found;
+}
+
+function holdsWork(tree: WorktreeEntry): boolean {
+  if (tree.dirty === 'unavailable' || tree.unmerged === 'unavailable') return true;
+  return tree.dirty.paths.length > 0 || tree.unmerged > 0;
+}
+
+/**
+ * What routing this repo has, whether the integration around it is intact,
+ * and what needs a person.
+ *
+ * The routing half is `runDialShow` rather than a second resolver: `status`
+ * telling a different story from `dial` about the same repo is the failure
+ * this codebase keeps finding, and one call is the only durable fix.
+ */
 export function runStatus(opts: StatusOptions = {}): StatusResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
-  const harness = harnessOf(opts.target, opts.userPathOptions);
-  let layered;
+  const harness = activeHarness(opts.target ?? undefined, opts.userPathOptions);
+  let shown;
   try {
-    layered = loadLayeredProfile(repoRoot, opts.userPathOptions, harness ?? 'standalone');
+    shown = runDialShow({ repoRoot, userPathOptions: opts.userPathOptions });
   } catch (err) {
     throw new StatusError((err as Error).message);
   }
-  const profile = layered.profile;
-  let dialState;
-  try {
-    dialState = readLocalDialState(repoRoot);
-  } catch (err) {
-    throw new StatusError((err as Error).message);
+  const link = linkState(userPaths(opts.userPathOptions).linkPath);
+  const agentFiles = shadowingAgentFiles(repoRoot, shown.rows.map((row) => row.archetype), opts.userPathOptions);
+  const worktrees = runWorktrees({ repoRoot }).filter(holdsWork);
+  const unclosed = unclosedDispatches(repoRoot).length;
+
+  const attention: string[] = [];
+  // "Does my dial resolve to something real" — the first of the two checks the
+  // doctor left behind. A dial that does not resolve, and one that resolves to
+  // a model this session can neither host nor spawn, fail it in different ways.
+  for (const stale of shown.staleDials) {
+    attention.push(`${stale.archetype} does not resolve — ${stale.reason}`);
   }
-  const userDials = readUserDials(opts.userPathOptions) as Record<string, DialRef>;
-  const sessionDials = dialState.dials;
-  const repoDials = profile.dials;
-
-  const roles: StatusRole[] = [];
-  /**
-   * Per archetype: can this delivery go out IN-SESSION, as `steering apply`
-   * decides it.
-   *
-   * Kept beside `adapter` rather than folded into it, because they answer
-   * different questions and both are wanted here: `adapter` is the SPEC SHAPE
-   * (which fields the row's `command` can come from), while this is the LANE.
-   * They diverge on a host spec with no argv, and keying the materialization
-   * comparison below on `adapter` made `status` expect an in-session slot the
-   * apply had deliberately written as a broker — reporting drift that was not
-   * there.
-   */
-  const hostSlots = new Map<string, boolean>();
-  const archetypes = archetypeDisplaySort(new Set(['worker', 'reviewer', 'judge', ...Object.keys(profile.archetypes)]));
-
-  const layers = { session: sessionDials, repo: repoDials, user: userDials };
-  for (const archetype of archetypes) {
-    try {
-      const resolved = resolveRole(archetype, archetype, profile, layers);
-      const spec = resolved.delivery.spec;
-      hostSlots.set(archetype, hostCandidateOf(resolved.delivery, spec));
-      roles.push({
-        archetype,
-        executor: resolved.delivery.refString,
-        adapter: spec.adapter,
-        model: resolved.delivery.model,
-        source: resolved.source,
-        command: spec.adapter === 'command' ? spec.command : null,
-      });
-    } catch {
-      // Skip if resolution fails (an undeclared harness, say).
-    }
+  for (const row of shown.rows) {
+    if (row.deliverable) continue;
+    attention.push(
+      `${row.archetype} has no lane from here: it routes to ${row.model}, which this session can neither deliver in-session nor run as a process.`,
+    );
   }
-  const external = roles.filter((r) => r.adapter === 'command');
-
-  const installation = readInstallationManifest(opts.userPathOptions);
-  const upaths = userPaths(opts.userPathOptions);
-  const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim()
-    || (installation.runtime != null && resolve(process.argv[1] ?? '') === resolve(installation.runtime.path) ? 'managed' : 'path');
-  const next = external.length > 0 ? 'review the external sandbox boundary before driving' : null;
-
-  const invokingVersion = packageVersion();
-  let observedVersion: string | null = null;
-  let observedSource: 'observed' | 'assumed' | null = null;
-  try {
-    if (existsSync(upaths.managedRuntimeDir)) {
-      const obs = readRuntimeVersionAt(upaths.managedRuntimeDir);
-      if (obs.version != null) {
-        observedVersion = obs.version;
-        observedSource = obs.source;
-      }
-    }
-  } catch {}
-  const managedVersion = observedVersion ?? installation.runtime?.version ?? null;
-  // If observed missing but manifest has version, observedSource is assumed
-  if (observedVersion == null && installation.runtime?.version != null) {
-    observedSource = installation.runtime.version_source ?? 'assumed';
+  if (link.state === 'missing') {
+    attention.push(`no \`fadeno\` linked at ${link.path} — run \`fadeno setup\` to link it onto PATH.`);
+  } else if (link.state === 'foreign') {
+    attention.push(`${link.path} is not a link Fadeno wrote, or points at a CLI that is gone — rerun \`fadeno setup\`.`);
   }
-  const versionCurrent = installation.runtime == null || installation.runtime.version === invokingVersion;
-
-  let skew: StatusResult['runtime']['skew'] = null;
-  if (managedVersion != null && invokingVersion != null) {
-    const cmp = compareFadenoVersions(managedVersion, invokingVersion);
-    if (cmp === 1) skew = 'managed-newer';
-    else if (cmp === -1) skew = 'managed-older';
-    else if (cmp === 0) skew = null;
-    else skew = 'divergent';
-  } else if (managedVersion == null) {
-    skew = null;
-  } else {
-    skew = 'divergent';
+  for (const file of agentFiles) {
+    attention.push(
+      `${file.path} defines "${file.archetype}" by hand (${file.scope} scope, ${file.harness}). ` +
+        (file.harness === 'codex'
+          ? 'A Codex agent file wins over the model a spawn passes, so it overrides the dial.'
+          : 'It supplies the prompt and tools for that spawn, whatever the dial says.'),
+    );
   }
-
-  let preferredCli: string;
-  let preferredReason: string | null = null;
-  const invokingPath = resolve(process.argv[1] ?? 'fadeno');
-  if (managedVersion != null && managedVersion === invokingVersion && installation.runtime?.path) {
-    preferredCli = installation.runtime.path;
-  } else {
-    preferredCli = invokingPath;
-    if (installation.runtime == null) {
-      preferredReason = `managed runtime not installed; using invoking CLI`;
-    } else if (skew === 'managed-older') {
-      preferredReason = `managed runtime ${managedVersion} is older than this CLI ${invokingVersion}; refreshes at next plugin-launched command, or run fadeno setup --from <bin-dir>`;
-    } else if (skew === 'managed-newer') {
-      preferredReason = `managed runtime ${managedVersion} is newer than this CLI ${invokingVersion}; update this CLI via your package manager — do not rerun setup from this older CLI`;
-    } else if (skew === 'divergent') {
-      preferredReason = `versions diverge (managed ${managedVersion} vs invoking ${invokingVersion}); using invoking CLI`;
-    } else {
-      preferredReason = `managed version differs; using invoking CLI`;
-    }
+  if (worktrees.length > 0) {
+    attention.push(`${worktrees.length} worktree(s) hold work that is not on HEAD — \`fadeno worktrees\` lists them.`);
+  }
+  if (unclosed > 0) {
+    attention.push(`${unclosed} dispatch(es) are still open — \`fadeno dispatches\` lists them.`);
   }
 
   return {
     repoRoot,
-    version: invokingVersion,
+    version: packageVersion(),
     harness,
-    dials: { session: sessionDials, repo: repoDials, user: userDials },
-    roles,
-    external,
+    routing: shown.rows,
+    unresolved: shown.staleDials,
+    link,
+    agentFiles,
+    worktrees,
+    unclosed,
     projectCustomized: existsSync(join(repoRoot, '.fadeno')),
     verbose: Boolean(opts.verbose),
-    next,
-    runtime: {
-      invocationSource,
-      managedVersion,
-      managedPath: installation.runtime?.path ?? null,
-      versionCurrent,
-      installedHarnesses: Object.keys(installation.harnesses).sort(),
-      skew,
-      preferredCli,
-      preferredReason,
-      observedVersion,
-      observedSource,
-    },
-    activeLoadout: null,
-    staleProjectPin: null,
-    staleUserPin: null,
-    pinOverrides: {},
+    attention,
   };
 }

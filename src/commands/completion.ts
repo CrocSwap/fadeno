@@ -92,8 +92,8 @@ const MODELS_SPEC = command(
 );
 
 const COMMANDS: Record<string, CommandSpec> = {
-  setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE, '--from': PATH, '--reset-runtime': NONE }),
-  status: command({ '--verbose': NONE, '--codex': NONE, '--claude': NONE, '--opencode': NONE, '--omp': NONE }),
+  setup: command({ '--codex': NONE, '--claude': NONE, '--from': PATH, '--force': NONE, '--json': NONE }),
+  status: command({ '--verbose': NONE, '--codex': NONE, '--claude': NONE, '--opencode': NONE, '--omp': NONE, '--json': NONE }),
   models: MODELS_SPEC,
   // Top-level alias for `models` — same handler in cli.ts, same flags.
   model: MODELS_SPEC,
