@@ -1,10 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { loadExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import {
+  codexUserAgentDir,
   retiredStateDirs,
   retiredStateFiles,
   userPaths,
@@ -74,6 +75,40 @@ function probe(command: string): CommandProbe {
     available: result.error == null && result.status === 0,
     version: output.length > 0 ? output.split(/\r?\n/, 1)[0] ?? null : null,
   };
+}
+
+/**
+ * The marker an earlier Fadeno wrote at the top of every agent file it
+ * materialized. Nothing writes one now — model and effort ride the spawn — so
+ * a file carrying it is Fadeno's own litter, and on Codex it is worse than
+ * litter: an agent file's `model` wins over the value a spawn passes, so a
+ * stale one silently overrides the dial it was supposed to serve.
+ */
+const MANAGED_AGENT_MARKER = '# fadeno:managed';
+
+/** Agent files a previous Fadeno materialized, in the two places it wrote them. */
+function sweepManagedAgents(repoRoot: string, options: UserPathOptions | undefined): string[] {
+  const removed: string[] = [];
+  for (const dir of [codexUserAgentDir(options), join(repoRoot, '.codex', 'agents')]) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.toml')) continue;
+      const path = join(dir, entry);
+      try {
+        if (!readFileSync(path, 'utf8').startsWith(MANAGED_AGENT_MARKER)) continue;
+      } catch {
+        continue;
+      }
+      rmSync(path, { force: true });
+      removed.push(path);
+    }
+  }
+  return removed;
 }
 
 /**
@@ -247,7 +282,7 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
     );
   }
   const link = linkCli(paths, source, opts.userPathOptions, opts.force ?? false);
-  const removed = sweepRetiredState(paths);
+  const removed = [...sweepRetiredState(paths), ...sweepManagedAgents(repoRoot, opts.userPathOptions)];
   const permission = opts.target === 'claude' ? ensureClaudePermission(opts.userPathOptions, notices) : null;
 
   notices.unshift(
@@ -257,7 +292,13 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
     notices.push(`${paths.binDir} is not on this shell's PATH — add it, or the \`fadeno\` command will not be found.`);
   }
   notices.push(`User configuration and state live under ${paths.configDir} and ${paths.stateDir}; project files were not changed.`);
-  for (const path of removed) notices.push(`Removed retired state ${path} (nothing reads it).`);
+  for (const path of removed) {
+    notices.push(
+      path.endsWith('.toml')
+        ? `Removed the agent file ${path}, which an earlier Fadeno materialized. Nothing writes one now, and on Codex a stale one overrides the dial.`
+        : `Removed retired state ${path} (nothing reads it).`,
+    );
+  }
   notices.push('Skills and subagents are loaded at host session start; a fresh session is required to pick up a new plugin version.');
 
   return { target: opts.target ?? null, repoRoot, paths, probes, link, removed, permission, notices };

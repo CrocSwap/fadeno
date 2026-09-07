@@ -33,9 +33,20 @@ would have cost more than fixing those projects when it bites.
   relay; `dispatch-stop` reads the agent's transcript, finds the dispatch by the
   contract header in its prompt, and records the last message and the model the
   agent actually ran on.
+- **A real Codex host lane.** A Codex `PreToolUse` hook can refuse a spawn and
+  not rewrite one, so the wrapper hands the corrected spawn back instead of
+  applying it: the first archetype spawn is refused with the dispatch already
+  open and the exact call to make — agent type, model, reasoning effort, and the
+  path to the contract-bearing prompt — and the retry, which carries that
+  contract, is checked against the dispatch it names and passes in silence.
+  `dispatch-open --stage-prompt` writes the prompt where the host can read it;
+  `--reuse-open` returns the dispatch already open for that archetype and name,
+  so a fumbled retry cannot cut a second worktree. Previously every Codex
+  archetype spawn was pushed to the command lane.
 - **`model_observed`** on the stopped row: what the agent reported running on,
   beside what the dial asked for. The only way to catch a harness that ignored
-  the model a spawn passed.
+  the model a spawn passed. `model_id` joins the opened row beside it, so that
+  comparison is exact rather than a substring guess.
 - **`context`** — one source for the host vocabulary, delivered both to a host
   session's hook and into a spawned director's prompt, so the two cannot drift.
 - **The nag.** At every spawn the session is reminded of every unclosed dispatch
@@ -43,6 +54,11 @@ would have cost more than fixing those projects when it bites.
   session-wide, so grandparents inherit orphans.
 - **`worktrees`** as its own verb: the cross-session safety net, listing every
   Fadeno worktree holding uncommitted paths or unmerged commits.
+- **`setup` sweeps the agent files an earlier Fadeno materialized** — anything
+  carrying the `# fadeno:managed` marker under `~/.codex/agents` or
+  `.codex/agents`. Nothing writes one now, and on Codex a stale one silently
+  overrides the dial it was meant to serve. A file without the marker is the
+  user's and is never touched.
 - **`status` reports a hand-written agent file** whose name Fadeno also routes.
   Fadeno materializes none itself, so such a file is the user's — and on Codex
   it silently overrides the dial.

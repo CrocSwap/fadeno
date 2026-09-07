@@ -440,6 +440,7 @@ export function recordOpened(repoRoot: string, prepared: Prepared, extra: { lane
     parent: prepared.parent,
     archetype: prepared.archetype,
     model: prepared.resolution.model,
+    ...(prepared.resolution.modelId !== prepared.resolution.model ? { model_id: prepared.resolution.modelId } : {}),
     effort: prepared.resolution.effort,
     explicit_model: prepared.resolution.explicitModel,
     lane: extra.lane ?? prepared.lane,

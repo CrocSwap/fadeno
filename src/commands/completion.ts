@@ -102,7 +102,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   }),
   'dispatch-open': command({
     '--archetype': { kind: 'archetype' }, '--model': { kind: 'free' }, '--name': { kind: 'free' }, '--prompt-file': PATH,
-    '--shared': NONE, '--from': { kind: 'free' }, '--session-id': { kind: 'free' }, '--parent': { kind: 'free' }, '--parent-transcript': PATH, '--harness': { kind: 'free' }, '--lane': { kind: 'free' }, '--json': NONE,
+    '--shared': NONE, '--from': { kind: 'free' }, '--session-id': { kind: 'free' }, '--parent': { kind: 'free' }, '--parent-transcript': PATH, '--harness': { kind: 'free' }, '--lane': { kind: 'free' },
+    '--stage-prompt': NONE, '--reuse-open': NONE, '--json': NONE,
   }),
   'dispatch-stop': command({ '--transcript': PATH, '--message-file': PATH, '--agent-cwd': PATH, '--json': NONE }, ['free']),
   'dispatch-close': command({ '--merged': NONE, '--kept': NONE, '--discarded': NONE, '--failed': NONE, '--note': { kind: 'free' } }, ['free']),

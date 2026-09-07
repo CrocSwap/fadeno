@@ -219,10 +219,17 @@ command lane, which loses nothing: that is where Fadeno controls the process
 outright.
 
 One asymmetry worth knowing: a Codex `PreToolUse` hook can **refuse** a spawn
-and nothing else — it cannot rewrite one. So under Codex host mode an archetype
-spawn is refused *with the exact command that runs it*, staged and ready, and
-the director runs it. The record ends up identical; the redirect is visible
-rather than silent.
+and nothing else — it cannot rewrite one. So the host lane there is a two-pass
+handshake. The first spawn is refused with the dispatch already open and the
+exact call to make: agent type, model, reasoning effort, and the path to the
+contract-bearing prompt. The retry carries that contract, Fadeno checks it names
+a dispatch that is open and is being spawned on the model it was opened for, and
+lets it through in silence. A repeated first pass returns the same dispatch
+rather than opening a second.
+
+It costs one round trip, and the correction is visible rather than applied
+behind your back. A model Codex cannot deliver in-session still takes the
+command lane, refused with the `fadeno dispatch` command that runs it.
 
 ---
 
@@ -260,7 +267,9 @@ Each of these was in the product and was removed on purpose.
 - **`final_message` records presence, never completeness.** On an interrupted
   Claude subagent the harness supplies no message at all, so its absence says
   nothing about whether the work finished.
-- **Under Codex, the redirect goes through the model.** See the note above.
+- **Under Codex, the correction goes through the model.** The hook can refuse
+  and check but not apply, so a session that ignores the refusal simply does not
+  get a dispatch. Nothing runs unrecorded — but nothing runs, either.
 
 ## Contributing
 

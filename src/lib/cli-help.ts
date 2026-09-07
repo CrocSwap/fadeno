@@ -70,6 +70,7 @@ const TOP_LEVEL: Record<string, PageSeed> = {
   'dispatch-open': page('The spawn wrapper for a spawn the host is about to make: open it on the host lane, or hand it to the command lane.', 'fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] (--prompt-file <path> | stdin) [--json]', [
     'The spawn hook\'s entry point. With `--lane auto` (the default) the resolution decides: a model this session can deliver opens on the host lane — worktree cut, row written, and `--json` carries the contract-bearing prompt the agent should receive — while any other model is a relay: nothing is opened, the prompt is staged, and `relay.command` is the `fadeno dispatch` call the dispatch proxy runs.',
     '`--lane host` opens on the host lane regardless, for a caller about to run the agent in-session itself; `--lane command` stages the relay regardless.',
+    '`--stage-prompt` also writes the contract-bearing prompt to a file and returns its path, for a caller that cannot put it on the spawn itself; `--reuse-open` returns the dispatch already open for this archetype and name instead of opening a second one. Together they are the refuse-and-retry lane a hook that cannot rewrite a spawn uses.',
     'Refused (exit 3) at the unclosed-dispatch limit; the refusal names what to close.',
   ]),
   'dispatch-stop': page('Record that a host-lane dispatch\'s agent stopped, and what its tree holds.', 'fadeno dispatch-stop [<name|id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json]', [
@@ -165,6 +166,8 @@ const OPTION_HINTS: Record<string, string> = {
   '--session': 'Local session scope',
   '--session-id': 'Host session the spawn came from',
   '--lane': 'Which lane opens it: auto (the resolution decides), host, or command',
+  '--stage-prompt': 'Also write the prompt to a file and return its path',
+  '--reuse-open': 'Return the dispatch already open for this archetype and name',
   '--transcript': 'The agent\'s transcript, read for the dispatch id, final message and model',
   '--parent-transcript': 'The spawning agent\'s transcript; its contract header names the parent dispatch',
   '--shared': 'Work in the live tree instead of a worktree',
@@ -210,7 +213,7 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   dial: withGlobals('--harness', '--session', '--user', '--repo', '--json'),
   clean: withGlobals('--force'),
   dispatch: withGlobals('--archetype', '--model', '--name', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--heartbeat'),
-  'dispatch-open': withGlobals('--archetype', '--model', '--name', '--lane', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--parent-transcript', '--harness', '--json'),
+  'dispatch-open': withGlobals('--archetype', '--model', '--name', '--lane', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--parent-transcript', '--harness', '--stage-prompt', '--reuse-open', '--json'),
   'dispatch-stop': withGlobals('--transcript', '--message-file', '--agent-cwd', '--json'),
   'dispatch-close': withGlobals('--merged', '--kept', '--discarded', '--failed', '--note'),
   cancel: withGlobals(),

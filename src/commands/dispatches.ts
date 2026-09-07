@@ -9,8 +9,8 @@
  * reader for every surface.
  */
 
-import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { DEFAULT_UNCLOSED_LIMIT, formatAge, hostVocabulary, nagText, spawnRefusedByLimit, type ArchetypeLine } from '../lib/contracts.ts';
 import {
   ageMinutes,
@@ -49,7 +49,7 @@ import {
 } from '../lib/spawn.ts';
 import { readTranscriptFacts } from '../lib/transcript.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
-import { WORKTREES_DIR, canonical, removeWorktree, reportWorktrees, type WorktreeReport } from '../lib/worktree.ts';
+import { WORKTREES_DIR, canonical, removeWorktree, reportWorktrees, sanitizeName, type WorktreeReport } from '../lib/worktree.ts';
 
 export class DispatchesError extends Error {}
 
@@ -153,6 +153,28 @@ export interface DispatchOpenOptions extends CommonOptions {
    */
   parentTranscript?: string | null;
   /**
+   * Also write the contract-bearing prompt to a file and return its path.
+   *
+   * For a caller that cannot put the prompt on the spawn itself. A Codex hook
+   * can refuse a spawn but not rewrite one, so it hands the host a path to
+   * read rather than a string to reproduce — and a file read is one thing a
+   * model does reliably, where copying four hundred lines verbatim out of a
+   * refusal message is not.
+   */
+  stagePrompt?: boolean;
+  /**
+   * Return the dispatch this session already opened for this archetype and
+   * name, instead of opening a second one.
+   *
+   * The retry guard for the refuse-and-retry lane: the host is told what to
+   * spawn, and if it comes back with the instruction misapplied the wrapper
+   * must not cut another worktree each time round. Requires `stagePrompt`,
+   * because a reused dispatch's prompt is read back from the staged file — the
+   * contract cannot be recomposed byte-for-byte after the fact (a director's
+   * carries the live unclosed list).
+   */
+  reuseOpen?: boolean;
+  /**
    * `auto` (the default) lets the resolution choose: a host candidate opens on
    * the host lane, anything else is handed to the command lane as a relay.
    * `host` opens on the host lane regardless — the caller is about to run the
@@ -181,8 +203,12 @@ export interface DispatchOpened {
   sharedReason: string | null;
   /** The contract-bearing prompt the agent should receive. */
   prompt: string;
+  /** Where that prompt was staged, when `--stage-prompt` asked for a file. */
+  promptFile?: string;
   contract: string;
   nag: string;
+  /** True when this is the dispatch a previous call opened, not a new one. */
+  reused?: true;
 }
 
 /**
@@ -248,6 +274,13 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
       nag: nagText(unclosed, resolution.unclosedLimit),
     };
   }
+  // The retry guard, before anything is prepared: a host that was refused and
+  // told what to spawn may come back with the same archetype and name, and it
+  // must get the dispatch it was already given rather than a second one.
+  if (opts.reuseOpen === true) {
+    const existing = reusableOpen(repoRoot, opts.archetype, opts.name ?? null, opts.session ?? null);
+    if (existing != null) return existing;
+  }
   const outcome = prepareDispatch({
     repoRoot,
     archetype: opts.archetype,
@@ -282,9 +315,66 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
     shared: p.shared,
     sharedReason: p.sharedReason,
     prompt: p.composedPrompt,
+    ...(opts.stagePrompt === true ? { promptFile: stageHostPrompt(repoRoot, p.id, p.composedPrompt) } : {}),
     contract: p.contract,
     nag: p.nag,
   };
+}
+
+/** Where a host-lane prompt is staged for a caller that cannot carry it inline. */
+function hostPromptPath(repoRoot: string, id: string): string {
+  return join(repoRoot, RELAY_DIR, `${id}.md`);
+}
+
+function stageHostPrompt(repoRoot: string, id: string, composed: string): string {
+  const path = hostPromptPath(repoRoot, id);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, composed.endsWith('\n') ? composed : `${composed}\n`, 'utf8');
+  return path;
+}
+
+/**
+ * The dispatch a previous call already opened for this archetype and name, or
+ * null.
+ *
+ * Deliberately narrow: same session, same archetype, same name, opened and not
+ * yet stopped, and its staged prompt still on disk. Anything looser would hand
+ * a caller somebody else's dispatch, and there is no failure worse than two
+ * agents believing they own one worktree.
+ */
+function reusableOpen(repoRoot: string, archetype: string, name: string | null, session: string | null): DispatchOpened | null {
+  if (name == null || name.trim().length === 0) return null;
+  const wanted = sanitizeName(name.trim());
+  for (const record of readDispatches(repoRoot).records) {
+    const o = record.opened;
+    if (o == null || record.state !== 'open' || record.stopped != null) continue;
+    if (o.archetype !== archetype || o.name !== wanted || o.lane !== 'host') continue;
+    if (session != null && o.session !== session) continue;
+    const staged = hostPromptPath(repoRoot, o.id);
+    if (!existsSync(staged)) continue;
+    return {
+      ok: true,
+      opened: true,
+      reused: true,
+      id: o.id,
+      name: o.name,
+      archetype: o.archetype,
+      model: o.model,
+      modelId: o.model_id ?? o.model,
+      effort: o.effort,
+      harness: o.harness,
+      lane: 'host',
+      cwd: o.workspace != null ? resolve(repoRoot, o.workspace.path) : repoRoot,
+      workspace: o.workspace ?? { path: '.', branch: null, base: 'unknown' },
+      shared: o.workspace == null || o.workspace.path === '.',
+      sharedReason: null,
+      prompt: readFileSync(staged, 'utf8'),
+      promptFile: staged,
+      contract: '',
+      nag: nagText(unclosedDispatches(repoRoot), DEFAULT_UNCLOSED_LIMIT),
+    };
+  }
+  return null;
 }
 
 export interface DispatchStopOptions extends CommonOptions {
@@ -518,7 +608,7 @@ export function renderDispatchDetail(d: DispatchDetail): string[] {
     lines.push(`  stopped:   ${s.at}${s.exit ? ` — ${s.exit.signal ? `killed by ${s.exit.signal}` : `exit ${s.exit.code}`}` : ''}; tree ${dirty}`);
     if (s.model_observed != null) {
       const asked = d.record.opened?.model ?? null;
-      lines.push(`  ran on:    ${s.model_observed}${modelAgrees(asked, s.model_observed) ? '' : `  (the dial asked for ${asked})`}`);
+      lines.push(`  ran on:    ${s.model_observed}${modelAgrees(asked, s.model_observed, d.record.opened?.model_id) ? '' : `  (the dial asked for ${asked})`}`);
     }
     if (s.final_message != null) lines.push('', '--- final message ---', s.final_message.trimEnd());
     else lines.push('  final message: none recorded');

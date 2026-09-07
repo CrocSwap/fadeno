@@ -167,6 +167,20 @@ export function classifyAgentType(agentType) {
   return { kind: 'generic', archetype: null, bare };
 }
 
+/**
+ * The dispatch a prompt already belongs to, read from the contract header
+ * Fadeno injected, or null.
+ *
+ * The same header `dispatch-stop` finds in a transcript, spelled here by hand
+ * for the same reason a hook spells everything by hand: there is no import
+ * path from a hook back into the CLI. `src/lib/contracts.ts` writes it and
+ * `src/lib/transcript.ts` reads it; change one, change all three.
+ */
+export function contractHeader(text) {
+  const match = /## Fadeno dispatch ([0-9a-f-]{36}) \(([^)\n]+)\)/.exec(String(text ?? ''));
+  return match == null ? null : { id: match[1], name: match[2] };
+}
+
 /** A short semantic name for a dispatch from whatever the spawn called itself. */
 export function nameFrom(...candidates) {
   for (const candidate of candidates) {

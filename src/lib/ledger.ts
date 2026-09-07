@@ -56,6 +56,13 @@ export interface OpenedRow {
   parent: string | null;
   archetype: string;
   model: string;
+  /**
+   * The provider-facing id handed to the harness — `gpt-5.6-sol` where `model`
+   * is `sol`. Recorded because it is what actually travelled, and because it
+   * makes the stop-time comparison against `model_observed` exact instead of a
+   * substring guess. Absent on rows an older Fadeno wrote.
+   */
+  model_id?: string;
   effort: string | null;
   /** Set when the caller overrode the dial with an explicit model. */
   explicit_model: string | null;
@@ -329,9 +336,19 @@ export function closeDispatch(
  * inside the reported id is taken as agreement, and `current-host` agrees
  * with anything, since it names whatever the session runs on.
  */
-export function modelAgrees(asked: string | null | undefined, observed: string | null | undefined): boolean {
+export function modelAgrees(
+  asked: string | null | undefined,
+  observed: string | null | undefined,
+  askedId?: string | null,
+): boolean {
   if (asked == null || observed == null) return true;
-  if (asked === 'current-host' || asked === observed) return true;
+  if (asked === 'current-host') return true;
+  // The recorded provider id, where the row has one: an exact answer, and the
+  // reason `model_id` is on the row at all.
+  if (askedId != null && askedId.length > 0) return askedId === observed || observed.includes(askedId);
+  // Older rows carry only the alias, so fall back to containment — `opus`
+  // against `claude-opus-5` is agreement, not a mismatch.
+  if (asked === observed) return true;
   return observed.toLowerCase().includes(asked.toLowerCase());
 }
 

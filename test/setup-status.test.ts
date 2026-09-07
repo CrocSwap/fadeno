@@ -99,6 +99,25 @@ test('setup sweeps the state the managed-runtime era wrote, because nothing read
   assert.equal(existsSync(join(stateDir, 'dials.json')), true);
 });
 
+test('setup removes the agent files an earlier Fadeno materialized, and leaves hand-written ones alone', (t) => {
+  const { root, user, source } = seed(t);
+  const projectAgents = join(root, '.codex', 'agents');
+  const userAgents = join(root, 'home', '.codex', 'agents');
+  mkdirSync(projectAgents, { recursive: true });
+  mkdirSync(userAgents, { recursive: true });
+  writeFileSync(join(projectAgents, 'worker.toml'), '# fadeno:managed version=0.6.1\nmodel = "gpt-5.6-luna"\n', 'utf8');
+  writeFileSync(join(userAgents, 'fadeno-judge.toml'), '# fadeno:managed version=0.6.1\nmodel = "opus"\n', 'utf8');
+  // Not Fadeno's, and never touched: an agent file without the marker belongs
+  // to the user, whatever it is named.
+  writeFileSync(join(projectAgents, 'reviewer.toml'), 'model = "mine"\n', 'utf8');
+
+  const result = runSetup({ repoRoot: root, userPathOptions: user, source, target: 'codex' });
+  assert.equal(existsSync(join(projectAgents, 'worker.toml')), false);
+  assert.equal(existsSync(join(userAgents, 'fadeno-judge.toml')), false);
+  assert.equal(existsSync(join(projectAgents, 'reviewer.toml')), true, 'a hand-written agent file is the user\'s');
+  assert.match(result.notices.join('\n'), /worker\.toml, which an earlier Fadeno materialized.*overrides the dial/s);
+});
+
 test('setup --claude grants the CLI permission once, in the user\'s own settings', (t) => {
   const { root, user, source } = seed(t);
   const settings = join(root, 'home', '.claude', 'settings.json');

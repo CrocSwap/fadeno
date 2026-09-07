@@ -7518,9 +7518,11 @@ function closeDispatch(repoRoot, record, verb, note, now = /* @__PURE__ */ new D
   appendRow(repoRoot, row);
   return { ok: true, row, replayed: false };
 }
-function modelAgrees(asked, observed) {
+function modelAgrees(asked, observed, askedId) {
   if (asked == null || observed == null) return true;
-  if (asked === "current-host" || asked === observed) return true;
+  if (asked === "current-host") return true;
+  if (askedId != null && askedId.length > 0) return askedId === observed || observed.includes(askedId);
+  if (asked === observed) return true;
   return observed.toLowerCase().includes(asked.toLowerCase());
 }
 function ageMinutes(record, now = /* @__PURE__ */ new Date()) {
@@ -7828,7 +7830,7 @@ function interpretUserDials(doc, path) {
         continue;
       }
       if (map.force_write_posture !== void 0) {
-        const message = `user dial "${k}" in ${path} carries "force_write_posture", which is no longer supported \u2014 there is no write-posture guard left to override. Remove the key (the dial's model/effort/harness are still valid) or re-set the dial with \`fadeno dial\`. See docs/experimental/permissions-and-isolation.md.`;
+        const message = `user dial "${k}" in ${path} carries "force_write_posture", which is no longer supported \u2014 there is no write-posture guard left to override. Remove the key (the dial's model/effort/harness are still valid) or re-set the dial with \`fadeno dial\`.`;
         problems.push(message);
         fatal ??= message;
         continue;
@@ -8122,7 +8124,7 @@ function parseDialRef(raw, label) {
     }
     if (map.force_write_posture !== void 0) {
       throw new ExecutorProfileError(
-        `${label} "force_write_posture" is no longer supported \u2014 there is no write-posture guard left to override. See docs/experimental/permissions-and-isolation.md.`
+        `${label} "force_write_posture" is no longer supported \u2014 there is no write-posture guard left to override.`
       );
     }
     const unknown = Object.keys(map).filter((k) => k !== "model" && k !== "effort" && k !== "harness" && k !== "via");
@@ -8194,13 +8196,13 @@ var V4_REMOVED_CATALOG_KEYS = {
 function v4MigrationError(source, key, detail) {
   const replacement = V4_REMOVED_CATALOG_KEYS[key] ?? detail ?? "";
   return new ExecutorProfileError(
-    `${source}: \`${key}\` was removed in catalog v4 \u2014 use ${replacement}. See docs/experimental/harness-neutral-dials.md.`
+    `${source}: \`${key}\` was removed in catalog v4 \u2014 use ${replacement}.`
   );
 }
 var PRE_DIALS_CATALOG_KEYS = ["executors", "targets", "loadouts", "default_loadout"];
 function preDialsCatalogError(source) {
   return new ExecutorProfileError(
-    `${source}: schema_version 4 required \u2014 pre-dials catalogs are not supported; migrate: targets:\u2192models:, loadouts:\u2192dials:, default_loadout: delete; routes:\u2192harnesses:; see docs/experimental/harness-neutral-dials.md`
+    `${source}: schema_version 4 required \u2014 pre-dials catalogs are not supported; migrate: targets:\u2192models:, loadouts:\u2192dials:, default_loadout: delete; routes:\u2192harnesses:\``
   );
 }
 function refuseRemovedCatalogKeys(doc, source) {
@@ -8408,7 +8410,7 @@ function parseExecutorProfile(text, source, host = "standalone") {
       if (rawHarness.write_variant !== void 0 || rawHarness.write_access !== void 0) {
         const key = rawHarness.write_variant !== void 0 ? "write_variant" : "write_access";
         throw new ExecutorProfileError(
-          `${source}: ${label}.${key} is no longer supported. A harness lane is an argv and nothing more: declare the command you want to run, and express any restriction as a SEPARATE named variant so it is visible in the argv rather than in metadata. Containment is isolated worktrees, now the default for command dispatches \u2014 see docs/experimental/permissions-and-isolation.md.`
+          `${source}: ${label}.${key} is no longer supported. A harness lane is an argv and nothing more: declare the command you want to run, and express any restriction as a SEPARATE harness entry so it is visible in the argv rather than in metadata. Containment is the isolated worktree every dispatch already gets.`
         );
       }
       if (rawHarness.models_command !== void 0) {
@@ -9585,6 +9587,7 @@ function recordOpened(repoRoot, prepared, extra = {}) {
     parent: prepared.parent,
     archetype: prepared.archetype,
     model: prepared.resolution.model,
+    ...prepared.resolution.modelId !== prepared.resolution.model ? { model_id: prepared.resolution.modelId } : {},
     effort: prepared.resolution.effort,
     explicit_model: prepared.resolution.explicitModel,
     lane: extra.lane ?? prepared.lane,
@@ -9948,6 +9951,10 @@ function runDispatchOpen(opts) {
       nag: nagText(unclosed, resolution.unclosedLimit)
     };
   }
+  if (opts.reuseOpen === true) {
+    const existing = reusableOpen(repoRoot, opts.archetype, opts.name ?? null, opts.session ?? null);
+    if (existing != null) return existing;
+  }
   const outcome = prepareDispatch({
     repoRoot,
     archetype: opts.archetype,
@@ -9982,9 +9989,54 @@ function runDispatchOpen(opts) {
     shared: p.shared,
     sharedReason: p.sharedReason,
     prompt: p.composedPrompt,
+    ...opts.stagePrompt === true ? { promptFile: stageHostPrompt(repoRoot, p.id, p.composedPrompt) } : {},
     contract: p.contract,
     nag: p.nag
   };
+}
+function hostPromptPath(repoRoot, id) {
+  return (0, import_node_path8.join)(repoRoot, RELAY_DIR, `${id}.md`);
+}
+function stageHostPrompt(repoRoot, id, composed) {
+  const path = hostPromptPath(repoRoot, id);
+  (0, import_node_fs9.mkdirSync)((0, import_node_path8.dirname)(path), { recursive: true });
+  (0, import_node_fs9.writeFileSync)(path, composed.endsWith("\n") ? composed : `${composed}
+`, "utf8");
+  return path;
+}
+function reusableOpen(repoRoot, archetype, name, session) {
+  if (name == null || name.trim().length === 0) return null;
+  const wanted = sanitizeName(name.trim());
+  for (const record of readDispatches(repoRoot).records) {
+    const o = record.opened;
+    if (o == null || record.state !== "open" || record.stopped != null) continue;
+    if (o.archetype !== archetype || o.name !== wanted || o.lane !== "host") continue;
+    if (session != null && o.session !== session) continue;
+    const staged = hostPromptPath(repoRoot, o.id);
+    if (!(0, import_node_fs9.existsSync)(staged)) continue;
+    return {
+      ok: true,
+      opened: true,
+      reused: true,
+      id: o.id,
+      name: o.name,
+      archetype: o.archetype,
+      model: o.model,
+      modelId: o.model_id ?? o.model,
+      effort: o.effort,
+      harness: o.harness,
+      lane: "host",
+      cwd: o.workspace != null ? (0, import_node_path8.resolve)(repoRoot, o.workspace.path) : repoRoot,
+      workspace: o.workspace ?? { path: ".", branch: null, base: "unknown" },
+      shared: o.workspace == null || o.workspace.path === ".",
+      sharedReason: null,
+      prompt: (0, import_node_fs9.readFileSync)(staged, "utf8"),
+      promptFile: staged,
+      contract: "",
+      nag: nagText(unclosedDispatches(repoRoot), DEFAULT_UNCLOSED_LIMIT)
+    };
+  }
+  return null;
 }
 var NotADispatchError = class extends DispatchesError {
 };
@@ -10123,7 +10175,7 @@ function renderDispatchDetail(d) {
     lines.push(`  stopped:   ${s.at}${s.exit ? ` \u2014 ${s.exit.signal ? `killed by ${s.exit.signal}` : `exit ${s.exit.code}`}` : ""}; tree ${dirty}`);
     if (s.model_observed != null) {
       const asked = d.record.opened?.model ?? null;
-      lines.push(`  ran on:    ${s.model_observed}${modelAgrees(asked, s.model_observed) ? "" : `  (the dial asked for ${asked})`}`);
+      lines.push(`  ran on:    ${s.model_observed}${modelAgrees(asked, s.model_observed, d.record.opened?.model_id) ? "" : `  (the dial asked for ${asked})`}`);
     }
     if (s.final_message != null) lines.push("", "--- final message ---", s.final_message.trimEnd());
     else lines.push("  final message: none recorded");
@@ -11056,7 +11108,7 @@ function runModelsAdd(opts) {
     const directlyListed = [...listings.values()].some((ids) => ids.includes(`${provider}/${id}`));
     if (directlyListed) {
       throw new ModelsError(
-        `model "${provider}/${id}" IS listed by OpenCode, but only as a direct (non-OpenRouter) identity, and catalog v4 cannot register that yet: the direct lane is the \`direct\` VARIANT of the \`opencode\` harness, variants are chosen by policy, and no model entry can name one. See the "Known gap" section of docs/experimental/harness-neutral-dials.md.`
+        `model "${provider}/${id}" IS listed by OpenCode, but only as a direct (non-OpenRouter) identity, and the shipped \`opencode\` harness prefixes every id with \`openrouter/\`. Declare a harness entry of your own whose command omits the prefix, then register the model against it with \`--harness <id>\`.`
       );
     }
     throw new ModelsError(`model "${provider}/${id}" was not found on the discovery path (tried exact identities: ${attempted}).`);
@@ -11663,6 +11715,8 @@ var COMMANDS = {
     "--parent-transcript": PATH,
     "--harness": { kind: "free" },
     "--lane": { kind: "free" },
+    "--stage-prompt": NONE,
+    "--reuse-open": NONE,
     "--json": NONE
   }),
   "dispatch-stop": command({ "--transcript": PATH, "--message-file": PATH, "--agent-cwd": PATH, "--json": NONE }, ["free"]),
@@ -11959,6 +12013,30 @@ function probe(command2) {
     version: output.length > 0 ? output.split(/\r?\n/, 1)[0] ?? null : null
   };
 }
+var MANAGED_AGENT_MARKER = "# fadeno:managed";
+function sweepManagedAgents(repoRoot, options) {
+  const removed = [];
+  for (const dir of [codexUserAgentDir(options), (0, import_node_path14.join)(repoRoot, ".codex", "agents")]) {
+    let entries;
+    try {
+      entries = (0, import_node_fs15.readdirSync)(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(".toml")) continue;
+      const path = (0, import_node_path14.join)(dir, entry);
+      try {
+        if (!(0, import_node_fs15.readFileSync)(path, "utf8").startsWith(MANAGED_AGENT_MARKER)) continue;
+      } catch {
+        continue;
+      }
+      (0, import_node_fs15.rmSync)(path, { force: true });
+      removed.push(path);
+    }
+  }
+  return removed;
+}
 function sweepRetiredState(paths) {
   const removed = [];
   for (const path of retiredStateFiles(paths)) {
@@ -12085,7 +12163,7 @@ function runSetup(opts = {}) {
     );
   }
   const link = linkCli(paths, source, opts.userPathOptions, opts.force ?? false);
-  const removed = sweepRetiredState(paths);
+  const removed = [...sweepRetiredState(paths), ...sweepManagedAgents(repoRoot, opts.userPathOptions)];
   const permission = opts.target === "claude" ? ensureClaudePermission(opts.userPathOptions, notices) : null;
   notices.unshift(
     `Fadeno ${packageVersion()} linked at ${link.path} -> ${link.target}. It is a link, so it follows the plugin: there is no second copy to keep in step.`
@@ -12094,7 +12172,11 @@ function runSetup(opts = {}) {
     notices.push(`${paths.binDir} is not on this shell's PATH \u2014 add it, or the \`fadeno\` command will not be found.`);
   }
   notices.push(`User configuration and state live under ${paths.configDir} and ${paths.stateDir}; project files were not changed.`);
-  for (const path of removed) notices.push(`Removed retired state ${path} (nothing reads it).`);
+  for (const path of removed) {
+    notices.push(
+      path.endsWith(".toml") ? `Removed the agent file ${path}, which an earlier Fadeno materialized. Nothing writes one now, and on Codex a stale one overrides the dial.` : `Removed retired state ${path} (nothing reads it).`
+    );
+  }
   notices.push("Skills and subagents are loaded at host session start; a fresh session is required to pick up a new plugin version.");
   return { target: opts.target ?? null, repoRoot, paths, probes, link, removed, permission, notices };
 }
@@ -12251,6 +12333,7 @@ var TOP_LEVEL = {
   "dispatch-open": page("The spawn wrapper for a spawn the host is about to make: open it on the host lane, or hand it to the command lane.", "fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] (--prompt-file <path> | stdin) [--json]", [
     "The spawn hook's entry point. With `--lane auto` (the default) the resolution decides: a model this session can deliver opens on the host lane \u2014 worktree cut, row written, and `--json` carries the contract-bearing prompt the agent should receive \u2014 while any other model is a relay: nothing is opened, the prompt is staged, and `relay.command` is the `fadeno dispatch` call the dispatch proxy runs.",
     "`--lane host` opens on the host lane regardless, for a caller about to run the agent in-session itself; `--lane command` stages the relay regardless.",
+    "`--stage-prompt` also writes the contract-bearing prompt to a file and returns its path, for a caller that cannot put it on the spawn itself; `--reuse-open` returns the dispatch already open for this archetype and name instead of opening a second one. Together they are the refuse-and-retry lane a hook that cannot rewrite a spawn uses.",
     "Refused (exit 3) at the unclosed-dispatch limit; the refusal names what to close."
   ]),
   "dispatch-stop": page("Record that a host-lane dispatch's agent stopped, and what its tree holds.", "fadeno dispatch-stop [<name|id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json]", [
@@ -12344,6 +12427,8 @@ var OPTION_HINTS = {
   "--session": "Local session scope",
   "--session-id": "Host session the spawn came from",
   "--lane": "Which lane opens it: auto (the resolution decides), host, or command",
+  "--stage-prompt": "Also write the prompt to a file and return its path",
+  "--reuse-open": "Return the dispatch already open for this archetype and name",
   "--transcript": "The agent's transcript, read for the dispatch id, final message and model",
   "--parent-transcript": "The spawning agent's transcript; its contract header names the parent dispatch",
   "--shared": "Work in the live tree instead of a worktree",
@@ -12417,7 +12502,7 @@ var PAGE_OPTIONS = {
   dial: withGlobals("--harness", "--session", "--user", "--repo", "--json"),
   clean: withGlobals("--force"),
   dispatch: withGlobals("--archetype", "--model", "--name", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--heartbeat"),
-  "dispatch-open": withGlobals("--archetype", "--model", "--name", "--lane", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--parent-transcript", "--harness", "--json"),
+  "dispatch-open": withGlobals("--archetype", "--model", "--name", "--lane", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--parent-transcript", "--harness", "--stage-prompt", "--reuse-open", "--json"),
   "dispatch-stop": withGlobals("--transcript", "--message-file", "--agent-cwd", "--json"),
   "dispatch-close": withGlobals("--merged", "--kept", "--discarded", "--failed", "--note"),
   cancel: withGlobals(),
@@ -12679,7 +12764,7 @@ async function main(argv) {
   const staleVia = argv.find((arg) => arg === "--via" || arg.startsWith("--via="));
   if (staleVia != null) {
     throw new Error(
-      "`--via` was removed with catalog v4 \u2014 use `--harness <id>`. A dial names a model and, optionally, the harness that executes it; the driver names it took (claude-exec, opencode-direct, muse-code) were harnesses all along. See docs/experimental/harness-neutral-dials.md."
+      "`--via` was removed with catalog v4 \u2014 use `--harness <id>`. A dial names a model and, optionally, the harness that executes it; the driver names it took (claude-exec, opencode-direct, muse-code) were harnesses all along."
     );
   }
   let parsed;
@@ -12712,6 +12797,8 @@ async function main(argv) {
         from: { type: "string" },
         shared: { type: "boolean" },
         lane: { type: "string" },
+        "stage-prompt": { type: "boolean" },
+        "reuse-open": { type: "boolean" },
         parent: { type: "string" },
         "session-id": { type: "string" },
         "prompt-file": { type: "string" },
@@ -13025,7 +13112,7 @@ async function main(argv) {
     case "dispatch-open": {
       if (!values.archetype) {
         throw new Error(
-          "Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] (--prompt-file <path> | stdin) [--json]"
+          "Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] [--stage-prompt] [--reuse-open] (--prompt-file <path> | stdin) [--json]"
         );
       }
       const promptFile = values["prompt-file"];
@@ -13041,7 +13128,9 @@ async function main(argv) {
         parent: values.parent,
         harness: values.harness ?? null,
         parentTranscript: values["parent-transcript"] ?? null,
-        lane: values.lane ?? "auto"
+        lane: values.lane ?? "auto",
+        stagePrompt: Boolean(values["stage-prompt"]),
+        reuseOpen: Boolean(values["reuse-open"])
       });
       if (!outcome.ok) {
         if (values.json) console.log(JSON.stringify({ ok: false, refused: outcome.refused }));
@@ -13061,10 +13150,11 @@ async function main(argv) {
         return 0;
       }
       console.log(
-        `${outcome.name} (${outcome.id}) opened on the host lane: ${outcome.model}${outcome.effort ? `@${outcome.effort}` : ""}${outcome.harness ? ` on ${outcome.harness}` : ""}`
+        `${outcome.name} (${outcome.id}) ${outcome.reused ? "is already open" : "opened"} on the host lane: ${outcome.model}${outcome.effort ? `@${outcome.effort}` : ""}${outcome.harness ? ` on ${outcome.harness}` : ""}`
       );
       console.log(`  work in: ${outcome.cwd}${outcome.workspace.branch ? ` (${outcome.workspace.branch})` : " (shared tree)"}`);
-      console.log("  the contract-bearing prompt is in the --json output; the hook hands it to the agent.");
+      if (outcome.promptFile != null) console.log(`  prompt staged at: ${outcome.promptFile}`);
+      else console.log("  the contract-bearing prompt is in the --json output; the hook hands it to the agent.");
       console.log(outcome.nag);
       return 0;
     }
@@ -13104,13 +13194,13 @@ async function main(argv) {
           mismatchedCwd: stopped.mismatchedCwd,
           model: stopped.record.opened?.model ?? null,
           modelObserved: stopped.row.model_observed ?? null,
-          modelMismatch: !modelAgrees(stopped.record.opened?.model, stopped.row.model_observed)
+          modelMismatch: !modelAgrees(stopped.record.opened?.model, stopped.row.model_observed, stopped.record.opened?.model_id)
         }));
         return 0;
       }
       const asked = stopped.record.opened?.model ?? null;
       const ran = stopped.row.model_observed ?? null;
-      const modelNote = !modelAgrees(asked, ran) ? `; WARNING: ran on ${ran}, the dial asked for ${asked}` : "";
+      const modelNote = !modelAgrees(asked, ran, stopped.record.opened?.model_id) ? `; WARNING: ran on ${ran}, the dial asked for ${asked}` : "";
       console.log(
         `${name} stopped${stopped.replayed ? " (already recorded)" : ""}; tree ${dirty}` + (stopped.mismatchedCwd != null ? `; WARNING: the agent worked in ${stopped.mismatchedCwd}, not its assigned worktree` : "") + modelNote + `. Close it: fadeno dispatch-close ${name} --merged|--kept|--discarded|--failed`
       );

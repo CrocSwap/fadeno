@@ -272,6 +272,8 @@ async function main(argv: string[]): Promise<number> {
         from: { type: 'string' },
         shared: { type: 'boolean' },
         lane: { type: 'string' },
+        'stage-prompt': { type: 'boolean' },
+        'reuse-open': { type: 'boolean' },
         parent: { type: 'string' },
         'session-id': { type: 'string' },
         'prompt-file': { type: 'string' },
@@ -632,7 +634,8 @@ async function main(argv: string[]): Promise<number> {
       if (!values.archetype) {
         throw new Error(
           'Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] ' +
-            '[--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] (--prompt-file <path> | stdin) [--json]',
+            '[--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] [--stage-prompt] [--reuse-open] ' +
+            '(--prompt-file <path> | stdin) [--json]',
         );
       }
       const promptFile = values['prompt-file'];
@@ -649,6 +652,8 @@ async function main(argv: string[]): Promise<number> {
         harness: values.harness ?? null,
         parentTranscript: values['parent-transcript'] ?? null,
         lane: (values.lane ?? 'auto') as OpenLane,
+        stagePrompt: Boolean(values['stage-prompt']),
+        reuseOpen: Boolean(values['reuse-open']),
       });
       if (!outcome.ok) {
         if (values.json) console.log(JSON.stringify({ ok: false, refused: outcome.refused }));
@@ -668,11 +673,12 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       console.log(
-        `${outcome.name} (${outcome.id}) opened on the host lane: ${outcome.model}${outcome.effort ? `@${outcome.effort}` : ''}` +
-          `${outcome.harness ? ` on ${outcome.harness}` : ''}`,
+        `${outcome.name} (${outcome.id}) ${outcome.reused ? 'is already open' : 'opened'} on the host lane: ` +
+          `${outcome.model}${outcome.effort ? `@${outcome.effort}` : ''}${outcome.harness ? ` on ${outcome.harness}` : ''}`,
       );
       console.log(`  work in: ${outcome.cwd}${outcome.workspace.branch ? ` (${outcome.workspace.branch})` : ' (shared tree)'}`);
-      console.log('  the contract-bearing prompt is in the --json output; the hook hands it to the agent.');
+      if (outcome.promptFile != null) console.log(`  prompt staged at: ${outcome.promptFile}`);
+      else console.log('  the contract-bearing prompt is in the --json output; the hook hands it to the agent.');
       console.log(outcome.nag);
       return 0;
     }
@@ -714,13 +720,13 @@ async function main(argv: string[]): Promise<number> {
           mismatchedCwd: stopped.mismatchedCwd,
           model: stopped.record.opened?.model ?? null,
           modelObserved: stopped.row.model_observed ?? null,
-          modelMismatch: !modelAgrees(stopped.record.opened?.model, stopped.row.model_observed),
+          modelMismatch: !modelAgrees(stopped.record.opened?.model, stopped.row.model_observed, stopped.record.opened?.model_id),
         }));
         return 0;
       }
       const asked = stopped.record.opened?.model ?? null;
       const ran = stopped.row.model_observed ?? null;
-      const modelNote = !modelAgrees(asked, ran) ? `; WARNING: ran on ${ran}, the dial asked for ${asked}` : '';
+      const modelNote = !modelAgrees(asked, ran, stopped.record.opened?.model_id) ? `; WARNING: ran on ${ran}, the dial asked for ${asked}` : '';
       console.log(
         `${name} stopped${stopped.replayed ? ' (already recorded)' : ''}; tree ${dirty}` +
           (stopped.mismatchedCwd != null ? `; WARNING: the agent worked in ${stopped.mismatchedCwd}, not its assigned worktree` : '') +
