@@ -79,14 +79,14 @@ test('a misspelled top-level key fails loudly instead of vanishing in the merge'
   // The regression: this catalog used to load clean, with `worktree_carry`
   // simply never in effect. Nothing downstream could tell the difference
   // between "carry nothing" and "the declaration was thrown away".
-  const { root, paths, projectFile } = seed(t, { ...V4_BASE, worktree_carrry: ['node_modules'] });
+  const { root, paths, projectFile } = seed(t, { ...V4_BASE, unregistered_model_harnes: 'opencode' });
   const err = thrown(() => loadLayeredProfile(root, paths));
   assert.match(err.message, /unknown top-level key/);
   // Names the file to edit and the exact key that is wrong...
   assert.ok(err.message.startsWith(`${projectFile}: `), `message must lead with the offending file; got ${err.message}`);
-  assert.match(err.message, /`worktree_carrry`/);
+  assert.match(err.message, /`unregistered_model_harnes`/);
   // ...and, since a typo is the whole failure mode, the key that was meant.
-  assert.match(err.message, /did you mean `worktree_carry`\?/);
+  assert.match(err.message, /did you mean `unregistered_model_harness`\?/);
 });
 
 test('the layer that carries the typo is the file named, even under layering', (t) => {
@@ -110,21 +110,21 @@ test('an unknown key with no near match gets the key list, not a wild guess', (t
 });
 
 test('several unknown keys are all reported, each with its own suggestion', (t) => {
-  const { root, paths } = seed(t, { ...V4_BASE, tolos: {}, zzzz: 1 });
+  const { root, paths } = seed(t, { ...V4_BASE, modles: {}, zzzz: 1 });
   const err = thrown(() => loadLayeredProfile(root, paths));
   assert.match(err.message, /unknown top-level keys/);
-  assert.match(err.message, /`tolos` \(did you mean `tools`\?\)/);
+  assert.match(err.message, /`modles` \(did you mean `models`\?\)/);
   assert.match(err.message, /`zzzz`/);
   assert.doesNotMatch(err.message, /`zzzz` \(did you mean/);
 });
 
 test('suggestCatalogKey answers typos and stays quiet on everything else', () => {
-  assert.equal(suggestCatalogKey('worktree_carrry'), 'worktree_carry');
+  assert.equal(suggestCatalogKey('unregistered_model_harnes'), 'unregistered_model_harness');
   assert.equal(suggestCatalogKey('dails'), 'dials'); // transposition
   assert.equal(suggestCatalogKey('modles'), 'models');
   assert.equal(suggestCatalogKey('dial'), 'dials'); // singular/plural
-  assert.equal(suggestCatalogKey('constraint'), 'constraints');
-  assert.equal(suggestCatalogKey('Worktree_Carry'), 'worktree_carry'); // case-only
+  assert.equal(suggestCatalogKey('archetype'), 'archetypes');
+  assert.equal(suggestCatalogKey('Unclosed_Limit'), 'unclosed_limit'); // case-only
   // Not close enough to be worth asserting: a confident wrong suggestion is
   // worse than none, and short keys must not be able to "mean" a long one.
   assert.equal(suggestCatalogKey('pipeline'), null);
@@ -146,15 +146,8 @@ test('a known key in the wrong layer keeps its own message, not "unknown key"', 
     'repo pins live in the project catalog; user dials are state — use `fadeno dial <archetype> <model> --user`',
   );
 
-  const withCarry = seed(t, null, { ...V4_BASE, worktree_carry: ['node_modules'] });
-  const carryErr = thrown(() => loadLayeredProfile(withCarry.root, withCarry.paths));
-  assert.equal(
-    carryErr.message,
-    'worktree_carry describes this repo\'s build state; it is project-only — declare it in .fadeno/executors.yaml, not the user or builtin catalog.',
-  );
-
   // Even alongside a typo: the misplacement is the more specific finding.
-  const both = seed(t, null, { ...V4_BASE, dials: { worker: 'sol' }, tolos: {} });
+  const both = seed(t, null, { ...V4_BASE, dials: { worker: 'sol' }, modles: {} });
   assert.doesNotMatch(thrown(() => loadLayeredProfile(both.root, both.paths)).message, /unknown top-level key/);
 });
 
@@ -177,7 +170,8 @@ test('a pre-dials catalog still gets migration instructions, now naming the file
  * vocabulary advertises must actually survive layering. A key present in
  * `CATALOG_TOP_LEVEL_KEYS` but absent from the merge is exactly the shape of
  * the original `worktree_carry` defect — accepted by the validator, dropped
- * before the parser, inert with no complaint. Adding a key without teaching
+ * before the parser, inert with no complaint (that key is itself gone now, and
+ * this table is what its lesson left behind). Adding a key without teaching
  * this table about it fails the coverage assertion below rather than shipping
  * an unverified one.
  */
@@ -209,26 +203,10 @@ const SURVIVES_THE_MERGE: Record<string, { declare: Record<string, unknown>; che
   },
   bindings: { declare: { bindings: { reviewer: 'sol' } }, check: (p) => assert.equal(p.bindings.reviewer?.model, 'sol') },
   dials: { declare: { dials: { worker: 'sol' } }, check: (p) => assert.equal(p.dials.worker?.model, 'sol') },
-  archetypes: { declare: { archetypes: { auditor: { ignored_output: 'kept' } } }, check: (p) => assert.equal(p.archetypes.auditor?.ignoredOutput, 'kept') },
-  constraints: {
-    declare: { constraints: { command: ['node', '-e', '0'] } },
-    check: (p) => assert.deepEqual(p.constraints?.command, ['node', '-e', '0']),
-  },
+  archetypes: { declare: { archetypes: { auditor: { description: 'Audits.' } } }, check: (p) => assert.equal(p.archetypes.auditor?.description, 'Audits.') },
   unregistered_model_harness: {
     declare: { unregistered_model_harness: 'crush' },
     check: (p) => assert.equal(p.unregisteredModelHarness, 'crush'),
-  },
-  tools: {
-    declare: { tools: { lint: { command: ['node', '-e', '0'] } } },
-    check: (p) => assert.deepEqual(p.tools.lint?.command, ['node', '-e', '0']),
-  },
-  worktree_carry: {
-    declare: { worktree_carry: ['node_modules'] },
-    check: (p) => assert.deepEqual(p.worktreeCarry, ['node_modules']),
-  },
-  surfaces: {
-    declare: { surfaces: ['src/cli.ts'] },
-    check: (p) => assert.deepEqual(p.surfaces, ['src/cli.ts']),
   },
   unclosed_limit: {
     declare: { unclosed_limit: 8 },

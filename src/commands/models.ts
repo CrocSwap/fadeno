@@ -14,7 +14,6 @@ import {
   ExecutorProfileError,
   type CommandExecutorSpec,
   type DialRef,
-  type EligibilityState,
   type ExecutorProfile,
   type HarnessRaw,
   type ModelEntry,
@@ -66,7 +65,6 @@ export interface ModelRow {
   native: boolean;
   /** The resolved argv grants the fadeno command family (director-capable). */
   fadeno_capable: boolean;
-  eligibility: Record<string, EligibilityState>;
   spellings: Record<string, string>;
   /** verified_at from the probe cache for (harness, delivered id), else null. */
   verified_at: string | null;
@@ -80,7 +78,6 @@ export interface ModelRow {
     harness: string;
     id: string;
     adapter: 'command' | 'host';
-    variant: string | null;
     fadeno_capable: boolean;
   }>;
 }
@@ -268,7 +265,6 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
         // argv at all is represented.
         native: compiled.hostCandidate,
         fadeno_capable: fadenoCapable,
-        eligibility: { ...entry.eligibility },
         spellings: { ...entry.spellings },
         verified_at: verified?.verified_at ?? null,
         stale: null,
@@ -288,7 +284,6 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
         adapter: null,
         native: false,
         fadeno_capable: false,
-        eligibility: { ...entry.eligibility },
         spellings: { ...entry.spellings },
         verified_at: null,
         stale: err instanceof ExecutorProfileError ? err.message : String(err),
@@ -307,7 +302,6 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
           harness: candidate,
           id: alt.modelId,
           adapter: altAdapter,
-          variant: alt.variant,
           fadeno_capable: argvGrantsFadenoShell(altCommand),
         });
       } catch {
@@ -623,7 +617,6 @@ function userModelEntry(raw: unknown): ModelEntry | null {
     id,
     effort: typeof record.effort === 'string' ? record.effort : 'default',
     spellings,
-    eligibility: {},
     ...(typeof record.harness === 'string' ? { harness: record.harness } : {}),
   };
 }

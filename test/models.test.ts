@@ -134,18 +134,12 @@ test('models: the SHIPPED catalog reports an anthropic command delivery as faden
   assert.equal(opus.adapter, 'command', 'ejected to the command lane under a codex host');
   assert.equal(opus.fadeno_capable, true, 'the shipped claude command lane can run fadeno');
 
-  // The director's lane too. `runModels` resolves without an archetype, so the
-  // `exec` variant never appears in its rows — read it through the same
-  // predicate the column is computed with.
+  // One lane per harness now, so what the column reports IS what a director
+  // would get — there is no second, archetype-chosen argv to read separately.
   const profile = loadLayeredProfile(root, user, 'codex').profile;
-  const director = resolveDelivery({ model: 'opus' }, profile, 'codex', { archetype: 'director' });
-  assert.equal(director.variant, 'exec');
-  assert.equal(director.spec.adapter, 'command');
-  assert.equal(
-    argvGrantsFadenoShell((director.spec as { command: string[] }).command),
-    true,
-    'the exec variant carries the same grant as the base lane',
-  );
+  const resolved = resolveDelivery({ model: 'opus' }, profile, 'codex');
+  assert.equal(resolved.spec.adapter, 'command');
+  assert.equal(argvGrantsFadenoShell((resolved.spec as { command: string[] }).command), true);
 });
 
 test('models: the SHIPPED catalog reports an openai command delivery as fadeno_capable', (t) => {

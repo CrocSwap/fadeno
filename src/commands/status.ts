@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { activeHarness } from '../lib/executors.ts';
 import { unclosedDispatches } from '../lib/ledger.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
-import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import { codexUserAgentDir, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 import { runDialShow, type EffectiveRow } from './dial.ts';
 import { runWorktrees, type WorktreeEntry } from './dispatches.ts';
 
@@ -81,7 +81,7 @@ function shadowingAgentFiles(
   const roots: Array<{ dir: string; harness: 'claude' | 'codex'; scope: 'user' | 'project'; ext: string }> = [
     { dir: join(claudeHome, 'agents'), harness: 'claude', scope: 'user', ext: '.md' },
     { dir: join(repoRoot, '.claude', 'agents'), harness: 'claude', scope: 'project', ext: '.md' },
-    { dir: join(home, '.codex', 'agents'), harness: 'codex', scope: 'user', ext: '.toml' },
+    { dir: codexUserAgentDir(options), harness: 'codex', scope: 'user', ext: '.toml' },
     { dir: join(repoRoot, '.codex', 'agents'), harness: 'codex', scope: 'project', ext: '.toml' },
   ];
   const found: ShadowingAgentFile[] = [];

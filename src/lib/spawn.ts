@@ -152,7 +152,7 @@ export function resolveArchetype(input: ResolveInput): Resolution {
     const explicit = input.explicitModel?.trim() || null;
     if (explicit != null) {
       const ref: DialRef = parseDialRef(explicit, '--model');
-      delivery = resolveDelivery(ref, profile, host, { archetype });
+      delivery = resolveDelivery(ref, profile, host);
       source = 'explicit';
     } else {
       const local = readLocalDialState(input.repoRoot);

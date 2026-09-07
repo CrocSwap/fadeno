@@ -120,11 +120,8 @@ function parseLayer(path: string): Record<string, unknown> {
   return doc;
 }
 
-/** The model-entry keys catalog v4 allows; anything else is v3 residue or a typo. */
-const V4_MODEL_KEYS: ReadonlySet<string> = new Set(['provider', 'id', 'effort', 'spellings', 'eligibility', 'harness']);
-
-/** The three eligibility states the parser accepts. */
-const ELIGIBILITY_STATES: ReadonlySet<unknown> = new Set(['eligible', 'shadow_only', 'forbidden']);
+/** The model-entry keys catalog v4 allows; anything else is residue or a typo. */
+const V4_MODEL_KEYS: ReadonlySet<string> = new Set(['provider', 'id', 'effort', 'spellings', 'harness']);
 
 /** A ref written the v3 way, as a string or in mapping form. */
 function repairLegacyRef(raw: unknown): unknown {
@@ -167,7 +164,7 @@ function repairLegacyRef(raw: unknown): unknown {
  * different schema generation with nothing to salvage: a pre-dials user
  * catalog (`targets:`/`loadouts:`) still gets `preDialsCatalogError`, and an
  * unknown top-level key still gets its did-you-mean — that check is what keeps
- * a misspelled `worktree_carry` from silently doing nothing.
+ * a misspelled catalog key from silently doing nothing.
  */
 /**
  * v3 `routes.<host>` KEYS → the v4 harness that owns that lane. A v3 `model
@@ -319,19 +316,6 @@ function repairUserLayer(doc: Record<string, unknown>, path: string, repairs: st
         }
       }
     }
-    if (entry.eligibility !== undefined) {
-      const eligibility = mapping(entry.eligibility);
-      if (eligibility == null) {
-        delete entry.eligibility;
-        repairs.push(`${where}: model "${name}" \`eligibility\` is not a mapping and was ignored`);
-      } else {
-        for (const [key, value] of Object.entries(eligibility)) {
-          if (BARE_IDENTIFIER_RE.test(key) && ELIGIBILITY_STATES.has(value)) continue;
-          delete eligibility[key];
-          repairs.push(`${where}: model "${name}" \`eligibility.${key}\` is not a valid state and was ignored`);
-        }
-      }
-    }
     for (const key of Object.keys(entry)) {
       if (V4_MODEL_KEYS.has(key)) continue;
       delete entry[key];
@@ -357,7 +341,6 @@ const ENTRY_MERGED_KEYS: ReadonlySet<CatalogTopLevelKey> = new Set<CatalogTopLev
   'bindings',
   'models',
   'dials',
-  'tools',
 ]);
 
 /**
@@ -366,12 +349,10 @@ const ENTRY_MERGED_KEYS: ReadonlySet<CatalogTopLevelKey> = new Set<CatalogTopLev
  *
  * This has to happen here and cannot happen in `parseExecutorProfile`: the
  * merge copies top-level keys by exact literal name, so a MISSPELLED key
- * (`worktree_carrry:` for `worktree_carry:`) is never looked up, never
- * copied, and therefore never reaches the parser's strict unknown-key check —
- * it vanishes, and the feature it was meant to switch on silently does
- * nothing. For `worktree_carry` specifically that is a shadow challenger with
- * no `node_modules`, unable to build or test, with nothing said about it. The
- * raw per-layer document is the last place the typo still exists.
+ * (`modles:` for `models:`) is never looked up, never copied, and therefore
+ * never reaches the parser's strict unknown-key check — it vanishes, and the
+ * thing it was meant to declare silently does nothing. The raw per-layer
+ * document is the last place the typo still exists.
  *
  * Scope note: only the layers that actually take part in the merge are
  * checked. A self-contained project catalog suppresses the builtin and user
@@ -422,20 +403,7 @@ function mergeLayer(target: Record<string, unknown>, source: Record<string, unkn
   if (layer !== 'project' && mapping(source.dials) != null && Object.keys(mapping(source.dials)!).length > 0) {
     throw new ExecutorProfileError('repo pins live in the project catalog; user dials are state — use `fadeno dial <archetype> <model> --user`');
   }
-  // Disallow worktree_carry in non-project layers, same shape as `dials`
-  // above and for the same reason: it describes THIS repo's gitignored
-  // build state (deps, build output, a local `.fadeno/` catalog), not a
-  // role or a model, so a user- or builtin-scope declaration could never
-  // name paths that make sense in whatever repo happens to load that
-  // layer. Project-only keeps the declaration co-located with the repo it
-  // describes.
-  if (layer !== 'project' && Array.isArray(source.surfaces) && source.surfaces.length > 0) {
-    throw new ExecutorProfileError('surfaces describes this repo\'s shape; it is project-only — declare it in .fadeno/executors.yaml, not the user or builtin catalog.');
-  }
-  if (layer !== 'project' && Array.isArray(source.worktree_carry) && source.worktree_carry.length > 0) {
-    throw new ExecutorProfileError('worktree_carry describes this repo\'s build state; it is project-only — declare it in .fadeno/executors.yaml, not the user or builtin catalog.');
-  }
-  // After the placement checks above, never before: a key that is KNOWN but
+  // After the placement check above, never before: a key that is KNOWN but
   // declared in the wrong layer has its own specific message, and must keep
   // saying so rather than being reported as unknown.
   validateLayerKeys(source, path);

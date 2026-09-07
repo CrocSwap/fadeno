@@ -1,7 +1,7 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { dirname, join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { loadLayeredProfile, type ModelFallbackOutcome, type ProfileProvenance } from './config-layers.ts';
 import { type FadenoHarness, type UserPathOptions } from './user-paths.ts';
 
@@ -12,58 +12,22 @@ export class ExecutorProfileError extends Error {}
 // layer loads only when it declares none of the removed keys)
 export const BARE_IDENTIFIER_RE = /^[a-z][a-z0-9_-]*$/;
 
-/** Per-target, per-archetype dispatch eligibility. Absent YAML is `eligible`. */
-export type EligibilityState = 'eligible' | 'shadow_only' | 'forbidden';
-
 /**
- * The minimal execution profile of the next protocol: named executors (each a
- * one-shot command adapter) plus direct role→executor bindings. No capability
- * routing, ranking, stickiness, or fallback — if a bound executor fails, the
- * run pauses and the user substitutes explicitly.
+ * A delivery that runs as a process: one argv, one shot. Nothing about
+ * sessions, resume, or deadlines — Fadeno launches a process and reads what it
+ * writes, and never kills it on a timer.
  */
 export interface CommandExecutorSpec {
   adapter: 'command';
   command: string[];
-  /**
-   * Read, carried through snapshots, and NEVER armed. Fadeno stopped running
-   * executors under a deadline; a catalog that still declares `timeout_ms`
-   * loads with a note rather than a refusal, and this field is what the note
-   * is about. Nothing reads it to schedule anything — see
-   * `IGNORED_DEADLINE_NOTE_TOKEN`.
-   */
-  timeoutMs?: number | null;
-  /** Optional metadata recorded in dispatch evidence; never alters `command`. */
+  /** Optional metadata recorded in the ledger; never alters `command`. */
   model: string | null;
-  /**
-   * Optional session-resume argv (must contain `{session_id}`). Declaring it
-   * makes the executor **session-capable**: the engine reuses one harness
-   * session per role per run. Resumed context is attested evidence — the
-   * ledger records the session id, but cannot recompute what the session
-   * already contained. Bias toward memoryless executors when not needed.
-   */
-  resume: string[] | null;
-  /**
-   * How a fresh call's session id is learned when the harness assigns it:
-   * a regex with one capture group, matched against stderr then stdout.
-   * Mutually exclusive with a `{session_id}` placeholder in `command`
-   * (engine-minted id).
-   */
-  sessionIdPattern: string | null;
-  /**
-   * Per-archetype eligibility of this delivery. Absent YAML is `{}`
-   * (every archetype `eligible`).
-   */
-  eligibility: Record<string, EligibilityState>;
-  /** Neutral v2 target metadata; absent for legacy v1 executors. */
-  target?: string;
   provider?: string;
-  /** v4 compiled executor harness id (for snapshot passthrough). */
+  /** The executor harness this lane belongs to. */
   harness?: string;
-  /** v4 compiled command-lane variant, when policy chose a named one. */
-  variant?: string;
 }
 
-/** A host facility invoked outside the command adapter. */
+/** A delivery the host session makes itself, as a subagent. */
 export interface HostExecutorSpec {
   adapter: 'host';
   /** Requested host model identifier; not proof of the host's runtime model. */
@@ -78,110 +42,13 @@ export interface HostExecutorSpec {
    * explicit delivery fallback, never an executor/provider substitution.
    */
   fallbackCommand?: string[] | null;
-  /**
-   * Per-archetype eligibility of this delivery. Absent YAML is `{}`
-   * (every archetype `eligible`).
-   */
-  eligibility: Record<string, EligibilityState>;
-  /** Neutral v2 target metadata; absent for legacy v1 executors. */
-  target?: string;
   provider?: string;
   harness?: string;
-  variant?: string;
 }
 
 export type ExecutorSpec = CommandExecutorSpec | HostExecutorSpec;
 
 /** Placeholder substituted into command/resume argv. */
-/**
- * The CALLER's prompt digest: sha256 of the prompt bytes exactly as they were
- * handed to Fadeno, before any kernel decoration.
- *
- * "Before any kernel decoration" is the whole definition, and it is load
- * bearing. Two processes derive this same value independently and must agree:
- *
- * - the steering hook / spawn guard, from the Agent call's `tool_input.prompt`
- *   (each hook is a standalone script with no import path back into the CLI,
- *   so it spells the same sha256 by hand — change one, change all);
- * - the kernel, from the stdin or `--prompt-file` bytes, captured in
- *   `runDispatch` BEFORE the archetype brief is prepended and before
- *   `DISPATCH_RESULT_FOOTER` is appended.
- *
- * The 2026-09-05 receipt for why this is one named thing: the hook rolled a
- * shadow attachment on the caller's bytes and SELECTED, so it rewrote the
- * spawn to the dispatch proxy; the kernel then rolled the same attachment on
- * the footer-appended bytes, did NOT select, and delivered a plain unpaired
- * dispatch. The hook-chosen pair evaporated between the two processes, with no
- * row anywhere saying why. Everything keyed on "which prompt is this?" — the
- * pair roll, the relay attestation, `fadeno dial resolve --prompt-sha256` —
- * uses this digest and nothing else.
- *
- * NOT the same as a row's `prompt_sha256`, which attests the SNAPSHOT the
- * executor actually received (brief and footer included). Both live on a
- * request row, under their own names, because they answer different questions.
- *
- * THE RULE, because "the caller's bytes" is not quite enough on its own: two
- * prompts that differ only in TRAILING NEWLINES are the same prompt, for
- * pairing and for attestation. The digest is taken over
- * `canonicalCallerPrompt` below, never over the raw bytes.
- */
-export function callerPromptDigest(prompt: string): string {
-  return createHash('sha256').update(canonicalCallerPrompt(prompt)).digest('hex');
-}
-
-/**
- * The caller's prompt with its trailing line terminators removed — the bytes
- * `callerPromptDigest` actually hashes.
- *
- * There is a transport between the two processes that must agree, and it is
- * not byte-preserving. The Claude dispatch proxy hands the prompt over in a
- * quoted heredoc (`fadeno dispatch --archetype worker <<'FADENO_PROMPT'` — see
- * `templates/claude/claude-agents/dispatch-worker.md`), and the shell feeds a
- * heredoc as each body line PLUS a terminating newline. So the kernel reads
- * `caller + "\n"` for a caller prompt that ended without one: hash the raw
- * bytes on both sides and the hook and the kernel roll different numbers for
- * the same task, which is the very defect this digest exists to close — just
- * moved from the kernel's decoration to the relay's transport. The same
- * asymmetry sits between a `--prompt-file` (files usually end in a newline)
- * and an inline `tool_input.prompt` (usually does not).
- *
- * Canonicalizing instead of trying to preserve the bytes is the choice that
- * survives contact: the transport cannot be made byte-exact from Fadeno's side
- * (it is a model writing a heredoc), while "trailing newlines are not part of
- * the prompt's identity" is a rule every writer can apply locally, with no
- * state threaded between them. It strips the whole run of terminators (`\n` or
- * `\r\n`), not exactly one, so a caller prompt that itself ends in a blank line
- * agrees with the same prompt after a round trip through the shell.
- *
- * Nothing else is normalized — not leading whitespace, not interior lines, not
- * trailing spaces. A digest that ignored more than the transport can change
- * would start calling genuinely different prompts the same prompt.
- *
- * Every writer of this digest applies this rule, and each hook spells it by
- * hand for the same reason it spells sha256 by hand (no import path back into
- * the CLI): `templates/claude/hooks/dispatch-steering.mjs`,
- * `templates/claude/hooks/dispatch-proxy-guard.mjs`,
- * `templates/opencode/plugin/fadeno-steering.js`,
- * `templates/omp/extensions/fadeno-steering.ts`. Change one, change all.
- */
-export function canonicalCallerPrompt(prompt: string): string {
-  return prompt.replace(/(?:\r?\n)+$/, '');
-}
-
-export const SESSION_ID_PLACEHOLDER = '{session_id}';
-
-export function substituteSessionId(argv: string[], sessionId: string): string[] {
-  return argv.map((part) => part.split(SESSION_ID_PLACEHOLDER).join(sessionId));
-}
-
-/**
- * Placeholder for harnesses whose CLI can only read a prompt from a regular
- * file (Muse Code refuses /dev/stdin, bare stdin, and `-` — verified live
- * 2026-08-16). Substituted at spawn time with the absolute path of the
- * kernel's attested prompt snapshot, so the digest attests exactly the bytes
- * the executor reads. Stdin is still piped alongside; a file-reading executor
- * simply ignores it.
- */
 export const PROMPT_FILE_PLACEHOLDER = '{prompt_file}';
 
 export function substitutePromptFile(argv: string[], promptPath: string): string[] {
@@ -237,7 +104,7 @@ export function substitutePromptFile(argv: string[], promptPath: string): string
  * an install that has not re-cut its own catalog still reads true.
  *
  * It deliberately reads no other flag's values. `--disallowedTools Bash` is the
- * natural shape of the restricted claude variant this catalog invites projects
+ * natural shape of the restricted claude lane this catalog invites projects
  * to declare, and a predicate that scanned every argv part regardless of the
  * flag it belonged to reported that argv as CAPABLE — as it did
  * `--append-system-prompt 'Prefer Bash, not Python'`. Position-blindness was
@@ -283,28 +150,26 @@ export function argvGrantsFadenoShell(argv: readonly string[]): boolean {
 export const ARCHETYPE_DISPLAY_ORDER = ['director', 'judge', 'reviewer', 'scout', 'worker'] as const;
 
 /**
- * The three role archetypes every profile has whether or not it says so:
- * `fadeno init` scaffolds a role subagent and a dispatch proxy for each, and
- * the plugins ship them.
+ * The three archetypes every profile has whether or not it says so. A catalog
+ * earns an entry in `archetypes:` by having something to say; silence is not
+ * absence.
  */
-export const ROLE_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
+const CANON_ROLE_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
 
 /**
  * Every archetype name a profile KNOWS, as opposed to every name it DECLARES.
  *
  * `profile.archetypes` is a policy overlay: an archetype earns an entry by
- * having something non-default to say (`requires_write`, `brief`, `fallback`).
+ * having something to say (`description`, `fallback`).
  * The builtin catalog therefore declares `worker`, `director` and `scout`
  * and stays silent about `reviewer` and `judge`, whose posture is entirely
  * default — they are no less real for it.
  *
  * Reading the overlay as the registry is a live bug this codebase has already
- * shipped: `runLockedSteeringResolve` refused every locked host dispatch for
- * `reviewer` and `judge` with "undeclared archetype", so a Codex reviewer
- * agent that correctly consulted steering was pushed onto the command lane
- * (2026-08-21, polymarket-quoter). Every OTHER reader — `dispatch.ts`,
- * `drive.ts`, the fallback walk — already treats absence as "no declared
- * policy, use defaults", which is the correct reading.
+ * shipped: a resolver that required a declaration refused every host dispatch
+ * for `reviewer` and `judge` with "undeclared archetype", pushing a Codex
+ * reviewer onto the command lane (2026-08-21, polymarket-quoter). Absence
+ * means "no declared policy, use defaults" — everywhere, without exception.
  *
  * Pass dial layers as `extra` where a name may exist only by being dialed.
  */
@@ -312,7 +177,7 @@ export function knownArchetypes(
   archetypes: Record<string, unknown>,
   ...extra: Array<Record<string, unknown> | undefined | null>
 ): Set<string> {
-  const names = new Set<string>(ROLE_ARCHETYPES);
+  const names = new Set<string>(CANON_ROLE_ARCHETYPES);
   for (const key of Object.keys(archetypes)) names.add(key);
   for (const layer of extra) {
     if (layer != null) for (const key of Object.keys(layer)) names.add(key);
@@ -329,51 +194,18 @@ export function archetypeDisplaySort(names: Iterable<string>): string[] {
   });
 }
 
-/** Whether an archetype's delivery provider must differ from every input producer. */
-export type ProviderDistinctness = 'advisory' | 'required';
-
 /**
- * Whether an archetype's *gitignored* output has to survive the dispatch.
+ * What a catalog says about an archetype, beyond which model it is dialed to.
  *
- * Consumed at pair materialization, and says only whether the files
- * `.gitignore` excludes are load-bearing product: a shadow pair runs each arm
- * in its own worktree and merges the primary's work back through a
- * `git add -A` diff, which drops every ignored path. `kept` therefore means
- * "a pair would destroy this dispatch's output" — lose the comparison, never
- * the work. Not `worktree_carry`, which is the opposite direction: ignored
- * files copied *into* a worktree before the arm runs.
- */
-export type IgnoredOutputPolicy = 'kept' | 'discardable';
-
-/**
- * What an archetype needs from whatever delivers it. Declared once per
- * archetype, independent of which executor a dial binds today.
- * `fallback` selects another archetype's *binding* only — never its policy.
- *
- * Note what is NOT here: a write posture. Fadeno does not enforce write
- * permissions, so an archetype does not declare a demand for the resolver to
- * match against a route's claimed capability — that negotiation is removed.
- * See docs/experimental/permissions-and-isolation.md.
+ * Two things, both about naming rather than enforcement: what the archetype
+ * is FOR, which a director reads when choosing what to spawn, and which
+ * archetype's dial it borrows when it has none of its own. Nothing here is a
+ * capability demand — Fadeno does not negotiate permissions, judge providers,
+ * or decide whose output survives.
  */
 export interface ArchetypePolicy {
-  /**
-   * Whether this archetype's gitignored output must survive. Absent YAML is
-   * `'discardable'`. Read at pair formation, never at resolution.
-   */
-  ignoredOutput: IgnoredOutputPolicy;
   /** Next archetype in the binding-fallback chain, or null. */
   fallback: string | null;
-  /**
-   * Name of a brief template composed in front of every ad-hoc dispatch of
-   * this archetype (resolved from .fadeno/briefs/<name>.md, then the builtin
-   * templates). How a director learns it should coordinate through fadeno.
-   */
-  brief: string | null;
-  /**
-   * Whether this archetype's delivery provider must differ from every
-   * input producer's. Absent YAML is `null` (no check).
-   */
-  distinctProviderFromInputs: ProviderDistinctness | null;
   /**
    * What this archetype is for, in a sentence a director reads when choosing
    * what to spawn next. Null when the catalog declares none; the canonical
@@ -403,11 +235,10 @@ export interface DialRef {
  * Legacy `--via <driver>` names, mapped to the v4 harness they always were.
  *
  * READ ONLY. `parseDialRef` accepts a persisted ` via <driver>` and translates
- * it; nothing in this codebase ever emits one again. The variant half of a
- * driver name (`claude-exec`, `opencode-direct`) is deliberately dropped: a
- * variant is chosen by policy under v4, not named on a dial, so a legacy ref
- * that carried one formats differently afterwards — which re-rolls a shadow
- * sample keyed on the challenger string. See CHANGELOG.
+ * it; nothing in this codebase ever emits one again. The lane half of a driver
+ * name (`claude-exec`, `opencode-direct`) is deliberately dropped: a harness
+ * has one command lane, so those names have nowhere left to point. A repo that
+ * needs a second spelling declares its own harness entry.
  */
 const LEGACY_DRIVER_HARNESS: Readonly<Record<string, string>> = {
   'claude-exec': 'claude',
@@ -550,7 +381,6 @@ export interface ModelEntry {
   effort: string;
   /** Provider-facing id per HARNESS (v4; was per driver). */
   spellings: Record<string, string>;
-  eligibility: Record<string, EligibilityState>;
   /**
    * An explicit non-home harness for this model. A promoted model's delivery
    * can differ from its upstream provider's home harness; `provider` + `id`
@@ -562,30 +392,17 @@ export interface ModelEntry {
   harness?: string;
 }
 
-/** One command lane of a harness: the base `command:` or a named variant. */
+/** A harness's command lane: one argv, and nothing else. */
 export interface HarnessLaneRaw {
   command: string[];
-  timeout_ms?: number | null;
-  resume?: string[] | null;
-  session_id_pattern?: string | null;
-  /**
-   * Per-archetype eligibility of every delivery through THIS lane, merged
-   * with model-level eligibility (strictest wins). This is how a catalog says
-   * "this lane cannot carry a director": the constraint is structural — it
-   * covers unregistered models falling through to the lane too. A variant
-   * does NOT inherit the base lane's eligibility; each lane states its own,
-   * exactly as each v3 route did.
-   */
-  eligibility?: Record<string, EligibilityState>;
 }
 
 /** The in-session half of a harness: what it can deliver without spawning. */
 export interface HarnessHostRaw {
   /**
-   * How this harness's agent definition carries a reasoning effort.
-   * `none` — no channel at all, so a pinned effort ejects to the command
-   * lane. `agent-file` — the materialized agent file carries it, so
-   * `fadeno steering apply` can pin it and the host lane survives.
+   * How this harness carries a reasoning effort on a spawn. `none` — no
+   * channel at all, so a host-lane spawn inherits the session's effort.
+   * `agent-file` — the harness reads it from an agent definition.
    *
    * A property of the FORMAT, not a preference: a Codex agent TOML has a
    * `model_reasoning_effort` key; Claude's Agent tool has no effort channel.
@@ -622,8 +439,6 @@ export interface HarnessHostRaw {
    * handed a model the provider may not serve.
    */
   relay?: DialRef;
-  /** Per-archetype eligibility of the HOST lane only. */
-  eligibility?: Record<string, EligibilityState>;
 }
 
 /**
@@ -635,20 +450,8 @@ export interface HarnessRaw {
   /** Home provider: models of this provider default to this harness. */
   provider?: string;
   host?: HarnessHostRaw;
-  /**
-   * The base command lane, in the SAME shape a variant has — so the parser
-   * reads one thing and `commandLanes` re-packs nothing. The YAML flattens it
-   * (`command:`, `timeout_ms:`, `eligibility:` sit at harness level, because
-   * a harness with one lane should not have to nest it), and this is where
-   * that flattening ends.
-   */
+  /** The command lane, when this harness has one. */
   command?: HarnessLaneRaw | null;
-  /**
-   * The base command lane's eligibility when there is NO `command:` — kept
-   * only so the loader can refuse the inert placement by name instead of
-   * dropping it. A declared lane carries its own inside `command`.
-   */
-  eligibility?: Record<string, EligibilityState>;
   models_command?: string[] | null;
   /**
    * Deliberately normalized from YAML's `models_prefix` even though most
@@ -657,8 +460,6 @@ export interface HarnessRaw {
    */
   modelsPrefix?: string;
   effort_encoding?: 'flag' | 'model-suffix';
-  /** Named alternative argvs of this harness's command lane, chosen by policy. */
-  variants?: Record<string, HarnessLaneRaw>;
 }
 
 /**
@@ -716,19 +517,16 @@ export interface CompiledDelivery {
    * there — `standalone`, say — would print a value that is not in the table.
    */
   harness: string | null;
-  /** The named command-lane variant policy chose, or null for the base lane. */
-  variant: string | null;
   /**
    * Whether this delivery is a candidate for the HOST lane: its harness is the
-   * host this call runs inside, that harness declares `host:`, and the host
-   * lane's eligibility permits the archetype.
+   * host this call runs inside, and that harness declares a `host:` able to
+   * carry this identity.
    *
    * Not the same as `spec.adapter === 'host'`. A host spec is also how a
    * delivery with NO command argv is represented (`current-host` in a bare
    * shell, a host-only harness named from a different host) — there is nothing
-   * to spawn, so the honest answer is "start a session inside it", which
-   * `decideLane` renders as `restart_required`. Pass THIS field as
-   * `decideLane`'s `hostModel`, never `deliveryIsHost`.
+   * to spawn and nothing to deliver in-session, which is the one shape with no
+   * lane at all. Route on THIS field (`laneOf`), never on `spec.adapter`.
    */
   hostCandidate: boolean;
   registered: boolean;
@@ -739,20 +537,16 @@ export function deliveryIsHost(compiled: CompiledDelivery): boolean {
 }
 
 /**
- * Whether a delivery can go out IN-SESSION — the one question every host-slot
- * decision has to ask, answered the same way in every caller.
+ * Whether a delivery can go out IN-SESSION — the one question the lane
+ * decision asks, answered the same way in every caller.
  *
- * A LIVE compile knows the host, so it answers from `hostCandidate`, which
- * folds in `harness === host`, the harness declaring `host:`, its
- * `identity:`, and the host lane's eligibility. `spec.adapter === 'host'` is
- * NOT that question: a host spec is also how a delivery with no argv at all is
- * represented (`current-host` in a bare shell, a host-only harness named from
- * a different host), so the two disagree exactly there — which is how
- * `steering apply --codex` came to write a Codex host agent for `opus on omp`.
- *
- * A SNAPSHOT spec has no live host to compare against: the run froze the
- * answer when it was cut, and `adapter: 'host'` IS that frozen answer. Passing
- * `null` says "this is a replay", and the frozen answer stands.
+ * A compile that knows the host answers from `hostCandidate`, which folds in
+ * `harness === host`, the harness declaring `host:`, and its `identity:`.
+ * `spec.adapter === 'host'` is NOT that question: a host spec is also how a
+ * delivery with no argv at all is represented (`current-host` in a bare shell,
+ * a host-only harness named from a different host), so the two disagree
+ * exactly there — which is how a Codex host agent once got written for a model
+ * that harness could not deliver.
  */
 export function hostCandidateOf(compiled: CompiledDelivery | null, spec: ExecutorSpec): boolean {
   return compiled != null ? compiled.hostCandidate : spec.adapter === 'host';
@@ -777,7 +571,6 @@ export interface ExecutorProfile {
   bindings: Record<string, DialRef>;
   dials: Record<string, DialRef>;
   archetypes: Record<string, ArchetypePolicy>;
-  constraints: { command: string[] } | null;
   unregisteredModelHarness: string;
   /**
    * How many unclosed dispatches this repository tolerates before the next
@@ -788,51 +581,9 @@ export interface ExecutorProfile {
   host?: HarnessId;
   schemaVersion?: 4;
   notes: string[];
-  tools: Record<string, ToolSpec>;
-  /**
-   * Repo-relative paths carried into a shadow's or an isolated dispatch's
-   * freshly-cut worktree (`git worktree add` checks out tracked content
-   * only, so gitignored deps/build output/a local `.fadeno/` catalog never
-   * cross into it otherwise). Project-only — see the enforcement comment in
-   * `config-layers.ts`'s `mergeLayer`.
-   */
-  worktreeCarry: string[];
-  /**
-   * Repo-relative files where a value must appear to count as having REACHED
-   * a consumer. Project-only, for the same reason as `worktree_carry`: it
-   * describes this repo's shape, and a builtin guess would be wrong
-   * everywhere.
-   *
-   * For Fadeno the surface is `src/cli.ts`, which builds its printed JSON
-   * field by field — an agent reads that stdout and nothing else. A field
-   * computed in a command, documented as the thing a coordinator MUST check,
-   * and never added to that object is inert end to end, which is exactly what
-   * shipped in shadow pair 89536181 with 1282 green tests.
-   *
-   * Empty means undeclared, and `fadeno bakeoff` then reports the reach
-   * signal as `null` rather than as an empty list of failures — absent a
-   * declaration it cannot tell "reached nothing" from "nothing to reach".
-   */
-  surfaces: string[];
 }
 
 export type HarnessId = 'codex' | 'claude' | 'grok' | 'opencode' | 'omp' | 'standalone';
-
-/**
- * Whether THIS catalog says the named harness's agent-definition format can
- * carry a reasoning effort, so `fadeno steering apply` can materialize a host
- * slot AT a dialed `@effort`.
- *
- * Read off `harnesses.<id>.host.effort_channel` rather than hardcoded: the
- * fact is a property of the harness's FORMAT, and the catalog is where a
- * harness is described. Where it is false, `steering apply` writes no host
- * agent file (it has nothing to write that would change delivery), a pinned
- * effort instead selects the LANE via `decideLane`, and telling the user to
- * run apply would send them to a command that does nothing.
- */
-export function hostEffortIsMaterializable(profile: ExecutorProfile, harness: string): boolean {
-  return profile.harnesses?.[harness]?.host?.effort_channel === 'agent-file';
-}
 
 /**
  * The host this call is running inside: `FADENO_HARNESS` → ambient markers →
@@ -895,90 +646,6 @@ export function withoutHarnessIdentity(env: NodeJS.ProcessEnv): NodeJS.ProcessEn
   return next;
 }
 
-export function atCwd(env: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
-  return { ...env, PWD: cwd };
-}
-
-/**
- * Names the dispatch an executor is running as. Pure provenance: any `fadeno`
- * the executor runs — at any depth — can say which dispatch it is inside.
- */
-export const IN_DISPATCH_ENV = 'FADENO_IN_DISPATCH';
-
-/**
- * Whether the executor reading it may dispatch again. `allow` or `deny`, and
- * always written rather than merely omitted: a director's executor carries
- * `allow`, and the workers *it* dispatches must not inherit that.
- */
-export const DISPATCH_NESTING_ENV = 'FADENO_DISPATCH_NESTING';
-
-/**
- * Absolute path of the cooperative status sidecar this executor should keep.
- *
- * The ENVIRONMENT, and not the prompt, because a runless dispatch's prompt
- * cannot carry a per-dispatch value. An ad-hoc dispatch relays the caller's
- * bytes verbatim plus a FIXED protocol footer, and the two arms of a shadow
- * pair are handed the very same snapshot file by fd — so a path written into
- * those bytes would be one path shared by both arms, and the challenger's
- * self-report would land on the primary's sidecar. It would also put the
- * primary's dispatch id in front of a challenger that is supposed to be blind
- * to which arm it is.
- *
- * Environment is per-process, so each arm gets its own value, nothing in the
- * prompt bytes moves, and no digest anywhere shifts. The prompt still carries
- * the INSTRUCTION — constant text naming this variable — because an agent
- * reads prompts, not environments; only the value rides here.
- */
-export const PROGRESS_SIDECAR_ENV = 'FADENO_PROGRESS_SIDECAR';
-
-/**
- * Archetypes whose executor is *told* to coordinate through fadeno, so a
- * nested dispatch from inside their workspace is the design rather than an
- * accident. `director` earns it through its brief
- * (`archetypes.director.brief: director`), which teaches the spawned model to
- * decompose and delegate instead of doing the work itself.
- *
- * Every other archetype re-dispatching is the 2026-08-31 dogfood failure:
- * proxies relay their prompt byte-for-byte, so a prompt addressed to the
- * *proxy* ("dispatch a fadeno worker… use tag X") arrives at the executor as
- * its own instructions, and it runs `fadeno dispatch` inside its own worktree.
- */
-export const COORDINATING_ARCHETYPES: ReadonlySet<string> = new Set(['director']);
-
-/**
- * Stamp an executor's environment with which dispatch it is, and whether it
- * may start another. The mirror of `FADENO_IN_SHADOW`, which has ridden along
- * to challengers for the same reason since shadow pairs shipped.
- */
-export function withDispatchProvenance(
-  env: NodeJS.ProcessEnv,
-  identity: {
-    dispatchId: string;
-    archetype: string | null;
-    /**
-     * Absolute path of this executor's status sidecar, when one was derived.
-     * Set here rather than at each spawn site so that every lane stamps the
-     * same variable, and so the value handed to the executor is the very
-     * expression handed to `superviseArgv` — the producer and the watcher
-     * cannot disagree about a string neither of them re-derives.
-     */
-    progressSidecar?: string | null;
-  },
-): NodeJS.ProcessEnv {
-  return {
-    ...env,
-    [IN_DISPATCH_ENV]: identity.dispatchId,
-    [DISPATCH_NESTING_ENV]:
-      identity.archetype != null && COORDINATING_ARCHETYPES.has(identity.archetype) ? 'allow' : 'deny',
-    // Absent, not empty, when there is no sidecar: the footer's instruction is
-    // conditional on the variable being SET, and an empty value would ask an
-    // agent to write to nowhere.
-    ...(identity.progressSidecar != null && identity.progressSidecar !== ''
-      ? { [PROGRESS_SIDECAR_ENV]: identity.progressSidecar }
-      : {}),
-  };
-}
-
 export interface LoadedExecutorProfile {
   profile: ExecutorProfile;
   path: string;
@@ -992,7 +659,7 @@ export interface LoadedExecutorProfile {
   modelFallback?: ModelFallbackOutcome;
 }
 
-/** Repo-relative location of the profile (playbooks stay harness-neutral). */
+/** Repo-relative location of the project catalog. */
 export const EXECUTORS_FILE = join('.fadeno', 'executors.yaml');
 
 /**
@@ -1016,11 +683,7 @@ export const CATALOG_TOP_LEVEL_KEYS = [
   'bindings',
   'dials',
   'archetypes',
-  'constraints',
   'unregistered_model_harness',
-  'tools',
-  'worktree_carry',
-  'surfaces',
   'unclosed_limit',
 ] as const;
 
@@ -1148,45 +811,22 @@ function isMapping(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/**
- * Keys an `archetypes.<name>` mapping may declare. Both parse sites — the
- * catalog parser and the snapshot reader — filter against this one list, so a
- * key added here can never be accepted by one and rejected by the other.
- */
+/** Keys an `archetypes.<name>` mapping may declare. */
 const ARCHETYPE_POLICY_KEYS: readonly string[] = [
   // Deliberately still "known" so the tailored migration error below is the
   // one a reader sees, instead of a generic unknown-key message that says
-  // nothing about WHY the key went away or what replaced it. It is refused
-  // either way; this only decides which explanation they get.
+  // nothing about WHY the key went away. It is refused either way; this only
+  // decides which explanation they get.
   'requires_write',
-  'ignored_output',
   'fallback',
-  'distinct_provider_from_inputs',
-  'brief',
   'description',
 ];
 
 /** The same list as prose, for the catalog parser's messages. */
-const ARCHETYPE_POLICY_KEY_FORMS =
-  '`ignored_output`, `fallback`, `distinct_provider_from_inputs`, `brief`, and `description`';
+const ARCHETYPE_POLICY_KEY_FORMS = '`fallback` and `description`';
 
 function unknownArchetypeKeys(rawPolicy: Record<string, unknown>): string[] {
   return Object.keys(rawPolicy).filter((key) => !ARCHETYPE_POLICY_KEYS.includes(key));
-}
-
-const IGNORED_OUTPUT_FORMS = '"kept" or "discardable"';
-
-/**
- * Shared by both parse sites. Absent is `'discardable'`; unlike
- * `requires_write` there is no boolean spelling, because "true" reads as
- * neither value.
- */
-function parseIgnoredOutput(raw: unknown, source: string, name: string): IgnoredOutputPolicy {
-  if (raw === undefined) return 'discardable';
-  if (raw === 'kept' || raw === 'discardable') return raw;
-  throw new ExecutorProfileError(
-    `${source}: \`archetypes.${name}.ignored_output\` must be ${IGNORED_OUTPUT_FORMS}.`,
-  );
 }
 
 /** Binding-chain successor. Undeclared names and non-string fallbacks are end-nodes. */
@@ -1206,32 +846,6 @@ function nextArchetypeFallback(
  * "same harness?" at resolution time. Nothing about the catalog itself varies
  * with it.
  */
-/**
- * The sentence every ignored-deadline loader note ends with.
- *
- * Exported because it has three consumers that must agree exactly: the notes
- * built below, `doctor`'s warning channel (via `ignoredDeadlineFindings` in
- * `catalog-rot.ts`), and the docs-claims test that pairs the documented
- * sentence with the code that emits it. A drifting spelling would not error —
- * doctor would simply stop surfacing the note, which is the silent-wrong-answer
- * shape this token exists to prevent.
- */
-export const IGNORED_DEADLINE_NOTE_TOKEN =
-  'is ignored — Fadeno no longer runs executors under a deadline';
-
-/**
- * A `timeout_ms` / `timeout` declaration that is read and never armed.
- *
- * Not a refusal. Catalogs written before deadlines were removed declare the
- * key — this repo's own carried 25 of them — and refusing would turn a
- * harmless stale key into a load-time failure of every command. It is parsed
- * (so a malformed value is still an error, exactly as before), carried through
- * snapshots for round-trip fidelity, and never handed to a supervisor.
- */
-function ignoredDeadlineNote(source: string, label: string): string {
-  return `${source}: ${label} ${IGNORED_DEADLINE_NOTE_TOKEN} (a clock cannot tell slow from stuck); delete the key. End a long attempt with \`fadeno cancel\`.`;
-}
-
 export function parseExecutorProfile(text: string, source: string, host: HarnessId = 'standalone'): ExecutorProfile {
   let doc: unknown;
   try {
@@ -1297,14 +911,13 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
       }
       modelHarness = raw.harness.trim();
     }
-    const eligibility = readEligibility(raw as Record<string, unknown>, `model "${name}"`, source);
-    const unknown = Object.keys(raw).filter((k) => !['provider', 'id', 'effort', 'spellings', 'eligibility', 'harness'].includes(k));
+    const unknown = Object.keys(raw).filter((k) => !['provider', 'id', 'effort', 'spellings', 'harness'].includes(k));
     if (unknown.length > 0) {
-      throw new ExecutorProfileError(`${source}: model "${name}" has unknown key(s) ${unknown.join(', ')}; only provider, id, effort, spellings, eligibility, harness are allowed.`);
+      throw new ExecutorProfileError(`${source}: model "${name}" has unknown key(s) ${unknown.join(', ')}; only provider, id, effort, spellings, harness are allowed.`);
     }
-    models[name] = { provider: prov, id, effort, spellings, eligibility, ...(modelHarness != null ? { harness: modelHarness } : {}) };
+    models[name] = { provider: prov, id, effort, spellings, ...(modelHarness != null ? { harness: modelHarness } : {}) };
   }
-  models['current-host'] = { provider: 'current-host', id: 'current-host', effort: 'default', spellings: {}, eligibility: {} };
+  models['current-host'] = { provider: 'current-host', id: 'current-host', effort: 'default', spellings: {} };
 
   // harnesses — ONE table, keyed by harness id.
   const harnesses: Record<string, HarnessRaw> = {};
@@ -1363,11 +976,9 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
         if (rawHost.relay !== undefined) {
           hostEntry.relay = parseDialRef(rawHost.relay, `${source}: ${label}.host.relay`);
         }
-        const hostEligibility = readEligibility(rawHost as Record<string, unknown>, `${label}.host`, source);
-        if (Object.keys(hostEligibility).length > 0) hostEntry.eligibility = hostEligibility;
-        const unknownHost = Object.keys(rawHost).filter((k) => !['effort_channel', 'identity', 'relay', 'eligibility'].includes(k));
+        const unknownHost = Object.keys(rawHost).filter((k) => !['effort_channel', 'identity', 'relay'].includes(k));
         if (unknownHost.length > 0) {
-          throw new ExecutorProfileError(`${source}: ${label}.host has unknown key(s) ${unknownHost.join(', ')}; only effort_channel, identity, relay, eligibility are allowed.`);
+          throw new ExecutorProfileError(`${source}: ${label}.host has unknown key(s) ${unknownHost.join(', ')}; only effort_channel, identity, relay are allowed.`);
         }
         entry.host = hostEntry;
       }
@@ -1402,100 +1013,25 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
         }
         entry.effort_encoding = rawHarness.effort_encoding;
       }
-      const readLane = (rawLane: Record<string, unknown>, laneLabel: string, required: boolean): HarnessLaneRaw | null => {
-        const cmd = rawLane.command;
-        if (cmd === undefined || cmd === null) {
-          if (required) throw new ExecutorProfileError(`${source}: ${laneLabel}.command must be a non-empty string array.`);
-          return null;
-        }
+      // The command lane is one argv. It used to also carry `resume:`,
+      // `session_id_pattern:` and `timeout_ms:` — session reuse for the run
+      // engine, and a deadline Fadeno read but never armed — plus named
+      // `variants:` that policy chose between on eligibility. All four went
+      // with the things that read them.
+      const cmd = (rawHarness as Record<string, unknown>).command;
+      if (cmd !== undefined && cmd !== null) {
         if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((p) => typeof p === 'string' && p.length > 0)) {
-          throw new ExecutorProfileError(`${source}: ${laneLabel}.command must be a non-empty string array.`);
+          throw new ExecutorProfileError(`${source}: ${label}.command must be a non-empty string array.`);
         }
-        const lane: HarnessLaneRaw = { command: cmd as string[] };
-        if (rawLane.resume !== undefined) {
-          const rs = rawLane.resume;
-          if (!Array.isArray(rs) || rs.length === 0 || !rs.every((p) => typeof p === 'string' && p.length > 0)) {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.resume must be a non-empty string array.`);
-          }
-          if (!(rs as string[]).some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.resume must contain ${SESSION_ID_PLACEHOLDER}.`);
-          }
-          lane.resume = rs as string[];
-        }
-        if (rawLane.session_id_pattern !== undefined) {
-          const pat = rawLane.session_id_pattern;
-          if (typeof pat !== 'string') {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.session_id_pattern must be a string.`);
-          }
-          try { new RegExp(pat); } catch (err) {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.session_id_pattern did not compile: ${(err as Error).message}`);
-          }
-          if (!pat.includes('(')) {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.session_id_pattern needs a capture group.`);
-          }
-          lane.session_id_pattern = pat;
-        }
-        if (rawLane.timeout_ms !== undefined) {
-          const tm = rawLane.timeout_ms;
-          if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.timeout_ms must be a positive integer (milliseconds).`);
-          }
-          lane.timeout_ms = tm;
-          notes.push(ignoredDeadlineNote(source, `${laneLabel}.timeout_ms`));
-        }
-        const laneEligibility = readEligibility(rawLane, laneLabel, source);
-        if (Object.keys(laneEligibility).length > 0) lane.eligibility = laneEligibility;
-        return lane;
-      };
-      const base = readLane(rawHarness as Record<string, unknown>, label, false);
-      if (base != null) {
-        entry.command = base;
-      } else {
-        // No `command:`, so the flattened lane fields describe nothing. Keep
-        // any `eligibility:` on the entry so the check below can refuse it by
-        // name rather than dropping it.
-        const eligibilityOnly = readEligibility(rawHarness as Record<string, unknown>, label, source);
-        if (Object.keys(eligibilityOnly).length > 0) entry.eligibility = eligibilityOnly;
+        entry.command = { command: cmd as string[] };
       }
-      if (rawHarness.variants !== undefined) {
-        if (!isMapping(rawHarness.variants)) {
-          throw new ExecutorProfileError(`${source}: ${label}.variants is not a mapping (variant name → lane).`);
-        }
-        const variants: Record<string, HarnessLaneRaw> = {};
-        for (const [variantKey, rawVariant] of Object.entries(rawHarness.variants)) {
-          if (!BARE_IDENTIFIER_RE.test(variantKey)) {
-            throw new ExecutorProfileError(`${source}: ${label}.variants key "${variantKey}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-          }
-          if (!isMapping(rawVariant)) {
-            throw new ExecutorProfileError(`${source}: ${label}.variants.${variantKey} is not a mapping.`);
-          }
-          const variantLabel = `${label}.variants.${variantKey}`;
-          const lane = readLane(rawVariant, variantLabel, true)!;
-          const unknownVariant = Object.keys(rawVariant).filter((k) => !['command', 'resume', 'session_id_pattern', 'timeout_ms', 'eligibility'].includes(k));
-          if (unknownVariant.length > 0) {
-            throw new ExecutorProfileError(`${source}: ${variantLabel} has unknown key(s) ${unknownVariant.join(', ')}; only command, resume, session_id_pattern, timeout_ms, eligibility are allowed.`);
-          }
-          variants[variantKey] = lane;
-        }
-        if (Object.keys(variants).length > 0) entry.variants = variants;
-      }
-      const unknownHarnessKeys = Object.keys(rawHarness).filter((k) => !['provider', 'host', 'command', 'resume', 'session_id_pattern', 'timeout_ms', 'eligibility', 'models_command', 'models_prefix', 'effort_encoding', 'variants'].includes(k));
+      const unknownHarnessKeys = Object.keys(rawHarness).filter((k) => !['provider', 'host', 'command', 'models_command', 'models_prefix', 'effort_encoding'].includes(k));
       if (unknownHarnessKeys.length > 0) {
         throw new ExecutorProfileError(`${source}: ${label} has unknown key(s) ${unknownHarnessKeys.join(', ')}.`);
       }
       if (entry.host == null && entry.command == null) {
         throw new ExecutorProfileError(
           `${source}: ${label} declares neither \`host:\` (Fadeno can run inside it) nor \`command:\` (Fadeno can spawn it) — one is required.`,
-        );
-      }
-      if (entry.command == null && entry.eligibility != null) {
-        // Harness-level eligibility constrains the COMMAND lanes. With no
-        // `command:` there is none, so the key would sit there doing nothing —
-        // and a v3 route rewritten naively (`{host: true, command, eligibility}`
-        // split into a `host:` block) is exactly how someone lands here while
-        // believing the host lane is gated. Refuse rather than ignore.
-        throw new ExecutorProfileError(
-          `${source}: ${label} declares \`eligibility:\` with no \`command:\` — harness-level eligibility constrains the command lanes, so it would do nothing here. Move it to \`${label}.host.eligibility\` to gate the host lane.`,
         );
       }
       harnesses[harnessKey] = entry;
@@ -1632,12 +1168,11 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
       if (rawPolicy.requires_write !== undefined) {
         throw new ExecutorProfileError(
           `${source}: \`archetypes.${name}.requires_write\` is no longer supported. Fadeno does not enforce ` +
-            'write permissions: a route is an argv, and a restriction belongs IN that argv — a separate route ' +
-            'with its own name (e.g. `--sandbox read-only`) that a reader can see. Containment is isolated ' +
-            'worktrees, now the default for command dispatches — see docs/experimental/permissions-and-isolation.md.',
+            'write permissions: a lane is an argv, and a restriction belongs IN that argv — a separate harness ' +
+            'entry with its own name (`--sandbox read-only`, say) that a reader can see. Containment is the ' +
+            'isolated worktree every dispatch already gets.',
         );
       }
-      const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
       let fallback: string | null = null;
       if (rawPolicy.fallback != null) {
         if (typeof rawPolicy.fallback !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.fallback)) {
@@ -1648,20 +1183,6 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
         }
         fallback = rawPolicy.fallback;
       }
-      let distinctProviderFromInputs: ProviderDistinctness | null = null;
-      if (rawPolicy.distinct_provider_from_inputs !== undefined) {
-        if (rawPolicy.distinct_provider_from_inputs !== 'advisory' && rawPolicy.distinct_provider_from_inputs !== 'required') {
-          throw new ExecutorProfileError(`${source}: \`archetypes.${name}.distinct_provider_from_inputs\` must be "advisory" or "required".`);
-        }
-        distinctProviderFromInputs = rawPolicy.distinct_provider_from_inputs;
-      }
-      let brief: string | null = null;
-      if (rawPolicy.brief != null) {
-        if (typeof rawPolicy.brief !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.brief)) {
-          throw new ExecutorProfileError(`${source}: \`archetypes.${name}.brief\` must be a bare lowercase identifier naming a brief template (${BARE_IDENTIFIER_RE.source}).`);
-        }
-        brief = rawPolicy.brief;
-      }
       let description: string | null = null;
       if (rawPolicy.description != null) {
         if (typeof rawPolicy.description !== 'string' || rawPolicy.description.trim().length === 0) {
@@ -1669,7 +1190,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
         }
         description = rawPolicy.description.trim();
       }
-      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief, description };
+      archetypes[name] = { fallback, description };
     }
     for (const start of Object.keys(archetypes)) {
       const path: string[] = [];
@@ -1684,156 +1205,6 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
         seen.add(current);
         current = nextArchetypeFallback(archetypes, current);
       }
-    }
-  }
-
-  let constraints: { command: string[] } | null = null;
-  if (doc.constraints != null) {
-    if (!isMapping(doc.constraints)) {
-      throw new ExecutorProfileError(`${source} \`constraints\` is not a mapping (only \`command\` is allowed).`);
-    }
-    const unknown = Object.keys(doc.constraints).filter((key) => key !== 'command');
-    if (unknown.length > 0) {
-      throw new ExecutorProfileError(`${source}: \`constraints\` has unknown key(s) ${unknown.join(', ')}; only \`command\` is allowed.`);
-    }
-    const command = doc.constraints.command;
-    if (!Array.isArray(command) || command.length === 0 || !command.every((part) => typeof part === 'string' && part.length > 0)) {
-      throw new ExecutorProfileError(`${source}: \`constraints.command\` must be a non-empty array of non-empty strings.`);
-    }
-    constraints = { command: command as string[] };
-  }
-
-  const tools: Record<string, ToolSpec> = {};
-  if (doc.tools !== undefined && doc.tools !== null) {
-    if (!isMapping(doc.tools)) {
-      throw new ExecutorProfileError(`${source} \`tools\` is not a mapping (tool name → {command, timeout_ms?}).`);
-    }
-    for (const [name, raw] of Object.entries(doc.tools)) {
-      if (!BARE_IDENTIFIER_RE.test(name)) {
-        throw new ExecutorProfileError(`${source}: tool name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      }
-      if (!isMapping(raw)) {
-        throw new ExecutorProfileError(`${source}: tool "${name}" is not a mapping.`);
-      }
-      const unknown = Object.keys(raw).filter((k) => k !== 'command' && k !== 'timeout_ms' && k !== 'timeout');
-      if (unknown.length > 0) {
-        throw new ExecutorProfileError(`${source}: tool "${name}" has unknown key(s) ${unknown.join(', ')}; only command, timeout, timeout_ms are allowed.`);
-      }
-      const cmd = raw.command;
-      if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((p) => typeof p === 'string' && p.length > 0)) {
-        throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` must be a non-empty array of non-empty strings.`);
-      }
-      for (const part of cmd as string[]) {
-        if (part.length === 0 || part.trim().length === 0) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` contains an empty or whitespace-only string.`);
-        }
-        if (part.includes('{') || part.includes('}') || part.includes('$') || part.includes('`')) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` must be a static argv without interpolation or placeholders; found "${part}".`);
-        }
-        if (part.includes('\n') || part.includes('\0')) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` contains an illegal character.`);
-        }
-      }
-      let timeoutMs: number | null = null;
-      if (raw.timeout_ms !== undefined) {
-        const tm = raw.timeout_ms;
-        if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout_ms\` must be a positive integer (milliseconds).`);
-        }
-        timeoutMs = tm;
-        notes.push(ignoredDeadlineNote(source, `tool "${name}".timeout_ms`));
-      }
-      if (raw.timeout !== undefined) {
-        if (timeoutMs != null) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" has both timeout and timeout_ms — use one.`);
-        }
-        const tm = raw.timeout;
-        if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout\` must be a positive integer (seconds).`);
-        }
-        timeoutMs = tm * 1000;
-        notes.push(ignoredDeadlineNote(source, `tool "${name}".timeout`));
-      }
-      tools[name] = { command: cmd as string[], ...(timeoutMs != null ? { timeoutMs } : {}) };
-    }
-  }
-
-  // worktree_carry
-  //
-  // Previously read directly off the raw catalog YAML in `dispatch.ts`,
-  // bypassing this parser entirely: `mergeLayer` (config-layers.ts) only
-  // copies a fixed allowlist of top-level keys between layers, so an
-  // unrecognized key like `worktree_carry` was dropped before it ever
-  // reached this function's strict unknown-key check below — which meant a
-  // value of the wrong type (or one holding a malformed entry) was silently
-  // ignored rather than rejected. Silent no-carry produces exactly the
-  // untrustworthy pair the carry list exists to prevent (a challenger with
-  // no `node_modules` cannot build or test, and nothing said so). Now that
-  // `worktree_carry` is a known, validated key here, a badly-shaped
-  // declaration — not an array, a non-string entry, an absolute path, a `..`
-  // segment — fails loudly like any other malformed catalog field, instead
-  // of quietly becoming "nothing to carry."
-  //
-  // Absolute paths and any ".." segment are rejected here, at parse time,
-  // rather than silently dropped the way the old reader did — carrying
-  // outside the repo is never sensible, so reporting it beats pretending the
-  // entry was never declared.
-  //
-  // The residual gap this comment used to describe — a top-level key
-  // MISSPELLED entirely (`worktree_carrry:` rather than `worktree_carry:`)
-  // being dropped by `mergeLayer`'s copy-by-literal-name before it could
-  // reach the unknown-key check below, and so silently doing nothing — is
-  // now closed, where it said it would have to be: config-layers.ts
-  // validates each layer's RAW keys before the selective merge, against
-  // `CATALOG_TOP_LEVEL_KEYS` above (the list this function also checks).
-  // That is the only place with the typo still in hand; by the time a
-  // document reaches this parser the misspelling is already gone.
-  const worktreeCarry: string[] = [];
-  if (doc.worktree_carry !== undefined) {
-    if (!Array.isArray(doc.worktree_carry)) {
-      throw new ExecutorProfileError(`${source}: \`worktree_carry\` must be an array of repo-relative path strings.`);
-    }
-    for (const raw of doc.worktree_carry) {
-      if (typeof raw !== 'string' || raw.trim().length === 0) {
-        throw new ExecutorProfileError(`${source}: \`worktree_carry\` entries must be non-empty strings; found ${JSON.stringify(raw)}.`);
-      }
-      const trimmed = raw.trim();
-      if (isAbsolute(trimmed)) {
-        throw new ExecutorProfileError(`${source}: \`worktree_carry\` entry "${trimmed}" must be repo-relative, not absolute.`);
-      }
-      const normalized = trimmed.split('\\').join('/');
-      if (normalized.split('/').includes('..')) {
-        throw new ExecutorProfileError(`${source}: \`worktree_carry\` entry "${trimmed}" may not contain a ".." segment.`);
-      }
-      worktreeCarry.push(normalized);
-    }
-  }
-
-  // surfaces
-  //
-  // Same shape and same rejections as `worktree_carry` above, and declared
-  // project-only for the same reason. A malformed entry fails loudly rather
-  // than collapsing to "no surfaces", because that silent state is
-  // indistinguishable from an honest undeclared one — and the honest one
-  // makes `fadeno bakeoff` withhold the signal rather than pass the arm.
-  const surfaces: string[] = [];
-  if (doc.surfaces !== undefined) {
-    if (!Array.isArray(doc.surfaces)) {
-      throw new ExecutorProfileError(`${source}: \`surfaces\` must be an array of repo-relative path strings.`);
-    }
-    for (const raw of doc.surfaces) {
-      if (typeof raw !== 'string' || raw.trim().length === 0) {
-        throw new ExecutorProfileError(`${source}: \`surfaces\` entries must be non-empty strings; found ${JSON.stringify(raw)}.`);
-      }
-      const trimmed = raw.trim();
-      if (isAbsolute(trimmed)) {
-        throw new ExecutorProfileError(`${source}: \`surfaces\` entry "${trimmed}" must be repo-relative, not absolute.`);
-      }
-      const normalized = trimmed.split('\\').join('/');
-      if (normalized.split('/').includes('..')) {
-        throw new ExecutorProfileError(`${source}: \`surfaces\` entry "${trimmed}" may not contain a ".." segment.`);
-      }
-      surfaces.push(normalized);
     }
   }
 
@@ -1861,34 +1232,12 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
     bindings,
     dials,
     archetypes,
-    constraints,
     unregisteredModelHarness,
     unclosedLimit,
     host,
     schemaVersion: 4,
     notes,
-    tools,
-    worktreeCarry,
-    surfaces,
   };
-}
-
-function readEligibility(raw: Record<string, unknown>, label: string, source: string): Record<string, EligibilityState> {
-  if (raw.eligibility === undefined) return {};
-  if (!isMapping(raw.eligibility)) {
-    throw new ExecutorProfileError(`${source}: ${label} \`eligibility\` is not a mapping (archetype → eligibility state).`);
-  }
-  const out: Record<string, EligibilityState> = {};
-  for (const [key, value] of Object.entries(raw.eligibility)) {
-    if (!BARE_IDENTIFIER_RE.test(key)) {
-      throw new ExecutorProfileError(`${source}: ${label} eligibility key "${key}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-    }
-    if (value !== 'eligible' && value !== 'shadow_only' && value !== 'forbidden') {
-      throw new ExecutorProfileError(`${source}: ${label} \`eligibility.${key}\` must be "eligible", "shadow_only", or "forbidden".`);
-    }
-    out[key] = value;
-  }
-  return out;
 }
 
 /** Load the repo's executor profile, or explain how to create one. */
@@ -2067,7 +1416,7 @@ export function resolveRole(
   layers: DialLayers,
 ): RoleResolution {
   const cascade = resolveDialCascade(role, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, layers);
-  const delivery = resolveDelivery(cascade.ref, profile, profile.host ?? 'standalone', { archetype });
+  const delivery = resolveDelivery(cascade.ref, profile, profile.host ?? 'standalone');
   return { delivery, source: cascade.source, resolvedVia: cascade.resolvedVia };
 }
 
@@ -2131,78 +1480,26 @@ export function declaredHarnesses(profile: ExecutorProfile): string[] {
   return Object.keys(profile.harnesses ?? {}).sort();
 }
 
-const ELIGIBILITY_RANK: Record<EligibilityState, number> = { eligible: 0, shadow_only: 1, forbidden: 2 };
-
-/**
- * Strictest-wins merge of any number of eligibility maps.
- *
- * `Object.hasOwn`, not a truthiness check on `out[key]`: an archetype named
- * `constructor` or `toString` would otherwise read a value off
- * `Object.prototype`, rank as `undefined`, and be silently dropped — a
- * forbidden archetype quietly becoming eligible.
- */
-function mergeEligibility(...maps: Array<Record<string, EligibilityState> | undefined>): Record<string, EligibilityState> {
-  const out: Record<string, EligibilityState> = {};
-  for (const map of maps) {
-    for (const [key, state] of Object.entries(map ?? {})) {
-      if (!Object.hasOwn(out, key) || ELIGIBILITY_RANK[state] > ELIGIBILITY_RANK[out[key]!]) out[key] = state;
-    }
-  }
-  return out;
-}
-
-/** One candidate command lane of a harness: the base argv, or a named variant. */
-interface LaneCandidate {
-  /** null for the base `command:` lane. */
-  name: string | null;
-  lane: HarnessLaneRaw;
-}
-
-/**
- * Every command lane a harness declares, base first.
- *
- * Base-first is the policy: an unconstrained delivery takes the plain argv,
- * and a variant is reached only because the base lane refuses the archetype.
- * That is what makes `worker opus` the base claude command and `director opus`
- * the `exec` variant, without either naming a lane on the dial.
- */
-function commandLanes(entry: HarnessRaw | undefined): LaneCandidate[] {
-  if (entry == null) return [];
-  const lanes: LaneCandidate[] = [];
-  if (entry.command != null) lanes.push({ name: null, lane: entry.command });
-  for (const [name, lane] of Object.entries(entry.variants ?? {})) lanes.push({ name, lane });
-  return lanes;
-}
-
-/** Context resolution consults: the archetype whose lane is being chosen. */
-export interface DeliveryContext {
-  archetype?: string | null;
-}
-
 /**
  * Resolve a dial ref to a delivery — the ONE resolution function.
  *
  *     h       = ref.harness ?? entry.harness ?? homeHarnessOf(provider) ?? unregistered_model_harness
  *     H       = harnesses[h]
  *     modelId = entry.spellings[h] ?? entry.id, then effort_encoding
- *     variant = first command lane whose eligibility permits ctx.archetype
  *     host lane iff h === host and H declares `host:`
  *
  * A dial never names a lane. The pair *(dial harness, host)* decides whether
- * the delivery is a host candidate; `decideLane` then decides the lane itself
- * from effort and proof. `hostCandidate` on the result is what to hand
- * `decideLane` as `hostModel` — never `spec.adapter`, which is also how a
- * delivery with no argv at all is represented.
+ * this session can deliver the model itself, and `hostCandidate` on the result
+ * is that answer — never `spec.adapter`, which is also how a delivery with no
+ * argv at all is represented.
  */
 export function resolveDelivery(
   ref: DialRef,
   profile: ExecutorProfile,
   host: HarnessId = profile.host ?? 'standalone',
-  ctx: DeliveryContext = {},
 ): CompiledDelivery {
   const harnesses = profile.harnesses ?? {};
   const refString = formatDialRef(ref);
-  const archetype = ctx.archetype ?? null;
 
   const build = (params: {
     model: string;
@@ -2212,92 +1509,46 @@ export function resolveDelivery(
     harness: string | null;
     registered: boolean;
     entry: HarnessRaw | undefined;
-    modelEligibility: Record<string, EligibilityState>;
   }): CompiledDelivery => {
-    const { model, modelId, effectiveEffort, provider, harness, entry, modelEligibility } = params;
+    const { model, modelId, effectiveEffort, provider, harness, entry } = params;
     const subst = (argv: string[]): string[] =>
       argv.map((part) => part.split('{model}').join(modelId).split('{reasoning_effort}').join(effectiveEffort));
-
-    // Pick the command lane: base first, then variants, skipping any lane the
-    // archetype is forbidden on. When every lane forbids it the base is kept
-    // anyway, so the kernel refuses with a reason instead of resolution
-    // failing with none.
-    const lanes = commandLanes(entry);
-    const permitted = lanes.filter(
-      (candidate) =>
-        archetype == null ||
-        mergeEligibility(modelEligibility, candidate.lane.eligibility)[archetype] !== 'forbidden',
-    );
-    const chosen = permitted[0] ?? lanes[0] ?? null;
-    const variant = chosen?.name ?? null;
+    const command = entry?.command ?? null;
 
     // The host lane exists when the dial's harness IS the host and that
     // harness declares `host:`. `current-host` under a bare shell has neither,
-    // which is why a bare shell answers `restart_required` rather than
-    // pretending an in-session delivery it cannot make.
+    // which is why a bare shell has no lane at all rather than pretending an
+    // in-session delivery it cannot make.
     const hostSide = harness === host ? entry?.host ?? null : null;
-    // Harness-level `eligibility:` gates the host lane too, unless
-    // `host.eligibility` states its own answer for that archetype. A v3 route
-    // carried ONE eligibility map for a `host: true` entry that also declared
-    // a `command:`, and it gated both lanes; splitting the entry in two must
-    // not silently drop half of that.
-    //
-    // Per-key OVERRIDE between the two harness-side maps, not strictest-wins:
-    // `host.eligibility` is the more specific statement about the same harness
-    // and must be able to relax as well as tighten (the whole reason to write
-    // it). The MODEL's map then merges strictest-wins over the result, because
-    // a model's own restriction is not a harness's to relax.
-    const hostEligibility = mergeEligibility(modelEligibility, {
-      ...(entry?.command?.eligibility ?? {}),
-      ...(hostSide?.eligibility ?? {}),
-    });
     const hostCandidate =
       hostSide != null
       // `identity: session` means the host lane can deliver only the session's
       // own identity: the adapter rewrites the agent NAME and nothing else, so
       // a named model handed to a host spawn there would be silently ignored.
-      && (hostSide.identity !== 'session' || model === 'current-host')
-      && (archetype == null || hostEligibility[archetype] !== 'forbidden');
+      && (hostSide.identity !== 'session' || model === 'current-host');
 
-    let spec: ExecutorSpec;
     // A HOST spec is emitted for a genuine host candidate, and for the one
     // other shape that has no argv to run: a delivery with neither a host lane
     // here nor a command anywhere (`current-host` in a bare shell, a host-only
     // harness named from a different host). `hostCandidate` on the result —
     // never `spec.adapter` — is what tells those two apart.
-    //
-    // When the host lane exists but its eligibility forbids this archetype,
-    // the delivery is NOT a host candidate and the spec is the command lane it
-    // will actually go out on, carrying that lane's eligibility. Emitting a
-    // host spec there reported the HOST lane's refusal for a delivery that had
-    // already fallen through to a variant which permits it — the resolver
-    // contradicting its own variant choice.
-    if (hostCandidate || chosen == null) {
-      spec = {
-        adapter: 'host',
-        model: modelId,
-        reasoningEffort: effectiveEffort,
-        agentType: '*',
-        fallbackCommand: chosen != null ? subst(chosen.lane.command) : null,
-        eligibility: hostCandidate ? { ...hostEligibility } : { ...mergeEligibility(modelEligibility, chosen?.lane.eligibility) },
-        ...(provider != null ? { provider } : {}),
-        ...(harness != null ? { harness } : {}),
-        ...(variant != null ? { variant } : {}),
-      };
-    } else {
-      spec = {
-        adapter: 'command',
-        command: subst(chosen.lane.command),
-        model: modelId,
-        resume: chosen.lane.resume != null ? subst(chosen.lane.resume) : null,
-        sessionIdPattern: chosen.lane.session_id_pattern ?? null,
-        ...(chosen.lane.timeout_ms != null ? { timeoutMs: chosen.lane.timeout_ms } : {}),
-        eligibility: { ...mergeEligibility(modelEligibility, chosen.lane.eligibility) },
-        ...(provider != null ? { provider } : {}),
-        ...(harness != null ? { harness } : {}),
-        ...(variant != null ? { variant } : {}),
-      };
-    }
+    const spec: ExecutorSpec = hostCandidate || command == null
+      ? {
+          adapter: 'host',
+          model: modelId,
+          reasoningEffort: effectiveEffort,
+          agentType: '*',
+          fallbackCommand: command != null ? subst(command.command) : null,
+          ...(provider != null ? { provider } : {}),
+          ...(harness != null ? { harness } : {}),
+        }
+      : {
+          adapter: 'command',
+          command: subst(command.command),
+          model: modelId,
+          ...(provider != null ? { provider } : {}),
+          ...(harness != null ? { harness } : {}),
+        };
     return {
       ref,
       refString,
@@ -2308,7 +1559,6 @@ export function resolveDelivery(
       effectiveEffort,
       provider,
       harness,
-      variant,
       hostCandidate,
       registered: params.registered,
     };
@@ -2332,19 +1582,11 @@ export function resolveDelivery(
       //
       // Both removals matter. There is no argv for "the session you are
       // already in", so `current-host` must never acquire a fallback command —
-      // that is what makes a pinned `current-host` honestly `restart_required`
+      // that is what makes `current-host` in a bare shell honestly lane-less
       // rather than silently spawning a second session.
-      //
-      // And `host.eligibility` describes delivering a NAMED MODEL to a spawned
-      // in-session agent (`harnesses.claude.host.eligibility: { director:
-      // forbidden }` — a Claude subagent cannot spawn subagents of its own, so
-      // it cannot coordinate). `current-host` is not that agent: it is the
-      // session itself, which can. Inheriting the constraint refused every
-      // locked wildcard host request that specialized to `director`.
       entry: entry?.host != null
         ? { host: { effort_channel: entry.host.effort_channel, identity: entry.host.identity } }
         : undefined,
-      modelEligibility: {},
     });
   }
 
@@ -2380,628 +1622,5 @@ export function resolveDelivery(
     harness,
     registered,
     entry: harnessEntry,
-    modelEligibility: entryModel?.eligibility ?? {},
   });
-}
-
-/** One delivery under consideration: the profile's name for it, plus its spec. */
-export interface DeliveryChoice {
-  executor: string;
-  spec: ExecutorSpec;
-}
-
-export function eligibilityFor(spec: ExecutorSpec, archetype: string | null): EligibilityState {
-  if (typeof archetype !== 'string') return 'eligible';
-  const map = spec.eligibility;
-  if (map == null || !Object.hasOwn(map, archetype)) return 'eligible';
-  const state = map[archetype];
-  return state === 'shadow_only' || state === 'forbidden' || state === 'eligible' ? state : 'eligible';
-}
-
-/**
- * Whether a resolved spec has a command lane at all — and, since 2026-08-21,
- * the ONLY question ad-hoc `fadeno dispatch` asks about delivery. A command
- * adapter always qualifies; a host adapter qualifies only when it declares a
- * `fallback_command` to shell out to.
- *
- * **This used to be two predicates and they disagreed.** A separate
- * `dispatchability(spec, harness)` also refused a *command-capable* host spec
- * whenever the harness was in `IN_SESSION_ONLY_HOST_HARNESSES` (`claude`),
- * with reason `host_in_session`, on the theory that shelling out to `claude -p
- * …` from inside a Claude session "re-enters this dispatch one level down".
- * That theory does not survive contact with the catalog: the `anthropic-exec`
- * route spawns exactly that subprocess **on purpose** under every harness
- * including `claude`, so the argv the gate refused was one the gate next door
- * recommended. `codex` was never in the set for the same fallback shape, which
- * made the refusal a coin-flip on which host you happened to be sitting in.
- *
- * What it cost: a coordinator that reached for `fadeno dispatch --archetype
- * reviewer` under Claude got a hard refusal, and on 2026-08-21 one answered it
- * by spawning an in-session subagent and reporting that as "equivalent role,
- * no recursion" — while the instructions it was following asked it to read the
- * result back by dispatch id, which by then could not exist. A gate that
- * refuses a capability the caller has is not a safe default; it is a prompt to
- * route around it.
- *
- * The one honest refusal is spec-shaped, not harness-shaped: a host spec with
- * no `fallback_command` has nothing to invoke (`current-host`, the base dial).
- * There is no longer a second, permission-shaped refusal beside it — routes
- * are argvs and Fadeno does not judge what they may do
- * (docs/experimental/permissions-and-isolation.md).
- *
- * One predicate, three consumers by construction: the dispatch kernel, the
- * `dial`/`steering` resolve previews, and `explainPairRoutability`.
- */
-export function commandRoutable(spec: ExecutorSpec): boolean {
-  return spec.adapter === 'command' || (spec.adapter === 'host' && spec.fallbackCommand != null);
-}
-
-export function explainEligibilityConflict(
-  delivery: DeliveryChoice,
-  archetype: string | null,
-): string | null {
-  if (eligibilityFor(delivery.spec, archetype) !== 'forbidden') return null;
-  return (
-    `archetype "${archetype}" is marked \`eligibility: forbidden\` on executor "${delivery.executor}" — ` +
-    'the catalog forbids this pairing. ' +
-    'Fix: choose an eligible executor, dial a different target, or change the catalog\'s eligibility entry.'
-  );
-}
-
-export interface InputProducer {
-  dispatchId: string | null;
-  executor: string | null;
-  provider: string | null;
-}
-
-export type ProviderConflict = { level: 'refuse' | 'warn'; message: string };
-
-function producerRef(producer: InputProducer): string {
-  if (typeof producer.dispatchId === 'string') return `dispatch ${producer.dispatchId}`;
-  if (typeof producer.executor === 'string') return `executor "${producer.executor}"`;
-  return 'an input producer';
-}
-
-export function explainProviderConflict(
-  archetype: string | null,
-  targetProvider: string | null,
-  producers: InputProducer[],
-  profile: ExecutorProfile,
-): ProviderConflict | null {
-  if (typeof archetype !== 'string' || !Object.hasOwn(profile.archetypes, archetype)) return null;
-  const policy = profile.archetypes[archetype]!.distinctProviderFromInputs;
-  if (policy !== 'advisory' && policy !== 'required') return null;
-  if (producers.length === 0) return null;
-
-  const level: ProviderConflict['level'] = policy === 'required' ? 'refuse' : 'warn';
-  const unresolvable = policy === 'required'
-    ? 'provenance is demanded but unresolvable'
-    : 'provider provenance is unresolvable';
-
-  for (const producer of producers) {
-    if (targetProvider == null || producer.provider == null) {
-      const detail = targetProvider == null
-        ? `the resolved target's provider is unknown — ${unresolvable}`
-        : `${producerRef(producer)} has no provider — ${unresolvable}`;
-      return {
-        level,
-        message:
-          `archetype "${archetype}" declares \`distinct_provider_from_inputs: ${policy}\`, but ${detail}.`,
-      };
-    }
-    if (producer.provider === targetProvider) {
-      return {
-        level,
-        message:
-          `archetype "${archetype}" declares \`distinct_provider_from_inputs: ${policy}\`, but ` +
-          `the resolved target's provider "${targetProvider}" matches ${producerRef(producer)} ` +
-          `(provider "${producer.provider}") — the dispatch would not be provider-distinct.`,
-      };
-    }
-  }
-  return null;
-}
-
-/** Bind a neutral host target to the archetype requested by this invocation. */
-export function executorForArchetype(
-  _profile: ExecutorProfile,
-  _executorName: string,
-  _archetype: string | null,
-): ExecutorSpec {
-  void _profile;
-  void _executorName;
-  void _archetype;
-  return { adapter: 'command', command: [], model: null, resume: null, sessionIdPattern: null, eligibility: {} } as ExecutorSpec;
-}
-
-// --- Snapshot format v3 ---
-
-export interface SnapshotDocument {
-  executors: Record<string, ExecutorSpec>;
-  bindings: Record<string, DialRef>;
-  archetypes: Record<string, ArchetypePolicy>;
-  constraints: { command: string[] } | null;
-  tools: Record<string, ToolSpec>;
-}
-
-function parseExecutorSpecEntry(raw: unknown, label: string, source: string): ExecutorSpec {
-  if (!isMapping(raw)) {
-    throw new ExecutorProfileError(`${source}: ${label} is not a mapping.`);
-  }
-  const adapter = raw.adapter;
-  if (adapter !== 'command' && adapter !== 'host') {
-    throw new ExecutorProfileError(`${source}: ${label} has adapter ${JSON.stringify(adapter)}; expected \`command\` or \`host\`.`);
-  }
-  if (adapter === 'host') {
-    const forbidden = ['command', 'resume', 'session_id_pattern'].filter((key) => raw[key] !== undefined);
-    if (forbidden.length > 0) {
-      throw new ExecutorProfileError(`${source}: ${label} host executor rejects command/session field(s): ${forbidden.join(', ')}.`);
-    }
-    const model = raw.model;
-    const reasoningEffort = raw.reasoning_effort;
-    const agentType = raw.agent_type;
-    if (typeof model !== 'string' || model.length === 0) {
-      throw new ExecutorProfileError(`${source}: ${label} host executor needs a non-empty \`model\`.`);
-    }
-    if (typeof reasoningEffort !== 'string' || reasoningEffort.length === 0) {
-      throw new ExecutorProfileError(`${source}: ${label} host executor needs a non-empty \`reasoning_effort\`.`);
-    }
-    if (typeof agentType !== 'string' || agentType.length === 0) {
-      throw new ExecutorProfileError(`${source}: ${label} host executor needs a non-empty \`agent_type\`.`);
-    }
-    let fallbackCommand: string[] | null = null;
-    if (raw.fallback_command != null) {
-      if (!Array.isArray(raw.fallback_command) || raw.fallback_command.length === 0 || !raw.fallback_command.every((part) => typeof part === 'string' && part.length > 0)) {
-        throw new ExecutorProfileError(`${source}: ${label} host executor needs \`fallback_command\` as a non-empty array of strings.`);
-      }
-      fallbackCommand = raw.fallback_command as string[];
-    }
-    const target = typeof raw.target === 'string' ? raw.target : undefined;
-    const provider = typeof raw.provider === 'string' ? raw.provider : undefined;
-    // A snapshot written before catalog v4 records `driver:`; the value was
-    // always a harness wearing a driver's name, so it reads back as one.
-    const specHarness = typeof raw.harness === 'string'
-      ? raw.harness
-      : typeof raw.driver === 'string' ? legacyDriverHarness(raw.driver) : undefined;
-    const variant = typeof raw.variant === 'string' ? raw.variant : undefined;
-    let eligibility: Record<string, EligibilityState> = {};
-    if (raw.eligibility !== undefined) {
-      if (!isMapping(raw.eligibility)) throw new ExecutorProfileError(`${source}: ${label} host executor \`eligibility\` is not a mapping.`);
-      for (const [k, v] of Object.entries(raw.eligibility)) {
-        if (!BARE_IDENTIFIER_RE.test(k)) throw new ExecutorProfileError(`${source}: ${label} host executor eligibility key "${k}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-        if (v !== 'eligible' && v !== 'shadow_only' && v !== 'forbidden') throw new ExecutorProfileError(`${source}: ${label} host executor \`eligibility.${k}\` must be "eligible", "shadow_only", or "forbidden".`);
-        eligibility[k] = v;
-      }
-    }
-    if (raw.timeout_ms !== undefined) {
-      throw new ExecutorProfileError(`${source}: ${label} host executor rejects \`timeout_ms\` — host dispatch is not supervised.`);
-    }
-    const spec: HostExecutorSpec = {
-      adapter: 'host', model, reasoningEffort, agentType, fallbackCommand, eligibility,
-      ...(target != null ? { target } : {}),
-      ...(provider != null ? { provider } : {}),
-      ...(specHarness != null ? { harness: specHarness } : {}),
-      ...(variant != null ? { variant } : {}),
-    };
-    return spec;
-  }
-  // command
-  if (raw.reasoning_effort !== undefined || raw.agent_type !== undefined || raw.fallback_command !== undefined) {
-    throw new ExecutorProfileError(`${source}: ${label} command executor rejects host-only field(s) \`reasoning_effort\`/\`agent_type\`/\`fallback_command\`.`);
-  }
-  const command = raw.command;
-  if (!Array.isArray(command) || command.length === 0 || !command.every((part) => typeof part === 'string' && part.length > 0)) {
-    throw new ExecutorProfileError(`${source}: ${label} needs \`command\` as a non-empty array of strings.`);
-  }
-  if (raw.model != null && typeof raw.model !== 'string') {
-    throw new ExecutorProfileError(`${source}: ${label} has a non-string \`model\`.`);
-  }
-  let resume: string[] | null = null;
-  if (raw.resume != null) {
-    if (!Array.isArray(raw.resume) || raw.resume.length === 0 || !raw.resume.every((part) => typeof part === 'string' && part.length > 0)) {
-      throw new ExecutorProfileError(`${source}: ${label} needs \`resume\` as a non-empty array of strings.`);
-    }
-    resume = raw.resume as string[];
-    if (!resume.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-      throw new ExecutorProfileError(`${source}: ${label} \`resume\` must contain the ${SESSION_ID_PLACEHOLDER} placeholder.`);
-    }
-  }
-  let sessionIdPattern: string | null = null;
-  if (raw.session_id_pattern != null) {
-    if (typeof raw.session_id_pattern !== 'string') {
-      throw new ExecutorProfileError(`${source}: ${label} has a non-string \`session_id_pattern\`.`);
-    }
-    let compiled: RegExp;
-    try { compiled = new RegExp(raw.session_id_pattern); } catch (err) { throw new ExecutorProfileError(`${source}: ${label} session_id_pattern did not compile: ${(err as Error).message}`); }
-    if (compiled.source.indexOf('(') < 0) {
-      throw new ExecutorProfileError(`${source}: ${label} session_id_pattern needs one capture group for the id.`);
-    }
-    sessionIdPattern = raw.session_id_pattern;
-  }
-  const mintsId = (command as string[]).some((part) => part.includes(SESSION_ID_PLACEHOLDER));
-  if (resume != null) {
-    if (mintsId && sessionIdPattern != null) {
-      throw new ExecutorProfileError(`${source}: ${label} declares both a ${SESSION_ID_PLACEHOLDER} placeholder in \`command\` and a \`session_id_pattern\` — use one id source, not both.`);
-    }
-    if (!mintsId && sessionIdPattern == null) {
-      throw new ExecutorProfileError(`${source}: ${label} declares \`resume\` but no session id source — put ${SESSION_ID_PLACEHOLDER} in \`command\` (engine-minted) or declare \`session_id_pattern\`.`);
-    }
-  } else if (sessionIdPattern != null || mintsId) {
-    throw new ExecutorProfileError(`${source}: ${label} has a session id source but no \`resume\` — session-capable executors must declare how to resume.`);
-  }
-  let eligibility: Record<string, EligibilityState> = {};
-  if (raw.eligibility !== undefined) {
-    if (!isMapping(raw.eligibility)) throw new ExecutorProfileError(`${source}: ${label} \`eligibility\` is not a mapping.`);
-    for (const [k, v] of Object.entries(raw.eligibility)) {
-      if (!BARE_IDENTIFIER_RE.test(k)) throw new ExecutorProfileError(`${source}: ${label} eligibility key "${k}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      if (v !== 'eligible' && v !== 'shadow_only' && v !== 'forbidden') throw new ExecutorProfileError(`${source}: ${label} \`eligibility.${k}\` must be "eligible", "shadow_only", or "forbidden".`);
-      eligibility[k] = v;
-    }
-  }
-  let timeoutMs: number | null = null;
-  if (raw.timeout_ms !== undefined) {
-    const tm = raw.timeout_ms;
-    if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
-      throw new ExecutorProfileError(`${source}: ${label} \`timeout_ms\` must be a positive integer (milliseconds).`);
-    }
-    timeoutMs = tm;
-  }
-  // The snapshot is the replay trust boundary: re-assert the same variant
-  // invariants the catalog parse enforces, never fewer.
-  // `write_variant` in a stored snapshot means the snapshot predates the
-  // permissions cut. Refuse rather than ignore, exactly as the catalog parser
-  // does — see docs/experimental/permissions-and-isolation.md.
-  if (raw.write_variant != null) {
-    throw new ExecutorProfileError(
-      `${source}: ${label} carries \`write_variant\`, which is no longer supported — this snapshot predates the ` +
-        'permissions cut. Re-snapshot from the current catalog.',
-    );
-  }
-  const spec: CommandExecutorSpec = {
-    adapter: 'command',
-    command: command as string[],
-    model: typeof raw.model === 'string' ? raw.model : null,
-    resume,
-    sessionIdPattern,
-    ...(timeoutMs != null ? { timeoutMs } : {}),
-    eligibility,
-    ...(typeof raw.target === 'string' ? { target: raw.target } : {}),
-    ...(typeof raw.provider === 'string' ? { provider: raw.provider } : {}),
-    ...(typeof raw.harness === 'string'
-      ? { harness: raw.harness }
-      : typeof raw.driver === 'string' ? { harness: legacyDriverHarness(raw.driver) } : {}),
-    ...(typeof raw.variant === 'string' ? { variant: raw.variant } : {}),
-  };
-  return spec;
-}
-
-/**
- * The separator between a ref and the archetype whose lane policy chose.
- *
- * A ref string is `model[@effort][ on <harness>]` — bare identifiers and `@`
- * only — so `#` cannot occur in one and the compound key is unambiguous.
- */
-export const SNAPSHOT_ARCHETYPE_SEPARATOR = '#';
-
-/**
- * The snapshot key for one (ref, archetype) pair.
- *
- * Under v3 a variant lived ON the ref (`opus via claude-exec`) and therefore
- * had a snapshot key of its own. Under v4 a variant is chosen by POLICY from
- * the archetype, so the ref alone no longer identifies the argv: `opus`
- * resolves to the base claude lane for a worker and to the `exec` variant for
- * a director. A snapshot keyed by ref alone froze the worker answer and made
- * `fadeno drive` refuse a director that `fadeno dispatch` delivers.
- */
-export function snapshotExecutorKey(refString: string, archetype: string | null): string {
-  return archetype == null ? refString : `${refString}${SNAPSHOT_ARCHETYPE_SEPARATOR}${archetype}`;
-}
-
-/**
- * Read a run snapshot's executor for a ref, preferring the archetype-specific
- * entry and falling back to the plain ref.
- *
- * The fallback is what keeps `snapshot_version: 3` honest: a snapshot cut
- * before this change has no `#` keys, and every lookup lands on exactly the
- * entry it always did. Going the other way, an older fadeno reading a newer
- * snapshot finds the plain ref and replays the answer IT would have given —
- * degrading to its own behaviour rather than to a wrong one.
- */
-export function snapshotExecutor(
-  profile: { executors?: Record<string, ExecutorSpec> } | SnapshotDocument | ExecutorProfile,
-  refString: string,
-  archetype: string | null,
-): ExecutorSpec | undefined {
-  const executors = (profile as { executors?: Record<string, ExecutorSpec> }).executors;
-  if (executors == null) return undefined;
-  if (archetype != null) {
-    const specific = executors[snapshotExecutorKey(refString, archetype)];
-    if (specific != null) return specific;
-  }
-  return executors[refString];
-}
-
-export function serializeSnapshot(
-  profile: ExecutorProfile,
-  extraRefs: DialRef[] = [],
-  /**
-   * Archetypes the CALLER knows about that the catalog does not enumerate —
-   * in practice a playbook's role archetypes.
-   *
-   * `knownArchetypes` sees the canon roster plus whatever `archetypes:` and
-   * `dials:` name; a playbook declaring `roles: { auditor: { archetype:
-   * auditor } }` against a catalog that only constrains `auditor` through a
-   * harness lane's `eligibility:` names it in neither. Without this the run
-   * froze no specialized entry for that archetype and every replay read the
-   * base lane — the lane policy had already ruled out.
-   */
-  extraArchetypes: readonly string[] = [],
-): string {
-  const seen = new Set<string>();
-  const executorsMap: Record<string, ExecutorSpec> = {};
-  const insertRef = (ref: DialRef, archetype: string | null = null) => {
-    const key = snapshotExecutorKey(formatDialRef(ref), archetype);
-    if (seen.has(key)) return;
-    seen.add(key);
-    try {
-      const compiled = resolveDelivery(ref, profile, profile.host ?? 'standalone', { archetype });
-      executorsMap[key] = compiled.spec as ExecutorSpec;
-    } catch {
-      // missing harness etc. — skip (should not happen for builtin)
-    }
-  };
-  for (const name of Object.keys(profile.models).sort()) {
-    if (name === 'current-host') continue;
-    insertRef({ model: name });
-  }
-  insertRef({ model: 'current-host' });
-  for (const ref of Object.values(profile.bindings)) insertRef(ref);
-  for (const ref of Object.values(profile.dials)) insertRef(ref);
-  for (const ref of extraRefs) insertRef(ref);
-
-  // Then, per archetype, only where policy chooses a DIFFERENT lane than the
-  // archetype-less resolution did. Additive by construction: a catalog whose
-  // lanes carry no eligibility adds no keys at all, and every snapshot cut
-  // before this change is byte-identical to one cut after it.
-  const refsToSpecialize = new Map<string, DialRef>();
-  for (const name of Object.keys(profile.models)) {
-    if (name !== 'current-host') refsToSpecialize.set(name, { model: name });
-  }
-  for (const ref of [...Object.values(profile.bindings), ...Object.values(profile.dials), ...extraRefs]) {
-    refsToSpecialize.set(formatDialRef(ref), ref);
-  }
-  const archetypes = archetypeDisplaySort(
-    knownArchetypes(profile.archetypes, profile.dials, Object.fromEntries(extraArchetypes.map((name) => [name, true]))),
-  );
-  for (const ref of refsToSpecialize.values()) {
-    const refString = formatDialRef(ref);
-    const base = executorsMap[refString];
-    if (base == null) continue;
-    for (const archetype of archetypes) {
-      let compiled: CompiledDelivery;
-      try {
-        compiled = resolveDelivery(ref, profile, profile.host ?? 'standalone', { archetype });
-      } catch {
-        continue;
-      }
-      if (JSON.stringify(compiled.spec) === JSON.stringify(base)) continue;
-      executorsMap[snapshotExecutorKey(refString, archetype)] = compiled.spec;
-    }
-  }
-
-  const tools: Record<string, ToolSpec> = { ...profile.tools };
-
-  const sortedExecutors: Record<string, Record<string, unknown>> = {};
-  for (const name of Object.keys(executorsMap).sort()) {
-    const spec = executorsMap[name]!;
-    const entry: Record<string, unknown> = spec.adapter === 'host'
-      ? {
-          adapter: spec.adapter,
-          model: spec.model,
-          reasoning_effort: spec.reasoningEffort,
-          agent_type: spec.agentType,
-          ...(spec.fallbackCommand != null ? { fallback_command: spec.fallbackCommand } : {}),
-        }
-      : { adapter: spec.adapter, command: spec.command };
-    if (spec.provider != null) entry.provider = spec.provider;
-    if (spec.harness != null) entry.harness = spec.harness;
-    if (spec.variant != null) entry.variant = spec.variant;
-    if (spec.adapter === 'command' && (spec as CommandExecutorSpec).model != null) entry.model = (spec as CommandExecutorSpec).model;
-    if (spec.eligibility != null && Object.keys(spec.eligibility).length > 0) {
-      const sortedEligibility: Record<string, EligibilityState> = {};
-      for (const key of Object.keys(spec.eligibility).sort()) {
-        if (typeof key !== 'string' || !Object.hasOwn(spec.eligibility, key)) continue;
-        sortedEligibility[key] = spec.eligibility[key]!;
-      }
-      entry.eligibility = sortedEligibility;
-    }
-    if (spec.adapter === 'command' && (spec as CommandExecutorSpec).timeoutMs != null) entry.timeout_ms = (spec as CommandExecutorSpec).timeoutMs;
-    if (spec.adapter === 'command' && spec.resume != null) entry.resume = spec.resume;
-    if (spec.adapter === 'command' && spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
-    if (spec.adapter === 'host' && spec.target != null) entry.target = spec.target;
-    if (spec.adapter === 'command' && (spec as CommandExecutorSpec).target != null) entry.target = (spec as CommandExecutorSpec).target;
-    sortedExecutors[name] = entry;
-  }
-  const out: Record<string, unknown> = { snapshot_version: 3, executors: sortedExecutors };
-  if (Object.keys(profile.bindings).length > 0) {
-    const sortedBindings: Record<string, unknown> = {};
-    for (const role of Object.keys(profile.bindings).sort()) {
-      sortedBindings[role] = serializeDialRef(profile.bindings[role]!);
-    }
-    out.bindings = sortedBindings;
-  }
-  if (Object.keys(profile.archetypes).length > 0) {
-    const sortedArchetypes: Record<string, Record<string, unknown>> = {};
-    for (const name of Object.keys(profile.archetypes).sort()) {
-      const policy = profile.archetypes[name]!;
-      const entry: Record<string, unknown> = {};
-      // Added, never defaulted: a `discardable` archetype serializes exactly
-      // as it did before this key existed, so no stored snapshot moves a byte.
-      if (policy.ignoredOutput !== 'discardable') entry.ignored_output = policy.ignoredOutput;
-      if (typeof policy.fallback === 'string') entry.fallback = policy.fallback;
-      if (policy.distinctProviderFromInputs != null) entry.distinct_provider_from_inputs = policy.distinctProviderFromInputs;
-      if (policy.brief != null) entry.brief = policy.brief;
-      sortedArchetypes[name] = entry;
-    }
-    out.archetypes = sortedArchetypes;
-  }
-  if (profile.constraints != null) out.constraints = { command: profile.constraints.command };
-  if (Object.keys(tools).length > 0) {
-    const sortedTools: Record<string, Record<string, unknown>> = {};
-    for (const name of Object.keys(tools).sort()) {
-      const spec = tools[name]!;
-      const entry: Record<string, unknown> = { command: spec.command };
-      if (spec.timeoutMs != null) entry.timeout_ms = spec.timeoutMs;
-      sortedTools[name] = entry;
-    }
-    out.tools = sortedTools;
-  }
-  return stringifyYaml(out);
-}
-
-export function parseSnapshotDocument(text: string, source: string): SnapshotDocument {
-  let doc: unknown;
-  try {
-    doc = parseYaml(text);
-  } catch (err) {
-    throw new ExecutorProfileError(`${source} did not parse: ${(err as Error).message}`);
-  }
-  if (!isMapping(doc)) {
-    throw new ExecutorProfileError(`${source} is not a mapping.`);
-  }
-  if (doc.snapshot_version !== 3) {
-    throw new ExecutorProfileError(`pre-dials run snapshot — this fadeno verifies snapshot_version 3 ledgers only; verify with fadeno <= 0.6.0-rc.27`);
-  }
-  if (!isMapping(doc.executors) || Object.keys(doc.executors).length === 0) {
-    throw new ExecutorProfileError(`${source} needs a non-empty \`executors\` mapping.`);
-  }
-  const executors: Record<string, ExecutorSpec> = {};
-  for (const [name, raw] of Object.entries(doc.executors)) {
-    executors[name] = parseExecutorSpecEntry(raw, `executors.${name}`, source);
-  }
-  const bindings: Record<string, DialRef> = {};
-  if (doc.bindings !== undefined) {
-    if (!isMapping(doc.bindings)) throw new ExecutorProfileError(`${source} \`bindings\` is not a mapping (role → dial ref).`);
-    for (const [role, rawRef] of Object.entries(doc.bindings)) {
-      if (typeof role !== 'string' || role.length === 0) throw new ExecutorProfileError(`${source}: binding role name must be non-empty.`);
-      bindings[role] = parseDialRef(rawRef, `bindings.${role}`);
-    }
-  }
-  const archetypes: Record<string, ArchetypePolicy> = {};
-  if (doc.archetypes != null) {
-    if (!isMapping(doc.archetypes)) throw new ExecutorProfileError(`${source} \`archetypes\` is not a mapping.`);
-    for (const [name, rawPolicy] of Object.entries(doc.archetypes)) {
-      if (!BARE_IDENTIFIER_RE.test(name)) throw new ExecutorProfileError(`${source}: archetype name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      if (!isMapping(rawPolicy)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping.`);
-      const unknown = unknownArchetypeKeys(rawPolicy);
-      if (unknown.length > 0) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}.`);
-      // Removed, and REFUSED rather than ignored: silently dropping a key
-      // someone wrote in order to restrict something is the exact failure this
-      // project exists to prevent, and it would be a poor way to land a change
-      // whose whole premise is that unenforced claims are dangerous.
-      if (rawPolicy.requires_write !== undefined) {
-        throw new ExecutorProfileError(
-          `${source}: \`archetypes.${name}.requires_write\` is no longer supported. Fadeno does not enforce ` +
-            'write permissions: a route is an argv, and a restriction belongs IN that argv — a separate route ' +
-            'with its own name (e.g. `--sandbox read-only`) that a reader can see. Containment is isolated ' +
-            'worktrees, now the default for command dispatches — see docs/experimental/permissions-and-isolation.md.',
-        );
-      }
-      const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
-      let fallback: string | null = null;
-      if (rawPolicy.fallback != null) {
-        if (typeof rawPolicy.fallback !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.fallback)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.fallback\` ${JSON.stringify(rawPolicy.fallback)} is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-        if (rawPolicy.fallback === name) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.fallback\` may not name its own archetype.`);
-        fallback = rawPolicy.fallback;
-      }
-      let distinctProviderFromInputs: ProviderDistinctness | null = null;
-      if (rawPolicy.distinct_provider_from_inputs !== undefined) {
-        if (rawPolicy.distinct_provider_from_inputs !== 'advisory' && rawPolicy.distinct_provider_from_inputs !== 'required') throw new ExecutorProfileError(`${source}: \`archetypes.${name}.distinct_provider_from_inputs\` must be "advisory" or "required".`);
-        distinctProviderFromInputs = rawPolicy.distinct_provider_from_inputs;
-      }
-      let brief: string | null = null;
-      if (rawPolicy.brief != null) {
-        if (typeof rawPolicy.brief !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.brief)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.brief\` must be a bare lowercase identifier.`);
-        brief = rawPolicy.brief;
-      }
-      let description: string | null = null;
-      if (rawPolicy.description != null) {
-        if (typeof rawPolicy.description !== 'string' || rawPolicy.description.trim().length === 0) {
-          throw new ExecutorProfileError(`${source}: \`archetypes.${name}.description\` must be a non-empty string.`);
-        }
-        description = rawPolicy.description.trim();
-      }
-      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief, description };
-    }
-    for (const start of Object.keys(archetypes)) {
-      const path: string[] = [];
-      const seen = new Set<string>();
-      let current: string | null = start;
-      while (typeof current === 'string' && Object.hasOwn(archetypes, current)) {
-        if (seen.has(current)) {
-          const cycle = path.slice(path.indexOf(current)).concat(current);
-          throw new ExecutorProfileError(`${source}: archetype fallback cycle: ${cycle.join(' → ')}.`);
-        }
-        path.push(current);
-        seen.add(current);
-        current = nextArchetypeFallback(archetypes, current);
-      }
-    }
-  }
-  let constraints: { command: string[] } | null = null;
-  if (doc.constraints != null) {
-    if (!isMapping(doc.constraints)) throw new ExecutorProfileError(`${source} \`constraints\` is not a mapping.`);
-    const unknown = Object.keys(doc.constraints).filter((key) => key !== 'command');
-    if (unknown.length > 0) throw new ExecutorProfileError(`${source}: \`constraints\` has unknown key(s) ${unknown.join(', ')}.`);
-    const command = doc.constraints.command;
-    if (!Array.isArray(command) || command.length === 0 || !command.every((p) => typeof p === 'string' && p.length > 0)) throw new ExecutorProfileError(`${source}: \`constraints.command\` must be a non-empty array of non-empty strings.`);
-    constraints = { command: command as string[] };
-  }
-  const tools: Record<string, ToolSpec> = {};
-  if ((doc as Record<string, unknown>).tools !== undefined && (doc as Record<string, unknown>).tools !== null) {
-    const rawTools = (doc as Record<string, unknown>).tools;
-    if (!isMapping(rawTools)) throw new ExecutorProfileError(`${source} \`tools\` is not a mapping.`);
-    for (const [name, raw] of Object.entries(rawTools)) {
-      if (!BARE_IDENTIFIER_RE.test(name)) throw new ExecutorProfileError(`${source}: tool name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      if (!isMapping(raw)) throw new ExecutorProfileError(`${source}: tool "${name}" is not a mapping.`);
-      const unknown = Object.keys(raw).filter((k) => k !== 'command' && k !== 'timeout_ms' && k !== 'timeout');
-      if (unknown.length > 0) throw new ExecutorProfileError(`${source}: tool "${name}" has unknown key(s) ${unknown.join(', ')}; only command, timeout, timeout_ms are allowed.`);
-      const cmd = (raw as Record<string, unknown>).command;
-      if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((p) => typeof p === 'string' && p.length > 0)) {
-        throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` must be a non-empty array of non-empty strings.`);
-      }
-      for (const part of cmd as string[]) {
-        if (part.length === 0 || part.trim().length === 0) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` contains an empty or whitespace-only string.`);
-        }
-        if (part.includes('{') || part.includes('}') || part.includes('$') || part.includes('`')) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` must be a static argv without interpolation or placeholders; found "${part}".`);
-        }
-        if (part.includes('\n') || part.includes('\0')) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` contains an illegal character.`);
-        }
-      }
-      let timeoutMs: number | null = null;
-      if ((raw as Record<string, unknown>).timeout_ms !== undefined) {
-        const tm = (raw as Record<string, unknown>).timeout_ms;
-        if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout_ms\` must be a positive integer (milliseconds).`);
-        }
-        timeoutMs = tm as number;
-      }
-      if ((raw as Record<string, unknown>).timeout !== undefined) {
-        if (timeoutMs != null) throw new ExecutorProfileError(`${source}: tool "${name}" has both timeout and timeout_ms — use one.`);
-        const tm = (raw as Record<string, unknown>).timeout;
-        if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout\` must be a positive integer (seconds).`);
-        }
-        timeoutMs = (tm as number) * 1000;
-      }
-      tools[name] = { command: cmd as string[], ...(timeoutMs != null ? { timeoutMs } : {}) };
-    }
-  }
-  const allowed = ['snapshot_version','executors','bindings','archetypes','constraints','tools'];
-  const unknownTop = Object.keys(doc).filter((k) => !allowed.includes(k));
-  if (unknownTop.length > 0) throw new ExecutorProfileError(`${source} has unknown key(s) ${unknownTop.join(', ')}.`);
-  return { executors, bindings, archetypes, constraints, tools };
 }

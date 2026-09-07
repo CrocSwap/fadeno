@@ -7964,12 +7964,16 @@ function removeVerifiedModels(options, predicate) {
   );
   return removed;
 }
+function codexUserAgentDir(options = {}) {
+  const env = options.env ?? process.env;
+  const home = options.home ?? (0, import_node_os.homedir)();
+  return (0, import_node_path3.join)(env.CODEX_HOME?.trim() || (0, import_node_path3.join)(home, ".codex"), "agents");
+}
 
 // src/lib/executors.ts
 var ExecutorProfileError = class extends Error {
 };
 var BARE_IDENTIFIER_RE = /^[a-z][a-z0-9_-]*$/;
-var SESSION_ID_PLACEHOLDER = "{session_id}";
 var PROMPT_FILE_PLACEHOLDER = "{prompt_file}";
 function substitutePromptFile(argv, promptPath2) {
   return argv.map((part) => part.split(PROMPT_FILE_PLACEHOLDER).join(promptPath2));
@@ -7999,9 +8003,9 @@ function argvGrantsFadenoShell(argv) {
   return false;
 }
 var ARCHETYPE_DISPLAY_ORDER = ["director", "judge", "reviewer", "scout", "worker"];
-var ROLE_ARCHETYPES = ["worker", "reviewer", "judge"];
+var CANON_ROLE_ARCHETYPES = ["worker", "reviewer", "judge"];
 function knownArchetypes(archetypes, ...extra) {
-  const names = new Set(ROLE_ARCHETYPES);
+  const names = new Set(CANON_ROLE_ARCHETYPES);
   for (const key of Object.keys(archetypes)) names.add(key);
   for (const layer of extra) {
     if (layer != null) for (const key of Object.keys(layer)) names.add(key);
@@ -8179,11 +8183,7 @@ var CATALOG_TOP_LEVEL_KEYS = [
   "bindings",
   "dials",
   "archetypes",
-  "constraints",
   "unregistered_model_harness",
-  "tools",
-  "worktree_carry",
-  "surfaces",
   "unclosed_limit"
 ];
 var V4_REMOVED_CATALOG_KEYS = {
@@ -8262,35 +8262,20 @@ function isMapping(value) {
 var ARCHETYPE_POLICY_KEYS = [
   // Deliberately still "known" so the tailored migration error below is the
   // one a reader sees, instead of a generic unknown-key message that says
-  // nothing about WHY the key went away or what replaced it. It is refused
-  // either way; this only decides which explanation they get.
+  // nothing about WHY the key went away. It is refused either way; this only
+  // decides which explanation they get.
   "requires_write",
-  "ignored_output",
   "fallback",
-  "distinct_provider_from_inputs",
-  "brief",
   "description"
 ];
-var ARCHETYPE_POLICY_KEY_FORMS = "`ignored_output`, `fallback`, `distinct_provider_from_inputs`, `brief`, and `description`";
+var ARCHETYPE_POLICY_KEY_FORMS = "`fallback` and `description`";
 function unknownArchetypeKeys(rawPolicy) {
   return Object.keys(rawPolicy).filter((key) => !ARCHETYPE_POLICY_KEYS.includes(key));
-}
-var IGNORED_OUTPUT_FORMS = '"kept" or "discardable"';
-function parseIgnoredOutput(raw, source, name) {
-  if (raw === void 0) return "discardable";
-  if (raw === "kept" || raw === "discardable") return raw;
-  throw new ExecutorProfileError(
-    `${source}: \`archetypes.${name}.ignored_output\` must be ${IGNORED_OUTPUT_FORMS}.`
-  );
 }
 function nextArchetypeFallback(archetypes, name) {
   if (!Object.hasOwn(archetypes, name)) return null;
   const next = archetypes[name].fallback;
   return typeof next === "string" ? next : null;
-}
-var IGNORED_DEADLINE_NOTE_TOKEN = "is ignored \u2014 Fadeno no longer runs executors under a deadline";
-function ignoredDeadlineNote(source, label) {
-  return `${source}: ${label} ${IGNORED_DEADLINE_NOTE_TOKEN} (a clock cannot tell slow from stuck); delete the key. End a long attempt with \`fadeno cancel\`.`;
 }
 function parseExecutorProfile(text, source, host = "standalone") {
   let doc;
@@ -8353,14 +8338,13 @@ function parseExecutorProfile(text, source, host = "standalone") {
       }
       modelHarness = raw.harness.trim();
     }
-    const eligibility = readEligibility(raw, `model "${name}"`, source);
-    const unknown = Object.keys(raw).filter((k) => !["provider", "id", "effort", "spellings", "eligibility", "harness"].includes(k));
+    const unknown = Object.keys(raw).filter((k) => !["provider", "id", "effort", "spellings", "harness"].includes(k));
     if (unknown.length > 0) {
-      throw new ExecutorProfileError(`${source}: model "${name}" has unknown key(s) ${unknown.join(", ")}; only provider, id, effort, spellings, eligibility, harness are allowed.`);
+      throw new ExecutorProfileError(`${source}: model "${name}" has unknown key(s) ${unknown.join(", ")}; only provider, id, effort, spellings, harness are allowed.`);
     }
-    models[name] = { provider: prov, id, effort, spellings, eligibility, ...modelHarness != null ? { harness: modelHarness } : {} };
+    models[name] = { provider: prov, id, effort, spellings, ...modelHarness != null ? { harness: modelHarness } : {} };
   }
-  models["current-host"] = { provider: "current-host", id: "current-host", effort: "default", spellings: {}, eligibility: {} };
+  models["current-host"] = { provider: "current-host", id: "current-host", effort: "default", spellings: {} };
   const harnesses = {};
   if (doc.routes !== void 0) throw v4MigrationError(source, "routes");
   if (doc.harnesses !== void 0) {
@@ -8412,11 +8396,9 @@ function parseExecutorProfile(text, source, host = "standalone") {
         if (rawHost.relay !== void 0) {
           hostEntry.relay = parseDialRef(rawHost.relay, `${source}: ${label}.host.relay`);
         }
-        const hostEligibility = readEligibility(rawHost, `${label}.host`, source);
-        if (Object.keys(hostEligibility).length > 0) hostEntry.eligibility = hostEligibility;
-        const unknownHost = Object.keys(rawHost).filter((k) => !["effort_channel", "identity", "relay", "eligibility"].includes(k));
+        const unknownHost = Object.keys(rawHost).filter((k) => !["effort_channel", "identity", "relay"].includes(k));
         if (unknownHost.length > 0) {
-          throw new ExecutorProfileError(`${source}: ${label}.host has unknown key(s) ${unknownHost.join(", ")}; only effort_channel, identity, relay, eligibility are allowed.`);
+          throw new ExecutorProfileError(`${source}: ${label}.host has unknown key(s) ${unknownHost.join(", ")}; only effort_channel, identity, relay are allowed.`);
         }
         entry.host = hostEntry;
       }
@@ -8448,94 +8430,20 @@ function parseExecutorProfile(text, source, host = "standalone") {
         }
         entry.effort_encoding = rawHarness.effort_encoding;
       }
-      const readLane = (rawLane, laneLabel, required) => {
-        const cmd = rawLane.command;
-        if (cmd === void 0 || cmd === null) {
-          if (required) throw new ExecutorProfileError(`${source}: ${laneLabel}.command must be a non-empty string array.`);
-          return null;
-        }
+      const cmd = rawHarness.command;
+      if (cmd !== void 0 && cmd !== null) {
         if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((p) => typeof p === "string" && p.length > 0)) {
-          throw new ExecutorProfileError(`${source}: ${laneLabel}.command must be a non-empty string array.`);
+          throw new ExecutorProfileError(`${source}: ${label}.command must be a non-empty string array.`);
         }
-        const lane = { command: cmd };
-        if (rawLane.resume !== void 0) {
-          const rs = rawLane.resume;
-          if (!Array.isArray(rs) || rs.length === 0 || !rs.every((p) => typeof p === "string" && p.length > 0)) {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.resume must be a non-empty string array.`);
-          }
-          if (!rs.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.resume must contain ${SESSION_ID_PLACEHOLDER}.`);
-          }
-          lane.resume = rs;
-        }
-        if (rawLane.session_id_pattern !== void 0) {
-          const pat = rawLane.session_id_pattern;
-          if (typeof pat !== "string") {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.session_id_pattern must be a string.`);
-          }
-          try {
-            new RegExp(pat);
-          } catch (err) {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.session_id_pattern did not compile: ${err.message}`);
-          }
-          if (!pat.includes("(")) {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.session_id_pattern needs a capture group.`);
-          }
-          lane.session_id_pattern = pat;
-        }
-        if (rawLane.timeout_ms !== void 0) {
-          const tm = rawLane.timeout_ms;
-          if (typeof tm !== "number" || !Number.isInteger(tm) || tm <= 0) {
-            throw new ExecutorProfileError(`${source}: ${laneLabel}.timeout_ms must be a positive integer (milliseconds).`);
-          }
-          lane.timeout_ms = tm;
-          notes.push(ignoredDeadlineNote(source, `${laneLabel}.timeout_ms`));
-        }
-        const laneEligibility = readEligibility(rawLane, laneLabel, source);
-        if (Object.keys(laneEligibility).length > 0) lane.eligibility = laneEligibility;
-        return lane;
-      };
-      const base = readLane(rawHarness, label, false);
-      if (base != null) {
-        entry.command = base;
-      } else {
-        const eligibilityOnly = readEligibility(rawHarness, label, source);
-        if (Object.keys(eligibilityOnly).length > 0) entry.eligibility = eligibilityOnly;
+        entry.command = { command: cmd };
       }
-      if (rawHarness.variants !== void 0) {
-        if (!isMapping(rawHarness.variants)) {
-          throw new ExecutorProfileError(`${source}: ${label}.variants is not a mapping (variant name \u2192 lane).`);
-        }
-        const variants = {};
-        for (const [variantKey, rawVariant] of Object.entries(rawHarness.variants)) {
-          if (!BARE_IDENTIFIER_RE.test(variantKey)) {
-            throw new ExecutorProfileError(`${source}: ${label}.variants key "${variantKey}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-          }
-          if (!isMapping(rawVariant)) {
-            throw new ExecutorProfileError(`${source}: ${label}.variants.${variantKey} is not a mapping.`);
-          }
-          const variantLabel = `${label}.variants.${variantKey}`;
-          const lane = readLane(rawVariant, variantLabel, true);
-          const unknownVariant = Object.keys(rawVariant).filter((k) => !["command", "resume", "session_id_pattern", "timeout_ms", "eligibility"].includes(k));
-          if (unknownVariant.length > 0) {
-            throw new ExecutorProfileError(`${source}: ${variantLabel} has unknown key(s) ${unknownVariant.join(", ")}; only command, resume, session_id_pattern, timeout_ms, eligibility are allowed.`);
-          }
-          variants[variantKey] = lane;
-        }
-        if (Object.keys(variants).length > 0) entry.variants = variants;
-      }
-      const unknownHarnessKeys = Object.keys(rawHarness).filter((k) => !["provider", "host", "command", "resume", "session_id_pattern", "timeout_ms", "eligibility", "models_command", "models_prefix", "effort_encoding", "variants"].includes(k));
+      const unknownHarnessKeys = Object.keys(rawHarness).filter((k) => !["provider", "host", "command", "models_command", "models_prefix", "effort_encoding"].includes(k));
       if (unknownHarnessKeys.length > 0) {
         throw new ExecutorProfileError(`${source}: ${label} has unknown key(s) ${unknownHarnessKeys.join(", ")}.`);
       }
       if (entry.host == null && entry.command == null) {
         throw new ExecutorProfileError(
           `${source}: ${label} declares neither \`host:\` (Fadeno can run inside it) nor \`command:\` (Fadeno can spawn it) \u2014 one is required.`
-        );
-      }
-      if (entry.command == null && entry.eligibility != null) {
-        throw new ExecutorProfileError(
-          `${source}: ${label} declares \`eligibility:\` with no \`command:\` \u2014 harness-level eligibility constrains the command lanes, so it would do nothing here. Move it to \`${label}.host.eligibility\` to gate the host lane.`
         );
       }
       harnesses[harnessKey] = entry;
@@ -8638,10 +8546,9 @@ function parseExecutorProfile(text, source, host = "standalone") {
       }
       if (rawPolicy.requires_write !== void 0) {
         throw new ExecutorProfileError(
-          `${source}: \`archetypes.${name}.requires_write\` is no longer supported. Fadeno does not enforce write permissions: a route is an argv, and a restriction belongs IN that argv \u2014 a separate route with its own name (e.g. \`--sandbox read-only\`) that a reader can see. Containment is isolated worktrees, now the default for command dispatches \u2014 see docs/experimental/permissions-and-isolation.md.`
+          `${source}: \`archetypes.${name}.requires_write\` is no longer supported. Fadeno does not enforce write permissions: a lane is an argv, and a restriction belongs IN that argv \u2014 a separate harness entry with its own name (\`--sandbox read-only\`, say) that a reader can see. Containment is the isolated worktree every dispatch already gets.`
         );
       }
-      const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
       let fallback = null;
       if (rawPolicy.fallback != null) {
         if (typeof rawPolicy.fallback !== "string" || !BARE_IDENTIFIER_RE.test(rawPolicy.fallback)) {
@@ -8652,20 +8559,6 @@ function parseExecutorProfile(text, source, host = "standalone") {
         }
         fallback = rawPolicy.fallback;
       }
-      let distinctProviderFromInputs = null;
-      if (rawPolicy.distinct_provider_from_inputs !== void 0) {
-        if (rawPolicy.distinct_provider_from_inputs !== "advisory" && rawPolicy.distinct_provider_from_inputs !== "required") {
-          throw new ExecutorProfileError(`${source}: \`archetypes.${name}.distinct_provider_from_inputs\` must be "advisory" or "required".`);
-        }
-        distinctProviderFromInputs = rawPolicy.distinct_provider_from_inputs;
-      }
-      let brief = null;
-      if (rawPolicy.brief != null) {
-        if (typeof rawPolicy.brief !== "string" || !BARE_IDENTIFIER_RE.test(rawPolicy.brief)) {
-          throw new ExecutorProfileError(`${source}: \`archetypes.${name}.brief\` must be a bare lowercase identifier naming a brief template (${BARE_IDENTIFIER_RE.source}).`);
-        }
-        brief = rawPolicy.brief;
-      }
       let description = null;
       if (rawPolicy.description != null) {
         if (typeof rawPolicy.description !== "string" || rawPolicy.description.trim().length === 0) {
@@ -8673,7 +8566,7 @@ function parseExecutorProfile(text, source, host = "standalone") {
         }
         description = rawPolicy.description.trim();
       }
-      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief, description };
+      archetypes[name] = { fallback, description };
     }
     for (const start of Object.keys(archetypes)) {
       const path = [];
@@ -8690,115 +8583,6 @@ function parseExecutorProfile(text, source, host = "standalone") {
       }
     }
   }
-  let constraints = null;
-  if (doc.constraints != null) {
-    if (!isMapping(doc.constraints)) {
-      throw new ExecutorProfileError(`${source} \`constraints\` is not a mapping (only \`command\` is allowed).`);
-    }
-    const unknown = Object.keys(doc.constraints).filter((key) => key !== "command");
-    if (unknown.length > 0) {
-      throw new ExecutorProfileError(`${source}: \`constraints\` has unknown key(s) ${unknown.join(", ")}; only \`command\` is allowed.`);
-    }
-    const command2 = doc.constraints.command;
-    if (!Array.isArray(command2) || command2.length === 0 || !command2.every((part) => typeof part === "string" && part.length > 0)) {
-      throw new ExecutorProfileError(`${source}: \`constraints.command\` must be a non-empty array of non-empty strings.`);
-    }
-    constraints = { command: command2 };
-  }
-  const tools = {};
-  if (doc.tools !== void 0 && doc.tools !== null) {
-    if (!isMapping(doc.tools)) {
-      throw new ExecutorProfileError(`${source} \`tools\` is not a mapping (tool name \u2192 {command, timeout_ms?}).`);
-    }
-    for (const [name, raw] of Object.entries(doc.tools)) {
-      if (!BARE_IDENTIFIER_RE.test(name)) {
-        throw new ExecutorProfileError(`${source}: tool name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      }
-      if (!isMapping(raw)) {
-        throw new ExecutorProfileError(`${source}: tool "${name}" is not a mapping.`);
-      }
-      const unknown = Object.keys(raw).filter((k) => k !== "command" && k !== "timeout_ms" && k !== "timeout");
-      if (unknown.length > 0) {
-        throw new ExecutorProfileError(`${source}: tool "${name}" has unknown key(s) ${unknown.join(", ")}; only command, timeout, timeout_ms are allowed.`);
-      }
-      const cmd = raw.command;
-      if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((p) => typeof p === "string" && p.length > 0)) {
-        throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` must be a non-empty array of non-empty strings.`);
-      }
-      for (const part of cmd) {
-        if (part.length === 0 || part.trim().length === 0) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` contains an empty or whitespace-only string.`);
-        }
-        if (part.includes("{") || part.includes("}") || part.includes("$") || part.includes("`")) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` must be a static argv without interpolation or placeholders; found "${part}".`);
-        }
-        if (part.includes("\n") || part.includes("\0")) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` contains an illegal character.`);
-        }
-      }
-      let timeoutMs = null;
-      if (raw.timeout_ms !== void 0) {
-        const tm = raw.timeout_ms;
-        if (typeof tm !== "number" || !Number.isInteger(tm) || tm <= 0) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout_ms\` must be a positive integer (milliseconds).`);
-        }
-        timeoutMs = tm;
-        notes.push(ignoredDeadlineNote(source, `tool "${name}".timeout_ms`));
-      }
-      if (raw.timeout !== void 0) {
-        if (timeoutMs != null) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" has both timeout and timeout_ms \u2014 use one.`);
-        }
-        const tm = raw.timeout;
-        if (typeof tm !== "number" || !Number.isInteger(tm) || tm <= 0) {
-          throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout\` must be a positive integer (seconds).`);
-        }
-        timeoutMs = tm * 1e3;
-        notes.push(ignoredDeadlineNote(source, `tool "${name}".timeout`));
-      }
-      tools[name] = { command: cmd, ...timeoutMs != null ? { timeoutMs } : {} };
-    }
-  }
-  const worktreeCarry = [];
-  if (doc.worktree_carry !== void 0) {
-    if (!Array.isArray(doc.worktree_carry)) {
-      throw new ExecutorProfileError(`${source}: \`worktree_carry\` must be an array of repo-relative path strings.`);
-    }
-    for (const raw of doc.worktree_carry) {
-      if (typeof raw !== "string" || raw.trim().length === 0) {
-        throw new ExecutorProfileError(`${source}: \`worktree_carry\` entries must be non-empty strings; found ${JSON.stringify(raw)}.`);
-      }
-      const trimmed = raw.trim();
-      if ((0, import_node_path4.isAbsolute)(trimmed)) {
-        throw new ExecutorProfileError(`${source}: \`worktree_carry\` entry "${trimmed}" must be repo-relative, not absolute.`);
-      }
-      const normalized = trimmed.split("\\").join("/");
-      if (normalized.split("/").includes("..")) {
-        throw new ExecutorProfileError(`${source}: \`worktree_carry\` entry "${trimmed}" may not contain a ".." segment.`);
-      }
-      worktreeCarry.push(normalized);
-    }
-  }
-  const surfaces = [];
-  if (doc.surfaces !== void 0) {
-    if (!Array.isArray(doc.surfaces)) {
-      throw new ExecutorProfileError(`${source}: \`surfaces\` must be an array of repo-relative path strings.`);
-    }
-    for (const raw of doc.surfaces) {
-      if (typeof raw !== "string" || raw.trim().length === 0) {
-        throw new ExecutorProfileError(`${source}: \`surfaces\` entries must be non-empty strings; found ${JSON.stringify(raw)}.`);
-      }
-      const trimmed = raw.trim();
-      if ((0, import_node_path4.isAbsolute)(trimmed)) {
-        throw new ExecutorProfileError(`${source}: \`surfaces\` entry "${trimmed}" must be repo-relative, not absolute.`);
-      }
-      const normalized = trimmed.split("\\").join("/");
-      if (normalized.split("/").includes("..")) {
-        throw new ExecutorProfileError(`${source}: \`surfaces\` entry "${trimmed}" may not contain a ".." segment.`);
-      }
-      surfaces.push(normalized);
-    }
-  }
   if (doc.relay !== void 0) throw v4MigrationError(source, "relay");
   const unknownTop = Object.keys(doc).filter((k) => !CATALOG_TOP_LEVEL_KEYS.includes(k));
   if (unknownTop.length > 0) {
@@ -8813,33 +8597,12 @@ function parseExecutorProfile(text, source, host = "standalone") {
     bindings,
     dials,
     archetypes,
-    constraints,
     unregisteredModelHarness,
     unclosedLimit,
     host,
     schemaVersion: 4,
-    notes,
-    tools,
-    worktreeCarry,
-    surfaces
+    notes
   };
-}
-function readEligibility(raw, label, source) {
-  if (raw.eligibility === void 0) return {};
-  if (!isMapping(raw.eligibility)) {
-    throw new ExecutorProfileError(`${source}: ${label} \`eligibility\` is not a mapping (archetype \u2192 eligibility state).`);
-  }
-  const out = {};
-  for (const [key, value] of Object.entries(raw.eligibility)) {
-    if (!BARE_IDENTIFIER_RE.test(key)) {
-      throw new ExecutorProfileError(`${source}: ${label} eligibility key "${key}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-    }
-    if (value !== "eligible" && value !== "shadow_only" && value !== "forbidden") {
-      throw new ExecutorProfileError(`${source}: ${label} \`eligibility.${key}\` must be "eligible", "shadow_only", or "forbidden".`);
-    }
-    out[key] = value;
-  }
-  return out;
 }
 function loadExecutorProfile(repoRoot, options = {}, harness) {
   try {
@@ -8963,7 +8726,7 @@ function resolveDialCascade(role, archetype, policy, layers) {
 }
 function resolveRole(role, archetype, profile, layers) {
   const cascade = resolveDialCascade(role, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, layers);
-  const delivery = resolveDelivery(cascade.ref, profile, profile.host ?? "standalone", { archetype });
+  const delivery = resolveDelivery(cascade.ref, profile, profile.host ?? "standalone");
   return { delivery, source: cascade.source, resolvedVia: cascade.resolvedVia };
 }
 function roleResolutionEchoLabel(source) {
@@ -8997,69 +8760,30 @@ function homeHarnessOf(profile, provider) {
 function declaredHarnesses(profile) {
   return Object.keys(profile.harnesses ?? {}).sort();
 }
-var ELIGIBILITY_RANK = { eligible: 0, shadow_only: 1, forbidden: 2 };
-function mergeEligibility(...maps) {
-  const out = {};
-  for (const map of maps) {
-    for (const [key, state] of Object.entries(map ?? {})) {
-      if (!Object.hasOwn(out, key) || ELIGIBILITY_RANK[state] > ELIGIBILITY_RANK[out[key]]) out[key] = state;
-    }
-  }
-  return out;
-}
-function commandLanes(entry) {
-  if (entry == null) return [];
-  const lanes = [];
-  if (entry.command != null) lanes.push({ name: null, lane: entry.command });
-  for (const [name, lane] of Object.entries(entry.variants ?? {})) lanes.push({ name, lane });
-  return lanes;
-}
-function resolveDelivery(ref, profile, host = profile.host ?? "standalone", ctx = {}) {
+function resolveDelivery(ref, profile, host = profile.host ?? "standalone") {
   const harnesses = profile.harnesses ?? {};
   const refString = formatDialRef(ref);
-  const archetype = ctx.archetype ?? null;
   const build = (params) => {
-    const { model, modelId: modelId2, effectiveEffort: effectiveEffort2, provider: provider2, harness: harness2, entry, modelEligibility } = params;
+    const { model, modelId: modelId2, effectiveEffort: effectiveEffort2, provider: provider2, harness: harness2, entry } = params;
     const subst = (argv) => argv.map((part) => part.split("{model}").join(modelId2).split("{reasoning_effort}").join(effectiveEffort2));
-    const lanes = commandLanes(entry);
-    const permitted = lanes.filter(
-      (candidate) => archetype == null || mergeEligibility(modelEligibility, candidate.lane.eligibility)[archetype] !== "forbidden"
-    );
-    const chosen = permitted[0] ?? lanes[0] ?? null;
-    const variant = chosen?.name ?? null;
+    const command2 = entry?.command ?? null;
     const hostSide = harness2 === host ? entry?.host ?? null : null;
-    const hostEligibility = mergeEligibility(modelEligibility, {
-      ...entry?.command?.eligibility ?? {},
-      ...hostSide?.eligibility ?? {}
-    });
-    const hostCandidate = hostSide != null && (hostSide.identity !== "session" || model === "current-host") && (archetype == null || hostEligibility[archetype] !== "forbidden");
-    let spec;
-    if (hostCandidate || chosen == null) {
-      spec = {
-        adapter: "host",
-        model: modelId2,
-        reasoningEffort: effectiveEffort2,
-        agentType: "*",
-        fallbackCommand: chosen != null ? subst(chosen.lane.command) : null,
-        eligibility: hostCandidate ? { ...hostEligibility } : { ...mergeEligibility(modelEligibility, chosen?.lane.eligibility) },
-        ...provider2 != null ? { provider: provider2 } : {},
-        ...harness2 != null ? { harness: harness2 } : {},
-        ...variant != null ? { variant } : {}
-      };
-    } else {
-      spec = {
-        adapter: "command",
-        command: subst(chosen.lane.command),
-        model: modelId2,
-        resume: chosen.lane.resume != null ? subst(chosen.lane.resume) : null,
-        sessionIdPattern: chosen.lane.session_id_pattern ?? null,
-        ...chosen.lane.timeout_ms != null ? { timeoutMs: chosen.lane.timeout_ms } : {},
-        eligibility: { ...mergeEligibility(modelEligibility, chosen.lane.eligibility) },
-        ...provider2 != null ? { provider: provider2 } : {},
-        ...harness2 != null ? { harness: harness2 } : {},
-        ...variant != null ? { variant } : {}
-      };
-    }
+    const hostCandidate = hostSide != null && (hostSide.identity !== "session" || model === "current-host");
+    const spec = hostCandidate || command2 == null ? {
+      adapter: "host",
+      model: modelId2,
+      reasoningEffort: effectiveEffort2,
+      agentType: "*",
+      fallbackCommand: command2 != null ? subst(command2.command) : null,
+      ...provider2 != null ? { provider: provider2 } : {},
+      ...harness2 != null ? { harness: harness2 } : {}
+    } : {
+      adapter: "command",
+      command: subst(command2.command),
+      model: modelId2,
+      ...provider2 != null ? { provider: provider2 } : {},
+      ...harness2 != null ? { harness: harness2 } : {}
+    };
     return {
       ref,
       refString,
@@ -9070,7 +8794,6 @@ function resolveDelivery(ref, profile, host = profile.host ?? "standalone", ctx 
       effectiveEffort: effectiveEffort2,
       provider: provider2,
       harness: harness2,
-      variant,
       hostCandidate,
       registered: params.registered
     };
@@ -9090,17 +8813,9 @@ function resolveDelivery(ref, profile, host = profile.host ?? "standalone", ctx 
       //
       // Both removals matter. There is no argv for "the session you are
       // already in", so `current-host` must never acquire a fallback command —
-      // that is what makes a pinned `current-host` honestly `restart_required`
+      // that is what makes `current-host` in a bare shell honestly lane-less
       // rather than silently spawning a second session.
-      //
-      // And `host.eligibility` describes delivering a NAMED MODEL to a spawned
-      // in-session agent (`harnesses.claude.host.eligibility: { director:
-      // forbidden }` — a Claude subagent cannot spawn subagents of its own, so
-      // it cannot coordinate). `current-host` is not that agent: it is the
-      // session itself, which can. Inheriting the constraint refused every
-      // locked wildcard host request that specialized to `director`.
-      entry: entry?.host != null ? { host: { effort_channel: entry.host.effort_channel, identity: entry.host.identity } } : void 0,
-      modelEligibility: {}
+      entry: entry?.host != null ? { host: { effort_channel: entry.host.effort_channel, identity: entry.host.identity } } : void 0
     });
   }
   const registered = Object.hasOwn(profile.models, ref.model);
@@ -9124,8 +8839,7 @@ function resolveDelivery(ref, profile, host = profile.host ?? "standalone", ctx 
     provider,
     harness,
     registered,
-    entry: harnessEntry,
-    modelEligibility: entryModel?.eligibility ?? {}
+    entry: harnessEntry
   });
 }
 
@@ -9144,8 +8858,7 @@ function parseLayer(path) {
   if (!doc) throw new ExecutorProfileError(`${path} is not a mapping.`);
   return doc;
 }
-var V4_MODEL_KEYS = /* @__PURE__ */ new Set(["provider", "id", "effort", "spellings", "eligibility", "harness"]);
-var ELIGIBILITY_STATES = /* @__PURE__ */ new Set(["eligible", "shadow_only", "forbidden"]);
+var V4_MODEL_KEYS = /* @__PURE__ */ new Set(["provider", "id", "effort", "spellings", "harness"]);
 function repairLegacyRef(raw) {
   if (typeof raw === "string") {
     try {
@@ -9278,19 +8991,6 @@ function repairUserLayer(doc, path, repairs) {
         }
       }
     }
-    if (entry.eligibility !== void 0) {
-      const eligibility = mapping(entry.eligibility);
-      if (eligibility == null) {
-        delete entry.eligibility;
-        repairs.push(`${where}: model "${name}" \`eligibility\` is not a mapping and was ignored`);
-      } else {
-        for (const [key, value] of Object.entries(eligibility)) {
-          if (BARE_IDENTIFIER_RE.test(key) && ELIGIBILITY_STATES.has(value)) continue;
-          delete eligibility[key];
-          repairs.push(`${where}: model "${name}" \`eligibility.${key}\` is not a valid state and was ignored`);
-        }
-      }
-    }
     for (const key of Object.keys(entry)) {
       if (V4_MODEL_KEYS.has(key)) continue;
       delete entry[key];
@@ -9305,8 +9005,7 @@ var ENTRY_MERGED_KEYS = /* @__PURE__ */ new Set([
   "archetypes",
   "bindings",
   "models",
-  "dials",
-  "tools"
+  "dials"
 ]);
 function validateLayerKeys(doc, path) {
   refuseRemovedCatalogKeys(doc, path);
@@ -9331,12 +9030,6 @@ function validateLayerKeys(doc, path) {
 function mergeLayer(target, source, layer, path, provenance) {
   if (layer !== "project" && mapping(source.dials) != null && Object.keys(mapping(source.dials)).length > 0) {
     throw new ExecutorProfileError("repo pins live in the project catalog; user dials are state \u2014 use `fadeno dial <archetype> <model> --user`");
-  }
-  if (layer !== "project" && Array.isArray(source.surfaces) && source.surfaces.length > 0) {
-    throw new ExecutorProfileError("surfaces describes this repo's shape; it is project-only \u2014 declare it in .fadeno/executors.yaml, not the user or builtin catalog.");
-  }
-  if (layer !== "project" && Array.isArray(source.worktree_carry) && source.worktree_carry.length > 0) {
-    throw new ExecutorProfileError("worktree_carry describes this repo's build state; it is project-only \u2014 declare it in .fadeno/executors.yaml, not the user or builtin catalog.");
   }
   validateLayerKeys(source, path);
   for (const key of CATALOG_TOP_LEVEL_KEYS) {
@@ -9715,7 +9408,7 @@ function resolveArchetype(input) {
     const explicit = input.explicitModel?.trim() || null;
     if (explicit != null) {
       const ref = parseDialRef(explicit, "--model");
-      delivery = resolveDelivery(ref, profile, host, { archetype });
+      delivery = resolveDelivery(ref, profile, host);
       source = "explicit";
     } else {
       const local = readLocalDialState(input.repoRoot);
@@ -11190,7 +10883,6 @@ function runModels(opts = {}) {
         // argv at all is represented.
         native: compiled.hostCandidate,
         fadeno_capable: fadenoCapable,
-        eligibility: { ...entry.eligibility },
         spellings: { ...entry.spellings },
         verified_at: verified?.verified_at ?? null,
         stale: null,
@@ -11208,7 +10900,6 @@ function runModels(opts = {}) {
         adapter: null,
         native: false,
         fadeno_capable: false,
-        eligibility: { ...entry.eligibility },
         spellings: { ...entry.spellings },
         verified_at: null,
         stale: err instanceof ExecutorProfileError ? err.message : String(err),
@@ -11225,7 +10916,6 @@ function runModels(opts = {}) {
           harness: candidate,
           id: alt.modelId,
           adapter: altAdapter,
-          variant: alt.variant,
           fadeno_capable: argvGrantsFadenoShell(altCommand)
         });
       } catch {
@@ -11408,7 +11098,6 @@ function userModelEntry(raw) {
     id,
     effort: typeof record.effort === "string" ? record.effort : "default",
     spellings,
-    eligibility: {},
     ...typeof record.harness === "string" ? { harness: record.harness } : {}
   };
 }
@@ -11994,7 +11683,6 @@ var PUBLIC_COMMAND_PATHS = Object.freeze(
     return [name, ...Object.keys(subcommands ?? {}).filter((subcommand) => !(name === "completion" && subcommand === "candidates")).map((subcommand) => `${name} ${subcommand}`)];
   })
 );
-var GATE_CONDITIONS = ["all_reviews_approved", "no_blocking_issues", "tests_pass"];
 function runCompletion() {
   return [
     "# bash completion for Fadeno",
@@ -12144,16 +11832,10 @@ function profileValues(repoRoot, kind) {
   const names = /* @__PURE__ */ new Set();
   return [...names];
 }
-function dynamicValues(kind, prefix, repoRoot, cwd, optionToken) {
-  let values;
+function dynamicValues(kind, prefix, repoRoot, cwd) {
   switch (kind) {
-    case "enum":
-      values = optionToken === "--format" ? ["ascii", "mermaid", "text", "json"] : optionToken === "--status" ? ["running", "completed", "failed", "aborted"] : optionToken === "--source" ? ["agent", "harness", "director"] : GATE_CONDITIONS;
-      return startsWith(values, prefix);
     case "path":
       return pathCandidates(prefix, cwd);
-    case "path-or-stdin":
-      return startsWith([...pathCandidates(prefix, cwd), "-"], prefix);
     case "dial":
     case "executor":
     case "archetype":
@@ -12162,25 +11844,6 @@ function dynamicValues(kind, prefix, repoRoot, cwd, optionToken) {
       return startsWith(userCatalogModels(), prefix);
     case "dialed-model":
       return startsWith(dialedModelRefs(repoRoot, cwd), prefix);
-    case "bind": {
-      const equals = prefix.indexOf("=");
-      const rolePrefix = equals < 0 ? "" : prefix.slice(0, equals + 1);
-      const executorPrefix = equals < 0 ? prefix : prefix.slice(equals + 1);
-      const executors = profileValues(repoRoot, "executor");
-      if (equals < 0) return [];
-      const roles = [];
-      const role = prefix.slice(0, equals);
-      const roleValues = roles.includes(role) ? roles : [...roles, role];
-      return startsWith(roleValues.flatMap((name) => executors.map((executor) => `${name}=${executor}`)), `${rolePrefix}${executorPrefix}`);
-    }
-    case "input": {
-      const equals = prefix.indexOf("=");
-      if (equals < 0) {
-        return [];
-      }
-      const left = prefix.slice(0, equals + 1);
-      return pathCandidates(prefix.slice(equals + 1), cwd).map((value) => `${left}${value}`);
-    }
     default:
       return [];
   }
@@ -12218,18 +11881,18 @@ function runCompletionCandidates(opts) {
   const previous = cword > 0 ? words[cword - 1] : void 0;
   const previousSpec = previous == null ? void 0 : optionSpec(context.spec, previous);
   if (previousSpec != null && previousSpec.kind !== "none" && previous != null && !previous.includes("=")) {
-    if (previousSpec.kind === "enum" && previousSpec.values != null) return startsWith(previousSpec.values, current);
-    return dynamicValues(previousSpec.kind, current, repoRoot, cwd, previous);
+    if (previousSpec.values != null) return startsWith(previousSpec.values, current);
+    return dynamicValues(previousSpec.kind, current, repoRoot, cwd);
   }
   const equal = current.indexOf("=");
   if (equal > 1 && current.startsWith("--")) {
     const tokenName = current.slice(0, equal);
     const found = optionSpec(context.spec, tokenName);
     if (found != null && found.kind !== "none") {
-      if (found.kind === "enum" && found.values != null) {
+      if (found.values != null) {
         return startsWith(found.values, current.slice(equal + 1)).map((value) => `${tokenName}=${value}`);
       }
-      return dynamicValues(found.kind, current.slice(equal + 1), repoRoot, cwd, tokenName).map((value) => `${tokenName}=${value}`);
+      return dynamicValues(found.kind, current.slice(equal + 1), repoRoot, cwd).map((value) => `${tokenName}=${value}`);
     }
   }
   if (current.startsWith("-")) {
@@ -12249,7 +11912,7 @@ function knownFlagsFor(command2, subcommand) {
   return /* @__PURE__ */ new Set([...Object.keys(spec.options), ...sub != null ? Object.keys(sub.options) : []]);
 }
 var RETIRED_FLAGS = {
-  "--timeout": ["dispatch", "drive", "tool-run"]
+  "--timeout": ["dispatch"]
 };
 function retiredFlagFor(command2, flag) {
   return RETIRED_FLAGS[flag]?.includes(command2) ?? false;
@@ -12459,7 +12122,7 @@ function shadowingAgentFiles(repoRoot, archetypes, options) {
   const roots = [
     { dir: (0, import_node_path15.join)(claudeHome, "agents"), harness: "claude", scope: "user", ext: ".md" },
     { dir: (0, import_node_path15.join)(repoRoot, ".claude", "agents"), harness: "claude", scope: "project", ext: ".md" },
-    { dir: (0, import_node_path15.join)(home, ".codex", "agents"), harness: "codex", scope: "user", ext: ".toml" },
+    { dir: codexUserAgentDir(options), harness: "codex", scope: "user", ext: ".toml" },
     { dir: (0, import_node_path15.join)(repoRoot, ".codex", "agents"), harness: "codex", scope: "project", ext: ".toml" }
   ];
   const found = [];
@@ -12909,13 +12572,10 @@ function printModelDetail(result, name) {
   printModels({ ...result, models: [row] });
   console.log(`  harness: ${row.home_harness}`);
   for (const delivery of row.deliveries) {
-    console.log(`  alternate: --harness ${delivery.harness} \u2192 ${delivery.id}${delivery.variant != null ? ` [variant ${delivery.variant}]` : ""}`);
+    console.log(`  alternate: --harness ${delivery.harness} \u2192 ${delivery.id}`);
   }
   for (const [harness, id] of Object.entries(row.spellings)) {
     console.log(`  spelling: --harness ${harness} \u2192 ${id}`);
-  }
-  for (const [archetype, state] of Object.entries(row.eligibility)) {
-    if (state !== "eligible") console.log(`  eligibility: ${archetype} \u2192 ${state}`);
   }
 }
 function printModelsHarness(result) {

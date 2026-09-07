@@ -84,13 +84,10 @@ function printModelDetail(result: ModelsResult, name: string): void {
   printModels({ ...result, models: [row] });
   console.log(`  harness: ${row.home_harness}`);
   for (const delivery of row.deliveries) {
-    console.log(`  alternate: --harness ${delivery.harness} → ${delivery.id}${delivery.variant != null ? ` [variant ${delivery.variant}]` : ''}`);
+    console.log(`  alternate: --harness ${delivery.harness} → ${delivery.id}`);
   }
   for (const [harness, id] of Object.entries(row.spellings)) {
     console.log(`  spelling: --harness ${harness} → ${id}`);
-  }
-  for (const [archetype, state] of Object.entries(row.eligibility)) {
-    if (state !== 'eligible') console.log(`  eligibility: ${archetype} → ${state}`);
   }
 }
 

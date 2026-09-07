@@ -20,13 +20,7 @@ export class CompletionError extends Error {}
 
 type ValueKind =
   | 'none'
-  | 'enum'
   | 'path'
-  | 'path-or-stdin'
-  | 'run'
-  | 'dispatch-id'
-  | 'playbook'
-  | 'step'
   | 'dial'
   | 'executor'
   /** User-catalog aliases only — the ones `model remove` can actually take. */
@@ -34,10 +28,6 @@ type ValueKind =
   /** Refs `models verify` accepts: the spellings of a dialed delivery. */
   | 'dialed-model'
   | 'archetype'
-  | 'bind'
-  /** A bare role name from the selected run's playbook — what `--unbind` takes. */
-  | 'role'
-  | 'input'
   | 'free';
 
 interface OptionSpec {
@@ -136,11 +126,6 @@ export const PUBLIC_COMMAND_PATHS: readonly string[] = Object.freeze(
     return [name, ...Object.keys(subcommands ?? {}).filter((subcommand) => !(name === 'completion' && subcommand === 'candidates')).map((subcommand) => `${name} ${subcommand}`)];
   }),
 );
-
-// `CommandSpec` is deliberately small, but gate conditions are useful values
-// just like enum options. Keeping this separate avoids a second parser while
-// retaining the static type of ordinary positional kinds.
-const GATE_CONDITIONS = ['all_reviews_approved', 'no_blocking_issues', 'tests_pass'];
 
 /** Render a sourceable Bash completion definition. */
 export function runCompletion(): string {
@@ -336,28 +321,10 @@ function profileValues(repoRoot: string, kind: 'dial' | 'executor' | 'archetype'
   return [...names];
 }
 
-function dynamicValues(
-  kind: ValueKind,
-  prefix: string,
-  repoRoot: string,
-  cwd: string,
-  optionToken?: string,
-): string[] {
-  let values: string[];
+function dynamicValues(kind: ValueKind, prefix: string, repoRoot: string, cwd: string): string[] {
   switch (kind) {
-    case 'enum':
-      values = optionToken === '--format'
-          ? ['ascii', 'mermaid', 'text', 'json']
-          : optionToken === '--status'
-            ? ['running', 'completed', 'failed', 'aborted']
-            : optionToken === '--source'
-              ? ['agent', 'harness', 'director']
-              : GATE_CONDITIONS;
-      return startsWith(values, prefix);
     case 'path':
       return pathCandidates(prefix, cwd);
-    case 'path-or-stdin':
-      return startsWith([...pathCandidates(prefix, cwd), '-'], prefix);
     case 'dial':
     case 'executor':
     case 'archetype':
@@ -366,28 +333,6 @@ function dynamicValues(
       return startsWith(userCatalogModels(), prefix);
     case 'dialed-model':
       return startsWith(dialedModelRefs(repoRoot, cwd), prefix);
-    case 'bind': {
-      const equals = prefix.indexOf('=');
-      const rolePrefix = equals < 0 ? '' : prefix.slice(0, equals + 1);
-      const executorPrefix = equals < 0 ? prefix : prefix.slice(equals + 1);
-      const executors = profileValues(repoRoot, 'executor');
-      // `parseBinds()` accepts only role=executor. Bare executor names are
-      // tempting suggestions here, but would be rejected by the CLI; wait for
-      // the user to type a role prefix (and `=`) before suggesting values.
-      if (equals < 0) return [];
-      const roles: string[] = [];
-      const role = prefix.slice(0, equals);
-      const roleValues = roles.includes(role) ? roles : [...roles, role];
-      return startsWith(roleValues.flatMap((name) => executors.map((executor) => `${name}=${executor}`)), `${rolePrefix}${executorPrefix}`);
-    }
-    case 'input': {
-      const equals = prefix.indexOf('=');
-      if (equals < 0) {
-        return [];
-      }
-      const left = prefix.slice(0, equals + 1);
-      return pathCandidates(prefix.slice(equals + 1), cwd).map((value) => `${left}${value}`);
-    }
     default:
       return [];
   }
@@ -430,8 +375,8 @@ export function runCompletionCandidates(opts: CompletionCandidatesOptions): stri
   const previous = cword > 0 ? words[cword - 1] : undefined;
   const previousSpec = previous == null ? undefined : optionSpec(context.spec, previous);
   if (previousSpec != null && previousSpec.kind !== 'none' && previous != null && !previous.includes('=')) {
-    if (previousSpec.kind === 'enum' && previousSpec.values != null) return startsWith(previousSpec.values, current);
-    return dynamicValues(previousSpec.kind, current, repoRoot, cwd, previous);
+    if (previousSpec.values != null) return startsWith(previousSpec.values, current);
+    return dynamicValues(previousSpec.kind, current, repoRoot, cwd);
   }
 
   const equal = current.indexOf('=');
@@ -439,10 +384,10 @@ export function runCompletionCandidates(opts: CompletionCandidatesOptions): stri
     const tokenName = current.slice(0, equal);
     const found = optionSpec(context.spec, tokenName);
     if (found != null && found.kind !== 'none') {
-      if (found.kind === 'enum' && found.values != null) {
+      if (found.values != null) {
         return startsWith(found.values, current.slice(equal + 1)).map((value) => `${tokenName}=${value}`);
       }
-      return dynamicValues(found.kind, current.slice(equal + 1), repoRoot, cwd, tokenName)
+      return dynamicValues(found.kind, current.slice(equal + 1), repoRoot, cwd)
         .map((value) => `${tokenName}=${value}`);
     }
   }
@@ -474,8 +419,8 @@ export function knownFlagsFor(command: string, subcommand?: string): Set<string>
   const spec = COMMANDS[command];
   if (spec == null) return null;
   const sub = subcommand != null ? spec.subcommands?.[subcommand] : undefined;
-  // A subcommand's own options are additive: `steering resolve --archetype`
-  // is valid, and so is `steering --help`.
+  // A subcommand's own options are additive: `dial resolve --archetype` is
+  // valid, and so is `dial --help`.
   return new Set([...Object.keys(spec.options), ...(sub != null ? Object.keys(sub.options) : [])]);
 }
 
@@ -509,7 +454,7 @@ export function knownFlagsFor(command: string, subcommand?: string): Set<string>
  * the same words `doctor` uses for the catalog key, that nothing is armed.
  */
 const RETIRED_FLAGS: Record<string, readonly string[]> = {
-  '--timeout': ['dispatch', 'drive', 'tool-run'],
+  '--timeout': ['dispatch'],
 };
 
 /** Whether `command` tolerates this retired flag. */

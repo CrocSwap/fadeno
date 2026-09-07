@@ -211,7 +211,7 @@ test('set time validates against the REGISTRY only — no lane notes, nothing ab
   const root = seedCatalog(t, {
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
-      forbidden: { provider: 'openai', id: 'forbid-model', effort: 'high', eligibility: { worker: 'forbidden' } },
+      plain: { provider: 'openai', id: 'plain-model', effort: 'high' },
     },
     harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] } },
     archetypes: { worker: { } },
@@ -225,8 +225,8 @@ test('set time validates against the REGISTRY only — no lane notes, nothing ab
 
   // Any model this catalog can compile dials, and `dial resolve` answers what
   // it resolves to. Nothing here asks a model to justify itself.
-  assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'forbidden' }));
-  assert.equal(runDialResolve({ repoRoot: root, userPathOptions: user, archetype: 'worker' }).model, 'forbidden');
+  assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'plain' }));
+  assert.equal(runDialResolve({ repoRoot: root, userPathOptions: user, archetype: 'worker' }).model, 'plain');
 
   // An unknown `--harness` IS refused at set time: it is the one thing a dial
   // can be wrong about without knowing anything about the call.

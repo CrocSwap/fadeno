@@ -8,18 +8,15 @@ import {
   resolveDelivery,
   deliveryIsHost,
   DIALS_LOCAL_FILE,
-  eligibilityFor,
   LOCAL_DIALS_SCHEMA_VERSION,
   ExecutorProfileError,
   formatDialRef,
   parseDialRef,
   parseExecutorProfile,
-  parseSnapshotDocument,
   readLocalDialState,
   resolveDialCascade,
   resolveRole,
   roleResolutionEchoLabel,
-  serializeSnapshot,
   writeLocalDialState,
   type ExecutorProfile,
   type LocalDialState,
@@ -63,7 +60,7 @@ test('v4 models registry happy path', () => {
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
       grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' },
-      opus: { provider: 'anthropic', id: 'opus', effort: 'default', spellings: { opencode: 'anthropic/claude-opus-4.8' }, eligibility: { judge: 'shadow_only' } },
+      opus: { provider: 'anthropic', id: 'opus', effort: 'default', spellings: { opencode: 'anthropic/claude-opus-4.8' } },
     },
     harnesses: { codex: { provider: 'openai', command: ['codex', 'exec', '--model', '{model}'] }, claude: { provider: 'anthropic', command: ['claude', '-p', '--model', '{model}'] }, grok: { provider: 'xai', command: ['grok', '--model', '{model}'] }, opencode: { command: ['opencode', 'run', '-m', '{model}'] } },
     archetypes: { worker: { }, judge: {} },
@@ -76,7 +73,6 @@ test('v4 models registry happy path', () => {
   assert.equal(profile.models.sol!.id, 'gpt-5.6-sol');
   assert.equal(profile.models.sol!.effort, 'high');
   assert.equal(profile.models.opus!.spellings.opencode, 'anthropic/claude-opus-4.8');
-  assert.deepEqual(profile.models.opus!.eligibility, { judge: 'shadow_only' });
   assert.deepEqual(profile.dials, { judge: { model: 'opus' } });
   assert.deepEqual(profile.bindings, { my_role: { model: 'sol', effort: 'high' } });
   assert.equal(profile.unregisteredModelHarness, 'opencode');
@@ -336,18 +332,6 @@ test('resolveDelivery: unknown harness error naming the declared table', () => {
   assert.throws(() => resolveDelivery({ model: 'nope-model' }, parseDoc({ schema_version: 4, models: { sol: { provider: 'xai' } }, harnesses: { grok: { provider: 'xai', command: ['grok'] } }, unregistered_model_harness: 'opencode' })), /unknown harness "opencode"/);
 });
 
-test('resolveDelivery: eligibility copied to spec', () => {
-  const profile = parseDoc({
-    schema_version: 4,
-    models: { sol: { provider: 'openai', eligibility: { judge: 'forbidden', reviewer: 'shadow_only' } } },
-    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
-  });
-  const compiled = resolveDelivery({ model: 'sol' }, profile);
-  assert.equal(eligibilityFor(compiled.spec, 'judge'), 'forbidden');
-  assert.equal(eligibilityFor(compiled.spec, 'reviewer'), 'shadow_only');
-  assert.equal(eligibilityFor(compiled.spec, 'worker'), 'eligible');
-});
-
 test('resolveDelivery: host built-in current-host compiles to host', () => {
   const profile = parseDoc({
     schema_version: 4,
@@ -371,8 +355,8 @@ test('archetypes: requires_write parses; an absent block is an empty map', () =>
     archetypes: { worker: { }, reviewer: { } },
   });
   assert.deepEqual(profile.archetypes, {
-    worker: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null, description: null },
-    reviewer: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null, description: null },
+    worker: { fallback: null, description: null },
+    reviewer: { fallback: null, description: null },
   });
   assert.deepEqual(parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'] } } }).archetypes, {});
 });
@@ -520,84 +504,3 @@ test('roleResolutionEchoLabel vocabulary', () => {
   assert.equal(roleResolutionEchoLabel('user'), 'user dial');
   assert.equal(roleResolutionEchoLabel('base'), 'no dial');
 });
-
-// --- snapshot format v3 ---
-
-test('serializeSnapshot v3 byte-stable and includes current-host always', () => {
-  const profile = parseDoc({
-    schema_version: 4,
-    models: { sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' }, grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' } },
-    harnesses: { codex: { provider: 'openai', command: ['codex', '{model}'] }, grok: { provider: 'xai', command: ['grok', '{model}'] } },
-    archetypes: { worker: { } },
-    bindings: { my_role: 'sol@high' },
-  });
-  const t1 = serializeSnapshot(profile, [{ model: 'sol', effort: 'low' }]);
-  const t2 = serializeSnapshot(profile, [{ model: 'sol', effort: 'low' }]);
-  assert.equal(t1, t2);
-  assert.match(t1, /snapshot_version: 3/);
-  assert.match(t1, /executors:/);
-  assert.match(t1, /current-host:/);
-  assert.match(t1, /sol:/);
-});
-
-test('serializeSnapshot round-trips via parseSnapshotDocument', () => {
-  const profile = parseDoc({
-    schema_version: 4,
-    models: { sol: { provider: 'openai', id: 'gpt-5.6-sol' } },
-    harnesses: { codex: { provider: 'openai', command: ['codex', '{model}'] } },
-    archetypes: { worker: {} },
-    bindings: { my_role: 'sol' },
-  });
-  const snapText = serializeSnapshot(profile);
-  const doc = parseSnapshotDocument(snapText, 'snap.yaml');
-  assert.ok(Object.keys(doc.executors).length >= 1);
-  assert.ok(Object.hasOwn(doc.executors, 'sol') || Object.keys(doc.executors).some((k) => k.includes('sol')));
-  assert.deepEqual(doc.bindings, { my_role: { model: 'sol' } });
-  const snap2 = serializeSnapshot(profile);
-  assert.equal(snapText, snap2);
-});
-
-test('serializeSnapshot all-native profile with zero dials/bindings', () => {
-  const profile = parseDoc({
-    schema_version: 4,
-    models: { sol: { provider: 'openai', id: 'sol-id' } },
-    harnesses: { codex: { provider: 'openai', command: ['codex', '{model}'] } },
-  });
-  // remove bindings/dials to simulate all-native
-  const emptyBindingsProfile: ExecutorProfile = { ...profile, bindings: {}, dials: {}, archetypes: {} };
-  const snapText = serializeSnapshot(emptyBindingsProfile);
-  const doc = parseSnapshotDocument(snapText, 'snap.yaml');
-  assert.ok(Object.hasOwn(doc.executors, 'current-host'));
-  assert.ok(Object.hasOwn(doc.executors, 'sol'));
-  assert.deepEqual(doc.bindings, {});
-  assert.deepEqual(doc.archetypes, {});
-  assert.equal(doc.constraints, null);
-  // no synthesized "*" binding
-  assert.ok(!Object.hasOwn(doc.bindings, '*'));
-  // reparses byte-stable
-  assert.equal(serializeSnapshot(emptyBindingsProfile), snapText);
-});
-
-test('parseSnapshotDocument rejects pre-dials snapshots', () => {
-  assert.throws(
-    () => parseSnapshotDocument('executors:\n  foo:\n    adapter: command\n    command: [x]\n', 'old.yaml'),
-    (err: unknown) => err instanceof ExecutorProfileError && /pre-dials run snapshot/.test(err.message) && /snapshot_version 3/.test(err.message),
-  );
-  assert.throws(
-    () => parseSnapshotDocument('snapshot_version: 2\nexecutors:\n  foo:\n    adapter: command\n    command: [x]\n', 'old.yaml'),
-    /pre-dials run snapshot/,
-  );
-});
-
-test('snapshot eligibility round-trip', () => {
-  const profile = parseDoc({
-    schema_version: 4,
-    models: { sol: { provider: 'openai', eligibility: { worker: 'forbidden' } } },
-    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
-  });
-  const snapText = serializeSnapshot(profile);
-  const doc = parseSnapshotDocument(snapText, 'snap.yaml');
-  assert.equal(doc.executors['sol']!.eligibility['worker'], 'forbidden');
-});
-
-

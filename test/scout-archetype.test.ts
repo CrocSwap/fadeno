@@ -111,13 +111,13 @@ test('archetypes: a fallback cycle is refused at parse', () => {
   );
 });
 
-test('archetypes: boolean aliases parse to required/none', () => {
+test('an archetype entry carries only what a catalog can say about it', () => {
   const profile = parseDoc({
     schema_version: 4,
     models: { 'rw-model': { provider: 'openai', id: 'rw-model' } },
     harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.stdout.write(\'x\')'] } },
     archetypes: { worker: { }, reviewer: { } },
   });
-  assert.deepEqual(profile.archetypes.worker, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null, description: null });
-  assert.deepEqual(profile.archetypes.reviewer, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null, description: null });
+  assert.deepEqual(profile.archetypes.worker, { fallback: null, description: null });
+  assert.deepEqual(profile.archetypes.reviewer, { fallback: null, description: null });
 });

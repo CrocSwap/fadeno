@@ -163,27 +163,17 @@ test('the claude harness can escalate its own models — the asymmetry that moti
   );
 });
 
-test('a director reaches the exec variant by POLICY, never by naming a lane on the dial', () => {
-  // The one place a variant is chosen. `worker opus` takes the base claude
-  // lane; `director opus` cannot (that lane declares `director: forbidden`), so
-  // resolution falls through to the first variant that permits it. Since the
-  // base lane opened its shell the fall-through is about NAMING, not
-  // capability: both argvs can run `fadeno`, and `variant: exec` on the ledger
-  // row is what tells the two dispatches apart.
+test('every archetype takes the same lane, because a lane is an argv and nothing more', () => {
+  // There used to be a second claude lane here, reached by policy: the base
+  // lane declared `director: forbidden` and resolution fell through to an
+  // `exec` variant whose argv was byte-identical. It existed to NAME the
+  // delivery, and named it after a distinction Fadeno no longer draws.
   const profile = catalogFor('claude');
-  const worker = resolveDelivery(parseDialRef('opus', 'test'), profile, 'claude', { archetype: 'worker' });
-  assert.equal(worker.variant, null);
-  assert.equal(worker.hostCandidate, true, 'a worker is delivered in-session under the claude host');
-
-  const director = resolveDelivery(parseDialRef('opus', 'test'), profile, 'claude', { archetype: 'director' });
-  assert.equal(director.variant, 'exec');
-  assert.equal(director.hostCandidate, false, 'an in-session agent cannot spawn subagents, so it cannot coordinate');
-  assert.ok(
-    argvGrantsFadenoShell(
-      (director.spec as { fallbackCommand?: string[] | null }).fallbackCommand
-        ?? (director.spec as { command?: string[] }).command
-        ?? [],
-    ),
-    'the exec variant is a lane that can actually run fadeno',
-  );
+  const worker = resolveDelivery(parseDialRef('opus', 'test'), profile, 'claude');
+  const director = resolveDelivery(parseDialRef('opus', 'test'), profile, 'claude');
+  assert.deepEqual(worker.spec, director.spec);
+  assert.equal(worker.hostCandidate, true, 'opus is delivered in-session under the claude host');
+  // The lane a spawned claude would take can run `fadeno`, which is what a
+  // director actually needs — checked in the argv, never in a declaration.
+  assert.ok(argvGrantsFadenoShell((director.spec as { fallbackCommand?: string[] | null }).fallbackCommand ?? []));
 });

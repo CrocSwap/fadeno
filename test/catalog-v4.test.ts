@@ -8,16 +8,11 @@ import { prepareDispatch } from '../src/lib/spawn.ts';
 import { loadGlobalProfile, loadLayeredProfile } from '../src/lib/config-layers.ts';
 import {
   argvGrantsFadenoShell,
-  eligibilityFor,
   ExecutorProfileError,
   formatDialRef,
   parseDialRef,
   parseExecutorProfile,
-  parseSnapshotDocument,
   resolveDelivery,
-  serializeSnapshot,
-  SNAPSHOT_ARCHETYPE_SEPARATOR,
-  snapshotExecutor,
   writeLocalDialState,
   type HarnessId,
 } from '../src/lib/executors.ts';
@@ -88,58 +83,6 @@ test('v4: an explicit `on <harness>` resolves onto that harness, with its spelli
     // putting `host: true` on `current-host` alone.
     assert.equal(compiled.hostCandidate, false, host);
   }
-});
-
-// 3. Variant by policy.
-
-test('v4: policy chooses the variant; a dial never names one', () => {
-  const profile = starter('claude');
-  const worker = resolveDelivery(parseDialRef('opus', 't'), profile, 'claude', { archetype: 'worker' });
-  assert.equal(worker.variant, null, 'the base lane, because nothing forbids a worker there');
-
-  const director = resolveDelivery(parseDialRef('opus', 't'), profile, 'claude', { archetype: 'director' });
-  assert.equal(director.variant, 'exec');
-  const argv = director.spec.adapter === 'command'
-    ? director.spec.command
-    : (director.spec as { fallbackCommand: string[] | null }).fallbackCommand ?? [];
-  // Asked of the predicate that actually reads this argv, not of a token that
-  // happens to be in it: a director lane has to be able to run `fadeno`, and
-  // `argvGrantsFadenoShell` is the one place that question is answered. Pinning
-  // a literal here is what made this assertion a second, drifting copy of the
-  // rule when the lane traded `--allowedTools Bash` for
-  // `--dangerously-skip-permissions`.
-  assert.ok(argvGrantsFadenoShell(argv), 'the exec variant can run fadeno');
-  // And the ref the user typed is unchanged: the variant is not on the dial.
-  assert.equal(formatDialRef(director.ref), 'opus');
-});
-
-test('the claude exec variant lifts `director` on an argv identical to the base lane', () => {
-  // Since the base lane opened its shell (`--dangerously-skip-permissions`),
-  // the variant grants nothing extra. It is the ELIGIBILITY carrier: the base
-  // lane forbids
-  // `director`, policy falls through, and the delivery gets the name `exec` in
-  // the ledger row and run snapshot — the only thing that tells a director
-  // dispatch apart from a worker dispatch that ran the identical command. If
-  // this assertion ever has to be relaxed, the catalog comment must say why.
-  const profile = starter('claude');
-  const claude = profile.harnesses.claude!;
-  assert.deepEqual(
-    claude.variants!.exec!.command,
-    claude.command!.command,
-    'exec is the base argv, not an escalation of it',
-  );
-
-  const worker = resolveDelivery(parseDialRef('opus', 't'), profile, 'claude', { archetype: 'worker' });
-  const director = resolveDelivery(parseDialRef('opus', 't'), profile, 'claude', { archetype: 'director' });
-  assert.equal(worker.variant, null);
-  assert.equal(director.variant, 'exec');
-  // The lift is in the eligibility, and only there.
-  assert.equal(eligibilityFor(worker.spec, 'director'), 'forbidden');
-  assert.equal(eligibilityFor(director.spec, 'director'), 'eligible');
-  const argvOf = (d: typeof worker) => (d.spec.adapter === 'command'
-    ? d.spec.command
-    : (d.spec as { fallbackCommand: string[] | null }).fallbackCommand ?? []);
-  assert.deepEqual(argvOf(director), argvOf(worker), 'same substituted argv, different name');
 });
 
 test('the claude command lane carries the headless-approval flag every other vendor has', () => {
@@ -281,41 +224,6 @@ test('v4: `harnesses:` under schema_version 3 is refused, naming the version it 
   );
 });
 
-// 6. Snapshot compatibility.
-
-test('v4: a committed v3 run snapshot still parses, unchanged', () => {
-  // The acceptance the plan names. `snapshot_version` did NOT move: the
-  // compiled executors map was already post-compile and harness-neutral, so a
-  // snapshot written before v4 replays byte-for-byte. Only its passthrough
-  // metadata key changed, and a stored `driver:` is read through the same
-  // legacy name map a dial ref uses.
-  const snapshot = [
-    'snapshot_version: 3',
-    'executors:',
-    '  current-host:',
-    '    adapter: host',
-    '    model: current-host',
-    '    reasoning_effort: default',
-    '    agent_type: "*"',
-    '    provider: current-host',
-    '    driver: current-host',
-    '  opus:',
-    '    adapter: command',
-    '    command: [claude, -p, --model, opus]',
-    '    provider: anthropic',
-    '    driver: claude-exec',
-    '    model: opus',
-    'archetypes:',
-    '  worker: {}',
-    '',
-  ].join('\n');
-  const parsed = parseSnapshotDocument(snapshot, 'profile.yaml (v3 fixture)');
-  const opus = parsed.executors.opus!;
-  assert.equal(opus.adapter, 'command');
-  assert.equal(opus.harness, 'claude', 'a stored `driver` reads back as the harness it always named');
-  assert.deepEqual((opus as { command: string[] }).command, ['claude', '-p', '--model', 'opus']);
-});
-
 // 7. A bare shell.
 
 test('v4: from a bare shell nothing is a host lane, and nothing about the model refuses a dial', (t) => {
@@ -328,13 +236,15 @@ test('v4: from a bare shell nothing is a host lane, and nothing about the model 
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
     models: {
       sol: { provider: 'openai', id: 'gpt-sol', effort: 'high' },
-      gated: { provider: 'anthropic', id: 'gated', eligibility: { worker: 'forbidden' } },
+      gated: { provider: 'anthropic', id: 'gated' },
     },
     archetypes: { worker: {}, scout: {} },
   }));
 
   // Registry-only validation: the dial lands, and nothing about the model is
-  // asked to justify itself at set time.
+  // asked to justify itself at set time. (`gated` was a model the catalog
+  // forbade the worker archetype on; Fadeno no longer judges which archetypes
+  // a model may serve, so the key is a load error and the pairing is fine.)
   assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'worker', model: 'gated', session: true }));
 
   // Every dial with a command lane resolves to it; the base dial has none.
@@ -526,35 +436,6 @@ test('dispatch\'s host-lane note agrees with dial resolve on the no-argv shapes'
   assert.match(refusal, /nothing to invoke/);
 });
 
-// --- Snapshots carry the policy-chosen variant -----------------------------
-
-test('a run snapshot carries the archetype-specific lane, so drive and dispatch agree', (t) => {
-  const root = tempRepo(t);
-  const profile = starter('claude');
-  const snapshot = parseSnapshotDocument(serializeSnapshot(profile), 'profile.yaml');
-  // The base entry is the plain claude lane; the director entry is the exec
-  // variant. Keyed by ref alone, `drive` refused `director opus` on
-  // eligibility while `dispatch` delivered it.
-  const base = snapshot.executors.opus!;
-  assert.equal(base.variant, undefined);
-  const director = snapshotExecutor(snapshot, 'opus', 'director')!;
-  assert.notEqual(director, base);
-  assert.equal(director.variant, 'exec');
-  assert.equal(eligibilityFor(director, 'director'), 'eligible');
-  assert.equal(eligibilityFor(base, 'director'), 'forbidden');
-  const argv = director.adapter === 'command'
-    ? director.command
-    : (director as { fallbackCommand: string[] | null }).fallbackCommand ?? [];
-  // Through the predicate, not a token: the snapshot has to carry a lane that
-  // can really run `fadeno`, and which token proves that changed on 2026-09-06.
-  assert.ok(argvGrantsFadenoShell(argv));
-  // Additive: a lookup with no archetype, or for an archetype policy does not
-  // move, lands on the plain ref — which is what an older snapshot has.
-  assert.equal(snapshotExecutor(snapshot, 'opus', null), base);
-  assert.equal(snapshotExecutor(snapshot, 'opus', 'worker'), base);
-  void root;
-});
-
 test('host.identity: session delivers only the session\'s own identity', () => {
   for (const host of ['opencode', 'omp'] as const) {
     const profile = starter(host);
@@ -577,42 +458,6 @@ test('host.identity: session delivers only the session\'s own identity', () => {
   const codex = starter('codex');
   assert.equal(codex.harnesses.codex?.host?.identity, 'model');
   assert.equal(resolveDelivery({ model: 'luna' }, codex, 'codex', { archetype: 'worker' }).hostCandidate, true);
-});
-
-test('harness-level eligibility gates the host lane too, unless host.eligibility says otherwise', () => {
-  // A v3 route `{ host: true, command, eligibility }` gated BOTH lanes with one
-  // map. Splitting it into `host:` + `command:` must not drop half of that.
-  const doc = (extra: Record<string, unknown>) => parseExecutorProfile(stringifyYaml({
-    schema_version: 4,
-    models: { m: { provider: 'p', id: 'm' } },
-    harnesses: { h: { provider: 'p', host: { effort_channel: 'none', ...extra }, command: ['run'], eligibility: { director: 'forbidden' } } },
-    archetypes: { director: {} },
-  }), 'test.yaml', 'h' as HarnessId);
-
-  const inherited = resolveDelivery({ model: 'm' }, doc({}), 'h' as HarnessId, { archetype: 'director' });
-  assert.equal(inherited.hostCandidate, false, 'harness-level eligibility reaches the host lane');
-
-  const overridden = resolveDelivery({ model: 'm' }, doc({ eligibility: { director: 'eligible' } }), 'h' as HarnessId, { archetype: 'director' });
-  assert.equal(overridden.hostCandidate, true, 'host.eligibility states its own answer and wins');
-});
-
-test('eligibility with no command lane, and a `standalone` harness, are refused at load', () => {
-  assert.throws(
-    () => parseExecutorProfile(stringifyYaml({
-      schema_version: 4,
-      models: { m: { provider: 'p', id: 'm' } },
-      harnesses: { h: { provider: 'p', host: { effort_channel: 'none' }, eligibility: { director: 'forbidden' } } },
-    }), 'test.yaml'),
-    /declares `eligibility:` with no `command:`[\s\S]*Move it to `.*\.host\.eligibility`/,
-  );
-  assert.throws(
-    () => parseExecutorProfile(stringifyYaml({
-      schema_version: 4,
-      models: { m: { provider: 'p', id: 'm' } },
-      harnesses: { p: { provider: 'p', command: ['run'] }, standalone: { host: { effort_channel: 'none' } } },
-    }), 'test.yaml'),
-    /`harnesses\.standalone` is not a harness/,
-  );
 });
 
 test('a bare shell reports harness: null for current-host, not a name that is not in the table', (t) => {
@@ -733,7 +578,7 @@ test('user layer: none of those shapes can reach a parse throw', (t) => {
       broken_delivery: { provider: 'anthropic', delivery: { route: 42 } },
       noprovider: { id: 'nope' },
       'Not-An-Identifier': { provider: 'anthropic' },
-      badkeys: { provider: 'anthropic', id: 'bk', made_up_key: true, eligibility: { worker: 'sideways' } },
+      badkeys: { provider: 'anthropic', id: 'bk', made_up_key: true, eligibility: { worker: 'forbidden' } },
       notamapping: 'just a string',
     },
     bindings: { lead: { model: 'opus', via: 'muse-code' } },
@@ -742,8 +587,8 @@ test('user layer: none of those shapes can reach a parse throw', (t) => {
   const models = layered.profile.models;
   assert.equal(models['legacy']?.harness, 'claude');
   assert.equal(models['legacy']?.spellings['claude'], 'legacy-x');
-  assert.equal(models['badkeys']?.provider, 'anthropic', 'unknown keys and bad eligibility are stripped, not fatal');
-  assert.deepEqual(models['badkeys']?.eligibility, {});
+  assert.equal(models['badkeys']?.provider, 'anthropic', 'unknown keys — including a removed one — are stripped, not fatal');
+  assert.equal((models['badkeys'] as Record<string, unknown>).eligibility, undefined);
   for (const gone of ['broken_delivery', 'noprovider', 'Not-An-Identifier', 'notamapping']) {
     assert.equal(Object.hasOwn(models, gone), false, `${gone} must be dropped, not loaded`);
   }

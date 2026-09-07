@@ -1,13 +1,11 @@
 # Fadeno's model registry and harness table.
 #
 # A dial names WHO runs an archetype — a model, an optional effort, and
-# optionally WHICH HARNESS runs it. It never names a lane, a driver, or an
-# argv. The HOST harness (the one Fadeno is invoked inside) is discovered at
-# dispatch time from ambient signals, never from stored state. At dispatch time
-# the pair (dial harness, host) plus policy resolves the delivery: same harness
-# runs in-session, a different one spawns that harness's CLI, and policy
-# adjusts (an effort pin the host cannot carry, eligibility, shadow pairs,
-# locked run snapshots).
+# optionally WHICH HARNESS runs it. It never names a lane or an argv. The HOST
+# harness (the one Fadeno is invoked inside) is discovered at dispatch time
+# from ambient signals, never from stored state, and the pair (dial harness,
+# host) decides the lane: the same harness delivers in-session, any other
+# spawns that harness's CLI.
 #
 # User ~/.config/fadeno/executors.yaml and project .fadeno/executors.yaml may
 # extend or override these names under the same layering rules.
@@ -86,31 +84,25 @@ models:
 # models of that provider default to this harness — exactly one harness may
 # claim a given provider.
 #
-# This replaced six near-identical `routes.<host>` tables. Their only real
-# difference was which entry carried `host: true`, and that bit is exactly
-# "dial harness == host harness" — a question about the call, not about the
-# catalog, so it is answered at dispatch time instead of stored six times.
-#
-# `eligibility:` sits on the LANE it constrains: on `host:` for the in-session
-# lane, at harness level for the base `command:` lane, and inside a variant for
-# that variant. A variant does not inherit the base lane's eligibility — it is
-# a different argv with different capabilities, which is the whole reason it
-# has its own name. Eligibility merges with the model's, strictest wins, and is
-# structural: it covers unregistered models falling through to the lane too.
+# A harness has ONE command lane: an argv, and nothing else. Named variants and
+# per-archetype `eligibility:` are gone — they existed so policy could route a
+# director to a differently-named lane, and Fadeno no longer decides which
+# archetypes a model may serve. A repo that wants a second spelling of a lane
+# (a restricted argv, a direct rather than proxied OpenCode call) declares it
+# as its own harness id and dials it with `--harness`.
 harnesses:
   claude:
     provider: anthropic
     host:
-      # Claude's Agent tool has no effort channel at all, so a pinned effort
-      # cannot be materialized into a host slot: it selects the LANE instead
-      # (`decideLane`), and `fadeno steering apply` writes no host agent file.
+      # Claude's Agent tool has no effort channel at all, so a host-lane spawn
+      # inherits whatever effort the session is running at.
       effort_channel: none
       # The relay: the model that reads a resolver answer and forwards a
       # delivery, doing none of the role work itself. Per harness because a
       # relay must be a model that harness's own provider already serves. Not
-      # an archetype — it carries no policy the kernel enforces, and listing it
-      # in `fadeno dial` would imply it is work to be dialed. Absent for a
-      # harness = keep the caller's built-in default.
+      # an archetype — it carries no policy, and listing it in `fadeno dial`
+      # would imply it is work to be dialed. Absent for a harness = keep the
+      # caller's built-in default.
       #
       # These are dogfood receipts, not guesses. 2026-08-12 A/B: haiku broke
       # the relay contract — it summarized deliveries instead of relaying them
@@ -122,9 +114,6 @@ harnesses:
       # Claude's proxies inherit session effort (no effort channel), so a pin
       # here would be inert — model only.
       relay: sonnet
-      # An in-session Claude agent cannot spawn subagents, so it cannot
-      # coordinate; a director delivered here would do the work itself.
-      eligibility: { director: forbidden }
     # `--dangerously-skip-permissions` is Claude Code's headless-approval flag,
     # and it sits here for the same reason every other vendor's command lane
     # carries its own: codex has
@@ -157,52 +146,30 @@ harnesses:
     # network, a package registry, and any credential in the environment. Side
     # effects outside the worktree are uncontained, exactly as they already are
     # for the five lanes above and below. A project that wants a tighter posture
-    # declares its OWN variant, with its own name and its own restricting flags,
-    # and lets policy or an explicit `--harness` reach it — see the permissions
-    # note at the bottom of this file.
+    # declares its OWN harness entry, with its own name and its own restricting
+    # flags — see the permissions note at the bottom of this file.
     command: [ claude, -p, --model, "{model}", --dangerously-skip-permissions ]
-    # No longer a capability claim — the `exec` variant below is the SAME argv,
-    # so both claude lanes can run `fadeno`. What this block still does is make
-    # a director resolve to a NAMED lane: the base lane forbids the archetype,
-    # policy falls through to the first variant that does not, and the ledger
-    # row and run snapshot then record `variant: exec`. That is how a reader
-    # tells a director dispatch from a worker dispatch that ran the identical
-    # command. Drop it and `director` silently becomes an unnamed base-lane
-    # delivery.
-    eligibility: { director: forbidden }
-    variants:
-      # The lane a director takes — and, since the base lane opened its shell,
-      # nothing more than that. Its argv is byte-identical to the base lane's;
-      # the variant grants no capability the base lane lacks, it only carries
-      # the `director` eligibility the base lane withholds. Keep the two argvs
-      # identical (a test asserts it); if they ever have to diverge, the reason
-      # goes in this comment. Chosen by POLICY, never named on a dial. (Was the
-      # `anthropic-exec` route / `--via claude-exec`.)
-      exec:
-        command: [ claude, -p, --model, "{model}", --dangerously-skip-permissions ]
   codex:
     provider: openai
     host:
-      # A Codex agent TOML carries `model_reasoning_effort`, so a pinned effort
-      # CAN be materialized: `fadeno steering apply` writes the host agent file
-      # and a fresh session then delivers in-session at the pin.
+      # A Codex agent TOML carries `model_reasoning_effort`, and Codex honours
+      # an explicit model and effort on a spawn where no agent file overrides
+      # them — so a host-lane spawn here can be delivered at the dialed effort.
       effort_channel: agent-file
-      # Codex bakes both model and effort into the broker TOML, so effort is
+      # Codex bakes both model and effort into the relay's TOML, so effort is
       # pinned here rather than left at luna's xhigh registry default.
       #
       # Raised low -> high 2026-08-20. Unlike the model choice above, this is a
-      # judgment call and not a receipt: luna is cheap enough that the broker's
-      # few relay tokens are not worth optimizing, and the broker's contract is
-      # not one instruction but a branch table (engine vs ordinary delivery,
-      # then command / host / restart_required / write_conflict) that it must
-      # route correctly every time. Raising effort on a model that ALREADY held
-      # the relay contract moves in the safe direction, which is why it does
-      # not need the A/B the rule above demands -- that rule guards changing
-      # WHO relays.
+      # judgment call and not a receipt: luna is cheap enough that the relay's
+      # few tokens are not worth optimizing, and its contract is not one
+      # instruction but a branch table it must route correctly every time.
+      # Raising effort on a model that ALREADY held the relay contract moves in
+      # the safe direction, which is why it does not need the A/B the rule
+      # above demands — that rule guards changing WHO relays.
       #
       # The failure mode to watch is the opposite of haiku's: a more capable
-      # broker is likelier to decide it can just do the work itself. Its
-      # instructions forbid that in every branch. If a broker is ever observed
+      # relay is likelier to decide it can just do the work itself. Its
+      # instructions forbid that in every branch. If a relay is ever observed
       # doing role work instead of dispatching, suspect this line first.
       relay: luna@high
     # `--dangerously-bypass-approvals-and-sandbox` is codex's headless-approval
@@ -225,18 +192,9 @@ harnesses:
     provider: xai
     host:
       effort_channel: none
-      # A Grok Build session cannot spawn a subagent that coordinates through
-      # fadeno, so a director delivered in-session would do the work itself.
-      eligibility: { director: forbidden }
     # `--always-approve` is the headless-approval flag.
     command: [ grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve ]
     models_command: [ grok, models ]
-    # Harness-level, so it holds on the COMMAND lane too, and for the same
-    # reason as the host block above: a spawned `grok` cannot dispatch back
-    # through fadeno either, so a director sent here would coordinate nothing.
-    # Stated twice because the two maps are merged per key — the host lane may
-    # relax what the harness forbids, and silence here would have let it.
-    eligibility: { director: forbidden }
   # google → Antigravity (`agy`). Executor only: Fadeno spawns it, never runs
   # inside it. NOT gemini-cli: that client is retired for individuals and dies
   # at auth with "IneligibleTierError", pointing at Antigravity as its
@@ -274,75 +232,60 @@ harnesses:
     command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
     models_command: [ agy, models ]
     effort_encoding: model-suffix
-    eligibility: { director: forbidden }
   # OpenCode: the universal adapter — home to no provider, and able to run
-  # anyone through `spellings`. Also a HOST (promoted from executor-only on
-  # 2026-08-22): role work is delivered by OpenCode's own subagents
-  # (.opencode/agents). `--variant` is OpenCode's reasoning-effort dial and
-  # accepts `default` as well as high/max/minimal, so {reasoning_effort}
-  # substitutes safely. `--auto` is its headless approval flag.
+  # anyone through `spellings`. Also a HOST: role work is delivered by
+  # OpenCode's own subagents (.opencode/agents). `--variant` is OpenCode's
+  # reasoning-effort dial and accepts `default` as well as high/max/minimal, so
+  # {reasoning_effort} substitutes safely. `--auto` is its headless approval
+  # flag.
   opencode:
     host:
       effort_channel: none
       # `session`, not `model`: the OpenCode plugin's rewrite sets only the
-      # agent NAME (`applyRewrite` → `subagent_type`), so a dialed model handed
-      # to a host spawn here would be silently ignored. So only `current-host`
-      # — the session's own identity — takes the host lane; a named model on
-      # `opencode` is a command delivery. That is exactly what v3 expressed by
-      # putting `host: true` on `routes.opencode.current-host` alone.
+      # agent NAME, so a dialed model handed to a host spawn here would be
+      # silently ignored. Only `current-host` — the session's own identity —
+      # takes the host lane; a named model on `opencode` is a command delivery.
       identity: session
-      # An in-session OpenCode subagent cannot coordinate through fadeno.
-      eligibility: { director: forbidden }
     command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
     models_command: [ opencode, models ]
     # The OpenRouter listing includes `openrouter/`; the `-m` argument must not
     # receive that prefix twice, so it is declared here rather than inlined.
+    # A model OpenCode serves DIRECTLY rather than through OpenRouter needs an
+    # argv without the prefix: declare it as its own harness entry and reach it
+    # with `--harness`.
     models_prefix: "openrouter/"
-    eligibility: { director: forbidden }
-    variants:
-      # A model served directly by OpenCode rather than through OpenRouter —
-      # no prefix on `-m`. (Was the `opencode-direct` route.)
-      direct:
-        command: [ opencode, run, -m, "{model}", --variant, "{reasoning_effort}", --auto ]
-        # Same argv capability as the base lane, so the same block: a spawned
-        # `opencode run` cannot run the fadeno command family either.
-        eligibility: { director: forbidden }
   # muse → Muse Code (`muse exec`). Executor only. Verified live 2026-08-16;
   # three spellings REJECTED before this one: `--prompt-file /dev/stdin` ("not
   # a regular file"), bare stdin ("missing prompt"), and `--prompt-file -`
   # (literal filename) — Muse Code reads prompts only from a regular file, so
-  # the command uses the {prompt_file} placeholder: the kernel substitutes its
-  # attested prompt snapshot's absolute path at spawn (the digest then attests
-  # exactly the bytes the executor reads). `--workspace .` verified to root
-  # tools at the spawn cwd (banner: "workspace root: . (explicit)"); a write
-  # landed in-place. `--reasoning-effort` accepts
+  # the command uses the {prompt_file} placeholder, which Fadeno substitutes
+  # with the composed prompt's absolute path at spawn. `--workspace .` verified
+  # to root tools at the spawn cwd (banner: "workspace root: . (explicit)"); a
+  # write landed in-place. `--reasoning-effort` accepts
   # none|minimal|low|medium|high|xhigh|ultra — NOT `default`, so an
   # unregistered model forced onto this harness fails loudly at the CLI.
   # `--trust-workspace --disable-approval --user-input-auto-resolve` is the
   # headless-approval trio (finer-grained than `--yolo`: the OS sandbox stays
   # on). Stdout is the report; banners go to stderr. No models listing
-  # subcommand — no dial-time probe. Engine repair re-asks travel on stdin,
-  # which file-reading executors ignore — a muse-dialed actor re-runs its
-  # recorded prompt instead (known limitation).
+  # subcommand — no dial-time probe.
   # A live probe with `--disable-write --disable-shell` read the workspace, was
   # physically denied the write tool, and still returned a report — so a
   # restricted muse lane genuinely works. It is not the default: a restriction
-  # is its own named variant, spelled out in its own command, never a second
-  # argv hidden beside this one.
+  # is its own named harness entry, spelled out in its own command, never a
+  # second argv hidden beside this one.
   muse:
     provider: muse
     command: [ muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log ]
-    eligibility: { director: forbidden }
   # omp is a native host with the same role-agent/task surface as OpenCode.
-  # Host only today: Fadeno runs inside it, and there is no headless omp CLI to
-  # spawn, so a dial that names `omp` from any other host answers
-  # `restart_required` rather than inventing a command.
+  # Host only: Fadeno runs inside it, and there is no headless omp CLI to
+  # spawn, so a dial that names `omp` from any other host has no lane at all
+  # rather than an invented command.
   omp:
     host:
       effort_channel: none
       # Same as OpenCode: the omp extension's rewrite sets only `agent`, so a
-      # dialed model cannot reach a host spawn. Only `current-host` is host-
-      # delivered here. (v3: `host: true` on `routes.omp.current-host` alone.)
+      # dialed model cannot reach a host spawn. Only `current-host` is
+      # host-delivered here.
       identity: session
 
 # Permissions: every command above is the PERMISSIVE argv for its vendor, and
@@ -352,8 +295,8 @@ harnesses:
 # silent-wrong-answer defects before it was removed. Enforcement belongs to
 # the vendor flags you can read in the argv (`--sandbox`, `--permission-mode`,
 # `--allowedTools`, `--disable-shell`), and containment belongs to isolated
-# worktrees, which are now the default for command dispatches. Worktrees
-# contain FILE writes; they are not a sandbox, and no lane above claims one.
+# worktrees. Worktrees contain FILE writes; they are not a sandbox, and no lane
+# above claims one.
 #
 # As of 2026-09-06 every lane carries its vendor's HEADLESS-APPROVAL flag and
 # no lane carries a restricting one. That is a deliberate posture, not an
@@ -364,39 +307,29 @@ harnesses:
 # that needed SSH, twice returning `Operation not permitted` for a worker
 # while the host's own SSH succeeded.
 #
-# To run something restricted, declare it as its OWN variant with its own name
-# (e.g. a `sandboxed` variant with `--sandbox read-only`) and let policy or an
-# explicit `--harness` reach it. A restriction spelled out in an argv is one a
-# reader can see; a restriction carried in metadata is one nobody knows about.
+# To run something restricted, declare it as its OWN harness entry with its own
+# name (a `claude-sandboxed` with `--permission-mode plan`, say) and reach it
+# with `--harness`. A restriction spelled out in an argv is one a reader can
+# see; a restriction carried in metadata is one nobody knows about.
 #
-# `requires_write:`, `write_variant:`, `routes:`, `relay:`, `driver:`,
-# `host: true`, `delivery:` and `unregistered_model_driver:` are REMOVED and
-# now error at load. See docs/experimental/harness-neutral-dials.md and
-# docs/experimental/permissions-and-isolation.md before reintroducing anything
-# of that shape.
-# `scout` is divergent artifact-producing work that must not mutate the
-# workspace. It is its own archetype: undialed it resolves to the host-native
-# base (current-host) like any other, never through another archetype's dial.
-# (`fallback` remains available for custom archetypes: binding-only — an
-# archetype without a dial resolves through its fallback's binding, never its
-# policy.)
-# `director` is high-level planning/orchestration delegated to a (usually
-# cheaper) model: it decomposes a side task and coordinates workers/reviewers
-# itself, via the fadeno CLI. That means it needs an argv that can actually run
-# `fadeno`. Every claude lane can (`--dangerously-skip-permissions`), as can
-# codex (`--dangerously-bypass-approvals-and-sandbox`); anthropic directors
-# still land on the `exec` variant, but for NAMING — the base lane declares
-# `eligibility: { director: forbidden }` so the delivery is recorded as
-# `variant: exec` — not because the base lane is incapable. Nothing enforces
-# this: check the command, not a declaration. The predicate that READS these
-# argvs for the `fadeno models` `fadeno_capable` column is
-# `argvGrantsFadenoShell`; it knows both vocabularies, and a new harness whose
-# lane spells approval some third way must be taught there or the column will
-# quietly answer `false` for it.
+# `requires_write:`, `write_variant:`, `variants:`, `eligibility:`,
+# `timeout_ms:`, `resume:`, `routes:`, `relay:`, `driver:`, `host: true`,
+# `delivery:` and `unregistered_model_driver:` are REMOVED and now error at
+# load.
+
 # The canonical archetypes. The set is open: add your own entry here with a
 # `description:` and a director will know when to reach for it. A description
 # is what a director reads when choosing what to spawn next, so write it as
-# the sentence that tells one archetype from another.
+# the sentence that tells one archetype from another. (`fallback:` remains
+# available too: an archetype with no dial of its own resolves through its
+# fallback's dial.)
+#
+# A director coordinates by spawning — which means its delivery needs an argv
+# that can run `fadeno`. Every lane above can; nothing enforces it, so check
+# the command rather than a declaration. `argvGrantsFadenoShell` is what reads
+# these argvs for the `fadeno models` `fadeno_capable` column, and a new
+# harness that spells approval some third way must be taught there or the
+# column will quietly answer `false` for it.
 archetypes:
   worker:
     description: Implements a described change in its own worktree, commits it on its branch, and reports what the tree holds.
@@ -412,30 +345,3 @@ archetypes:
 # Where a model nobody registered goes. Its id is passed verbatim, so this must
 # name a harness that can accept an arbitrary id — OpenCode via OpenRouter.
 unregistered_model_harness: opencode
-
-# Deterministic tool registry for `tool_call` steps (Priority 7 frozen contract).
-# `tool:` in a playbook is a logical capability name, never shell. Each name
-# must be bound here as a static argv array with optional positive timeout.
-# No shell is inserted: argv runs directly. An entry may explicitly name a shell
-# such as [sh, -c, "…"] — that is the operator's explicit choice, not Fadeno's.
-# No interpolation (`{`, `}`, `$`, backtick are rejected — this is a literal
-# argv, not a template). Only ready `tool_call` steps whose output schema is
-# `test-result` are automated via `fadeno tool-run`; Diff and other typed
-# outputs remain manual via `fadeno tool-complete`.
-#
-# Layering follows the same precedence as executors: project
-# `.fadeno/executors.yaml` overrides user `~/.config/fadeno/executors.yaml`
-# which overrides this shipped default, except a self-contained project catalog
-# with its own `models:` + `harnesses:` suppresses the builtin and user layers
-# entirely (see src/lib/config-layers.ts:projectIsComplete). Snapshotted per
-# run into `profile.yaml`; verification recomputes command_sha256 against that
-# snapshot.
-tools:
-  # Example (matches starter playbooks — `tool: test_runner`):
-  # test_runner:
-  #   command: [npm, test]
-  #   timeout_ms: 300000
-  # # or timeout in seconds:
-  # # test_runner:
-  # #   command: [npm, test]
-  # #   timeout: 300

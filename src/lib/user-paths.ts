@@ -7,26 +7,6 @@ import { join } from 'node:path';
 // differently from a catalog dial.
 import { formatDialRef, legacyDriverHarness, parseDialRef, type DialRef } from './executors.ts';
 
-/**
- * What a reader could not use in a document that already carries the current
- * `schema_version`.
- *
- * `error` means the document yields NOTHING through its reader — the stamp
- * says current and every read comes back empty, which is the failure the
- * persisted-state inventory exists to make loud. `warning` means the reader
- * got most of it and silently dropped a part, which is worth saying but is not
- * a broken file.
- *
- * Declared here rather than in `persisted-state.ts` because that module
- * imports this one (and `executors.ts` and `installations.ts`) and not the
- * other way round; this is the lowest module all three validators share.
- */
-export interface DocumentDefect {
-  severity: 'warning' | 'error';
-  /** A sentence completing "it …" — no leading capital, no trailing period. */
-  detail: string;
-}
-
 /** Inputs used to resolve Fadeno's user-level configuration locations. */
 export interface UserPathOptions {
   env?: Record<string, string | undefined>;
@@ -135,10 +115,9 @@ export function retiredStateDirs(paths: FadenoUserPaths): string[] {
 // --- atomic writes ---
 
 /**
- * Write `text` to `path` by rename, the way `writeInstallationManifest`
- * already does.
+ * Write `text` to `path` by rename.
  *
- * Every file under here is read by a concurrent process — a steering hook
+ * Every file under here is read by a concurrent process — a spawn hook
  * resolving dials while `fadeno dial` writes them is the normal case, not the
  * exception. A plain `writeFileSync` truncates in place, so a reader can
  * observe an empty prefix and conclude "no dials", which is a wrong answer
@@ -251,8 +230,8 @@ function interpretUserDials(doc: Record<string, unknown>, path: string): UserDia
       }
       // Refused, not dropped, and refused HERE rather than left to the profile
       // parser. `parseExecutorProfile` rejects this key with the same pointer,
-      // but a user dial never reaches it: `drive` casts this map straight to
-      // `DialRef`, so the flag used to ride along invisibly and mean nothing.
+      // but a user dial never reaches it — every reader casts this map straight
+      // to `DialRef`, so the flag used to ride along invisibly and mean nothing.
       // Silently ignoring a key someone wrote in order to override a guard is
       // the failure the permissions cut exists to end — and the guard it named
       // does not exist any more, so the file is stating something untrue.
@@ -277,34 +256,6 @@ function interpretUserDials(doc: Record<string, unknown>, path: string): UserDia
     }
   }
   return { dials: out, problems, fatal };
-}
-
-/**
- * What `readUserDials` could not use in an already-parsed dials document, or
- * null when it reads the whole thing.
- *
- * The audit's question, answered by the reader's own code. A stamp is not a
- * schema: `{"schema_version": 1, "dials": []}` carries the CURRENT version and
- * still yields no dials, so an audit that reads only the stamp reports a
- * healthy file whose every read comes back empty.
- */
-export function validateUserDialsDocument(doc: unknown, path = 'dials.json'): DocumentDefect | null {
-  if (doc == null || typeof doc !== 'object' || Array.isArray(doc)) {
-    return { severity: 'error', detail: 'is not a JSON object' };
-  }
-  let reading: UserDialsReading;
-  try {
-    reading = interpretUserDials(doc as Record<string, unknown>, path);
-  } catch (err) {
-    return { severity: 'error', detail: (err as Error).message };
-  }
-  // A read that THROWS, or a document that yields no dials at all while
-  // holding entries, is the whole file gone; anything else is one dropped key.
-  if (reading.fatal != null) return { severity: 'error', detail: reading.fatal };
-  const first = reading.problems[0];
-  if (first == null) return null;
-  const yieldsNothing = Object.keys(reading.dials).length === 0;
-  return { severity: yieldsNothing ? 'error' : 'warning', detail: first };
 }
 
 export function readUserDials(options: UserPathOptions = {}): Record<string, { model: string; effort?: string; harness?: string }> {
@@ -403,28 +354,6 @@ function verificationRow(entry: unknown): ModelVerification | null {
   return { harness, model: map.model, verified_at: map.verified_at };
 }
 
-/**
- * What `readVerifiedModels` could not use in an already-parsed cache document,
- * or null when it reads the whole thing.
- *
- * Rows are checked too, not just the envelope: a stamped document holding
- * three rows the reader skips is a cache that reports zero entries while the
- * file says three — the same silent emptiness as a missing `verifications`
- * key, just further in.
- */
-export function validateVerificationDocument(doc: unknown): DocumentDefect | null {
-  const read = interpretVerificationDocument(doc);
-  // `understood: false` is what makes `recordVerifiedModel` refuse to write:
-  // the whole cache is unreadable, not one row of it.
-  if (read.problem != null) return { severity: 'error', detail: read.problem };
-  const unusable = read.rows.filter((row) => verificationRow(row) == null).length;
-  if (unusable === 0) return null;
-  return {
-    severity: unusable === read.rows.length ? 'error' : 'warning',
-    detail: `has ${unusable} of ${read.rows.length} row(s) that are not {harness, model, verified_at}, which the reader drops`,
-  };
-}
-
 function readVerificationDocument(path: string): { rows: unknown[]; understood: boolean } {
   if (!existsSync(path)) return { rows: [], understood: true };
   const text = readFileSync(path, 'utf8').trim();
@@ -507,8 +436,8 @@ export function removeVerifiedModels(
 
 /**
  * `$CODEX_HOME/agents`, else `<home>/.codex/agents` — where Codex looks for
- * user-scope role agents, and so where `steering apply --codex` writes them,
- * `status` and `doctor` look for them, and `uninstall` removes them.
+ * user-scope agents, and so where `status` looks for a hand-written one whose
+ * name Fadeno also routes. Fadeno materializes none of them itself.
  *
  * This lived as four hand-copied expressions, and one of them disagreed.
  * Three read `options?.env?.CODEX_HOME ?? process.env.CODEX_HOME`; the fourth
