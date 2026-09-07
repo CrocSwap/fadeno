@@ -51,7 +51,7 @@ test('setup links the CLI rather than copying it, and says when the directory is
   assert.equal(readlinkSync(result.link.path), source);
   assert.equal(result.link.onPath, false);
   assert.match(result.notices.join('\n'), /is not on this shell's PATH/);
-  assert.match(result.notices.join('\n'), /there is no second copy to keep in step/);
+  assert.match(result.notices.join('\n'), /It is a link, not a copy/);
 
   // Running it again is a no-op, and running it against a new plugin build
   // retargets the same link — which is the whole point of a link.

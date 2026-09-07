@@ -285,8 +285,14 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
   const removed = [...sweepRetiredState(paths), ...sweepManagedAgents(repoRoot, opts.userPathOptions)];
   const permission = opts.target === 'claude' ? ensureClaudePermission(opts.userPathOptions, notices) : null;
 
+  // Name the target, and say what it means rather than what it usually means:
+  // the link follows whatever CLI ran setup. Run from the plugin's launcher it
+  // follows the plugin; run from a checkout it follows that checkout. Claiming
+  // the first unconditionally would be a sentence that is sometimes false, and
+  // the whole reason for a link over a copy is that nobody has to wonder.
   notices.unshift(
-    `Fadeno ${packageVersion()} linked at ${link.path} -> ${link.target}. It is a link, so it follows the plugin: there is no second copy to keep in step.`,
+    `Fadeno ${packageVersion()} linked at ${link.path} -> ${link.target}. It is a link, not a copy: \`fadeno\` runs whatever is at that path, ` +
+      "so there is no second CLI to keep in step. Run setup from the plugin's own launcher to point it at the plugin instead.",
   );
   if (!link.onPath) {
     notices.push(`${paths.binDir} is not on this shell's PATH — add it, or the \`fadeno\` command will not be found.`);
