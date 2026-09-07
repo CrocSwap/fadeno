@@ -452,6 +452,343 @@ test('dispatches: a malformed stop row still renders as a stop, never as a clean
   assert.ok(!line.includes('no uncommitted changes'), line);
 });
 
+// --- the tail contest --------------------------------------------------------
+
+/**
+ * The stop hook has no matcher and fires for EVERY subagent, so without a
+ * ranking each ordinary `Explore` / `Plan` / `general-purpose` stop takes one
+ * of the ten slots the listing has. Noise that drowns a warning is how the
+ * polymarket artifact loss stayed invisible for two dispatches.
+ *
+ * What is ranked is what each row says is AT RISK — never whether Fadeno
+ * steered the spawn. Every reported incident had no Fadeno record at all, and
+ * that absence is exactly why nothing recorded them.
+ */
+
+/** A killed in-session agent: nothing named it, it never signed off, edits are in the tree. */
+function killedInSession(at: string, paths: string[]): Record<string, unknown> {
+  return stopRow({
+    timestamp: at,
+    agent_type: 'general-purpose',
+    last_message: { present: false, chars: null, excerpt: null },
+    workspace: { tree: null, git: 'dirty', entries: paths, entry_count: paths.length, truncated: false, note: null },
+  });
+}
+
+/** An ordinary subagent that reached its own turn end, in the user's dirty tree. */
+function signedOff(at: string, agentType = 'Explore'): Record<string, unknown> {
+  return stopRow({
+    timestamp: at,
+    agent_type: agentType,
+    last_message: { present: true, chars: 20, excerpt: 'Read four files.' },
+  });
+}
+
+function commandRequest(id: string, at: string): Record<string, unknown> {
+  return {
+    format: DISPATCHES_FORMAT,
+    timestamp: at,
+    event: 'dispatch_requested',
+    dispatch_id: id,
+    archetype: 'worker',
+    executor: 'echo-worker',
+    transport: 'command',
+  };
+}
+
+/**
+ * THE REPORTED CASE, as a regression test.
+ *
+ * polymarket, 2026-09-05: a session 429 killed five host agents at once. They
+ * had been spawned directly in-session — before `dispatch-open` existed — so
+ * there was no dispatch id, no worktree and no Fadeno record of any kind. One
+ * died mid-edit leaving five partial files, and roughly seven hours passed
+ * before a human found out by hand.
+ *
+ * The stop rows now exist. This is the other half: that a busy session
+ * afterwards cannot push them off the end of the listing.
+ */
+test('dispatches: five agents killed in-session survive a tail that the work after them would fill', (t) => {
+  const killed = [1, 2, 3, 4, 5].map((n) =>
+    killedInSession(`2026-09-05T14:0${n}:00.000Z`, ['M src/a.ts', 'M src/b.ts', '?? src/c.ts']),
+  );
+  // Twelve ordinary entries land after the incident — a plain chronological
+  // tail of ten would show these and nothing else.
+  const after = Array.from({ length: 12 }, (_, i) => commandRequest(`aa${i}`.padEnd(8, '0'), `2026-09-05T15:${String(i).padStart(2, '0')}:00.000Z`));
+  const root = seed(t, [...killed, ...after]);
+
+  const result = runDispatches({ repoRoot: root });
+  const stops = result.entries.filter((entry) => entry.kind === 'stopped');
+  assert.equal(stops.length, 5, `all five killed agents must survive the tail:\n${result.lines.join('\n')}`);
+  for (const stop of stops) {
+    assert.equal(stop.stop?.risk, 'unowned_dirty');
+    assert.equal(stop.stop?.correlation.dispatchId, null, 'the incident had no dispatch id — that is the point');
+  }
+  // Nothing was collapsed: not one of these left the system anything to know.
+  assert.deepEqual(result.stopsCollapsed, []);
+  assert.ok(result.lines.some((line) => line.includes('3 uncommitted paths — M src/a.ts')), result.lines.join('\n'));
+});
+
+test('dispatches: an unsettled dispatch outranks recency; a clean uncorrelated stop never competes', (t) => {
+  const dead = 'deadbeef-1111-2222-3333-444455556666';
+  const root = seed(t, [
+    adhocOpen(dead),
+    // The stop that matters, and the OLDEST contender in the log.
+    stopRow({
+      timestamp: '2026-09-06T09:05:00.000Z',
+      last_message: { present: false, chars: null, excerpt: null },
+      dispatch_correlation: { dispatch_id: dead, scope: 'adhoc', basis: 'host_worktree_path' },
+    }),
+    // A clean uncorrelated stop, newer. Collapsed: nothing it could point at.
+    stopRow({
+      timestamp: '2026-09-06T09:06:00.000Z',
+      last_message: { present: false, chars: null, excerpt: null },
+      workspace: { tree: null, git: 'clean', entries: [], entry_count: 0, truncated: false, note: null },
+    }),
+    // An unmeasured stop, newest of all. Ranks like any ordinary entry.
+    stopRow({
+      timestamp: '2026-09-06T09:07:00.000Z',
+      last_message: { present: false, chars: null, excerpt: null },
+      workspace: { tree: null, git: 'unavailable', entries: null, entry_count: null, truncated: false, note: 'not a git repository' },
+    }),
+  ]);
+
+  const tight = runDispatches({ repoRoot: root, tail: 1 });
+  assert.equal(tight.entries.length, 1);
+  assert.equal(tight.entries[0]!.stop?.risk, 'unsettled_dispatch');
+  assert.equal(tight.entries[0]!.timestamp, '2026-09-06T09:05:00.000Z', 'rank must beat recency for the one slot');
+
+  // The clean one does not survive any tail, because it never entered the
+  // contest — it is collapsed, counted, and reachable through `--stops`.
+  const roomy = runDispatches({ repoRoot: root, tail: 10 });
+  assert.deepEqual(
+    roomy.entries.map((entry) => entry.stop?.risk ?? entry.kind),
+    ['adhoc-host', 'unsettled_dispatch', 'unmeasured'],
+  );
+  assert.deepEqual(roomy.stopsCollapsed, [
+    { risk: 'tree_clean', reading: 'reported no uncommitted change in its tree at the stop', count: 1 },
+  ]);
+});
+
+/**
+ * The premise this ranking had to correct. "Uncorrelated but dirty" on its own
+ * fires for EVERY ordinary in-session subagent: an unsteered `Explore` runs in
+ * the repo root, and a session that is dispatching work is a session whose
+ * root has uncommitted changes in it. This repo's own ledger carries 42
+ * `native_spawn` rows in exactly that position — so the tree alone would have
+ * promoted all 42 into the tier meant for the five dead agents.
+ *
+ * The discriminator is the final message, which Claude Code measurably
+ * supplies on the ordinary turn-end path and not on the interrupted one.
+ */
+test('dispatches: in one dirty tree, the agent that was cut off takes the slot and the one that signed off does not', (t) => {
+  const root = seed(t, [
+    signedOff('2026-09-06T10:00:00.000Z'),
+    signedOff('2026-09-06T10:01:00.000Z', 'Plan'),
+    signedOff('2026-09-06T10:02:00.000Z', 'general-purpose'),
+    killedInSession('2026-09-06T10:03:00.000Z', ['M src/live-experiment.ts']),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+
+  assert.equal(result.entries.length, 1, 'three ordinary stops must not crowd the one that was cut off');
+  assert.equal(result.entries[0]!.timestamp, '2026-09-06T10:03:00.000Z');
+  assert.equal(result.entries[0]!.stop?.risk, 'unowned_dirty');
+  // Every one of the four saw the same dirty tree. The tree is not what
+  // separated them, and a ranking that read only the tree would have shown all
+  // four — or, with a tighter tail, the wrong three.
+  for (const row of readFileSync(join(root, DISPATCHES_FILE), 'utf8').trim().split('\n')) {
+    assert.equal((JSON.parse(row).workspace as Record<string, unknown>).git, 'dirty');
+  }
+  // And the reading that collapsed the other three is stated, not implied.
+  assert.deepEqual(result.stopsCollapsed, [
+    { risk: 'agent_signed_off', reading: 'carried a final message, so the agent reached its own turn end', count: 3 },
+  ]);
+  assert.ok(
+    result.summary.includes('3 agent stops collapsed: 3 carried a final message, so the agent reached its own turn end.'),
+    result.summary,
+  );
+});
+
+test('dispatches: `unavailable` is never collapsed as clean, and never worded like it', (t) => {
+  const root = seed(t, [
+    stopRow({
+      last_message: { present: false, chars: null, excerpt: null },
+      workspace: { tree: null, git: 'unavailable', entries: null, entry_count: null, truncated: false, note: 'not a git repository' },
+    }),
+    // A row whose workspace object never arrived at all: the same admission by
+    // a different route, and it must not borrow `clean` either.
+    { format: DISPATCHES_FORMAT, timestamp: '2026-09-06T09:16:00.000Z', event: 'host_agent_stopped' },
+  ]);
+  const result = runDispatches({ repoRoot: root });
+
+  assert.deepEqual(result.entries.map((entry) => entry.stop?.risk), ['unmeasured', 'unmeasured']);
+  assert.deepEqual(result.stopsCollapsed, [], 'an unmeasured tree is not an all-clear');
+  assert.equal(result.stopsTotal, 2);
+  for (const line of result.lines) assert.ok(line.includes('git could not answer — unknown, not clean'), line);
+  assert.ok(!/no uncommitted change/.test(result.summary), result.summary);
+});
+
+test('dispatches: the collapsed count says what it counted, and every collapsed row stays reachable', (t) => {
+  const settled = 'd10c8f9a-1111-2222-3333-444455556666';
+  const root = seed(t, [
+    adhocOpen(settled),
+    // The ordinary end of a successful host dispatch: the agent stops, THEN
+    // the host closes it. The largest population of stop rows there is.
+    stopRow({
+      dispatch_correlation: { dispatch_id: settled, scope: 'adhoc', basis: 'host_worktree_path' },
+      last_message: { present: false, chars: null, excerpt: null },
+    }),
+    {
+      format: DISPATCHES_FORMAT,
+      timestamp: '2026-09-06T09:20:00.000Z',
+      event: 'adhoc_host_dispatch_closed',
+      dispatch_id: settled,
+      outcome: 'ok',
+    },
+    signedOff('2026-09-06T09:21:00.000Z'),
+    stopRow({
+      timestamp: '2026-09-06T09:22:00.000Z',
+      last_message: { present: false, chars: null, excerpt: null },
+      workspace: { tree: null, git: 'clean', entries: [], entry_count: 0, truncated: false, note: null },
+    }),
+  ]);
+
+  const result = runDispatches({ repoRoot: root });
+  // One entry left in the listing: the dispatch itself, closed.
+  assert.deepEqual(result.entries.map((entry) => entry.kind), ['adhoc-host']);
+  assert.deepEqual(result.stopsCollapsed, [
+    { risk: 'settled_dispatch', reading: 'named a dispatch that has a terminal receipt', count: 1 },
+    { risk: 'agent_signed_off', reading: 'carried a final message, so the agent reached its own turn end', count: 1 },
+    { risk: 'tree_clean', reading: 'reported no uncommitted change in its tree at the stop', count: 1 },
+  ]);
+  // The count carries its readings, and the caveat that keeps it from reading
+  // as a verdict. `clean` is a fact about a tree at a moment, and the agent may
+  // have committed its work or been in a tree someone has since cleaned.
+  assert.ok(result.summary.includes('3 agent stops collapsed:'), result.summary);
+  assert.ok(result.summary.includes('1 named a dispatch that has a terminal receipt'), result.summary);
+  assert.ok(result.summary.includes('Collapsed is not a verdict on the work'), result.summary);
+  assert.ok(result.summary.includes('not proof the agent did nothing'), result.summary);
+  assert.ok(result.summary.includes('`fadeno dispatches --stops`'), result.summary);
+
+  // Reachable, and each says why it was not in the listing.
+  const stops = runDispatches({ repoRoot: root, stops: true });
+  assert.equal(stops.stopsTotal, 3);
+  assert.equal(stops.entries.length, 3);
+  assert.deepEqual(stops.stopsCollapsed, [], '--stops collapses nothing');
+  assert.ok(stops.summary.includes('3 of 3 agent stops shown — every stop row in the log, none collapsed'), stops.summary);
+  assert.ok(stops.lines.every((line) => line.includes('[collapsed in the default listing — it ')), stops.lines.join('\n'));
+  assert.ok(stops.lines[0]!.includes('it named a dispatch that has a terminal receipt'), stops.lines[0]);
+
+  // And the settled dispatch was never reopened by the stop that named it.
+  assert.equal(result.entries[0]!.completed, true);
+  assert.equal(result.entries[0]!.agentStopped, null);
+  assert.ok(result.lines[0]!.includes('closed by the host'), result.lines[0]);
+});
+
+/**
+ * Settlement is read at the END of the fold, not where the stop landed. A
+ * host dispatch's ordinary life is: the agent stops, and only then does the
+ * host write the receipt — so a stop judged at its own position would call
+ * every successful delivery a warning.
+ */
+test('dispatches: a receipt written AFTER the stop still collapses it; a missing dispatch never does', (t) => {
+  const settled = 'aaaa1111-0000-0000-0000-000000000000';
+  const orphan = 'bbbb2222-0000-0000-0000-000000000000';
+  const root = seed(t, [
+    adhocOpen(settled),
+    stopRow({ dispatch_correlation: { dispatch_id: settled, scope: 'adhoc', basis: 'host_worktree_path' } }),
+    { format: DISPATCHES_FORMAT, timestamp: '2026-09-06T09:30:00.000Z', event: 'adhoc_host_dispatch_closed', dispatch_id: settled, outcome: 'ok' },
+    // A dispatch this log does not contain — a truncated head. A silence is
+    // not a receipt, so this one stays in the listing.
+    stopRow({ timestamp: '2026-09-06T09:31:00.000Z', dispatch_correlation: { dispatch_id: orphan, scope: 'adhoc', basis: 'host_worktree_path' } }),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  assert.deepEqual(result.entries.map((entry) => entry.stop?.risk ?? entry.kind), ['adhoc-host', 'unsettled_dispatch']);
+  assert.deepEqual(result.stopsCollapsed, [
+    { risk: 'settled_dispatch', reading: 'named a dispatch that has a terminal receipt', count: 1 },
+  ]);
+});
+
+/**
+ * The same ordering, on the command lane, where it was printing a sentence
+ * that contradicted the rest of its own line: the stop marked the dispatch
+ * while it was open, the kernel's completion row arrived afterwards, and the
+ * line then read `exit 0 in 12ms  [agent stopped: … — no terminal receipt was
+ * recorded]`. A receipt retires the mark, whichever order the rows arrived in.
+ */
+test('dispatches: a completion row after a stop retires the mark instead of contradicting itself', (t) => {
+  const id = 'c0ffee00-1111-2222-3333-444455556666';
+  const root = seed(t, [
+    commandRequest(id, '2026-09-06T09:00:00.000Z'),
+    stopRow({ dispatch_correlation: { dispatch_id: id, scope: 'adhoc', basis: 'host_worktree_path' } }),
+    {
+      format: DISPATCHES_FORMAT,
+      timestamp: '2026-09-06T09:20:00.000Z',
+      event: 'dispatch_completed',
+      dispatch_id: id,
+      exit_code: 0,
+      duration_ms: 12,
+      output_bytes: 40,
+    },
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.entries[0]!.completed, true);
+  assert.equal(result.entries[0]!.agentStopped, null);
+  const line = result.lines[0]!;
+  assert.ok(line.includes('exit 0'), line);
+  assert.ok(!line.includes('no terminal receipt was recorded'), line);
+  assert.ok(!/AGENT STOPPED/.test(line), line);
+});
+
+test('dispatches: rank decides what fits, chronology decides the order of what fits', (t) => {
+  const dead = 'deadbeef-1111-2222-3333-444455556666';
+  const root = seed(t, [
+    adhocOpen(dead),
+    stopRow({
+      timestamp: '2026-09-06T09:05:00.000Z',
+      last_message: { present: false, chars: null, excerpt: null },
+      dispatch_correlation: { dispatch_id: dead, scope: 'adhoc', basis: 'host_worktree_path' },
+    }),
+    commandRequest('cccc1111', '2026-09-06T09:06:00.000Z'),
+    commandRequest('cccc2222', '2026-09-06T09:07:00.000Z'),
+  ]);
+  const result = runDispatches({ repoRoot: root, tail: 2 });
+  // The promoted stop was pulled in from further back, and it is still where
+  // it happened: a stop line makes positional claims ("open at this point"),
+  // and hoisting the row would turn an accurate sentence into a false one.
+  assert.deepEqual(result.entries.map((entry) => entry.timestamp), [
+    '2026-09-06T09:05:00.000Z',
+    '2026-09-06T09:07:00.000Z',
+  ]);
+  assert.deepEqual(
+    result.lines.map((line) => line.split('  ')[0]),
+    ['2026-09-06T09:05:00.000Z', '2026-09-06T09:07:00.000Z'],
+  );
+});
+
+test('dispatches: ranking never takes a slot from a row that is not a stop', (t) => {
+  // Only stop rows are ranked. Making a dispatch row disappear so a stop could
+  // be louder would be a new way to hide evidence.
+  const root = seed(t, Array.from({ length: 4 }, (_, i) => commandRequest(`dddd${i}`.padEnd(8, '0'), `2026-09-06T11:0${i}:00.000Z`)));
+  const result = runDispatches({ repoRoot: root, tail: 3 });
+  assert.deepEqual(result.entries.map((entry) => entry.timestamp), [
+    '2026-09-06T11:01:00.000Z',
+    '2026-09-06T11:02:00.000Z',
+    '2026-09-06T11:03:00.000Z',
+  ]);
+  assert.equal(result.summary, '3 of 4 dispatches shown');
+  assert.deepEqual(result.stopsCollapsed, []);
+  assert.equal(result.stopsTotal, 0);
+});
+
+test('dispatches: --stops on a log with no stops says so rather than saying nothing', (t) => {
+  const root = seed(t, [commandRequest('eeee1111', '2026-09-06T12:00:00.000Z')]);
+  const result = runDispatches({ repoRoot: root, stops: true });
+  assert.deepEqual(result.entries, []);
+  assert.equal(result.summary, 'No agent stops recorded in .fadeno/dispatches.jsonl.');
+  assert.equal(result.total, 1, 'the log is not empty; only the stop population is');
+});
+
 // --- the run projection ------------------------------------------------------
 
 /**

@@ -356,6 +356,44 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Added
 
+- **`fadeno dispatches` ranks agent-stop rows by risk, so a warning cannot be
+  drowned by ordinary ones.** The `SubagentStop` receipt fires for EVERY
+  subagent and has no matcher — deliberately, because the reported incidents
+  had no Fadeno record at all — so in an ordinary session each `Explore` /
+  `Plan` / `general-purpose` stop took one of the listing's ten slots. Noise
+  that drowns a warning is how the polymarket artifact loss stayed invisible
+  for two dispatches. The tail now goes by what each row says is at risk, read
+  off signals already on it: a stop that named a dispatch with **no terminal
+  receipt** outranks everything (a known delivery died), an **uncorrelated stop
+  whose agent was cut off in a dirty tree** is next (the polymarket case:
+  something is at risk and nothing else in the system knows), and one whose
+  tree **could not be measured** competes like any other entry, because
+  `unavailable` is an admission and never an all-clear.
+  The three readings that leave nothing unaccounted for collapse to a counted
+  summary line — the dispatch it named has a receipt (the ordinary end of every
+  successful host dispatch, and the largest population of stop rows there is),
+  the harness handed over a final message, or git found the tree clean.
+  *Collapsed is never dropped*: the count states which reading collapsed how
+  many, the caveat that a clean tree at the stop is not proof the agent did
+  nothing is printed with it, and `fadeno dispatches --stops` lists every stop
+  row with the reading that collapsed it. Rank decides what FITS; chronology
+  still decides the ORDER of what fits — a stop line makes positional claims
+  (`[open at this point: …]`) that are only true where the row sits.
+  The one signal that separates a killed agent from an ordinary one is the
+  **final message**, not the tree: an unsteered `Explore` runs in the repo root,
+  and a session that is dispatching work is a session whose root is dirty — this
+  repo's own ledger carries 42 `native_spawn` rows in exactly that position — so
+  ranking on the tree alone would promote all 42 into the tier meant for the
+  five dead agents. Claude Code supplies `last_assistant_message` on the
+  ordinary turn-end path and supplies no messages at all on the interrupted
+  one, which is measured in the hook's own header. It is not a completeness
+  verdict in either direction and is never rendered as one.
+  Also fixed on the way past: a terminal receipt arriving AFTER a stop left the
+  mark `[agent stopped: … — no terminal receipt was recorded]` on the same line
+  as `exit 0`. A receipt now retires the mark in the fold's appliers, whichever
+  order the two rows arrived in, so `fadeno dispatches` says what `fadeno show`
+  already said.
+
 - **`worktree_carry:` is no longer silent when a repo declares none.** The key
   that carries a repo's gitignored build environment into a freshly-cut
   worktree has existed, been parse-validated, and been refused outside project

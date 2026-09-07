@@ -1315,6 +1315,7 @@ function main(argv: string[]): number {
         'ignored-output': { type: 'string' },
         diagnostics: { type: 'boolean' },
         tail: { type: 'string' },
+        stops: { type: 'boolean' },
         rate: { type: 'string' },
         n: { type: 'string' },
         tag: { type: 'string' },
@@ -2875,7 +2876,7 @@ function main(argv: string[]): number {
         }
         tail = n;
       }
-      const result = runDispatches({ tail });
+      const result = runDispatches({ tail, stops: Boolean(values.stops) });
       if (values.json) {
         console.log(
           JSON.stringify(
@@ -2885,6 +2886,12 @@ function main(argv: string[]): number {
               shown: result.entries.length,
               skipped: result.skipped,
               skippedNewerFormat: result.skippedNewerFormat,
+              // What the listing did NOT slot, and why. A JSON consumer that
+              // only read `entries` would see the same silence the terminal
+              // reader is protected from: rows exist that this view collapsed.
+              stopsOnly: result.stopsOnly,
+              stopsTotal: result.stopsTotal,
+              stopsCollapsed: result.stopsCollapsed,
               entries: result.entries,
             },
             null,

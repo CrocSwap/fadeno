@@ -307,6 +307,121 @@ export interface DispatchStopRecord {
    * was open, never which one was this agent's.
    */
   openDispatchIds: string[];
+  /**
+   * Which reading of THIS row's own signals decided whether it earns a slot in
+   * the tail — see `StopRisk` and `classifyStop`. Null means no reader
+   * classified it: `stoppedEntry` alone cannot, because settlement is a fact
+   * about the whole log rather than about this row.
+   */
+  risk: StopRisk | null;
+  /** That reading in words, so a `--json` consumer needs no lookup table. */
+  riskReading: string | null;
+}
+
+/**
+ * Why a stop row does — or does not — earn one of the tail's slots.
+ *
+ * The listing is a chronological tail of ten, and the stop hook fires for
+ * EVERY subagent with no matcher, so each ordinary `Explore` / `Plan` /
+ * `general-purpose` stop takes a slot from the evidence around it. Noise that
+ * drowns a warning is how the polymarket artifact loss stayed invisible for
+ * two dispatches, so the slots go by what the row says is at risk.
+ *
+ * The discriminator is deliberately NOT Fadeno-ness. Every reported incident
+ * had no Fadeno record at all — the 2026-09-05 429 killed five agents spawned
+ * directly in-session, before `dispatch-open` existed, with no dispatch id and
+ * no worktree — and that ABSENCE is exactly why nothing recorded them. A
+ * matcher, or a `basis === 'host_worktree_path'` test, would reproduce the
+ * original bug in a new place. What discriminates is whether anything else in
+ * the system is in a position to know, and all three signals are on the row:
+ * the correlation, the presence of a final message, and the tree.
+ *
+ * Three of these six collapse (see `COLLAPSED_STOP_RISKS`). Collapsed means
+ * the row does not crowd the listing — it is still in the ledger, still
+ * counted in the summary with the reading that collapsed it, and still listed
+ * by `fadeno dispatches --stops`. It is never a verdict on the work: nobody
+ * asked the agent whether it was done.
+ */
+export type StopRisk =
+  /**
+   * It identified a dispatch and that dispatch has no terminal receipt
+   * anywhere in this log. A known delivery died and nothing closed it — the
+   * loudest thing this listing can say, and the one that stayed invisible for
+   * seven hours.
+   */
+  | 'unsettled_dispatch'
+  /**
+   * It named no dispatch, the harness handed over no final message, and git
+   * found uncommitted changes. The polymarket case: something is sitting in a
+   * tree and nothing else in the system knows about it.
+   */
+  | 'unowned_dirty'
+  /**
+   * It named no dispatch, the harness handed over no final message, and git
+   * could not answer. Never hide what you could not measure — `unavailable`
+   * is an admission, not an all-clear.
+   */
+  | 'unmeasured'
+  /**
+   * COLLAPSED. The dispatch it named carries a terminal receipt, so the
+   * delivery was accounted for. This is the ordinary end of every successful
+   * host dispatch — the agent stops, then the host closes it — which makes it
+   * the single largest source of stop rows in a repo that dogfoods.
+   */
+  | 'settled_dispatch'
+  /**
+   * COLLAPSED. The harness handed over a final message, which on Claude
+   * happens on the ordinary turn-end path and measurably NOT on the
+   * interrupted one (see the hook header). It is not a completeness verdict
+   * and is never rendered as one; it is only evidence that the agent reached
+   * its own turn end rather than being cut off.
+   */
+  | 'agent_signed_off'
+  /**
+   * COLLAPSED. Git answered and listed nothing. `clean` means the tree carried
+   * no uncommitted change AT THE STOP — not that the agent did nothing and not
+   * that it finished; it may have committed, or the tree may have been cleaned
+   * since. Which is why this collapses rather than drops.
+   */
+  | 'tree_clean';
+
+/**
+ * Each risk in words, as a verb phrase about the row ("it <reading>").
+ *
+ * Carried beside the enum rather than derived at the render, because these
+ * sentences are the whole warrant for collapsing a row: a count that does not
+ * say what it counted is a positive claim with no reading behind it.
+ */
+export const STOP_RISK_READING: Readonly<Record<StopRisk, string>> = {
+  unsettled_dispatch: 'named a dispatch that has no terminal receipt',
+  unowned_dirty:
+    'named no dispatch, carried no final message from the agent, and found uncommitted changes in its tree',
+  unmeasured: 'named no dispatch, carried no final message from the agent, and could not measure its tree',
+  settled_dispatch: 'named a dispatch that has a terminal receipt',
+  agent_signed_off: 'carried a final message, so the agent reached its own turn end',
+  tree_clean: 'reported no uncommitted change in its tree at the stop',
+};
+
+/**
+ * The risks whose rows do not compete for a tail slot.
+ *
+ * Collapsed, never dropped — the count and its reading go in the summary and
+ * the rows stay reachable through `--stops`. Membership is the claim "nothing
+ * this row could point at is unaccounted for", which is weaker than "nothing
+ * happened" and must never be rendered as the stronger one.
+ */
+const COLLAPSED_STOP_RISKS: ReadonlySet<StopRisk> = new Set<StopRisk>([
+  'settled_dispatch',
+  'agent_signed_off',
+  'tree_clean',
+]);
+
+/** Summary order for the collapsed readings: most common first, so it reads. */
+const COLLAPSED_STOP_ORDER: readonly StopRisk[] = ['settled_dispatch', 'agent_signed_off', 'tree_clean'];
+
+/** Whether a classified stop is one the default listing collapses. */
+export function isCollapsedStopRisk(risk: StopRisk): boolean {
+  return COLLAPSED_STOP_RISKS.has(risk);
 }
 
 export interface DispatchEntry {
@@ -634,6 +749,13 @@ export interface DispatchesOptions {
   tail?: number;
   cwd?: string;
   repoRoot?: string;
+  /**
+   * `--stops`: list the `host_agent_stopped` entries themselves, every one of
+   * them, with nothing collapsed — the way back to the rows the default
+   * listing folds into a count. Obeys `--tail` exactly like the default view,
+   * so the one rule holds everywhere and the summary always names the total.
+   */
+  stops?: boolean;
 }
 
 export interface DispatchesResult {
@@ -658,6 +780,16 @@ export interface DispatchesResult {
   lines: string[];
   /** Footer for the rendered view, or the friendly message when empty. */
   summary: string;
+  /** Whether this is the `--stops` view (stop rows only, nothing collapsed). */
+  stopsOnly: boolean;
+  /** Every `host_agent_stopped` entry in the log, before any tail or collapse. */
+  stopsTotal: number;
+  /**
+   * Stop entries the default listing collapsed, grouped by the reading that
+   * collapsed them. Empty in the `--stops` view, which collapses nothing.
+   * Never a claim that those agents did nothing — see `StopRisk`.
+   */
+  stopsCollapsed: StopCollapse[];
 }
 
 /** Shortest unique prefix `runDispatchesOutput` will accept as a dispatch id. */
@@ -1381,8 +1513,66 @@ function stoppedEntry(row: Record<string, unknown>): DispatchEntry {
       basis: str(correlation.basis) ?? 'unestablished',
     },
     openDispatchIds: [], // filled by the reader, which can see the whole log
+    // Unclassified until a reader that has folded the WHOLE log says
+    // otherwise: one of the three signals a risk turns on — whether the
+    // dispatch this row named ever received a receipt — is not on this row and
+    // cannot be. Null is "nobody classified this", never "no risk".
+    risk: null,
+    riskReading: null,
   };
   return entry;
+}
+
+/**
+ * Which reading of a stop row's own signals decides its claim on a tail slot.
+ *
+ * Read in this order, and the order is the argument:
+ *
+ * 1. THE CORRELATION, and settlement read at the END of the fold rather than
+ *    where the stop landed. The ordinary life of a host dispatch is: the agent
+ *    stops (this row), THEN the host runs `dispatch-close` (the receipt). A
+ *    stop judged at its own position would therefore call every successful
+ *    delivery a warning — and those stops are the largest population of all.
+ *    A dispatch this log does not contain is NOT settled: a truncated head is
+ *    a silence, and reading a silence as a receipt is the exact defect the
+ *    rest of this file is built against.
+ * 2. THE FINAL MESSAGE. Measured, in the hook's header, out of Claude Code's
+ *    own bundle: the harness supplies `last_assistant_message` on the ordinary
+ *    turn-end path and supplies NO messages on the interrupted path. So its
+ *    presence is evidence the agent reached its own turn end, and its absence
+ *    is the shape of every reported incident (a 429, a kill, credit
+ *    exhaustion). It is not a completeness verdict in either direction and is
+ *    never rendered as one — the agent was never asked.
+ *
+ *    This is also the correction the tree alone cannot make. "Uncorrelated but
+ *    dirty" on its own fires for EVERY ordinary in-session subagent, because
+ *    an unsteered `Explore` runs in the repo root and a session that is
+ *    dispatching work is a session whose root is dirty — this repo's own
+ *    ledger carries 42 `native_spawn` rows in exactly that position. Ranking
+ *    on the tree alone would promote all 42 into the tier meant for the five
+ *    dead agents, which is the noise this ranking exists to remove.
+ * 3. THE TREE, last, and its three states kept apart: `dirty` is something at
+ *    risk, `clean` is a claim about the stop and not about the work, and
+ *    anything else is an admission that nothing was measured.
+ *
+ * Note what this never reads: `agent_type`, the harness, or whether Fadeno
+ * steered the spawn. See `StopRisk` for why filtering on Fadeno-ness would
+ * reproduce the original bug.
+ */
+function classifyStop(entry: DispatchEntry, byDispatchId: ReadonlyMap<string, DispatchEntry>): StopRisk {
+  const stop = entry.stop;
+  if (stop == null) throw new Error('classifyStop requires a stop entry'); // unreachable: callers filter on kind
+  const named = stop.correlation.dispatchId;
+  if (named != null) {
+    const target = byDispatchId.get(named);
+    return target != null && (target.completed || target.withdrawn) ? 'settled_dispatch' : 'unsettled_dispatch';
+  }
+  if (stop.lastMessagePresent) return 'agent_signed_off';
+  if (stop.git === 'dirty') return 'unowned_dirty';
+  if (stop.git === 'clean') return 'tree_clean';
+  // `unavailable`, and a row whose workspace object was missing or malformed.
+  // Both mean the same thing here and neither may borrow `clean`'s wording.
+  return 'unmeasured';
 }
 
 /**
@@ -1490,8 +1680,33 @@ function correlateAttestation(entries: readonly DispatchEntry[], row: Record<str
 }
 
 /** Fold a completion row's outcome into the entry its request row opened. */
+/**
+ * A terminal receipt RETIRES an `agentStopped` mark, whichever order the two
+ * rows arrived in.
+ *
+ * The mark's own sentence is "an agent stopped and no terminal receipt was
+ * recorded". The stop hook fires as the agent concludes and the host writes
+ * the receipt after that, so on the ordinary successful path the stop lands
+ * FIRST — `correlateAgentStop` sees an open dispatch, marks it, and the
+ * receipt then arrives and makes the mark's own words false. Left in place it
+ * printed "no terminal receipt was recorded" on the same line as `exit 0`.
+ *
+ * Cleared here, in the appliers, rather than in the tail reader, so both
+ * consumers of this fold get it — and so `fadeno dispatches` says what
+ * `fadeno show` already said, which suppresses the mark for a settled request
+ * (`isHostRequestSettled`). Two surfaces disagreeing about whether work is
+ * live is the failure the stop row exists to end.
+ *
+ * Nothing is lost: the stop keeps its own entry, which is where the death is
+ * evidence in its own right.
+ */
+function retireAgentStop(entry: DispatchEntry): void {
+  entry.agentStopped = null;
+}
+
 function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): void {
   entry.completed = true;
+  retireAgentStop(entry);
   entry.exitCode = num(row.exit_code);
   entry.signal = str(row.signal);
   entry.durationMs = num(row.duration_ms);
@@ -1582,6 +1797,7 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
  */
 function applyWithdrawal(entry: DispatchEntry, row: Record<string, unknown>): void {
   entry.withdrawn = true;
+  retireAgentStop(entry);
   entry.withdrawnReason = str(row.reason);
   entry.withdrawnWorkLeft = str(row.work_left);
   // Identity fallbacks, on the same rule as `applyCompletion`: a log truncated
@@ -1624,6 +1840,7 @@ function adhocHostEntry(row: Record<string, unknown>): DispatchEntry {
  */
 function applyAdhocHostClose(entry: DispatchEntry, row: Record<string, unknown>): void {
   entry.completed = true;
+  retireAgentStop(entry);
   const stated = str(row.outcome);
   entry.outcome = stated === 'ok' || stated === 'failed' ? (stated as AdhocHostOutcome) : null;
   // The stated failure reason is this lane's `error`: it is the only prose on
@@ -1917,6 +2134,14 @@ export function renderDispatchLine(entry: DispatchEntry): string {
     }
     if (stop?.transcriptPath != null) {
       parts.push(`[transcript ${excerpt(flatPath(stop.transcriptPath), PATH_EXCERPT)}]`);
+    }
+    // Why this row is not in the default listing — reachable only through
+    // `--stops`, which is the one view that renders a collapsed stop. A row
+    // the reader had to ask for must say why it had to be asked for; a row
+    // that earned its slot needs no such justification, so nothing is printed
+    // on the ones that did.
+    if (stop?.risk != null && isCollapsedStopRisk(stop.risk)) {
+      parts.push(`[collapsed in the default listing — it ${stop.riskReading ?? STOP_RISK_READING[stop.risk]}]`);
     }
     if (entry.sessionEffort != null) parts.push(`[session effort: ${entry.sessionEffort}]`);
     if (entry.format != null && formatTier(entry.format) === 'older') parts.push(`[format ${entry.format}]`);
@@ -2259,14 +2484,19 @@ export function renderDispatchLine(entry: DispatchEntry): string {
   return parts.join('  ');
 }
 
-function summarize(
-  shown: number,
-  total: number,
-  skipped: number,
-  newerFormat: number,
-  exists: boolean,
-  path: string,
-): string {
+function summarize(opts: {
+  shown: number;
+  total: number;
+  skipped: number;
+  newerFormat: number;
+  exists: boolean;
+  path: string;
+  /** `--stops`: the listing is the stop rows themselves, uncollapsed. */
+  stopsOnly: boolean;
+  /** Stops the default listing collapsed, newest reading first. Empty otherwise. */
+  collapsed: readonly StopCollapse[];
+}): string {
+  const { shown, total, skipped, newerFormat, exists, path, stopsOnly, collapsed } = opts;
   // Two distinct notes: an unreadable row is damage, a newer-format row is a
   // fadeno that is behind its own evidence. Conflating them would send the
   // reader to repair a log that is perfectly intact.
@@ -2276,11 +2506,96 @@ function summarize(
       ? `  (${newerFormat} row${newerFormat === 1 ? '' : 's'} from a newer format skipped)`
       : '');
   if (total === 0) {
+    if (stopsOnly) {
+      return exists
+        ? `No agent stops recorded in ${path}.${notes}`
+        : `No agent stops recorded yet (${path} absent).${notes}`;
+    }
     return exists
       ? `No dispatches recorded in ${path}.${notes}`
       : `No dispatches recorded yet (${path} absent).${notes}`;
   }
-  return `${shown} of ${total} dispatch${total === 1 ? '' : 'es'} shown${notes}`;
+  if (stopsOnly) {
+    return (
+      `${shown} of ${total} agent stop${total === 1 ? '' : 's'} shown — every stop row in the log, ` +
+      `none collapsed${notes}`
+    );
+  }
+  const head = `${shown} of ${total} dispatch${total === 1 ? '' : 'es'} shown${notes}`;
+  if (collapsed.length === 0) return head;
+  // What was collapsed, and the reading behind each count. A bare "7 collapsed"
+  // would be a positive claim about seven rows nobody stated a reason for; the
+  // caveat after it is the other half, because `clean` at the stop is evidence
+  // about a tree at a moment, never about whether an agent finished.
+  const held = collapsed.reduce((sum, group) => sum + group.count, 0);
+  return (
+    `${head}\n` +
+    `  ${held} agent stop${held === 1 ? '' : 's'} collapsed: ` +
+    `${collapsed.map((group) => `${group.count} ${group.reading}`).join('; ')}.\n` +
+    '  Collapsed is not a verdict on the work — a clean tree at the stop is not proof the agent did ' +
+    'nothing, and a final message is not a completeness claim. Every collapsed row is still in the ' +
+    'ledger: `fadeno dispatches --stops` lists them.'
+  );
+}
+
+/** One collapsed-stop count and the reading that collapsed it. */
+export interface StopCollapse {
+  risk: StopRisk;
+  reading: string;
+  count: number;
+}
+
+/**
+ * Rank for the tail contest. Lower wins a slot; ties break by recency.
+ *
+ * Only stop rows are ranked. Every other entry keeps the unconditional claim
+ * it has always had (`ORDINARY_RANK`), because making a dispatch row disappear
+ * so a stop row could be louder would be a new way to hide evidence — the
+ * failure this whole file is built against — and because the two loud tiers
+ * are, by construction, rare.
+ */
+const ORDINARY_RANK = 2;
+
+const STOP_RISK_RANK: Readonly<Record<StopRisk, number>> = {
+  // A known delivery died and nothing closed it: the one thing that must never
+  // be pushed off the end of the listing by a busier session.
+  unsettled_dispatch: 0,
+  // Something is in a tree and nothing else knows. The reported case.
+  unowned_dirty: 1,
+  // Could not tell. Competes exactly like an ordinary entry — never hidden,
+  // and never promoted above evidence that actually measured something.
+  unmeasured: ORDINARY_RANK,
+  settled_dispatch: ORDINARY_RANK,
+  agent_signed_off: ORDINARY_RANK,
+  tree_clean: ORDINARY_RANK,
+};
+
+/**
+ * Which entries survive the tail, and in what order.
+ *
+ * RANK DECIDES WHAT FITS; CHRONOLOGY DECIDES THE ORDER OF WHAT FITS. The
+ * listing is not re-sorted, and three things depend on that:
+ *
+ *   - This reader's stated contract is append order — "a killed dispatch's
+ *     request row is still where it happened".
+ *   - A stop line makes POSITIONAL claims. `[open at this point: …]` is only
+ *     true where the row sits; hoisting the row above the dispatches it names
+ *     would turn an accurate sentence into a false one.
+ *   - A host reads this to reconstruct a session. A stop is read against the
+ *     dispatch rows around it, and pulling it out of that sequence costs more
+ *     than the visibility it buys — which selection already bought.
+ */
+function selectShown(entries: readonly DispatchEntry[], tail: number): DispatchEntry[] {
+  const contenders: Array<{ entry: DispatchEntry; at: number; rank: number }> = [];
+  entries.forEach((entry, at) => {
+    const risk = entry.stop?.risk ?? null;
+    if (risk != null && isCollapsedStopRisk(risk)) return; // counted in the summary, not slotted
+    contenders.push({ entry, at, rank: risk != null ? STOP_RISK_RANK[risk] : ORDINARY_RANK });
+  });
+  if (contenders.length <= tail) return contenders.map((c) => c.entry); // already chronological
+  const kept = [...contenders].sort((a, b) => a.rank - b.rank || b.at - a.at).slice(0, tail);
+  kept.sort((a, b) => a.at - b.at);
+  return kept.map((c) => c.entry);
 }
 
 /**
@@ -2293,9 +2608,16 @@ function summarize(
  * so it stops reading as live. Every refusal is a logical entry of its own and so
  * counts against `--tail` exactly like a delivery does: a denial loop is
  * evidence, and a tail that quietly dropped it would hide the one thing
- * worth seeing. Order is append order (oldest → newest), never
- * re-sorted by timestamp: a killed dispatch's request row is still where it
- * happened. A missing or empty log is a friendly answer, not an error, and
+ * worth seeing.
+ *
+ * Stop rows are the one population `--tail` does not take purely by recency,
+ * because the hook has no matcher and fires for EVERY subagent: they are
+ * ranked by what the row itself says is at risk (`StopRisk`), the three
+ * readings that leave nothing unaccounted for collapse to a counted summary
+ * line, and the rest compete for slots. Rank decides what FITS; chronology
+ * still decides the ORDER of what fits — order is append order (oldest →
+ * newest), never re-sorted by timestamp: a killed dispatch's request row is
+ * still where it happened. A missing or empty log is a friendly answer, not an error, and
  * rows that cannot be read are counted rather than fatal — the log is
  * evidence, and a truncated tail must not hide the rows that survived.
  *
@@ -2497,6 +2819,7 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
     throw new DispatchesCommandError(`tail must be a positive integer (got ${String(opts.tail)}).`);
   }
 
+  const stopsOnly = opts.stops === true;
   const path = DISPATCHES_FILE.split('\\').join('/');
   const absolute = join(repoRoot, DISPATCHES_FILE);
   if (!existsSync(absolute)) {
@@ -2510,7 +2833,10 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
       tail,
       entries: [],
       lines: [],
-      summary: summarize(0, 0, 0, 0, false, path),
+      summary: summarize({ shown: 0, total: 0, skipped: 0, newerFormat: 0, exists: false, path, stopsOnly, collapsed: [] }),
+      stopsOnly,
+      stopsTotal: 0,
+      stopsCollapsed: [],
     };
   }
 
@@ -2535,7 +2861,29 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
     else if (fold === 'newer-format') skippedNewerFormat += 1;
   }
 
-  const shown = entries.slice(-tail);
+  // Classified AFTER the whole log is folded, never during it: `unsettled` is
+  // a fact about whether a receipt ever arrived, and a stop lands BEFORE the
+  // `dispatch-close` that settles it. Nothing is read from disk to answer it —
+  // `byDispatchId` already holds every dispatch this log carries — so the
+  // ranking costs one pass over the entries and no I/O.
+  const stopEntries = entries.filter((entry) => entry.kind === 'stopped' && entry.stop != null);
+  for (const entry of stopEntries) {
+    const risk = classifyStop(entry, byDispatchId);
+    entry.stop!.risk = risk;
+    entry.stop!.riskReading = STOP_RISK_READING[risk];
+  }
+
+  const collapsed: StopCollapse[] = stopsOnly
+    ? []
+    : COLLAPSED_STOP_ORDER.map((risk) => ({
+        risk,
+        reading: STOP_RISK_READING[risk],
+        count: stopEntries.filter((entry) => entry.stop!.risk === risk).length,
+      })).filter((group) => group.count > 0);
+
+  // `--stops` is the way back to the collapsed rows, so it collapses nothing
+  // and ranks nothing: it is the whole stop population in append order.
+  const shown = stopsOnly ? stopEntries.slice(-tail) : selectShown(entries, tail);
   return {
     repoRoot,
     path,
@@ -2546,7 +2894,22 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
     tail,
     entries: shown,
     lines: shown.map(renderDispatchLine),
-    summary: summarize(shown.length, entries.length, skipped, skippedNewerFormat, true, path),
+    summary: summarize({
+      shown: shown.length,
+      // In the stops view the denominator is the stop population, not the
+      // whole log: "3 of 41 shown" would invite the reader to think 38 stops
+      // were withheld.
+      total: stopsOnly ? stopEntries.length : entries.length,
+      skipped,
+      newerFormat: skippedNewerFormat,
+      exists: true,
+      path,
+      stopsOnly,
+      collapsed,
+    }),
+    stopsOnly,
+    stopsTotal: stopEntries.length,
+    stopsCollapsed: collapsed,
   };
 }
 

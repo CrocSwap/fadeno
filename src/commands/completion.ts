@@ -227,6 +227,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   attest: command({ '--archetype': { kind: 'archetype' } }),
   dispatches: command({
     '--tail': { kind: 'free' },
+    '--stops': NONE,
     '--json': NONE,
     '--bakeoffs': NONE,
     '--output': { kind: 'free' },

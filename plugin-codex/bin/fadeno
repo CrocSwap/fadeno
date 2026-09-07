@@ -25700,6 +25700,23 @@ var NOTE_EXCERPT = 200;
 var IGNORED_PATHS_SHOWN = 3;
 var KNOWN_FORMAT_MAJOR = DISPATCHES_FORMAT.split(".")[0];
 var OUTCOME_KEYS = ["exit_code", "duration_ms", "output_sha256", "signal"];
+var STOP_RISK_READING = {
+  unsettled_dispatch: "named a dispatch that has no terminal receipt",
+  unowned_dirty: "named no dispatch, carried no final message from the agent, and found uncommitted changes in its tree",
+  unmeasured: "named no dispatch, carried no final message from the agent, and could not measure its tree",
+  settled_dispatch: "named a dispatch that has a terminal receipt",
+  agent_signed_off: "carried a final message, so the agent reached its own turn end",
+  tree_clean: "reported no uncommitted change in its tree at the stop"
+};
+var COLLAPSED_STOP_RISKS = /* @__PURE__ */ new Set([
+  "settled_dispatch",
+  "agent_signed_off",
+  "tree_clean"
+]);
+var COLLAPSED_STOP_ORDER = ["settled_dispatch", "agent_signed_off", "tree_clean"];
+function isCollapsedStopRisk(risk) {
+  return COLLAPSED_STOP_RISKS.has(risk);
+}
 var OUTPUT_ID_PREFIX_MIN = 8;
 function sleepSync2(ms) {
   if (ms <= 0) return;
@@ -26092,10 +26109,29 @@ function stoppedEntry(row) {
       // conservative reading, and the one that cannot invent an identification.
       basis: str2(correlation.basis) ?? "unestablished"
     },
-    openDispatchIds: []
+    openDispatchIds: [],
     // filled by the reader, which can see the whole log
+    // Unclassified until a reader that has folded the WHOLE log says
+    // otherwise: one of the three signals a risk turns on — whether the
+    // dispatch this row named ever received a receipt — is not on this row and
+    // cannot be. Null is "nobody classified this", never "no risk".
+    risk: null,
+    riskReading: null
   };
   return entry;
+}
+function classifyStop(entry, byDispatchId) {
+  const stop = entry.stop;
+  if (stop == null) throw new Error("classifyStop requires a stop entry");
+  const named = stop.correlation.dispatchId;
+  if (named != null) {
+    const target = byDispatchId.get(named);
+    return target != null && (target.completed || target.withdrawn) ? "settled_dispatch" : "unsettled_dispatch";
+  }
+  if (stop.lastMessagePresent) return "agent_signed_off";
+  if (stop.git === "dirty") return "unowned_dirty";
+  if (stop.git === "clean") return "tree_clean";
+  return "unmeasured";
 }
 function correlateAgentStop(entry, byDispatchId) {
   const stop = entry.stop;
@@ -26132,8 +26168,12 @@ function correlateAttestation(entries, row) {
     return;
   }
 }
+function retireAgentStop(entry) {
+  entry.agentStopped = null;
+}
 function applyCompletion(entry, row) {
   entry.completed = true;
+  retireAgentStop(entry);
   entry.exitCode = num(row.exit_code);
   entry.signal = str2(row.signal);
   entry.durationMs = num(row.duration_ms);
@@ -26190,6 +26230,7 @@ function applyCompletion(entry, row) {
 }
 function applyWithdrawal(entry, row) {
   entry.withdrawn = true;
+  retireAgentStop(entry);
   entry.withdrawnReason = str2(row.reason);
   entry.withdrawnWorkLeft = str2(row.work_left);
   entry.archetype = entry.archetype ?? str2(row.archetype);
@@ -26204,6 +26245,7 @@ function adhocHostEntry(row) {
 }
 function applyAdhocHostClose(entry, row) {
   entry.completed = true;
+  retireAgentStop(entry);
   const stated = str2(row.outcome);
   entry.outcome = stated === "ok" || stated === "failed" ? stated : null;
   entry.error = str2(row.reason) ?? str2(row.error);
@@ -26344,6 +26386,9 @@ function renderDispatchLine(entry) {
     }
     if (stop?.transcriptPath != null) {
       parts.push(`[transcript ${excerpt(flatPath(stop.transcriptPath), PATH_EXCERPT)}]`);
+    }
+    if (stop?.risk != null && isCollapsedStopRisk(stop.risk)) {
+      parts.push(`[collapsed in the default listing \u2014 it ${stop.riskReading ?? STOP_RISK_READING[stop.risk]}]`);
     }
     if (entry.sessionEffort != null) parts.push(`[session effort: ${entry.sessionEffort}]`);
     if (entry.format != null && formatTier(entry.format) === "older") parts.push(`[format ${entry.format}]`);
@@ -26511,12 +26556,50 @@ function renderDispatchLine(entry) {
   if (entry.format != null && formatTier(entry.format) === "older") parts.push(`[format ${entry.format}]`);
   return parts.join("  ");
 }
-function summarize(shown, total, skipped, newerFormat, exists, path) {
+function summarize(opts) {
+  const { shown, total, skipped, newerFormat, exists, path, stopsOnly, collapsed } = opts;
   const notes = (skipped > 0 ? `  (${skipped} unreadable row${skipped === 1 ? "" : "s"} skipped)` : "") + (newerFormat > 0 ? `  (${newerFormat} row${newerFormat === 1 ? "" : "s"} from a newer format skipped)` : "");
   if (total === 0) {
+    if (stopsOnly) {
+      return exists ? `No agent stops recorded in ${path}.${notes}` : `No agent stops recorded yet (${path} absent).${notes}`;
+    }
     return exists ? `No dispatches recorded in ${path}.${notes}` : `No dispatches recorded yet (${path} absent).${notes}`;
   }
-  return `${shown} of ${total} dispatch${total === 1 ? "" : "es"} shown${notes}`;
+  if (stopsOnly) {
+    return `${shown} of ${total} agent stop${total === 1 ? "" : "s"} shown \u2014 every stop row in the log, none collapsed${notes}`;
+  }
+  const head = `${shown} of ${total} dispatch${total === 1 ? "" : "es"} shown${notes}`;
+  if (collapsed.length === 0) return head;
+  const held = collapsed.reduce((sum, group) => sum + group.count, 0);
+  return `${head}
+  ${held} agent stop${held === 1 ? "" : "s"} collapsed: ${collapsed.map((group) => `${group.count} ${group.reading}`).join("; ")}.
+  Collapsed is not a verdict on the work \u2014 a clean tree at the stop is not proof the agent did nothing, and a final message is not a completeness claim. Every collapsed row is still in the ledger: \`fadeno dispatches --stops\` lists them.`;
+}
+var ORDINARY_RANK = 2;
+var STOP_RISK_RANK = {
+  // A known delivery died and nothing closed it: the one thing that must never
+  // be pushed off the end of the listing by a busier session.
+  unsettled_dispatch: 0,
+  // Something is in a tree and nothing else knows. The reported case.
+  unowned_dirty: 1,
+  // Could not tell. Competes exactly like an ordinary entry — never hidden,
+  // and never promoted above evidence that actually measured something.
+  unmeasured: ORDINARY_RANK,
+  settled_dispatch: ORDINARY_RANK,
+  agent_signed_off: ORDINARY_RANK,
+  tree_clean: ORDINARY_RANK
+};
+function selectShown(entries, tail) {
+  const contenders = [];
+  entries.forEach((entry, at) => {
+    const risk = entry.stop?.risk ?? null;
+    if (risk != null && isCollapsedStopRisk(risk)) return;
+    contenders.push({ entry, at, rank: risk != null ? STOP_RISK_RANK[risk] : ORDINARY_RANK });
+  });
+  if (contenders.length <= tail) return contenders.map((c) => c.entry);
+  const kept = [...contenders].sort((a, b) => a.rank - b.rank || b.at - a.at).slice(0, tail);
+  kept.sort((a, b) => a.at - b.at);
+  return kept.map((c) => c.entry);
 }
 var KNOWN_NON_ENTRY_EVENTS = /* @__PURE__ */ new Set([
   "dispatch_cancelled",
@@ -26622,6 +26705,7 @@ function runDispatches(opts = {}) {
   if (!Number.isInteger(tail) || tail < 1) {
     throw new DispatchesCommandError(`tail must be a positive integer (got ${String(opts.tail)}).`);
   }
+  const stopsOnly = opts.stops === true;
   const path = DISPATCHES_FILE.split("\\").join("/");
   const absolute = (0, import_node_path20.join)(repoRoot, DISPATCHES_FILE);
   if (!(0, import_node_fs19.existsSync)(absolute)) {
@@ -26635,7 +26719,10 @@ function runDispatches(opts = {}) {
       tail,
       entries: [],
       lines: [],
-      summary: summarize(0, 0, 0, 0, false, path)
+      summary: summarize({ shown: 0, total: 0, skipped: 0, newerFormat: 0, exists: false, path, stopsOnly, collapsed: [] }),
+      stopsOnly,
+      stopsTotal: 0,
+      stopsCollapsed: []
     };
   }
   const entries = [];
@@ -26657,7 +26744,18 @@ function runDispatches(opts = {}) {
     if (fold === "skipped") skipped += 1;
     else if (fold === "newer-format") skippedNewerFormat += 1;
   }
-  const shown = entries.slice(-tail);
+  const stopEntries = entries.filter((entry) => entry.kind === "stopped" && entry.stop != null);
+  for (const entry of stopEntries) {
+    const risk = classifyStop(entry, byDispatchId);
+    entry.stop.risk = risk;
+    entry.stop.riskReading = STOP_RISK_READING[risk];
+  }
+  const collapsed = stopsOnly ? [] : COLLAPSED_STOP_ORDER.map((risk) => ({
+    risk,
+    reading: STOP_RISK_READING[risk],
+    count: stopEntries.filter((entry) => entry.stop.risk === risk).length
+  })).filter((group) => group.count > 0);
+  const shown = stopsOnly ? stopEntries.slice(-tail) : selectShown(entries, tail);
   return {
     repoRoot,
     path,
@@ -26668,7 +26766,22 @@ function runDispatches(opts = {}) {
     tail,
     entries: shown,
     lines: shown.map(renderDispatchLine),
-    summary: summarize(shown.length, entries.length, skipped, skippedNewerFormat, true, path)
+    summary: summarize({
+      shown: shown.length,
+      // In the stops view the denominator is the stop population, not the
+      // whole log: "3 of 41 shown" would invite the reader to think 38 stops
+      // were withheld.
+      total: stopsOnly ? stopEntries.length : entries.length,
+      skipped,
+      newerFormat: skippedNewerFormat,
+      exists: true,
+      path,
+      stopsOnly,
+      collapsed
+    }),
+    stopsOnly,
+    stopsTotal: stopEntries.length,
+    stopsCollapsed: collapsed
   };
 }
 function loadAgentStops(opts = {}) {
@@ -41541,6 +41654,7 @@ var COMMANDS = {
   attest: command({ "--archetype": { kind: "archetype" } }),
   dispatches: command({
     "--tail": { kind: "free" },
+    "--stops": NONE,
     "--json": NONE,
     "--bakeoffs": NONE,
     "--output": { kind: "free" },
@@ -46255,7 +46369,7 @@ var TOP_LEVEL = {
   "attempt-accept": page("Accept a hand-resolved isolated attempt.", "fadeno attempt-accept <run> <actor-call>"),
   runs: page("List run ledgers under `.fadeno/runs`.", "fadeno runs"),
   attest: page("Record this subagent delivery as evidence.", "fadeno attest --archetype <name>"),
-  dispatches: page("Inspect or recover command dispatches.", ["fadeno dispatches [--tail <count>] [--json] [--bakeoffs]", "fadeno dispatches --output <id|last|tag:<tag>> [--wait <seconds>]", "fadeno dispatches --cancel <id|tag:<tag>> | --merge <id|tag:<tag>>", "fadeno dispatches --withdraw <id|tag:<tag>> --reason <text> [--work-left <path>]"], ["`--output` writes the saved snapshot bytes verbatim to stdout; use `--wait` only for a completion row.", "`--cancel` signals a live executor. `--withdraw` is the second move for one nothing can signal: it records the terminal receipt, signals nothing, and removes no workspace. It is refused while any process behind the claim is alive.", "A `relay_attested: false` dispatch is quarantined: `--output` prefixes the bytes with the failure, and `--merge` refuses without `--allow-relay-mismatch`."]),
+  dispatches: page("Inspect or recover command dispatches.", ["fadeno dispatches [--tail <count>] [--stops] [--json] [--bakeoffs]", "fadeno dispatches --output <id|last|tag:<tag>> [--wait <seconds>]", "fadeno dispatches --cancel <id|tag:<tag>> | --merge <id|tag:<tag>>", "fadeno dispatches --withdraw <id|tag:<tag>> --reason <text> [--work-left <path>]"], ["`--output` writes the saved snapshot bytes verbatim to stdout; use `--wait` only for a completion row.", "`--cancel` signals a live executor. `--withdraw` is the second move for one nothing can signal: it records the terminal receipt, signals nothing, and removes no workspace. It is refused while any process behind the claim is alive.", "A `relay_attested: false` dispatch is quarantined: `--output` prefixes the bytes with the failure, and `--merge` refuses without `--allow-relay-mismatch`.", "The listing ranks agent-stop rows by what each one says is at risk, and collapses to a counted summary the ones that left nothing unaccounted for \u2014 a settled dispatch, a final message from the agent, or a tree git found clean. Collapsed is not a verdict on the work: `--stops` lists every stop row with the reading that collapsed it."]),
   "shadow-apply": page("Apply a selected shadow arm diff.", "fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]"),
   bakeoff: page("Measure or adjudicate a shadow pair.", ["fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--harness <id>] [--evidence inlined|explored]", "fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]", "fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file> [--evidence inlined|explored]"], ["`--measure-only` records no adjudication; `--prepare` writes blinded prompts; `--record` requires both host-delivered judgment files."]),
   show: page("Show a run step projection and artifacts.", "fadeno show <run> [--events] [--legacy]"),
@@ -46368,6 +46482,7 @@ var OPTION_HINTS = {
   "--source": "Progress observation source",
   "--status": "Run status",
   "--step": "Run step id",
+  "--stops": "List every agent-stop row, uncollapsed",
   "--strict": "Fail on an unreachable listing too",
   "--tag": "Dispatch recovery label",
   "--tail": "Number of recent entries",
@@ -46480,7 +46595,7 @@ var PAGE_OPTIONS = {
   "attempt-accept": withGlobals(),
   runs: withGlobals(),
   attest: withGlobals("--archetype"),
-  dispatches: withGlobals("--tail", "--json", "--bakeoffs", "--output", "--wait", "--tag", "--cancel", "--withdraw", "--work-left", "--reason", "--merge", "--allow-relay-mismatch"),
+  dispatches: withGlobals("--tail", "--stops", "--json", "--bakeoffs", "--output", "--wait", "--tag", "--cancel", "--withdraw", "--work-left", "--reason", "--merge", "--allow-relay-mismatch"),
   "shadow-apply": withGlobals("--arm", "--check"),
   bakeoff: withGlobals("--measure-only", "--evidence", "--prepare", "--record", "--comparison", "--adversarial", "--json", "--judge", "--harness"),
   show: withGlobals("--events", "--legacy"),
@@ -47575,6 +47690,7 @@ function main(argv) {
         "ignored-output": { type: "string" },
         diagnostics: { type: "boolean" },
         tail: { type: "string" },
+        stops: { type: "boolean" },
         rate: { type: "string" },
         n: { type: "string" },
         tag: { type: "string" },
@@ -48834,7 +48950,7 @@ Or advance manually with the playbook cursor:`);
         }
         tail = n;
       }
-      const result = runDispatches({ tail });
+      const result = runDispatches({ tail, stops: Boolean(values.stops) });
       if (values.json) {
         console.log(
           JSON.stringify(
@@ -48844,6 +48960,12 @@ Or advance manually with the playbook cursor:`);
               shown: result.entries.length,
               skipped: result.skipped,
               skippedNewerFormat: result.skippedNewerFormat,
+              // What the listing did NOT slot, and why. A JSON consumer that
+              // only read `entries` would see the same silence the terminal
+              // reader is protected from: rows exist that this view collapsed.
+              stopsOnly: result.stopsOnly,
+              stopsTotal: result.stopsTotal,
+              stopsCollapsed: result.stopsCollapsed,
               entries: result.entries
             },
             null,
