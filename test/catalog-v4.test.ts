@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { runDialResolve, runDialSet, runDialShow } from '../src/commands/dial.ts';
-import { runDispatch } from '../src/commands/dispatch.ts';
+import { prepareDispatch } from '../src/lib/spawn.ts';
 import { loadGlobalProfile, loadLayeredProfile } from '../src/lib/config-layers.ts';
 import {
   argvGrantsFadenoShell,
@@ -227,34 +227,6 @@ test('v4: a legacy ` via <driver>` is read, translated, and never written back',
   assert.deepEqual(parseDialRef('m via grok', 't'), { model: 'm', harness: 'grok' });
 });
 
-test('v4: a format 1.0 ledger row reads back with `driver` as the executor harness', async (t) => {
-  const { runDispatches } = await import('../src/commands/dispatches.ts');
-  const root = tempRepo(t);
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-  // Under 1.0 `harness` was the HOST and `driver` was the executor. Both rows
-  // below describe the same delivery; only the spelling differs.
-  const rows = [
-    {
-      format: '1.0', timestamp: '2026-08-12T12:00:00.000Z', event: 'dispatch_requested',
-      dispatch_id: 'd1', archetype: 'worker', executor: 'opus', model: 'opus',
-      harness: 'codex', driver: 'claude-exec', transport: 'command',
-    },
-    {
-      format: '1.1', timestamp: '2026-08-12T12:01:00.000Z', event: 'dispatch_requested',
-      dispatch_id: 'd2', archetype: 'worker', executor: 'opus', model: 'opus',
-      host: 'codex', harness: 'claude', variant: 'exec', transport: 'command',
-    },
-  ];
-  writeFileSync(join(root, '.fadeno', 'dispatches.jsonl'), `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`);
-  const result = runDispatches({ repoRoot: root });
-  const [legacy, current] = result.entries;
-  assert.equal(legacy!.harness, 'claude', 'a 1.0 `driver` reads as the executor harness');
-  assert.equal(legacy!.host, 'codex', 'and its `harness` reads as the host');
-  assert.equal(legacy!.variant, null, '1.0 could not record a variant');
-  assert.equal(current!.harness, 'claude');
-  assert.equal(current!.host, 'codex');
-  assert.equal(current!.variant, 'exec');
-});
 
 // 5. v3 layers.
 
@@ -546,12 +518,11 @@ test('dispatch\'s host-lane note agrees with dial resolve on the no-argv shapes'
   assert.equal(resolved.lane, 'restart_required');
   let refusal = '';
   try {
-    runDispatch({ archetype: 'reviewer', prompt: 'go', repoRoot: root, userPathOptions: paths });
+    prepareDispatch({ archetype: 'reviewer', prompt: 'go', repoRoot: root, userPathOptions: paths, lane: 'command', env: {} });
   } catch (err) {
     refusal = (err as Error).message;
   }
-  assert.match(refusal, /declares no fallback_command/);
-  assert.doesNotMatch(refusal, /resolves to the HOST lane here/, 'the note must not claim a lane dial resolve denies');
+  assert.match(refusal, /nothing to invoke/);
 });
 
 // --- Snapshots carry the policy-chosen variant -----------------------------

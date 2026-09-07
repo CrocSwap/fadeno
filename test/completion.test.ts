@@ -21,7 +21,7 @@ test('completion: dial flags replace old flags', (t) => {
   assert.ok(complete(root, ['fadeno', 'dial', 'clear', '--']).includes('--repo'));
   assert.ok(complete(root, ['fadeno', 'dial', 'clear', '--']).includes('--session'));
   assert.ok(complete(root, ['fadeno', 'dispatch', '--']).includes('--archetype'));
-  assert.ok(complete(root, ['fadeno', 'dispatch', '--']).includes('--role'));
+  assert.ok(complete(root, ['fadeno', 'dispatch', '--']).includes('--name'));
   // old flags gone
   assert.ok(!complete(root, ['fadeno', 'dispatch', '--']).includes('--executor'));
   assert.ok(!complete(root, ['fadeno', 'dispatch', '--']).includes('--loadout'));

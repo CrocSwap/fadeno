@@ -1,4693 +1,569 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
-import { sha256Hex } from '../lib/fsutil.ts';
+/**
+ * The dispatch family of commands (spec §08): `dispatch` (the command lane,
+ * end to end), `dispatch-open` and `dispatch-stop` (the host lane's halves,
+ * driven by the hooks), `dispatch-close`, `cancel`, `dispatches`,
+ * `worktrees`, `context` and `clean`. Each returns data; `cli.ts` prints.
+ *
+ * Everything here reads the ledger through `lib/ledger.ts` and writes it
+ * through `lib/spawn.ts`, so there is one writer per row kind and one
+ * reader for every surface.
+ */
+
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
+import { loadLayeredProfile } from '../lib/config-layers.ts';
+import { DEFAULT_UNCLOSED_LIMIT, describeArchetype, formatAge, hostVocabulary, type ArchetypeLine } from '../lib/contracts.ts';
+import { ExecutorProfileError, archetypeDisplaySort, knownArchetypes, readLocalDialState } from '../lib/executors.ts';
+import {
+  ageMinutes,
+  closeDispatch,
+  findDispatch,
+  isCloseVerb,
+  readDispatches,
+  readPrompt,
+  unclosedDispatches,
+  type CloseVerb,
+  type DispatchRecord,
+  type DispatchState,
+  type Lane,
+  type StoppedRow,
+} from '../lib/ledger.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
-  formatBakeoffDuration,
-  isBakeoffVerdict,
-  parseBakeoffFile,
-  VERDICT_BUCKET,
-  type BakeoffArtifact,
-  type BakeoffVerdict,
-} from '../lib/bakeoff.ts';
+  OUTPUTS_DIR,
+  SpawnError,
+  cancelDispatch,
+  outputPaths,
+  prepareDispatch,
+  recordOpened,
+  recordStopped,
+  resolveArchetype,
+  runCommandDispatch,
+  workspaceDir,
+  type CancelOutcome,
+  type RunResult,
+} from '../lib/spawn.ts';
+import { readUserDials, type UserPathOptions } from '../lib/user-paths.ts';
+import { WORKTREES_DIR, canonical, removeWorktree, reportWorktrees, type WorktreeReport } from '../lib/worktree.ts';
 
-/**
- * `parseBakeoffFile` and `BakeoffArtifact` moved to `src/lib/bakeoff.ts` so
- * the persisted-state audit — which lives in `src/lib/` and may not import
- * `src/commands/` — reads `.fadeno/bakeoffs/` through the SAME reader this
- * scorecard uses, instead of a second copy that could disagree about which
- * records are usable. Re-exported here because this module is where every
- * existing importer looks for them.
- */
-export { parseBakeoffFile, type BakeoffArtifact };
-import {
-  DISPATCHES_FILE,
-  DISPATCHES_FORMAT,
-  appendEvidenceRow,
-  commandDispatchTerminalState,
-  normalizeDispatchOutcome,
-  type DispatchOutcome,
-} from './dispatch.ts';
-import {
-  adhocHostTerminalState,
-  isAdhocHostRequest,
-  type AdhocHostOutcome,
-} from './dispatch-adhoc.ts';
-import { legacyDriverHarness } from '../lib/executors.ts';
-import { INFLIGHT_DIR, readInflightClaim } from '../lib/supervisor.ts';
-import {
-  collectIsolatedDiff,
-  ignoredOutputStamp,
-  removeIsolatedWorktree,
-  scanIgnoredOutput,
-  WorkspaceIsolationError,
-} from '../lib/workspace-isolation.ts';
-import {
-  concurrentWriteStrength,
-  describeConcurrentWrite,
-  UNREADABLE_WINDOW_LOG_ID,
-  describeIgnoredOutput,
-  ignoredOutputSignalOrder,
-  ignoredOutputVerdict,
-  parseConcurrentWriteStamps,
-  parseIgnoredOutputDiscarded,
-  parseIgnoredOutputPolicy,
-  type ConcurrentWriteRecord,
-  type IgnoredOutputPolicyRecord,
-} from '../lib/receipt-attestations.ts';
-import { mergeBackReapplyCommand, settleIsolatedWork, type MergeBackResult } from '../lib/workspace-baseline.ts';
+export class DispatchesError extends Error {}
 
-export class DispatchesCommandError extends Error {}
-
-/** Logical entries rendered when `--tail` is not given. */
-export const DEFAULT_TAIL = 10;
-
-/** Longest recorded spawn error rendered inline before ellipsis. */
-const ERROR_EXCERPT = 80;
-
-/** Longest single discarded path rendered inline before ellipsis. */
-const PATH_EXCERPT = 60;
-
-/**
- * Longest writer note rendered inline. Wider than `ERROR_EXCERPT` on purpose:
- * a note explains why a listing is a FLOOR, and its own reason sits at the
- * end of the sentence — clipping at 80 would keep the preamble and cut the
- * one fact worth reading. The cap is here to stop a pathological row taking
- * the terminal, not to summarize.
- */
-const NOTE_EXCERPT = 200;
-
-/**
- * Discarded paths named inline before the rest are counted. The view is one
- * line per dispatch, so a worktree with thirty ignored directories must not
- * become thirty screens — but the count that follows keeps the line honest
- * about how much it is not showing.
- */
-const IGNORED_PATHS_SHOWN = 3;
-
-/**
- * The evidence-format major this reader understands, derived from the writer's
- * own stamp so the two can never disagree.
- */
-const KNOWN_FORMAT_MAJOR = DISPATCHES_FORMAT.split('.')[0]!;
-
-/**
- * Outcome keys that mark a row as the *result* of a dispatch rather than its
- * request. Presence, not value: `exit_code` is null when the spawn itself
- * failed, so a value test would drop exactly the rows worth keeping.
- */
-const OUTCOME_KEYS = ['exit_code', 'duration_ms', 'output_sha256', 'signal'];
-
-/**
- * The primary arm's merge-back result, from a completion row's
- * `primary_merge` object.
- *
- * When a shadow pair is selected, BOTH arms run in isolated worktrees so
- * neither is advantaged by the caller's tree; the primary's diff is then
- * merged back into that tree at the end. This records what happened to it —
- * the one part of a paired dispatch that changes the caller's own workspace.
- *
- *   `clean`      — the diff applied with no conflict; the work is in the tree.
- *   `conflicted` — `--3way` left markers or could not apply. Nothing was
- *                  reverted, so the tree may be PARTIALLY applied — some
- *                  hunks can be staged while others carry markers. The work
- *                  is not lost either way: it is preserved at `diffSnapshot`,
- *                  recoverable with `fadeno shadow-apply <pair-id> --arm
- *                  primary`.
- *
- * There is deliberately no third status for "no merge was attempted" — an
- * unpaired `--isolate` or a shared-mode primary omits the whole object, and
- * absence already says it. A reader must never synthesize a status for an
- * absent object; `primaryMerge == null` means *not applicable*, which is the
- * ordinary case for nearly every row in the log.
- *
- * `status` is typed as a plain string rather than a two-member union, for the
- * same reason `refusal.predicate` is: the vocabulary belongs to the writer,
- * and a reader that narrowed it would silently DROP a status a newer fadeno
- * introduced — the exact defect this field was added to fix. An unrecognized
- * status renders verbatim. (`skipped` is the one value this reader knows to
- * say nothing about: it is what the omission convention above replaced, and
- * a row that still spells it out should not be louder than one that omits.)
- */
-export interface DispatchPrimaryMerge {
-  /** `clean` or `conflicted` today; rendered verbatim if it is neither. */
-  status: string;
-  /**
-   * The writer's own prose for what happened: `git apply --3way`'s stderr, a
-   * lease it could not take, or why a `clean` merge changed nothing. Free
-   * text, so it is excerpted to one bounded line when rendered — git's stderr
-   * is multi-line, and this view is one line per dispatch.
-   */
-  detail?: string;
-  /**
-   * Repo-relative path to the diff that was applied, or left unapplied for
-   * `shadow-apply` to retry. The writer always states it; it is optional here
-   * so a row that somehow lost it still surfaces its status rather than
-   * failing to parse — the same tolerance `hostRefusedEntry` gives a refusal
-   * row with no refusal object.
-   */
-  diffSnapshot?: string;
-}
-
-/**
- * Gitignored output an arm produced that no diff carried out of its worktree,
- * from a completion row's `ignored_output_discarded` object.
- *
- * A pair runs both arms in isolated worktrees and moves work back as a diff
- * taken from `git add -A` — which RESPECTS `.gitignore`. So whatever the arm
- * built into an ignored path (a `dist/`, a build cache, a coverage report) is
- * not in that diff, and the caller's tree never receives it. Carried
- * dependencies are the opposite case and unaffected: `worktree_carry` brings
- * those IN as input, where this is only ever about output.
- *
- * Absent means nothing was discarded. There is deliberately no empty spelling
- * for a reader to synthesize — the same rule `DispatchPrimaryMerge` states,
- * and for the same reason: a reader that invents a value for silence is
- * making a claim the writer did not make.
- */
-export interface DispatchIgnoredOutputDiscarded {
-  /**
-   * Repo-relative, git-collapsed to directories, exactly as the writer stated
-   * them. May be empty when `truncated` is true — "I could not enumerate what
-   * was lost" is a different claim from "nothing was lost", and the whole
-   * point of this field is that the two never render the same.
-   */
-  paths: string[];
-  /**
-   * The listing is a FLOOR, not the set: detection could not guarantee
-   * completeness (a git failure, or a size cap).
-   *
-   * Normalized to a boolean here, where `DispatchPrimaryMerge` leaves its
-   * optionals off, because the two absences differ. An absent `detail` is the
-   * writer saying nothing; an absent `truncated` has exactly one meaning —
-   * the listing is the whole set — so stating it costs no invention. Any
-   * present value that is not an explicit `false` reads as truncated, so a
-   * newer writer that spells a REASON where this expects a flag still errs
-   * toward "I could not tell" rather than toward "that was everything". Only
-   * one of those two directions is a silent drop.
-   */
-  truncated: boolean;
-  /**
-   * The writer's own prose for WHY the listing is short — a git failure and
-   * its stderr, or the entry cap it stopped at. Optional exactly as
-   * `DispatchPrimaryMerge.detail` is: absent is the writer saying nothing.
-   *
-   * It is the difference between two truncations with different remedies:
-   * "git could not run here" is a broken tool, "there were more than 10,000
-   * ignored entries" is a build directory doing its job. A degraded verdict
-   * that cannot say why is barely better than no verdict, so this is read
-   * even though it renders as free text — the whole point of surfacing a
-   * floor is lost if the reader cannot tell which floor it is standing on.
-   */
-  note?: string;
-  /**
-   * Repo-relative worktree still holding this output, when it survives on
-   * disk. Present for a challenger, whose worktree is retained until
-   * `fadeno clean`, and now for a primary too: the kernel refuses to tear
-   * down a worktree that still holds ignored content, so the stamp names
-   * where it is instead of only saying it is gone. Stated by the writer,
-   * never inferred here — a "still on disk" hint that turns out to be wrong
-   * is worse than silence, which is also why rows written before the
-   * retention landed read `null` rather than a guessed path.
-   */
-  retainedAt: string | null;
-}
-
-/**
- * One logical dispatch: a correlated `dispatch_requested` /
- * `dispatch_completed` pair from the kernel (`kind: "command"`), a single
- * `dispatch_refused` row (also `kind: "command"` — the refusal *is* the
- * request-point evidence), a single `host_delivery` row from the Claude
- * steering hook (`kind: "host"`), which has no kernel downstream, or a single
- * `host_refused` row from that same hook (also `kind: "host"` — the spawn was
- * denied before any subagent existed, so there is nothing downstream at all).
- * A `host`
- * entry may additionally carry a correlated `host_attestation` row — written
- * by `fadeno attest` running INSIDE the subagent itself, folded onto the
- * `attestedAt`/`attestedEffort`/`attestedEffortEvidence` fields rather than
- * becoming an entry of its own (see `correlateAttestation`).
- *
- * `kind: "native"` is the odd one out: a `native_spawn` row from the Codex
- * spawn guard, recording a GENERIC harness subagent — no archetype, no dial,
- * no Fadeno identity of any kind. It is here because the alternative is worse.
- * The 2026-09-04 basanos receipt is a Codex host session that quietly spawned
- * three `agent_type: default` subagents on the parent's frontier model and
- * burned 57.5M input tokens before a human noticed, and the log said nothing
- * at all — so "nobody spawned anything" and "somebody spawned something
- * Fadeno never steered" must not render identically.
- *
- * `kind: "rewritten"` is a `host_rewritten` row: the Claude steering hook took
- * a spawn OFF the host lane and onto the dispatch proxy. Its own kind, not a
- * `host` one, because nothing ran in session — the work's real evidence is the
- * kernel's `dispatch_requested`/`dispatch_completed` pair under the relay's
- * dispatch id, joined to this row by content (`caller_prompt_sha256` there
- * equals `prompt_sha256` here). Two consequences fall out of the separate
- * kind, and both are wanted: `correlateAttestation` only walks `kind: "host"`,
- * so a rewritten spawn can never steal an attestation owed to a real host
- * delivery, and `[never attested]` is never printed for a spawn that was never
- * under the attestation contract.
- */
-/**
- * A `host_agent_stopped` row that NAMED this dispatch — the stop hook read the
- * id out of the host worktree the agent was standing in, so it is an
- * identification rather than a correlation heuristic.
- *
- * Its presence is the whole point: an entry carrying one must never go on
- * rendering as potentially live. It says only what is known — an agent stopped
- * and no terminal receipt was recorded — and never that the work was
- * unfinished, which nothing here can support.
- */
-export interface DispatchAgentStop {
-  at: string | null;
-  agentType: string | null;
-  agentId: string | null;
-  /** How the stop row named this dispatch. The writer's vocabulary, kept open. */
-  basis: string;
-  /**
-   * Uncommitted paths in the agent's tree at the stop, or null when git could
-   * not answer. Zero is a real answer and is not the same as null.
-   */
-  dirtyPaths: number | null;
-}
-
-/**
- * What one `host_agent_stopped` row recorded — the stop hook's whole payload,
- * as its own entry.
- *
- * `git` is a closed vocabulary of three and the distinction is load-bearing:
- * `clean` is a claim (git answered and listed nothing), `unavailable` is an
- * admission (git could not answer), and folding the second into the first
- * would turn "I could not tell" into "there was nothing".
- *
- * `lastMessage*` reports the PRESENCE of the agent's final message as its own
- * fact, because Claude Code measurably supplies none on the interrupted path —
- * the path that matters. It is not a completeness verdict and must never be
- * rendered as one: a stop hook fires when the agent is already gone, so nobody
- * asked it whether the work was done.
- */
-export interface DispatchStopRecord {
-  agentId: string | null;
-  sessionId: string | null;
-  transcriptPath: string | null;
-  lastMessagePresent: boolean;
-  lastMessageExcerpt: string | null;
-  git: 'clean' | 'dirty' | 'unavailable' | null;
-  /** `git status --short` lines, bounded by the writer. */
-  entries: string[];
-  entryCount: number | null;
-  truncated: boolean;
-  /** Why git could not answer, in git's own words. Null when it did. */
-  note: string | null;
-  /** The isolated host worktree the agent was in, repo-relative; null in the repo root. */
-  tree: string | null;
-  correlation: { dispatchId: string | null; scope: string | null; basis: string };
-  /**
-   * Dispatch ids that had no terminal receipt at this row's position in the
-   * log — computed by the reader, never claimed by the writer. It says what
-   * was open, never which one was this agent's.
-   */
-  openDispatchIds: string[];
-  /**
-   * Which reading of THIS row's own signals decided whether it earns a slot in
-   * the tail — see `StopRisk` and `classifyStop`. Null means no reader
-   * classified it: `stoppedEntry` alone cannot, because settlement is a fact
-   * about the whole log rather than about this row.
-   */
-  risk: StopRisk | null;
-  /** That reading in words, so a `--json` consumer needs no lookup table. */
-  riskReading: string | null;
-}
-
-/**
- * Why a stop row does — or does not — earn one of the tail's slots.
- *
- * The listing is a chronological tail of ten, and the stop hook fires for
- * EVERY subagent with no matcher, so each ordinary `Explore` / `Plan` /
- * `general-purpose` stop takes a slot from the evidence around it. Noise that
- * drowns a warning is how the polymarket artifact loss stayed invisible for
- * two dispatches, so the slots go by what the row says is at risk.
- *
- * The discriminator is deliberately NOT Fadeno-ness. Every reported incident
- * had no Fadeno record at all — the 2026-09-05 429 killed five agents spawned
- * directly in-session, before `dispatch-open` existed, with no dispatch id and
- * no worktree — and that ABSENCE is exactly why nothing recorded them. A
- * matcher, or a `basis === 'host_worktree_path'` test, would reproduce the
- * original bug in a new place. What discriminates is whether anything else in
- * the system is in a position to know, and all three signals are on the row:
- * the correlation, the presence of a final message, and the tree.
- *
- * Three of these six collapse (see `COLLAPSED_STOP_RISKS`). Collapsed means
- * the row does not crowd the listing — it is still in the ledger, still
- * counted in the summary with the reading that collapsed it, and still listed
- * by `fadeno dispatches --stops`. It is never a verdict on the work: nobody
- * asked the agent whether it was done.
- */
-export type StopRisk =
-  /**
-   * It identified a dispatch and that dispatch has no terminal receipt
-   * anywhere in this log. A known delivery died and nothing closed it — the
-   * loudest thing this listing can say, and the one that stayed invisible for
-   * seven hours.
-   */
-  | 'unsettled_dispatch'
-  /**
-   * It named no dispatch, the harness handed over no final message, and git
-   * found uncommitted changes. The polymarket case: something is sitting in a
-   * tree and nothing else in the system knows about it.
-   */
-  | 'unowned_dirty'
-  /**
-   * It named no dispatch, the harness handed over no final message, and git
-   * could not answer. Never hide what you could not measure — `unavailable`
-   * is an admission, not an all-clear.
-   */
-  | 'unmeasured'
-  /**
-   * COLLAPSED. The dispatch it named carries a terminal receipt, so the
-   * delivery was accounted for. This is the ordinary end of every successful
-   * host dispatch — the agent stops, then the host closes it — which makes it
-   * the single largest source of stop rows in a repo that dogfoods.
-   */
-  | 'settled_dispatch'
-  /**
-   * COLLAPSED. The harness handed over a final message, which on Claude
-   * happens on the ordinary turn-end path and measurably NOT on the
-   * interrupted one (see the hook header). It is not a completeness verdict
-   * and is never rendered as one; it is only evidence that the agent reached
-   * its own turn end rather than being cut off.
-   */
-  | 'agent_signed_off'
-  /**
-   * COLLAPSED. Git answered and listed nothing. `clean` means the tree carried
-   * no uncommitted change AT THE STOP — not that the agent did nothing and not
-   * that it finished; it may have committed, or the tree may have been cleaned
-   * since. Which is why this collapses rather than drops.
-   */
-  | 'tree_clean';
-
-/**
- * Each risk in words, as a verb phrase about the row ("it <reading>").
- *
- * Carried beside the enum rather than derived at the render, because these
- * sentences are the whole warrant for collapsing a row: a count that does not
- * say what it counted is a positive claim with no reading behind it.
- */
-export const STOP_RISK_READING: Readonly<Record<StopRisk, string>> = {
-  unsettled_dispatch: 'named a dispatch that has no terminal receipt',
-  unowned_dirty:
-    'named no dispatch, carried no final message from the agent, and found uncommitted changes in its tree',
-  unmeasured: 'named no dispatch, carried no final message from the agent, and could not measure its tree',
-  settled_dispatch: 'named a dispatch that has a terminal receipt',
-  agent_signed_off: 'carried a final message, so the agent reached its own turn end',
-  tree_clean: 'reported no uncommitted change in its tree at the stop',
-};
-
-/**
- * The risks whose rows do not compete for a tail slot.
- *
- * Collapsed, never dropped — the count and its reading go in the summary and
- * the rows stay reachable through `--stops`. Membership is the claim "nothing
- * this row could point at is unaccounted for", which is weaker than "nothing
- * happened" and must never be rendered as the stronger one.
- */
-const COLLAPSED_STOP_RISKS: ReadonlySet<StopRisk> = new Set<StopRisk>([
-  'settled_dispatch',
-  'agent_signed_off',
-  'tree_clean',
-]);
-
-/** Summary order for the collapsed readings: most common first, so it reads. */
-const COLLAPSED_STOP_ORDER: readonly StopRisk[] = ['settled_dispatch', 'agent_signed_off', 'tree_clean'];
-
-/** Whether a classified stop is one the default listing collapses. */
-export function isCollapsedStopRisk(risk: StopRisk): boolean {
-  return COLLAPSED_STOP_RISKS.has(risk);
-}
-
-export interface DispatchEntry {
-  /**
-   * Which lane produced this row.
-   *
-   * `adhoc-host` is the RUNLESS host dispatch (`fadeno dispatch-open` /
-   * `dispatch-close`): a host-lane delivery with an isolated worktree, a
-   * dispatch id and a terminal receipt, and no run ledger behind it. It is not
-   * `host` — a `host_delivery` row is a spawn the steering hook recorded, with
-   * no worktree, no id and no receipt — and it is not `command`, because
-   * nothing was spawned out of process and there is no exit code to read.
-   *
-   * `stopped` is not a dispatch at all: it is a `host_agent_stopped` row, the
-   * receipt an agent's DEATH leaves behind. It gets an entry of its own for
-   * the same reason a refusal does — a repo where every agent is being killed
-   * must not read like a repo where nothing happened — and because most stops
-   * name no dispatch, so there is often nothing to fold it onto.
-   */
-  kind: 'command' | 'host' | 'native' | 'rewritten' | 'adhoc-host' | 'stopped';
-  format: string | null;
-  legacy: boolean;
-  timestamp: string | null;
-  dispatchId: string | null;
-  archetype: string | null;
-  role: string | null;
-  agentType: string | null;
-  resolution: string | null;
-  dial: { model: string; effort?: string; via?: string } | null;
-  loadout: string | null;
-  loadoutSource: string | null;
-  executor: string | null;
-  model: string | null;
-  modelOverride: string | null;
-  modelId: string | null;
-  reasoningEffort: string | null;
-  /**
-   * The effort the WRITER's own process observed (`CLAUDE_EFFORT` in the
-   * steering hook), as opposed to the effort the dial asked for. Null means
-   * unobservable — a Codex broker, a bare shell, or a row written before the
-   * field existed — never "the session has no effort" (see
-   * `readSessionEffort` in `src/lib/lane.ts`).
-   *
-   * On a `host_delivery` it repeats `reasoningEffort` whenever it is
-   * non-null, which is the writer's own stated redundancy: on that lane they
-   * are the same fact. It is kept as its own field anyway because it is the
-   * only *measured* one of the two — a requested effort that exceeds every
-   * effort ever observed here is the shape of a silent harness downgrade.
-   */
-  sessionEffort: string | null;
-  /**
-   * Why the resolver put this delivery on the lane it chose — a closed
-   * vocabulary (`LaneReason` in `src/lib/lane.ts`), written verbatim so this
-   * reader can GROUP on it. The lane is session-state dependent and can flip
-   * mid-session, so this is the only record of which state the spawn saw.
-   * Null on a row written by a fadeno that predates the field, and on kernel
-   * rows, which do not carry a lane today.
-   */
-  laneReason: string | null;
-  /**
-   * The harness that EXECUTED this dispatch. On a format 1.0 row this comes
-   * from `driver` (translated); on 1.1 it is the `harness` field itself, which
-   * under 1.0 meant the host instead. See `harnessFieldsOf`.
-   */
-  harness: string | null;
-  /** The harness the call ran INSIDE. `harness` on a 1.0 row. */
-  host: string | null;
-  /** The command-lane variant, when policy chose a named one. 1.1 and later. */
-  variant: string | null;
-  target: string | null;
-  provider: string | null;
-  transport: string | null;
-  /** Native OpenCode Task lifecycle and hook correlation, when supplied. */
-  background: boolean | null;
-  taskId: string | null;
-  sessionId: string | null;
-  callId: string | null;
-  promptSource: string | null;
-  promptSnapshot: string | null;
-  promptSha256: string | null;
-  /**
-   * The CALLER's prompt digest: sha256 of the bytes handed to Fadeno, before
-   * the kernel composed an archetype brief or the result-protocol footer in,
-   * and with trailing newlines stripped (`callerPromptDigest` in
-   * `src/lib/executors.ts` — the relay's heredoc adds one, so raw bytes would
-   * not survive the trip). `promptSha256` above attests the SNAPSHOT the
-   * executor received, so the two differ on any brief-carrying or command-lane
-   * dispatch, and only this one is stable across them.
-   *
-   * It is what joins a spawn-side hook row to the kernel rows it produced: a
-   * `host_rewritten` row's `promptSha256` IS a caller digest, and equals this
-   * field on the `dispatch_requested` row the rewrite led to. Null on kernel
-   * rows written before the field existed, and on a `host_delivery` row, whose
-   * `prompt_sha256` attests the snapshot the hook wrote rather than the
-   * canonical caller bytes.
-   */
-  callerPromptSha256: string | null;
-  relayAttested: boolean | null;
-  /**
-   * `--allow-relay-mismatch` carried a `relay_attested: false` dispatch past
-   * the `relay_fidelity` refusal. False on every row that never had the
-   * field, which reads correctly for both cases that produce one: a dispatch
-   * nobody waved through, and a pre-refusal row from before the flag existed.
-   */
-  relayMismatchAllowed: boolean;
-  writeVariant: boolean | null;
-  /**
-   * Present only on a `host_rewritten` row (`kind: "rewritten"`): the Claude
-   * steering hook took this spawn off the host lane and onto a dispatch proxy.
-   * Null on every other kind.
-   *
-   * `reason` is a two-value vocabulary the hook owns — `shadow_pair_selected`
-   * (the pair rule moved a spawn the dial alone would have kept in session) and
-   * `command_lane` (the dial's own lane) — kept a plain string here for the
-   * same reason `refusal.predicate` is: the vocabulary belongs to the writer
-   * and may grow. `challenger`/`rate` are the attachment, and are null unless
-   * the reason is the pair.
-   */
-  rewrite: {
-    to: string | null;
-    reason: string;
-    modelApplied: string | null;
-    challenger: string | null;
-    rate: number | null;
-  } | null;
-  /**
-   * Present on a kernel `dispatch_refused` row and on the steering hook's
-   * `host_refused` row — the two ways a dispatch is recorded as never having
-   * run. Null on every other kind. The predicate vocabularies are per-writer
-   * and disjoint (`DispatchRefusalPredicate` in dispatch.ts for the kernel;
-   * `resolver_error` / `resolver_timeout` / `restart_required` for the hook),
-   * so the predicate also says which side refused — and, across the hook's
-   * two resolver-side values, whether the resolver failed or merely hung,
-   * which have different remedies.
-   *
-   * A predicate is a plain string on purpose: the vocabularies are the
-   * writers' and they grow. `ignored_output_kept` is one such growth — a
-   * dispatch that declared its gitignored output must survive, so no pair was
-   * formed — and it is a deliberate TRADE, not a fault (see
-   * `CHOICE_REFUSALS`). Narrowing this to a union would have dropped it.
-   */
-  refusal: { predicate: string; message: string } | null;
-  /**
-   * `false` when the row stamped `gate_eligible: false` (shadow_only).
-   * Null when the field is absent — absent is not a claim of eligible.
-   */
-  gateEligible: boolean | null;
-  /**
-   * Whether an outcome was recorded. False on a command dispatch means the
-   * process never reached its completion row — killed, or still in flight.
-   * Host deliveries and refusals record no outcome, so they are always false.
-   */
-  completed: boolean;
-  /**
-   * A `dispatch_withdrawn` row landed: an operator retired this dispatch by
-   * hand after finding nothing left to signal. The OTHER terminal receipt —
-   * `completed` stays false, because no executor ever reported, and
-   * conflating the two would let a retired dispatch read as one that ran.
-   */
-  withdrawn: boolean;
-  /** Why it was retired, as the operator stated it. Null unless withdrawn. */
-  withdrawnReason: string | null;
-  /**
-   * A tree the withdrawing operator named as still holding this dispatch's
-   * uncommitted work, repo-relative. Null when they named none — which is a
-   * silence, never a claim that the workspace is clean.
-   */
-  withdrawnWorkLeft: string | null;
-  /**
-   * What the completion row says the dispatch produced. Stated by the writer,
-   * derived from `exit_code`/`output_bytes` on rows written before the field,
-   * and null when the row carries too little to say either way.
-   */
-  outcome: DispatchOutcome | null;
-  exitCode: number | null;
-  signal: string | null;
-  durationMs: number | null;
-  outputSha256: string | null;
-  /**
-   * Completion-row attestation that the workspace fingerprint changed across
-   * the spawn. Null when the field is absent — absent is not a claim of
-   * unchanged (no git, probe failed, or a row that predates the field).
-   */
-  workspaceChanged: boolean | null;
-  error: string | null;
-  shadow: boolean;
-  primaryDispatchId: string | null;
-  shadowSource: string | null;
-  /**
-   * Correlates one pair's rows as a single thing, independent of which arm
-   * happens to carry `primary_dispatch_id`. Written on the shadow's request
-   * row and refusal rows from the start, and folded onto the primary's own
-   * completion row once a challenger actually fires — so a row from before
-   * the field existed simply reads null rather than breaking correlation.
-   */
-  pairId: string | null;
-  /**
-   * The retained challenger worktree, repo-relative, on a shadow identity
-   * row (request or completion). Null on a refusal — the worktree is either
-   * never created or removed before the refusal is written — and on a
-   * primary, which never places its own worktree on the ledger today. How
-   * the post-shadow cleaner (`fadeno clean`) finds a challenger worktree to
-   * deregister rather than deleting it out from under git.
-   */
-  workspace: string | null;
-  /**
-   * The pair's shared starting-state commit: an addressable commit both arms
-   * were cut from, so the baseline is not an implicit asymmetry between them.
-   * Present on the shadow's rows and, when a shadow actually fired, on the
-   * primary's completion row too.
-   */
-  baselineCommit: string | null;
-  diffSnapshot: string | null;
-  diffBytes: number | null;
-  /**
-   * What happened when a pair-selected, isolated PRIMARY's diff was merged
-   * back into the caller's tree — see `DispatchPrimaryMerge`. Null when the
-   * row says nothing, which is the ordinary case: an unpaired or shared-mode
-   * dispatch never attempts a merge, and absent is not a claim either way.
-   */
-  primaryMerge: DispatchPrimaryMerge | null;
-  /**
-   * Gitignored output this arm produced that no diff carried out of its
-   * worktree — see `DispatchIgnoredOutputDiscarded`. Null when the row says
-   * nothing, which means nothing was discarded: an unpaired dispatch runs in
-   * the caller's own tree, where an ignored `dist/` simply stays put.
-   */
-  ignoredOutputDiscarded: DispatchIgnoredOutputDiscarded | null;
-  /**
-   * The resolved `ignored_output` policy this dispatch ran under, from the
-   * REQUEST row — where the caller's intent is recorded, before anything has
-   * happened to test it.
-   *
-   * Null means the row did not say, which is a row written before the kernel
-   * recorded this at all. Never defaulted to `discardable` here: the whole
-   * reason the field exists is that a director who launched with
-   * `--ignored-output kept` had nothing on any row to check the tool's
-   * "DISCARDED" verdict against, and answering that with a synthesized
-   * default would put a second unfounded claim beside the first.
-   */
-  ignoredOutputPolicy: IgnoredOutputPolicyRecord | null;
-  /**
-   * What the kernel said when `--isolate` and `ignored_output: kept` were
-   * asked for together, in its own words. Null when they were not — the
-   * ordinary case.
-   */
-  ignoredOutputPolicyConflict: string | null;
-  /**
-   * Other deliveries that wrote the same paths while this one ran
-   * (`concurrent_write` on the completion row). Null when the row says
-   * nothing — the ordinary case, and the only spelling of "nothing
-   * overlapped".
-   *
-   * This log is the ONLY place an ad-hoc dispatch's stamp is written, so
-   * this listing is the only place it can be read. Before it existed the
-   * stamp was echoed once on the dispatching process's stdout, which the
-   * recover-by-tag path discards — the same channel mistake `relay_attested`
-   * made, in the mechanism that replaced the repo-wide writer lease.
-   */
-  concurrentWrite: ConcurrentWriteRecord[] | null;
-  /**
-   * Why an isolated delivery ran shared after all (`workspace_mode_degraded`
-   * on the completion row). Kernel-written since isolation became
-   * candidacy-not-capability: a pair that MATERIALIZED isolates, and every
-   * later failure degrades to "no pair, primary runs normally" rather than
-   * killing the dispatch. Null means no degradation was recorded.
-   *
-   * Read by `fadeno bakeoff` as a confound: a degraded arm did not run in the
-   * conditions the other one did.
-   */
-  workspaceModeDegraded: string | null;
-  /**
-   * The argv this dispatch actually ran, as recorded on its request row.
-   *
-   * Replaces the old `write_posture_unverified` flag, and answers a strictly
-   * larger question. That flag reported one bit about a CLAIM in the catalog;
-   * this is what was EXECUTED, so a bakeoff can compare two arms and see any
-   * capability skew between them — sandbox flags, tool allowlists, agent
-   * selection — rather than only whether someone declared a write posture.
-   * Null when the row predates the field or carried no command.
-   */
-  command: string[] | null;
-  /**
-   * Set when a hardlink-carried path was written THROUGH (`carry_mutated`) —
-   * one inode in two trees, so an arm may have altered the other's inputs.
-   * The single most comparability-destroying thing a pair can record.
-   */
-  carryMutated: boolean | null;
-  outputBytes: number | null;
-  diagnosticsSnapshot: string | null;
-  diagnosticsBytes: number | null;
-  /**
-   * Measured from INSIDE the subagent by `fadeno attest` (a `host_attestation`
-   * row), correlated onto the `host_delivery` entry it attests — the request
-   * that row is a REQUEST recorded by the parent hook before the subagent ran.
-   * `attestedAt` is null until (if ever) a matching attestation is found,
-   * which is what makes "delivered, never attested" visible rather than
-   * indistinguishable from success. Always null on a `command`-kind entry:
-   * command dispatch already carries its own kernel-measured completion row.
-   * Correlation is archetype + nearest preceding unattested `host_delivery`
-   * (see `correlateAttestation`) — a best-effort match, not a guaranteed one.
-   */
-  attestedAt: string | null;
-  /** The attested `CLAUDE_EFFORT`, or null when the attestation itself could not measure one. */
-  attestedEffort: string | null;
-  /** Whether the matched attestation measured `effort` or said so was `unavailable`; null with no match. */
-  attestedEffortEvidence: 'measured' | 'unavailable' | null;
-  /**
-   * A `host_agent_stopped` row named THIS dispatch. Null on every entry no
-   * stop row identified — which is most of them, and which is a silence, never
-   * a claim that the agent is still alive.
-   *
-   * Set only from a stop row whose correlation basis is an identification (the
-   * dispatch id read out of the host worktree path). Nothing here is ever
-   * inferred from timing or from an agent type: a row that names the wrong
-   * dispatch is worse than one that names none.
-   */
-  agentStopped: DispatchAgentStop | null;
-  /** The stop row itself, on a `kind: 'stopped'` entry. Null on every other kind. */
-  stop: DispatchStopRecord | null;
-}
-
-export interface DispatchesOptions {
-  /** Logical entries to show, newest-last (default 10). */
-  tail?: number;
+export interface CommonOptions {
   cwd?: string;
   repoRoot?: string;
-  /**
-   * `--stops`: list the `host_agent_stopped` entries themselves, every one of
-   * them, with nothing collapsed — the way back to the rows the default
-   * listing folds into a count. Obeys `--tail` exactly like the default view,
-   * so the one rule holds everywhere and the summary always names the total.
-   */
-  stops?: boolean;
+  userPathOptions?: UserPathOptions;
+  env?: NodeJS.ProcessEnv;
 }
 
-export interface DispatchesResult {
-  repoRoot: string;
-  /** Repo-relative evidence log that was read. */
-  path: string;
-  exists: boolean;
-  /** Logical entries in the whole log (before `tail` truncation). */
-  total: number;
-  /** Rows that could not be read as evidence (bad JSON or unknown event). */
-  skipped: number;
-  /**
-   * Rows stamped with a format major this reader was not written against.
-   * Counted apart from `skipped`: they are perfectly good evidence written by
-   * a newer fadeno, and the fix is to upgrade — not to repair the log.
-   */
-  skippedNewerFormat: number;
-  tail: number;
-  /** The last `tail` logical entries, oldest → newest. */
-  entries: DispatchEntry[];
-  /** One rendered line per entry, index-aligned with `entries`. */
-  lines: string[];
-  /** Footer for the rendered view, or the friendly message when empty. */
-  summary: string;
-  /** Whether this is the `--stops` view (stop rows only, nothing collapsed). */
-  stopsOnly: boolean;
-  /** Every `host_agent_stopped` entry in the log, before any tail or collapse. */
-  stopsTotal: number;
-  /**
-   * Stop entries the default listing collapsed, grouped by the reading that
-   * collapsed them. Empty in the `--stops` view, which collapses nothing.
-   * Never a claim that those agents did nothing — see `StopRisk`.
-   */
-  stopsCollapsed: StopCollapse[];
+function rootOf(opts: CommonOptions): string {
+  return resolve(opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd()));
 }
 
-/** Shortest unique prefix `runDispatchesOutput` will accept as a dispatch id. */
-const OUTPUT_ID_PREFIX_MIN = 8;
+function readPromptInput(opts: { prompt?: string | null; promptFile?: string | null }, cwd: string): string {
+  if (opts.promptFile != null && opts.promptFile.trim() !== '') {
+    const path = resolve(cwd, opts.promptFile);
+    if (!existsSync(path)) throw new DispatchesError(`--prompt-file ${opts.promptFile}: no such file.`);
+    return readFileSync(path, 'utf8');
+  }
+  if (typeof opts.prompt === 'string') return opts.prompt;
+  throw new DispatchesError('no prompt: pass --prompt-file <path> or pipe the prompt on stdin.');
+}
 
-export type DispatchOutputAttestation = 'match' | 'mismatch' | 'incomplete';
+function lookup(repoRoot: string, ref: string): DispatchRecord {
+  const found = findDispatch(readDispatches(repoRoot).records, ref);
+  if (!found.ok) throw new DispatchesError(found.message);
+  return found.record;
+}
 
-export interface DispatchesOutputOptions {
-  /** Full `dispatch_id`, unique prefix of at least 8 characters, or `last`. */
-  dispatchId: string;
-  /**
-   * Caller-chosen handle passed to `fadeno dispatch --tag`; wins over
-   * `dispatchId` when set.
-   *
-   * The handle a caller can still name after losing everything the dispatch
-   * printed. A killed Bash call takes the kernel's stderr echo with it, which
-   * left `last` as the only recovery route and `last` cannot tell one finished
-   * dispatch from another — so a 2026-08-14 dogfood recovered a concurrent
-   * proxy's report. A tag is chosen before the spawn and survives the kill.
-   */
-  tag?: string | null;
-  cwd?: string;
-  repoRoot?: string;
-  /**
-   * Accepted for CLI-wiring symmetry with other commands. Recovery reads only
-   * the repo-local evidence log and snapshot file; user-scope state is unused.
-   */
-  env?: string | null;
-  /**
-   * Wait up to this many milliseconds for the completion row to arrive before
-   * answering. Zero or absent reads once.
-   *
-   * A timed-out caller reads the ledger at the one moment the answer is least
-   * likely to be there: the harness gave up on the call, but the executor is
-   * still running and the kernel has not written its completion row yet. The
-   * 2026-08-13 dogfood proxies read exactly then, saw no completion, declared
-   * failure, and never looked again — while the kernel went on to record both
-   * dispatches as `exit_code: 0` with 5833 and 3743 bytes. The data was right
-   * the whole time; the read was early. Waiting is the difference between
-   * asking once and asking until there is an answer.
-   */
-  waitMs?: number;
-  /** Poll interval while waiting. Injectable so tests need no real delay. */
-  pollMs?: number;
-  /**
-   * Progress sink for long waits, invoked at most once per heartbeat interval
-   * with an elapsed-time line. The host agent relaying this call otherwise
-   * sees pure silence for its whole timeout and reports a healthy review as
-   * hung (Codex host feedback, 2026-08-26). Stderr by convention at the call
-   * site — stdout carries the report bytes.
-   */
-  onHeartbeat?: (line: string) => void;
-  /** Heartbeat interval while waiting. Injectable so tests need no real delay. */
+// ---------------------------------------------------------------------------
+// dispatch — the command lane, end to end
+// ---------------------------------------------------------------------------
+
+export interface DispatchOptions extends CommonOptions {
+  archetype?: string | null;
+  model?: string | null;
+  name?: string | null;
+  shared?: boolean;
+  from?: string | null;
+  prompt?: string | null;
+  promptFile?: string | null;
+  session?: string | null;
+  parent?: string | null;
+  onEcho?: (line: string) => void;
   heartbeatMs?: number;
 }
 
-export interface DispatchesOutputResult {
-  dispatchId: string;
-  /** Repo-relative `output_snapshot` path recorded on the request row. */
-  path: string;
-  /**
-   * What a caller relays: the snapshot file content, preceded by
-   * `relayNotice` when there is one.
-   *
-   * The prefix is the whole point rather than a convenience. Every other
-   * caveat this command can raise — the verdict, the merge stamp, the
-   * attestation — travels on stderr, and the dispatch-proxy contract states
-   * that stderr "is discarded along with a timed-out call". So on the exact
-   * path where a dispatch is recovered by tag after a timeout, a stderr-only
-   * warning does not exist. A relay-fidelity failure is the one finding that
-   * invalidates the bytes themselves, so it rides WITH them.
-   */
-  bytes: string;
-  /**
-   * The in-band quarantine banner prefixed onto `bytes`, or null when the
-   * relay attestation raised nothing. Exposed separately so a caller can tell
-   * report from banner without re-deriving the boundary.
-   */
-  relayNotice: string | null;
-  /** The dispatch's `relay_attested` verdict; see `runDispatch`. */
-  relayAttested: boolean | null;
-  /** Whether `--allow-relay-mismatch` is why a `false` dispatch ran at all. */
-  relayMismatchAllowed: boolean;
-  /**
-   * The in-band banner for destroyed gitignored output, prefixed onto
-   * `bytes` after `relayNotice`, or null when the receipt recorded none.
-   * See `discardedOutputNotice` for why this finding rides with the bytes
-   * and `concurrentWrite` below does not.
-   */
-  ignoredOutputNotice: string | null;
-  /** The stamp behind that banner, for a caller that would rather not parse prose. */
-  ignoredOutputDiscarded: DispatchIgnoredOutputDiscarded | null;
-  /**
-   * The resolved `ignored_output` policy the dispatch ran under, so the same
-   * caller can check the verdict against what was asked for without going
-   * back to the ledger. Null when no row stated one.
-   */
-  ignoredOutputPolicy: IgnoredOutputPolicyRecord | null;
-  /**
-   * Other deliveries that wrote the same paths while this one ran. Reported
-   * beside the bytes rather than prefixed onto them: an overlap does not make
-   * the report false, and the in-band channel is reserved for findings that
-   * do. Null while the dispatch is still open.
-   */
-  concurrentWrite: ConcurrentWriteRecord[] | null;
-  /**
-   * The snapshot bytes alone, with no banner. `attested` is computed against
-   * THIS, never `bytes`: the digest on the completion row is the executor's
-   * output, and a banner Fadeno prepended afterwards is not part of it.
-   */
-  snapshotBytes: string;
-  /**
-   * `match` / `mismatch` compare sha256(bytes) to the completion row's
-   * `output_sha256`. `incomplete` when no completion row exists — the
-   * killed-mid-flight case this reader exists for.
-   */
-  attested: DispatchOutputAttestation;
-  /**
-   * An operator retired this dispatch: these bytes are everything it ever
-   * produced, and no completion row is coming. `attested` still reads
-   * `incomplete` — there is nothing to attest against — but `incomplete`
-   * alone reads as "still running", which for a withdrawn dispatch is the
-   * exact wrong thing to tell a caller waiting on it.
-   */
-  withdrawn: boolean;
-  /** Why it was retired, as the operator stated it. Null unless withdrawn. */
-  withdrawnReason: string | null;
-  /**
-   * The completion row's verdict and the facts behind it; all null while the
-   * dispatch is still open. `attested` says the bytes are the ones the row
-   * hashed — it says nothing about whether the executor finished, and a
-   * kernel-killed executor attests perfectly. A caller relaying `bytes` has to
-   * relay this too.
-   */
-  outcome: DispatchOutcome | null;
-  exitCode: number | null;
-  signal: string | null;
-  outputBytes: number | null;
-  /**
-   * Where the executor's stderr was retained, from the completion row.
-   *
-   * `dispatch` no longer relays that transcript to the terminal — it is
-   * retained and its path echoed — and the echo goes on stderr, which is
-   * exactly what a killed Bash call discards. This is how the caller who
-   * recovers by tag learns where it went. `stderrTruncated` is carried
-   * alongside because a path is a claim about what is IN the file.
-   */
-  stderrSnapshot: string | null;
-  stderrBytes: number | null;
-  stderrTruncated: boolean;
-  /** The deadline that killed it, when `outcome` is `timeout`. */
-  timeoutMs: number | null;
-  /** The merge-back stamp, when the dispatch ran isolated and one was attempted. */
-  primaryMerge: { status: string; detail?: string; conflicts?: string[]; rebased_onto?: string } | null;
-  /** The retained worktree, while the merge-back is `unresolved`. */
-  workspace: string | null;
-  /**
-   * How the query landed on this record. `recency` means `last` fell back to
-   * "newest in the log" because nothing was open — a guess worth surfacing
-   * when concurrent dispatches share one evidence file.
-   */
-  resolvedBy: OutputResolution;
-}
+export type DispatchOutcome = { ok: true; result: RunResult } | { ok: false; refused: string };
 
-/**
- * Block the calling thread. Recovery is a synchronous command in a
- * synchronous CLI; making the whole call stack async to wait for one file to
- * gain a line is not a trade worth making.
- */
-function sleepSync(ms: number): void {
-  if (ms <= 0) return;
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-/** `855944` → `14m 16s`; sub-minute stays in seconds, hours roll up. */
-export function formatElapsed(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
-}
-
-function str(value: unknown): string | null {
-  return typeof value === 'string' && value !== '' ? value : null;
-}
-
-function bool(value: unknown): boolean | null {
-  return typeof value === 'boolean' ? value : null;
-}
-
-function num(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-/** `loadout` is `{name, source}` on kernel rows and a bare name on hook rows. */
-function loadoutOf(value: unknown): { name: string | null; source: string | null } {
-  if (typeof value === 'string') return { name: value === '' ? null : value, source: null };
-  if (value != null && typeof value === 'object' && !Array.isArray(value)) {
-    const row = value as Record<string, unknown>;
-    return { name: str(row.name), source: str(row.source) };
-  }
-  return { name: null, source: null };
-}
-
-function excerpt(text: string, max: number): string {
-  const oneLine = text.split('\n')[0]!.trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
-}
-
-/**
- * One path, rendered as one line. A filename may legally contain a newline
- * and this view is one line per dispatch, so the break is ESCAPED rather than
- * cut at the way free prose is: truncating `we\nird/dist` to `we` would name
- * a path that does not exist, which is worse than a long line.
- */
-function flatPath(path: string): string {
-  const flat = path.split('\r').join('\\r').split('\n').join('\\n');
-  return flat.length > PATH_EXCERPT ? `${flat.slice(0, PATH_EXCERPT - 1)}…` : flat;
-}
-
-/**
- * Which reader tier a row's `format` stamp puts it in.
- */
-function formatTier(value: unknown): 'unversioned' | 'known' | 'older' | 'newer' {
-  const format = str(value);
-  if (format == null) return 'unversioned';
-  const majorStr = format.split('.')[0];
-  const known = parseInt(KNOWN_FORMAT_MAJOR, 10);
-  const maj = parseInt(majorStr ?? '', 10);
-  if (!Number.isFinite(maj) || !Number.isFinite(known)) {
-    return majorStr === KNOWN_FORMAT_MAJOR ? 'known' : 'newer';
-  }
-  if (maj === known) return 'known';
-  if (maj > known) return 'newer';
-  return 'older';
-}
-
-/**
- * Does an unversioned, event-less row look like a pre-`dispatch_id` dispatch?
- * That writer emitted exactly one row per dispatch, after the spawn: a
- * timestamp, whatever identity it had resolved, and the outcome. Requiring a
- * timestamp, some identity, and at least one outcome key keeps an unrelated
- * JSON object from being read as evidence of a dispatch that never happened.
- */
-function isLegacyCompletion(row: Record<string, unknown>): boolean {
-  if (str(row.timestamp) == null) return false;
-  if (str(row.executor) == null && str(row.archetype) == null) return false;
-  return OUTCOME_KEYS.some((key) => key in row);
-}
-
-function refusalOf(value: unknown): { predicate: string; message: string } | null {
-  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
-  const row = value as Record<string, unknown>;
-  const predicate = str(row.predicate);
-  const message = typeof row.message === 'string' ? row.message : null;
-  if (predicate == null || message == null) return null;
-  return { predicate, message };
-}
-
-/**
- * The two lane facts every writer spells the same way, read in one place so
- * a rename on the wire is a one-line edit here rather than a hunt. Kernel
- * rows carry neither today and simply read null; the Claude steering hook
- * writes both, on deliveries and on refusals alike.
- */
-function laneFieldsOf(row: Record<string, unknown>): {
-  sessionEffort: string | null;
-  laneReason: string | null;
-} {
-  return { sessionEffort: str(row.session_effort), laneReason: str(row.lane_reason) };
-}
-
-/**
- * Parse a completion row's `primary_merge` object (see
- * `DispatchPrimaryMerge`). `status` is the whole claim, so a row without one
- * reads as no claim at all rather than as a merge of unknown outcome.
- */
-function primaryMergeOf(value: unknown): DispatchPrimaryMerge | null {
-  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
-  const row = value as Record<string, unknown>;
-  const status = str(row.status);
-  if (status == null) return null;
-  const out: DispatchPrimaryMerge = { status };
-  const detail = str(row.detail);
-  if (detail != null) out.detail = detail;
-  const snapshot = str(row.diff_snapshot);
-  if (snapshot != null) out.diffSnapshot = snapshot;
-  return out;
-}
-
-/**
- * Parse a completion row's `ignored_output_discarded` object (see
- * `DispatchIgnoredOutputDiscarded`).
- *
- * The rules live in `parseIgnoredOutputDiscarded`, shared with `verify` and
- * `show`. What counts as a finding is the decision that must not drift
- * between surfaces: two readers wording a discard differently costs a
- * re-read, two readers disagreeing about whether there IS one costs the
- * output. Rendering stays local, because an inline bracketed fragment on a
- * one-line listing is a different job from a section in a run projection.
- */
-function ignoredOutputDiscardedOf(value: unknown): DispatchIgnoredOutputDiscarded | null {
-  return parseIgnoredOutputDiscarded(value);
-}
-
-function dialOf(value: unknown): { model: string; effort?: string; harness?: string } | null {
-  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
-  const row = value as Record<string, unknown>;
-  const model = str(row.model);
-  if (model == null) return null;
-  const out: { model: string; effort?: string; harness?: string } = { model };
-  const eff = str(row.effort);
-  if (eff != null) out.effort = eff;
-  const harness = str(row.harness);
-  if (harness != null) out.harness = harness;
-  else {
-    // Format 1.0 wrote `dial.via` with a driver alias. Read as the harness it
-    // always named; never rewritten on disk.
-    const via = str(row.via);
-    if (via != null) out.harness = legacyDriverHarness(via);
-  }
-  return out;
-}
-
-/** Numeric `major.minor` comparison; an unparseable side sorts oldest. */
-function compareFormat(a: string, b: string): number {
-  const parts = (v: string) => v.split('.').map((p) => Number.parseInt(p, 10));
-  const [aMajor = -1, aMinor = -1] = parts(a);
-  const [bMajor = -1, bMinor = -1] = parts(b);
-  if (!Number.isFinite(aMajor) || !Number.isFinite(aMinor)) return -1;
-  return aMajor !== bMajor ? aMajor - bMajor : aMinor - bMinor;
-}
-
-/**
- * The two harness identities on one row, across both ledger formats.
- *
- * Format **1.1** writes them by their real names: `host` is the harness the
- * call ran INSIDE, `harness` is the harness that EXECUTED it, and `variant`
- * names the command lane when policy chose one.
- *
- * Format **1.0** wrote `harness` for the HOST and `driver` for the executor —
- * one word, two meanings, on the same row. A 1.0 row is translated here and
- * only here, so every consumer downstream sees the 1.1 vocabulary. Old rows
- * are never rewritten.
- */
-function harnessFieldsOf(row: Record<string, unknown>): { host: string | null; harness: string | null; variant: string | null } {
-  const format = str(row.format);
-  // A VERSION comparison, not a prefix test: `0.2` and `1.0` are both "before
-  // 1.1", and a future `1.2` must not read as legacy because it fails to start
-  // with the string `1.1`.
-  const legacy = format == null || compareFormat(format, '1.1') < 0;
-  if (!legacy) {
-    return { host: str(row.host), harness: str(row.harness), variant: str(row.variant) };
-  }
-  const driver = str(row.driver);
-  return {
-    host: str(row.host) ?? str(row.harness),
-    harness: driver != null ? legacyDriverHarness(driver) : null,
-    variant: null,
-  };
-}
-
-function requestedEntry(row: Record<string, unknown>): DispatchEntry {
-  const loadout = loadoutOf(row.loadout);
-  const lane = laneFieldsOf(row);
-  return {
-    kind: 'command',
-    format: str(row.format),
-    legacy: false,
-    timestamp: str(row.timestamp),
-    dispatchId: str(row.dispatch_id),
-    archetype: str(row.archetype),
-    role: str(row.role),
-    agentType: null,
-    resolution: str(row.resolution),
-    dial: dialOf(row.dial),
-    loadout: loadout.name,
-    loadoutSource: loadout.source,
-    executor: str(row.executor),
-    model: str(row.model),
-    modelOverride: null,
-    modelId: str(row.model_id),
-    reasoningEffort: str(row.reasoning_effort),
-    // Read rather than hard-nulled: the kernel does not write lane fields
-    // today, but reading them costs nothing and is the difference between
-    // "the writer said nothing" and this reader dropping what it said.
-    sessionEffort: lane.sessionEffort,
-    laneReason: lane.laneReason,
-    ...harnessFieldsOf(row),
-    target: str(row.target),
-    provider: str(row.provider),
-    transport: str(row.transport),
-    background: bool(row.background),
-    taskId: str(row.task_id),
-    sessionId: str(row.session_id),
-    callId: str(row.call_id),
-    promptSource: str(row.prompt_source),
-    promptSnapshot: str(row.prompt_snapshot),
-    promptSha256: str(row.prompt_sha256),
-    callerPromptSha256: str(row.caller_prompt_sha256),
-    relayAttested: bool(row.relay_attested),
-    relayMismatchAllowed: row.relay_mismatch_allowed === true,
-    writeVariant: bool(row.write_variant),
-    rewrite: null, // a kernel row is the delivery, never the decision to reroute one
-    refusal: refusalOf(row.refusal),
-    gateEligible: row.gate_eligible === false ? false : null,
-    completed: false,
-    withdrawn: false,
-    withdrawnReason: null,
-    withdrawnWorkLeft: null,
-    outcome: null,
-    exitCode: null,
-    signal: null,
-    durationMs: null,
-    outputSha256: null,
-    workspaceChanged: null,
-    error: null,
-    shadow: row.shadow === true,
-    primaryDispatchId: str(row.primary_dispatch_id),
-    shadowSource: str(row.shadow_source),
-    pairId: str(row.pair_id),
-    workspace: str(row.workspace),
-    baselineCommit: str(row.baseline_commit),
-    diffSnapshot: str(row.diff_snapshot),
-    diffBytes: num(row.diff_bytes),
-    // A merge-back is a *result*: it happens after the arm has run, so it
-    // arrives on the completion row and is folded in by `applyCompletion`.
-    // A request row cannot yet know how its own diff merged.
-    primaryMerge: null,
-    // Likewise a result: what an arm built into an ignored path is only
-    // knowable once it has finished building it. Folded in by
-    // `applyCompletion`.
-    ignoredOutputDiscarded: null,
-    // The POLICY, unlike the finding, is an intent and is stated up front —
-    // it is read here, from the request row, so a dispatch that never
-    // completed still says what it was launched under.
-    ignoredOutputPolicy: parseIgnoredOutputPolicy(row.ignored_output_policy),
-    ignoredOutputPolicyConflict: str(row.ignored_output_policy_conflict),
-    concurrentWrite: null,
-    workspaceModeDegraded: null,
-    command: null,
-    carryMutated: null,
-    outputBytes: num(row.output_bytes),
-    diagnosticsSnapshot: str(row.diagnostics_snapshot),
-    diagnosticsBytes: num(row.diagnostics_bytes),
-    // Attestation only ever correlates onto a `host` entry (see
-    // `correlateAttestation`); a command dispatch's own completion row is
-    // already a kernel measurement, so these stay null for its whole life.
-    attestedAt: null,
-    attestedEffort: null,
-    attestedEffortEvidence: null,
-    // Set only by a later `host_agent_stopped` row that NAMES this dispatch id
-    // — see `correlateAgentStop`. Absent is a silence, not a liveness claim.
-    agentStopped: null,
-    stop: null, // only a `kind: 'stopped'` entry carries one
-  };
-}
-
-function hostEntry(row: Record<string, unknown>): DispatchEntry {
-  const loadout = loadoutOf(row.loadout);
-  const lane = laneFieldsOf(row);
-  return {
-    kind: 'host',
-    format: str(row.format),
-    legacy: false,
-    timestamp: str(row.timestamp),
-    dispatchId: null,
-    archetype: str(row.archetype),
-    role: null,
-    agentType: str(row.agent_type),
-    resolution: null,
-    dial: dialOf(row.dial),
-    loadout: loadout.name,
-    loadoutSource: loadout.source,
-    executor: str(row.executor),
-    model: str(row.model),
-    modelOverride: str(row.model_override),
-    modelId: str(row.model_id),
-    reasoningEffort: str(row.reasoning_effort),
-    // The hook writes both on a delivery AND on a denial, so
-    // `hostRefusedEntry` (which builds on this) gets them for free — the two
-    // row types dropped them identically, and now surface them identically.
-    sessionEffort: lane.sessionEffort,
-    laneReason: lane.laneReason,
-    ...harnessFieldsOf(row),
-    target: null,
-    provider: null,
-    transport: str(row.transport),
-    background: bool(row.background),
-    taskId: str(row.task_id),
-    sessionId: str(row.session_id),
-    callId: str(row.call_id),
-    promptSource: null,
-    promptSnapshot: str(row.prompt_snapshot),
-    promptSha256: str(row.prompt_sha256),
-    // A `host_delivery` row's `prompt_sha256` attests the SNAPSHOT the hook
-    // wrote beside it — raw bytes, exactly as the kernel's field does — so it
-    // is not the canonical caller digest and must not be presented as one.
-    // (They differ only by trailing newlines, and nothing joins to a host
-    // delivery by content: nothing ran downstream of it.) The one hook row that
-    // does carry a caller digest is `host_rewritten`, which overrides this
-    // below.
-    callerPromptSha256: null,
-    relayAttested: null,
-    relayMismatchAllowed: false,
-    writeVariant: null,
-    rewrite: null, // set by `hostRewrittenEntry`, which builds on this
-    refusal: null,
-    gateEligible: null,
-    completed: false,
-    // Host deliveries have their own lifecycle (`host_dispatch_withdrawn`,
-    // read through `hostRequestTerminalState`); this pair is the COMMAND
-    // lane's receipt and stays null on a host row rather than borrowing it.
-    withdrawn: false,
-    withdrawnReason: null,
-    withdrawnWorkLeft: null,
-    outcome: null,
-    exitCode: null,
-    signal: null,
-    durationMs: null,
-    outputSha256: null,
-    workspaceChanged: null,
-    error: null,
-    shadow: false,
-    primaryDispatchId: null,
-    shadowSource: null,
-    pairId: null,
-    workspace: null,
-    baselineCommit: null,
-    diffSnapshot: null,
-    diffBytes: null,
-    // A host spawn has no worktree of its own, and a selected pair forces
-    // both arms onto the command lane anyway, so no host row is ever the
-    // primary arm of a merge-back.
-    primaryMerge: null,
-    // And with no worktree there is nothing to discard on the way out of one:
-    // a host subagent writes into the caller's own tree, where a gitignored
-    // build directory stays exactly where it was written. No policy either:
-    // this lane takes no `--ignored-output`, so claiming one would be an
-    // invention rather than a record.
-    ignoredOutputDiscarded: null,
-    ignoredOutputPolicy: null,
-    ignoredOutputPolicyConflict: null,
-    concurrentWrite: null,
-    workspaceModeDegraded: null,
-    command: null,
-    carryMutated: null,
-    outputBytes: null,
-    diagnosticsSnapshot: null,
-    diagnosticsBytes: null,
-    // Unattested until a later `host_attestation` row correlates onto this
-    // one — see `correlateAttestation`, called from the main read loop below.
-    attestedAt: null,
-    attestedEffort: null,
-    attestedEffortEvidence: null,
-    // A host spawn carries no dispatch id, so no stop row can ever NAME one.
-    // It stays null here for the life of the entry — which is honest, and is
-    // exactly why the stop row renders as an entry of its own.
-    agentStopped: null,
-    stop: null, // only a `kind: 'stopped'` entry carries one
-  };
-}
-
-/**
- * A `host_refused` row: the Claude steering hook DENIED the spawn, so no
- * subagent ever existed. Built on `hostEntry` because the identity half is
- * the same shape (and mostly null on the resolver-error path, which denies
- * before anything is resolved), plus the refusal the kernel's own refusal
- * rows already carry.
- *
- * The event name is the claim, so a row whose `refusal` object is missing or
- * malformed still renders as a refusal rather than quietly reading as a
- * delivery that was never attested — which is the exact confusion this row
- * exists to end.
- */
-function hostRefusedEntry(row: Record<string, unknown>): DispatchEntry {
-  const entry = hostEntry(row);
-  entry.refusal = refusalOf(row.refusal) ?? { predicate: 'unknown', message: '' };
-  return entry;
-}
-
-/**
- * A `native_spawn` row: the Codex spawn guard saw a GENERIC subagent launch
- * (host mode off, so it was allowed) and recorded it. Built on `hostEntry`
- * because the row is a host-side spawn like any other, then corrected on the
- * two fields where a generic spawn differs from a steered one.
- *
- * `model` leads with the INHERITED model — the parent session's active model,
- * which is what a spawn naming none of its own actually runs on, and the fact
- * the basanos receipt turned on. A spawn that named its own model keeps that
- * visible as `modelOverride`, so the line reads `inherited → requested`; a
- * spawn that named the same model the session was already on renders once
- * rather than twice.
- *
- * NOT correlated with attestations, and it must not be: `correlateAttestation`
- * only walks `kind: 'host'` entries with a matching archetype, and a native
- * spawn has no archetype to match. A generic subagent never runs `fadeno
- * attest`, so `[never attested]` would be an accusation about a contract this
- * spawn was never under.
- */
-function nativeSpawnEntry(row: Record<string, unknown>): DispatchEntry {
-  const entry = hostEntry(row);
-  const requested = str(row.model_requested);
-  const inherited = str(row.model_inherited);
-  entry.kind = 'native';
-  entry.archetype = null; // by construction: this spawn named no Fadeno role
-  entry.agentType = str(row.agent_type);
-  entry.model = inherited ?? requested;
-  // An override is only visible when BOTH sides are: `model_inherited` is null
-  // whenever the writer could not observe the session's model at all — every
-  // Claude row, since a Claude `PreToolUse` event publishes no model — and
-  // reading that null as "different" rendered `opus → opus`, claiming a spawn
-  // overrode a model nothing ever saw.
-  entry.modelOverride =
-    requested != null && inherited != null && requested !== inherited ? requested : null;
-  entry.reasoningEffort = str(row.reasoning_effort);
-  return entry;
-}
-
-/**
- * A `host_rewritten` row: the Claude steering hook took a host-eligible spawn
- * OFF the host lane and onto a dispatch proxy — because a shadow pair was
- * selected, or because the dial's own lane is `command`.
- *
- * Built on `hostEntry` because the identity half is the same shape (the dialed
- * executor, the lane and its reason, the caller's digest), then given its own
- * `kind` so it can never be mistaken for a delivery. Nothing ran in session
- * here: the delivery evidence is the kernel's row pair under the relay's
- * dispatch id, joined to this row by `caller_prompt_sha256`.
- *
- * The event name is the claim, exactly as in `hostRefusedEntry`: a row whose
- * `reason` is missing still renders as a rewrite, with the reason marked
- * unknown, rather than silently reading as an in-session delivery — which is
- * the confusion this row exists to end.
- */
-function hostRewrittenEntry(row: Record<string, unknown>): DispatchEntry {
-  const entry = hostEntry(row);
-  entry.kind = 'rewritten';
-  entry.agentType = str(row.agent_type);
-  // This row writes no snapshot — the kernel owns the one for the dispatch the
-  // rewrite produced — so its `prompt_sha256` is the CALLER digest, canonical,
-  // and equals `caller_prompt_sha256` on that kernel row. Both names hold it
-  // here so a reader can join in either direction.
-  entry.callerPromptSha256 = str(row.prompt_sha256);
-  entry.rewrite = {
-    to: str(row.subagent_type_applied),
-    reason: str(row.reason) ?? 'unknown',
-    modelApplied: str(row.model_applied),
-    challenger: str(row.challenger),
-    rate: num(row.rate),
-  };
-  return entry;
-}
-
-/** The stop hook's tree vocabulary, or null when the row states none we know. */
-function stopGitOf(value: unknown): 'clean' | 'dirty' | 'unavailable' | null {
-  const state = str(value);
-  return state === 'clean' || state === 'dirty' || state === 'unavailable' ? state : null;
-}
-
-/** An object field, or an empty object — so every read below is total. */
-function objectOf(value: unknown): Record<string, unknown> {
-  return value != null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-/**
- * A `host_agent_stopped` row: a subagent (or Codex managed agent) stopped —
- * finished, interrupted, killed, or cut off by a session limit — and the stop
- * hook recorded what was sitting in the tree it had been working in.
- *
- * Built on `hostEntry` because the identity half is the same shape, then given
- * its own `kind` so it can never be mistaken for a delivery. NOTHING was
- * delivered here and nothing ran: this row is a death certificate, and the
- * only positive claims on it are the ones the hook could observe.
- *
- * The event name is the claim, exactly as in `hostRefusedEntry`: a row whose
- * `workspace` object is missing or malformed still renders as a stop, with the
- * tree marked unreadable, rather than quietly reading as a clean one.
- *
- * NOT correlated with attestations, and it must not be: `correlateAttestation`
- * walks `kind: 'host'` entries only, and a stop is not a delivery that could
- * have attested anything.
- */
-function stoppedEntry(row: Record<string, unknown>): DispatchEntry {
-  const entry = hostEntry(row);
-  const workspace = objectOf(row.workspace);
-  const message = objectOf(row.last_message);
-  const correlation = objectOf(row.dispatch_correlation);
-  const entryCount = num(workspace.entry_count);
-  entry.kind = 'stopped';
-  entry.archetype = null; // a stop names an agent type, never an archetype
-  entry.agentType = str(row.agent_type);
-  entry.model = str(row.model); // Codex publishes it on this event; Claude does not
-  entry.stop = {
-    agentId: str(row.agent_id),
-    sessionId: str(row.session_id),
-    transcriptPath: str(row.agent_transcript_path),
-    // Presence is its own fact, and it is deliberately read from the object
-    // rather than from whether an excerpt survived truncation: a message of
-    // whitespace is still a message the harness handed over.
-    lastMessagePresent: message.present === true,
-    lastMessageExcerpt: str(message.excerpt),
-    git: stopGitOf(workspace.git),
-    entries: Array.isArray(workspace.entries)
-      ? workspace.entries.filter((line): line is string => typeof line === 'string')
-      : [],
-    entryCount,
-    truncated: workspace.truncated === true,
-    note: str(workspace.note),
-    tree: str(workspace.tree),
-    correlation: {
-      dispatchId: str(correlation.dispatch_id),
-      scope: str(correlation.scope),
-      // A row that states no basis is treated as stating none at all — the
-      // conservative reading, and the one that cannot invent an identification.
-      basis: str(correlation.basis) ?? 'unestablished',
-    },
-    openDispatchIds: [], // filled by the reader, which can see the whole log
-    // Unclassified until a reader that has folded the WHOLE log says
-    // otherwise: one of the three signals a risk turns on — whether the
-    // dispatch this row named ever received a receipt — is not on this row and
-    // cannot be. Null is "nobody classified this", never "no risk".
-    risk: null,
-    riskReading: null,
-  };
-  return entry;
-}
-
-/**
- * Which reading of a stop row's own signals decides its claim on a tail slot.
- *
- * Read in this order, and the order is the argument:
- *
- * 1. THE CORRELATION, and settlement read at the END of the fold rather than
- *    where the stop landed. The ordinary life of a host dispatch is: the agent
- *    stops (this row), THEN the host runs `dispatch-close` (the receipt). A
- *    stop judged at its own position would therefore call every successful
- *    delivery a warning — and those stops are the largest population of all.
- *    A dispatch this log does not contain is NOT settled: a truncated head is
- *    a silence, and reading a silence as a receipt is the exact defect the
- *    rest of this file is built against.
- * 2. THE FINAL MESSAGE. Measured, in the hook's header, out of Claude Code's
- *    own bundle: the harness supplies `last_assistant_message` on the ordinary
- *    turn-end path and supplies NO messages on the interrupted path. So its
- *    presence is evidence the agent reached its own turn end, and its absence
- *    is the shape of every reported incident (a 429, a kill, credit
- *    exhaustion). It is not a completeness verdict in either direction and is
- *    never rendered as one — the agent was never asked.
- *
- *    This is also the correction the tree alone cannot make. "Uncorrelated but
- *    dirty" on its own fires for EVERY ordinary in-session subagent, because
- *    an unsteered `Explore` runs in the repo root and a session that is
- *    dispatching work is a session whose root is dirty — this repo's own
- *    ledger carries 42 `native_spawn` rows in exactly that position. Ranking
- *    on the tree alone would promote all 42 into the tier meant for the five
- *    dead agents, which is the noise this ranking exists to remove.
- * 3. THE TREE, last, and its three states kept apart: `dirty` is something at
- *    risk, `clean` is a claim about the stop and not about the work, and
- *    anything else is an admission that nothing was measured.
- *
- * Note what this never reads: `agent_type`, the harness, or whether Fadeno
- * steered the spawn. See `StopRisk` for why filtering on Fadeno-ness would
- * reproduce the original bug.
- */
-function classifyStop(entry: DispatchEntry, byDispatchId: ReadonlyMap<string, DispatchEntry>): StopRisk {
-  const stop = entry.stop;
-  if (stop == null) throw new Error('classifyStop requires a stop entry'); // unreachable: callers filter on kind
-  const named = stop.correlation.dispatchId;
-  if (named != null) {
-    const target = byDispatchId.get(named);
-    return target != null && (target.completed || target.withdrawn) ? 'settled_dispatch' : 'unsettled_dispatch';
-  }
-  if (stop.lastMessagePresent) return 'agent_signed_off';
-  if (stop.git === 'dirty') return 'unowned_dirty';
-  if (stop.git === 'clean') return 'tree_clean';
-  // `unavailable`, and a row whose workspace object was missing or malformed.
-  // Both mean the same thing here and neither may borrow `clean`'s wording.
-  return 'unmeasured';
-}
-
-/**
- * Fold a `host_agent_stopped` row into the log around it.
- *
- * Two effects, and the split is the honest part.
- *
- * 1. The stop always gets an entry of its own. It is evidence in its own right
- *    — five agents killed by one 429 is the thing the reporters most needed to
- *    see — and it must not become invisible just because it happened to land
- *    near a dispatch.
- *
- * 2. It marks a dispatch ONLY when the row named one, and the row only names
- *    one when the stop hook could read the id out of the host worktree the
- *    agent was standing in (`.fadeno/local/host-worktrees/<scope>/<id>`). That
- *    is an identification, not a match: the path IS the id.
- *
- * What this deliberately does NOT do is guess. A stop event names an agent,
- * never a dispatch, and the nearest-preceding heuristic `correlateAttestation`
- * uses would be available here — same archetype, same append order — but an
- * attestation that lands on the wrong delivery costs a mislabelled effort,
- * while a stop that lands on the wrong dispatch tells a host that live work is
- * dead. So an uncorrelated stop says outright that it names no dispatch, and
- * carries the ids that were open at that point in the log as context rather
- * than as an answer.
- *
- * The open list is computed HERE rather than written by the hook, for two
- * reasons: the reader can see the whole log where the hook can only see one
- * moment of it, and a hook that read the ledger could not finish inside the
- * 5s budget a killed subagent's cleanup gives it.
- */
-function correlateAgentStop(
-  entry: DispatchEntry,
-  byDispatchId: Map<string, DispatchEntry>,
-): void {
-  const stop = entry.stop;
-  if (stop == null) return;
-  const named = stop.correlation.dispatchId;
-  const target = named == null ? undefined : byDispatchId.get(named);
-  // A named dispatch that has already settled is not marked: the agent stopped
-  // after its work was received, which is what an ordinary finish looks like.
-  if (target != null && !target.completed && !target.withdrawn) {
-    target.agentStopped = {
-      at: entry.timestamp,
-      agentType: entry.agentType,
-      agentId: stop.agentId,
-      basis: stop.correlation.basis,
-      dirtyPaths: stop.git === 'unavailable' ? null : stop.entryCount,
-    };
-    return;
-  }
-  // Nothing was named, or what was named is not in this log (a truncated head,
-  // a run-scoped worktree whose dispatch lives in a run ledger instead). Say
-  // what was open and claim nothing about which one this agent held.
-  for (const [id, candidate] of byDispatchId) {
-    if (!candidate.completed && !candidate.withdrawn) stop.openDispatchIds.push(id);
-  }
-}
-
-/**
- * Correlate a `host_attestation` row (written by `fadeno attest`, running
- * INSIDE the subagent) onto the `host_delivery` entry it measures.
- *
- * The hard part, stated honestly: the subagent has neither the parent's
- * prompt digest (injecting one into the prompt would make prompt bytes vary
- * per spawn, which shadow pairs depend on NOT happening — see
- * `runAttest` in `src/commands/attest.ts`) nor the parent's session id (its
- * own differs). Archetype plus append order is all that is left, so this
- * matches the NEAREST PRECEDING entry of `kind: 'host'` with the same
- * archetype that no earlier attestation has already claimed — scanning
- * backward through everything read so far, oldest match wins ties by being
- * found last.
- *
- * Precision limits, plainly: two host deliveries of the SAME archetype that
- * both go unattested, followed by one attestation, correlate that
- * attestation to the more recent of the two — which is usually right (the
- * subagent that just ran is more likely to be the one attesting) but is a
- * heuristic, not a proof. An attestation with no preceding unattested
- * `host_delivery` of its archetype at all (attest run twice for one
- * delivery, or run outside a steered host spawn entirely) matches nothing
- * and is silently dropped — it is real evidence that fadeno attest ran, but
- * evidence of nothing THIS reader can render as a dispatch, so it is neither
- * folded into an entry nor counted as an unreadable row.
- */
-function correlateAttestation(entries: readonly DispatchEntry[], row: Record<string, unknown>): void {
-  const archetype = str(row.archetype);
-  if (archetype == null) return; // cannot correlate without knowing what it claims to be
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const candidate = entries[i]!;
-    if (candidate.kind !== 'host') continue;
-    // A refused spawn never ran, so nothing inside it could have attested.
-    // Without this the nearest-preceding rule would happily fold a real
-    // subagent's attestation onto a denial — inventing a measurement of a
-    // spawn the hook blocked, and consuming the attestation the delivery it
-    // actually came from was owed.
-    if (candidate.refusal != null) continue;
-    if (candidate.archetype !== archetype) continue;
-    if (candidate.attestedAt != null) continue; // already claimed by an earlier attestation
-    candidate.attestedAt = str(row.timestamp);
-    candidate.attestedEffort = str(row.effort);
-    const evidence = str(row.effort_evidence);
-    candidate.attestedEffortEvidence = evidence === 'measured' || evidence === 'unavailable' ? evidence : null;
-    return;
-  }
-}
-
-/** Fold a completion row's outcome into the entry its request row opened. */
-/**
- * A terminal receipt RETIRES an `agentStopped` mark, whichever order the two
- * rows arrived in.
- *
- * The mark's own sentence is "an agent stopped and no terminal receipt was
- * recorded". The stop hook fires as the agent concludes and the host writes
- * the receipt after that, so on the ordinary successful path the stop lands
- * FIRST — `correlateAgentStop` sees an open dispatch, marks it, and the
- * receipt then arrives and makes the mark's own words false. Left in place it
- * printed "no terminal receipt was recorded" on the same line as `exit 0`.
- *
- * Cleared here, in the appliers, rather than in the tail reader, so both
- * consumers of this fold get it — and so `fadeno dispatches` says what
- * `fadeno show` already said, which suppresses the mark for a settled request
- * (`isHostRequestSettled`). Two surfaces disagreeing about whether work is
- * live is the failure the stop row exists to end.
- *
- * Nothing is lost: the stop keeps its own entry, which is where the death is
- * evidence in its own right.
- */
-function retireAgentStop(entry: DispatchEntry): void {
-  entry.agentStopped = null;
-}
-
-function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): void {
-  entry.completed = true;
-  retireAgentStop(entry);
-  entry.exitCode = num(row.exit_code);
-  entry.signal = str(row.signal);
-  entry.durationMs = num(row.duration_ms);
-  entry.outputSha256 = str(row.output_sha256);
-  entry.error = str(row.error);
-  if (typeof row.workspace_changed === 'boolean') {
-    entry.workspaceChanged = row.workspace_changed;
-  }
-  entry.relayAttested = entry.relayAttested ?? bool(row.relay_attested);
-  // `||=`, not `??=`: the field is a boolean, and the completion row is the
-  // one that carries it once the request row already said false.
-  entry.relayMismatchAllowed = entry.relayMismatchAllowed || row.relay_mismatch_allowed === true;
-  entry.writeVariant = entry.writeVariant ?? bool(row.write_variant);
-  entry.model = entry.model ?? str(row.model);
-  entry.modelId = entry.modelId ?? str(row.model_id);
-  {
-    const fields = harnessFieldsOf(row);
-    entry.harness = entry.harness ?? fields.harness;
-    entry.host = entry.host ?? fields.host;
-    entry.variant = entry.variant ?? fields.variant;
-  }
-  entry.reasoningEffort = entry.reasoningEffort ?? str(row.reasoning_effort);
-  const lane = laneFieldsOf(row);
-  entry.sessionEffort = entry.sessionEffort ?? lane.sessionEffort;
-  entry.laneReason = entry.laneReason ?? lane.laneReason;
-  entry.dial = entry.dial ?? dialOf(row.dial);
-  entry.executor = entry.executor ?? str(row.executor);
-  if (row.gate_eligible === false) entry.gateEligible = false;
-  if (entry.refusal == null) entry.refusal = refusalOf(row.refusal);
-  // Shadow and output fields may arrive on either row; completion wins where
-  // request was silent, mirroring the identity fallback above.
-  if (row.shadow === true) entry.shadow = true;
-  entry.primaryDispatchId = entry.primaryDispatchId ?? str(row.primary_dispatch_id);
-  entry.shadowSource = entry.shadowSource ?? str(row.shadow_source);
-  entry.pairId = entry.pairId ?? str(row.pair_id);
-  entry.workspace = entry.workspace ?? str(row.workspace);
-  entry.baselineCommit = entry.baselineCommit ?? str(row.baseline_commit);
-  entry.diffSnapshot = entry.diffSnapshot ?? str(row.diff_snapshot);
-  const db = num(row.diff_bytes);
-  if (db != null) entry.diffBytes = db;
-  // The merge-back result: written once, at the end of a paired primary's
-  // run, so the completion row is its only home (see `DispatchPrimaryMerge`).
-  entry.primaryMerge = entry.primaryMerge ?? primaryMergeOf(row.primary_merge);
-  // What the arm built that the diff could not carry — written at the same
-  // moment and for the same reason as the merge result above.
-  entry.ignoredOutputDiscarded =
-    entry.ignoredOutputDiscarded ?? ignoredOutputDiscardedOf(row.ignored_output_discarded);
-  // The policy rides BOTH rows (it is on the kernel's `identity`), so a
-  // completion recovered without its request — the recover-by-tag path — still
-  // carries it. `??` keeps the request row authoritative when both are present;
-  // they cannot disagree, because one expression writes both.
-  entry.ignoredOutputPolicy = entry.ignoredOutputPolicy ?? parseIgnoredOutputPolicy(row.ignored_output_policy);
-  entry.ignoredOutputPolicyConflict =
-    entry.ignoredOutputPolicyConflict ?? str(row.ignored_output_policy_conflict);
-  // Who else wrote the tree while this one ran. Same moment, same row, and
-  // the same reason it has to be read here: nothing prevents a concurrent
-  // writer any more, so a stamp nobody projects is a lost write nobody sees.
-  entry.concurrentWrite = entry.concurrentWrite ?? parseConcurrentWriteStamps(row.concurrent_write);
-  // Both written by the kernel at completion and, until `fadeno bakeoff`,
-  // read by nobody — the reader-drops-the-next-field pattern this codebase
-  // keeps re-committing (roadmap item 2). They are confounds, so a comparison
-  // that cannot see them silently judges arms that never ran alike.
-  entry.workspaceModeDegraded = entry.workspaceModeDegraded ?? str(row.workspace_mode_degraded);
-  if (Array.isArray(row.command) && row.command.every((c: unknown) => typeof c === 'string')) {
-    entry.command = entry.command ?? (row.command as string[]);
-  }
-  if (typeof row.carry_mutated === 'boolean') entry.carryMutated = row.carry_mutated;
-  else if (row.carry_mutated != null && entry.carryMutated == null) entry.carryMutated = true;
-  const ob = num(row.output_bytes);
-  if (ob != null) entry.outputBytes = ob;
-  entry.diagnosticsSnapshot = entry.diagnosticsSnapshot ?? str(row.diagnostics_snapshot);
-  const diagb = num(row.diagnostics_bytes);
-  if (diagb != null) entry.diagnosticsBytes = diagb;
-  // Last, so it classifies against the fields this row just folded in rather
-  // than the request row's blanks.
-  entry.outcome = normalizeDispatchOutcome(row.outcome, entry);
-}
-
-/**
- * Fold a `dispatch_withdrawn` row onto the dispatch it retires.
- *
- * Deliberately NOT `applyCompletion`: nothing here touches `completed`,
- * `outcome`, `exitCode` or `outputSha256`, because no executor reported any of
- * them. A withdraw says the OPERATOR ended the dispatch's life, and the entry
- * has to keep saying that the work itself never reported — a retired dispatch
- * that renders as `exit ?` would be indistinguishable from one still running,
- * which is the confusion the receipt exists to end.
- */
-function applyWithdrawal(entry: DispatchEntry, row: Record<string, unknown>): void {
-  entry.withdrawn = true;
-  retireAgentStop(entry);
-  entry.withdrawnReason = str(row.reason);
-  entry.withdrawnWorkLeft = str(row.work_left);
-  // Identity fallbacks, on the same rule as `applyCompletion`: a log truncated
-  // at the head can leave this row as the only one carrying them.
-  entry.archetype = entry.archetype ?? str(row.archetype);
-  entry.executor = entry.executor ?? str(row.executor);
-}
-
-/**
- * An `adhoc_host_dispatch_requested` row: a RUNLESS host dispatch was opened,
- * an isolated worktree was cut for it, and the host is about to spawn into it.
- *
- * Built on `requestedEntry` rather than on `hostEntry` because the shape it
- * shares is the KERNEL's, not the steering hook's: it has a dispatch id, a
- * workspace, a base commit and a terminal receipt still to come, none of which
- * a `host_delivery` row has. Only `kind` and the fields that would be a lie on
- * this lane are overridden.
- */
-function adhocHostEntry(row: Record<string, unknown>): DispatchEntry {
-  const entry = requestedEntry(row);
-  entry.kind = 'adhoc-host';
-  // Nothing is spawned out of process, so there is no relay to attest and no
-  // command to record. `requestedEntry` reads both from the row; the writer
-  // never puts them there, but hard-nulling them says so rather than leaving
-  // a future field to be read into a lane it does not describe.
-  entry.relayAttested = null;
-  entry.command = null;
-  return entry;
-}
-
-/**
- * Fold an `adhoc_host_dispatch_closed` row onto the dispatch it ends.
- *
- * Deliberately NOT `applyCompletion`. That one reads `exit_code`, `signal` and
- * `duration_ms` and then DERIVES an outcome from them when the row states
- * none — and an ad-hoc host dispatch has no exit code at all, because Fadeno
- * never spawned the process. Running it here would let a host agent that did
- * good work be classified from three fields that will always be absent. The
- * outcome on this lane is STATED by the host and is never derived.
- */
-function applyAdhocHostClose(entry: DispatchEntry, row: Record<string, unknown>): void {
-  entry.completed = true;
-  retireAgentStop(entry);
-  const stated = str(row.outcome);
-  entry.outcome = stated === 'ok' || stated === 'failed' ? (stated as AdhocHostOutcome) : null;
-  // The stated failure reason is this lane's `error`: it is the only prose on
-  // the receipt, and the shared render tail already surfaces `error`.
-  entry.error = str(row.reason) ?? str(row.error);
-  entry.diffSnapshot = entry.diffSnapshot ?? str(row.diff_snapshot);
-  const bytes = num(row.diff_bytes);
-  if (bytes != null) entry.diffBytes = bytes;
-  entry.primaryMerge = entry.primaryMerge ?? primaryMergeOf(row.primary_merge);
-  // The retained worktree wins over the request row's: a close that removed it
-  // omits `workspace` entirely, and pointing a reader at a directory that is
-  // gone is worse than pointing at none.
-  entry.workspace = str(row.workspace) ?? (row.workspace_removed === true ? null : entry.workspace);
-  entry.baselineCommit = entry.baselineCommit ?? str(row.base_commit);
-  entry.archetype = entry.archetype ?? str(row.archetype);
-  entry.agentType = entry.agentType ?? str(row.agent_id);
-}
-
-/**
- * A pre-`dispatch_id` row read as one complete dispatch. The old writer put a
- * single row on disk after the spawn, so the row is both request and outcome:
- * build the identity the same way a request row is built (every field it
- * lacks simply reads null) and fold its own outcome straight back in. Old
- * evidence ages into `[legacy]` rather than degrading into "unreadable" — the
- * dispatch really happened, and a reader that drops it is lying by omission.
- */
-function legacyEntry(row: Record<string, unknown>): DispatchEntry {
-  const entry = requestedEntry(row);
-  entry.legacy = true;
-  applyCompletion(entry, row);
-  return entry;
-}
-
-/**
- * Refusal predicates that record a deliberate TRADE, rendered as one.
- *
- * `[refused: <predicate>]` is the right marker for a denial: something the
- * caller asked for did not happen, and the remedy is to fix it.
- * `ignored_output_kept` is not that. The dispatch declared — through the
- * archetype policy `ignored_output: kept`, or a per-dispatch override — that
- * its gitignored output must survive, and a pair cannot promise that: both
- * arms run in isolated worktrees and the work comes back as a diff that
- * respects `.gitignore`. So the kernel gave up the COMPARISON to keep the
- * OUTPUT. Nothing failed, nothing needs fixing, and a marker that says
- * "refused" invites someone to go undo a decision that was made on purpose.
- *
- * A map, not an object literal, because the key is writer-controlled text: an
- * object would answer to `toString` and every other inherited name.
- *
- * Honest scope note: every `shadow_*` predicate has a version of this problem
- * — a shadow refusal returns null and the primary runs on, so those rows also
- * mean "no comparison" rather than "your dispatch failed" — but those really
- * are conditions with remedies (raise the cap, fix the dial), where this one
- * is a choice already made. Only the choice is re-worded here.
- */
-const CHOICE_REFUSALS = new Map<string, string>([
-  [
-    'ignored_output_kept',
-    '[no pair: ignored_output_kept — the comparison was traded away so the gitignored output survives]',
-  ],
-]);
-
-/** The refusal marker for a predicate: a denial unless the writer meant a choice. */
-function refusalMarker(predicate: string): string {
-  return CHOICE_REFUSALS.get(predicate) ?? `[refused: ${predicate}]`;
-}
-
-/** Status lines named inline on a stop entry before the count takes over. */
-const STOP_PATHS_SHOWN = 3;
-
-/** Open dispatch ids named inline when a stop could not identify one. */
-const STOP_OPEN_SHOWN = 4;
-
-/**
- * The mark a dispatch carries once a `host_agent_stopped` row NAMED it.
- *
- * Rendered on the entry itself rather than only on the stop row, because the
- * line a host reads when they ask "what is still running?" is this one — and
- * before this mark existed it said "killed or in flight" (or "OPEN") for a
- * dispatch whose agent had been dead for seven hours.
- *
- * Every clause is something the hook observed. The dirty-path count is a count
- * of the TREE, never an attribution of those paths to this agent: a host, a
- * user and other agents write there too. Nothing here says the work was
- * unfinished, because nothing knows that.
- */
-function agentStoppedParts(stop: DispatchAgentStop | null): string[] {
-  if (stop == null) return [];
-  const who = stop.agentType ?? '(unnamed agent)';
-  const when = stop.at != null ? ` at ${stop.at}` : '';
-  const parts = [`[agent stopped: ${who}${when} — no terminal receipt was recorded]`];
-  if (stop.dirtyPaths == null) {
-    parts.push('[tree at the stop: git could not answer — unknown, not clean]');
-  } else if (stop.dirtyPaths > 0) {
-    parts.push(
-      `[tree at the stop: ${stop.dirtyPaths} uncommitted path${stop.dirtyPaths === 1 ? '' : 's'} — ` +
-        'the tree\'s, not necessarily this agent\'s]',
-    );
-  } else {
-    parts.push('[tree at the stop: no uncommitted changes]');
-  }
-  return parts;
-}
-
-/**
- * How a merge-back into the caller's tree renders, for every lane that does one.
- *
- * `clean` earns a mark of its own: it is the only evidence in this view that
- * the tree the caller is looking at actually received the work. `conflicted`
- * says outright that the tree may be PARTIALLY applied — `git apply --3way`
- * stages what it can and reverts nothing, so the failure a reader would
- * otherwise assume ("nothing happened") is the one thing it does not mean —
- * and names the remedy inline, because the work is preserved in a diff nobody
- * finds by accident. An absent object renders nothing at all: no merge was
- * attempted, which is the ordinary case for nearly every row.
- *
- * Shared by the command lane and the runless host lane rather than copied,
- * because they record the SAME stamp from the SAME `settleIsolatedWork`. Only
- * the recovery command differs — a pair has `shadow-apply`, an ad-hoc host
- * dispatch has its diff — so that one line is the caller's, computed lazily so
- * a row that never needs it never builds one.
- */
-function mergeParts(merge: DispatchPrimaryMerge | null, recovery: () => string | null): string[] {
-  if (merge == null || merge.status === 'skipped') return [];
-  const parts: string[] = [];
-  if (merge.status === 'clean') {
-    parts.push('[primary merged: clean]');
-  } else if (merge.status === 'conflicted') {
-    parts.push('[primary merge CONFLICTED — nothing reverted, the tree may be partially applied]');
-  } else if (merge.status === 'blocked') {
-    // Distinct from `conflicted` on purpose. A conflict means git tried and
-    // may have left the tree half-applied, so the reader must go look; this
-    // means nothing was attempted and the workspace is exactly as it was.
-    // Sending someone to inspect `git status` after a run that wrote nothing
-    // is a false alarm, and false alarms are how real ones stop being read.
-    parts.push('[primary merge BLOCKED — nothing was applied, the workspace is untouched]');
-  } else {
-    // A status this reader does not know. Say it rather than swallow it.
-    parts.push(`[primary merge: ${merge.status}]`);
-  }
-  // Free-form writer prose (git stderr, a rebase conflict list, "no changes"),
-  // so it is bounded exactly like a spawn error: one line, one entry.
-  if (merge.detail != null) parts.push(`[merge detail: ${excerpt(merge.detail, ERROR_EXCERPT)}]`);
-  if (merge.status === 'conflicted' || merge.status === 'blocked') {
-    const hint = recovery();
-    if (hint != null) parts.push(`[recover: ${hint}]`);
-  }
-  return parts;
-}
-
-/**
- * One provenance line per logical entry:
- *
- * ```
- * <ts>  [command]  worker/reviewer → executor (model)  via command  exit 0 in 12ms  [markers]  <prompt snapshot>
- * <ts>  [native]  <agent_type> (<inherited model>)  [unsteered spawn]  sha256:<8>
- *   — a native spawn writes no snapshot, so its line ends in the prompt digest rather than a path.
- * <ts>  [rewritten]  <agent_type> → <proxy> (relay <model>)  [off the host lane: <reason>]  sha256:<8>
- *   — likewise no snapshot: the kernel owns the one for the dispatch this rewrite produced.
- * <ts>  [stopped]  <agent_type> (agent <id8>)  STOPPED — no terminal receipt was recorded  [tree: 5 uncommitted paths — …]  [dispatch: NOT ESTABLISHED …]
- *   — a death certificate, not a dispatch: nothing was dialed, delivered or run.
- * ```
- *
- * Host deliveries render `[host]`, fold any `model_override` into the
- * model as `(model → override)`, and carry no outcome field.
- */
-export function renderDispatchLine(entry: DispatchEntry): string {
-  const parts: string[] = [entry.timestamp ?? '?', `[${entry.kind}]`];
-  if (entry.kind === 'rewritten') {
-    // Deliberately NOT the shared renderer below. That one reads
-    // `archetype → executor (model)`, which on this row would print the DIALED
-    // identity — the thing the proxy is going to go and deliver — as though it
-    // were what this line records. What this line records is a redirection, so
-    // it renders the two ends of it: what was asked for, and what was spawned
-    // instead.
-    const rw = entry.rewrite;
-    parts.push(
-      `${entry.agentType ?? entry.archetype ?? '(unnamed)'} → ${rw?.to ?? '(unrecorded)'}` +
-        `${rw?.modelApplied != null ? ` (relay ${rw.modelApplied})` : ''}`,
-    );
-    // The dialed identity still belongs on the line — it is what the pair or
-    // the lane was decided FOR — but marked as the dial rather than as the
-    // thing that ran.
-    if (entry.executor != null) {
-      parts.push(`[dial: ${entry.executor}${entry.model != null ? ` (${entry.model})` : ''}]`);
-    }
-    const reason = rw?.reason ?? 'unknown';
-    parts.push(`[off the host lane: ${reason}]`);
-    // The attachment, on the one reason that turns on it. A pair whose
-    // challenger the row did not state renders the reason alone rather than an
-    // empty parenthesis.
-    if (reason === 'shadow_pair_selected' && rw?.challenger != null) {
-      parts.push(`[challenger: ${rw.challenger}${rw.rate != null ? ` @${rw.rate}` : ''}]`);
-    }
-    if (entry.laneReason != null) parts.push(`[lane: ${entry.laneReason}]`);
-    // The join key to the kernel rows this rewrite produced: the same eight
-    // characters appear as `caller_prompt_sha256` on the dispatch that ran.
-    if (entry.promptSha256 != null) parts.push(`sha256:${entry.promptSha256.slice(0, 8)}`);
-    return parts.join('  ');
-  }
-  if (entry.kind === 'native') {
-    // A generic subagent: no archetype, no dial, no executor. Every field the
-    // shared renderer below would reach for is null by construction, and
-    // printing `(none) → (unresolved)` would read as a Fadeno dispatch that
-    // failed to resolve rather than as a spawn Fadeno never steered. Say what
-    // was asked for and what it runs on, and mark it unsteered.
-    const model = entry.modelOverride != null
-      ? `${entry.model ?? '?'} → ${entry.modelOverride}`
-      : entry.model;
-    parts.push(`${entry.agentType ?? '(unnamed)'}${model != null ? ` (${model})` : ''}`);
-    // What the caller ASKED for, if anything — and otherwise what the writer
-    // OBSERVED the session running at, said in different words because it is
-    // a different fact. A Claude spawn can never request an effort (the Agent
-    // tool has no such parameter) but the hook can read the session's own, so
-    // without this branch the only effort a Claude native row carries would
-    // never be rendered at all.
-    if (entry.reasoningEffort != null) parts.push(`effort ${entry.reasoningEffort}`);
-    else if (entry.sessionEffort != null) parts.push(`session effort ${entry.sessionEffort}`);
-    parts.push('[unsteered spawn]');
-    if (entry.promptSha256 != null) parts.push(`sha256:${entry.promptSha256.slice(0, 8)}`);
-    return parts.join('  ');
-  }
-  if (entry.kind === 'stopped') {
-    // Deliberately NOT the shared renderer below. Nothing was dialed, nothing
-    // was delivered and nothing ran: `archetype → executor (model)` would read
-    // as a dispatch that failed to resolve rather than as an agent that died.
-    const stop = entry.stop;
-    parts.push(
-      `${entry.agentType ?? '(unnamed agent)'}` +
-        `${stop?.agentId != null ? ` (agent ${stop.agentId.slice(0, 8)})` : ''}` +
-        `${entry.model != null ? ` on ${entry.model}` : ''}`,
-    );
-    parts.push('STOPPED — no terminal receipt was recorded');
-    // The tree, which is the half a transcript cannot give cheaply. The three
-    // states are worded so they can never be confused: a count, an explicit
-    // "nothing", and an explicit "could not tell".
-    if (stop?.git === 'dirty') {
-      const shown = stop.entries.slice(0, STOP_PATHS_SHOWN);
-      const total = stop.entryCount ?? shown.length;
-      const rest = total - shown.length;
-      parts.push(
-        `[tree: ${stop.truncated ? 'at least ' : ''}${total} uncommitted path${total === 1 ? '' : 's'}` +
-          `${shown.length > 0 ? ` — ${shown.join(', ')}${rest > 0 ? ` (+${rest} more)` : ''}` : ''}]`,
-      );
-    } else if (stop?.git === 'clean') {
-      parts.push('[tree: no uncommitted changes at the stop]');
-    } else {
-      // Never "clean". A probe that could not run said nothing about the tree,
-      // and reading its silence as an all-clear is the exact shape of the
-      // silent wrong answer the rest of this file is built to avoid.
-      parts.push(
-        `[tree: git could not answer — unknown, not clean` +
-          `${stop?.note != null ? `: ${excerpt(stop.note, ERROR_EXCERPT)}` : ''}]`,
-      );
-    }
-    if (stop?.tree != null) parts.push(`[in ${flatPath(stop.tree)}]`);
-    // The agent's own last words, and NOT a verdict on them. A stop hook fires
-    // when the agent is already gone, so nobody asked it whether the work was
-    // complete — this line reports whether the harness handed over a final
-    // message at all, which is a different and knowable fact. Claude supplies
-    // none on the interrupted path, so absence here is routine and is never
-    // evidence that the agent had nothing to say.
-    if (stop?.lastMessagePresent === true) {
-      parts.push(
-        `[final message: ${stop.lastMessageExcerpt != null ? `"${excerpt(stop.lastMessageExcerpt, NOTE_EXCERPT)}"` : '(recorded, no excerpt)'}]`,
-      );
-    } else {
-      parts.push('[no final message recorded — the agent stated no completion verdict]');
-    }
-    // Which dispatch, or an explicit refusal to name one.
-    const correlated = stop?.correlation.dispatchId;
-    if (correlated != null) {
-      parts.push(
-        `[dispatch ${correlated.slice(0, 8)}` +
-          `${stop!.correlation.scope != null ? ` (${stop!.correlation.scope})` : ''}` +
-          ` — identified by ${stop!.correlation.basis}]`,
-      );
-    } else {
-      parts.push('[dispatch: NOT ESTABLISHED — a stop event names an agent, never a dispatch]');
-      const open = stop?.openDispatchIds ?? [];
-      if (open.length > 0) {
-        const shown = open.slice(0, STOP_OPEN_SHOWN).map((id) => id.slice(0, 8));
-        const rest = open.length - shown.length;
-        parts.push(
-          `[open at this point: ${shown.join(', ')}${rest > 0 ? ` (+${rest} more)` : ''} — ` +
-            'which, if any, was this agent\'s is not recorded]',
-        );
-      } else {
-        parts.push('[no dispatch was open at this point]');
-      }
-    }
-    if (stop?.transcriptPath != null) {
-      parts.push(`[transcript ${excerpt(flatPath(stop.transcriptPath), PATH_EXCERPT)}]`);
-    }
-    // Why this row is not in the default listing — reachable only through
-    // `--stops`, which is the one view that renders a collapsed stop. A row
-    // the reader had to ask for must say why it had to be asked for; a row
-    // that earned its slot needs no such justification, so nothing is printed
-    // on the ones that did.
-    if (stop?.risk != null && isCollapsedStopRisk(stop.risk)) {
-      parts.push(`[collapsed in the default listing — it ${stop.riskReading ?? STOP_RISK_READING[stop.risk]}]`);
-    }
-    if (entry.sessionEffort != null) parts.push(`[session effort: ${entry.sessionEffort}]`);
-    if (entry.format != null && formatTier(entry.format) === 'older') parts.push(`[format ${entry.format}]`);
-    return parts.join('  ');
-  }
-  if (entry.kind === 'adhoc-host') {
-    // Deliberately NOT the shared renderer below. That one reads
-    // `archetype → executor (model)`, and a runless host dispatch has no
-    // executor to name: the HOST picks and spawns the agent, so Fadeno
-    // resolved nothing. The shared renderer printed `worker → (unresolved)`,
-    // which reads as a dial that failed rather than as a lane where there was
-    // never anything to dial. And there is no exit code either, because
-    // Fadeno never held the process — so the line says what the receipt says,
-    // and until there is one it says the dispatch is OPEN rather than
-    // borrowing "killed or in flight", which names a process that
-    // does not exist here.
-    parts.push(`${entry.archetype ?? '(no archetype)'} → in-session agent (isolated worktree)`);
-    if (!entry.completed) {
-      // "OPEN" reads as "possibly still working", and for seven hours on
-      // 2026-09-05 that is exactly what a dead agent's dispatch said. A stop
-      // row that NAMED this dispatch settles the question the other way — the
-      // agent is gone — without claiming anything about whether it finished.
-      parts.push(
-        entry.agentStopped != null
-          ? 'AGENT STOPPED — no terminal receipt'
-          : 'OPEN — no terminal receipt yet',
-      );
-      parts.push(...agentStoppedParts(entry.agentStopped));
-      if (entry.workspace != null) parts.push(`[workspace ${flatPath(entry.workspace)}]`);
-      parts.push(
-        `[close it: fadeno dispatch-close ${entry.dispatchId != null ? entry.dispatchId.slice(0, 8) : '<id>'}]`,
-      );
-    } else {
-      if (entry.outcome === 'failed') parts.push('FAILED');
-      parts.push(`closed by the host${entry.outcome != null ? ` (${entry.outcome})` : ''}`);
-      if (entry.diffBytes != null) parts.push(`${entry.diffBytes} diff bytes`);
-    }
-    parts.push(
-      ...mergeParts(entry.primaryMerge, () =>
-        // No `shadow-apply` here: this lane forms no pair, so the recovery is
-        // the diff itself. A hint naming a command that cannot resolve would
-        // be worse than naming none.
-        entry.diffSnapshot != null ? mergeBackReapplyCommand(entry.diffSnapshot) : null,
-      ),
-    );
-    // Where the work still is when it did not land. The one fact a host
-    // cannot recover from anywhere else, so it is never silent.
-    if (entry.workspace != null && entry.completed) {
-      parts.push(`[worktree retained at ${flatPath(entry.workspace)}]`);
-    }
-    if (entry.error != null) parts.push(`[reason: ${excerpt(entry.error, ERROR_EXCERPT)}]`);
-    if (entry.format != null && formatTier(entry.format) === 'older') parts.push(`[format ${entry.format}]`);
-    return parts.join('  ');
-  }
-  const roleSlot = entry.role ?? (entry.agentType !== entry.archetype ? entry.agentType : null);
-  const who = `${entry.archetype ?? '(none)'}${roleSlot != null ? `/${roleSlot}` : ''}`;
-  const model =
-    entry.modelOverride != null
-      ? `${entry.model ?? '?'} → ${entry.modelOverride}`
-      : entry.model;
-  parts.push(
-    `${who} → ${entry.executor ?? '(unresolved)'}${model != null ? ` (${model})` : ''}`,
-  );
-  const on = entry.harness ?? entry.transport;
-  if (on != null) parts.push(`on ${on}${entry.variant != null ? `/${entry.variant}` : ''}`);
-  if (entry.background === true) parts.push('[background]');
-  if (entry.taskId != null) parts.push(`[task: ${entry.taskId}]`);
-  if (entry.shadow) {
-    const pid8 = entry.primaryDispatchId ? entry.primaryDispatchId.slice(0, 8) : '?';
-    parts.push(`[shadow of ${pid8}]`);
-  }
-  // Resolution provenance marks for session/repo/user (base/binding silent)
-  if (entry.resolution === 'session') parts.push('[session dial]');
-  else if (entry.resolution === 'repo') parts.push('[repo pin]');
-  else if (entry.resolution === 'user') parts.push('[user dial]');
-
-  if (entry.kind === 'command') {
-    if (entry.refusal != null) {
-      parts.push(refusalMarker(entry.refusal.predicate));
-      parts.push(entry.refusal.message);
-    } else if (entry.completed) {
-      // The outcome leads. `dispatch_completed` only means the spawn reached a
-      // terminal state, and a reader scanning exit codes at the end of a long
-      // line was the thing that let two zero-byte failures read as success.
-      if (entry.outcome === 'failed') parts.push('FAILED');
-      else if (entry.outcome === 'empty') parts.push('NO OUTPUT');
-      const code = `exit ${entry.exitCode ?? '?'}${entry.signal != null ? ` (${entry.signal})` : ''}`;
-      parts.push(entry.durationMs != null ? `${code} in ${entry.durationMs}ms` : code);
-      // Exit-0 plus an explicit "nothing changed" attestation: the legible
-      // face of the exit-0 no-op. The old third term — "and the route claimed
-      // write_access: true" — is gone with the permissions system; a row that
-      // attests no change is making that claim itself, and `workspace_changed`
-      // is only ever written for a SHARED delivery that could have changed
-      // something. Rows omitting either field render unchanged: absent is not
-      // a claim.
-      if (
-        entry.exitCode === 0 &&
-        entry.workspaceChanged === false &&
-        !entry.shadow
-      ) {
-        parts.push('[no workspace change]');
-      }
-      // FAILED at exit 0 can only come from the executor's own outcome claim
-      // (every other failed derivation implies a nonzero/null exit), so say so:
-      // a reader who stops at "exit 0" was exactly the failure mode the claim
-      // channel exists to close.
-      if (entry.outcome === 'failed' && entry.exitCode === 0) {
-        parts.push('[claimed failed despite exit 0]');
-      }
-    } else if (entry.withdrawn) {
-      // The whole point of the receipt: this line used to read "no completion
-      // recorded (killed or in flight)" forever, which is the sentence that
-      // made dead workers look potentially live. It now says who ended it and
-      // why, and still refuses to invent an exit code nobody measured.
-      parts.push('WITHDRAWN');
-      parts.push(
-        `retired by the operator, no completion row${entry.withdrawnReason != null ? `: ${excerpt(entry.withdrawnReason, ERROR_EXCERPT)}` : ''}`,
-      );
-    } else if (entry.agentStopped != null) {
-      // Same fix as the withdraw receipt, arriving by a different route: this
-      // line used to say "killed or in flight" forever. A stop row that named
-      // this dispatch removes the "in flight" half — the agent is gone — and
-      // still refuses to invent an exit code nobody measured, or a verdict on
-      // whether the work was done.
-      parts.push('AGENT STOPPED — no completion row was ever written');
-    } else {
-      parts.push('no completion recorded (killed or in flight)');
-    }
-    parts.push(...agentStoppedParts(entry.agentStopped));
-    // Rendered outside the chain on purpose. A ledger carrying BOTH receipts
-    // is corrupt — the withdraw preconditions refuse a completed dispatch —
-    // and the honest render of a corrupt pair shows both facts rather than
-    // letting the branch order silently pick one.
-    if (entry.withdrawn && entry.completed) parts.push('[ALSO withdrawn — corrupt: two terminal receipts]');
-    // Where the operator says this dispatch's uncommitted work is. The one
-    // thing a host could previously only get by reading a transcript.
-    if (entry.withdrawnWorkLeft != null) {
-      parts.push(`[work left at ${excerpt(flatPath(entry.withdrawnWorkLeft), PATH_EXCERPT)}]`);
-    }
-  } else if (entry.kind === 'host') {
-    if (entry.refusal != null) {
-      // Denied by the steering hook: no subagent, so no attestation is owed
-      // and `[never attested]` would be an accusation about something that
-      // never existed. The same `[refused: <predicate>]` marker the command
-      // branch uses — one vocabulary for "this did not run", whichever side
-      // stopped it — and, for a predicate that names a deliberate trade
-      // rather than a denial, the same one-vocabulary rule applies to saying
-      // so (see `CHOICE_REFUSALS`).
-      parts.push(refusalMarker(entry.refusal.predicate));
-      if (entry.refusal.message !== '') parts.push(entry.refusal.message);
-    } else if (entry.attestedAt == null) {
-      // The gap this whole feature closes: a host_delivery is a REQUEST the
-      // parent's steering hook recorded before the subagent ever ran, and
-      // running `fadeno attest` is only tier-1/advisory — an agent may not
-      // comply. An unattested row must read as visibly unconfirmed rather
-      // than look identical to a measured, successful one.
-      parts.push('[never attested]');
-    } else if (
-      entry.reasoningEffort != null &&
-      entry.reasoningEffort !== 'inherited' &&
-      entry.attestedEffort != null &&
-      entry.reasoningEffort !== entry.attestedEffort
-    ) {
-      // The signature of a silent downgrade: the harness resolves a turn's
-      // effort AFTER any per-model/per-org cap, so a dial asking for xhigh
-      // can land lower with nothing raised on the request-side row. A shadow
-      // pair spanning this row is not a comparison of equals.
-      parts.push(`[effort mismatch: requested ${entry.reasoningEffort}, attested ${entry.attestedEffort}]`);
-    } else {
-      parts.push(`[attested: effort ${entry.attestedEffort ?? 'unmeasured'}]`);
-    }
-  }
-
-  // Lane provenance. `sessionEffort` is the only *observed* effort on the
-  // row, and `laneReason` is why the resolver chose this lane at all — the
-  // lane is session-state dependent, so the same dial renders differently
-  // from a different session. Both render only when the row states them, so
-  // rows from before the fields existed (and kernel rows, which carry no
-  // lane) are untouched.
-  if (entry.sessionEffort != null) parts.push(`[session effort: ${entry.sessionEffort}]`);
-  if (entry.laneReason != null) parts.push(`[lane: ${entry.laneReason}]`);
-  // The primary arm's merge-back into the caller's tree. `clean` earns a mark
-  // of its own: it is the only evidence in this view that the tree the caller
-  // is looking at actually received the primary's work. `conflicted` says
-  // outright that the tree may be PARTIALLY applied — `git apply --3way`
-  // stages what it can and reverts nothing, so the failure a reader would
-  // otherwise assume ("nothing happened") is the one thing it does not mean —
-  // and names the remedy inline, because the work is preserved in a diff
-  // nobody finds by accident. An absent object is not rendered at all: no
-  // merge was attempted, which is the ordinary case for nearly every row.
-  parts.push(
-    ...mergeParts(entry.primaryMerge, () => {
-      // Both spellings resolve (`resolveDispatchPair` takes a pair id or
-      // either arm's dispatch id, whole or as an 8+ character prefix), so the
-      // hint stays runnable on a row that carries only one of them.
-      const ref = entry.pairId ?? entry.dispatchId;
-      return `fadeno shadow-apply ${ref != null ? ref.slice(0, 8) : '<pair-id>'} --arm primary`;
-    }),
-  );
-
-  // Gitignored output the arm produced that no diff carried out of its
-  // worktree. It renders on the line of a dispatch that otherwise reads as a
-  // success, because from the caller's side that is exactly the shape of the
-  // problem: exit 0, a merged diff, and no `dist/`. An absent object renders
-  // nothing — nothing was discarded, the ordinary case — but an object that
-  // carries only a truncation flag, or only a note, still renders: "I could
-  // not tell" and "there was nothing" must not be spelled the same way, and
-  // that is the whole reason this field exists.
-  const ignored = entry.ignoredOutputDiscarded;
-  if (ignored != null && (ignored.paths.length > 0 || ignored.truncated || ignored.note != null)) {
-    // KEPT or DISCARDED, from `ignoredOutputVerdict` — the writer's own
-    // `retained_at`, read in the one place that decides. This line said
-    // DISCARDED unconditionally and added "still on disk at …" as a
-    // footnote several clauses later, so a director who launched with
-    // `--ignored-output kept` read a loss report about work that was sitting
-    // on disk, and went and checked the artifacts by hand.
-    const verdict = ignoredOutputVerdict(ignored);
-    // Anything not recognisable as build output first, because this sample is
-    // capped: an entry whose only interesting path is a `data/research/` tree
-    // beside four build directories must not have it counted away.
-    const ordered = ignoredOutputSignalOrder(ignored.paths);
-    const shown = ordered.slice(0, IGNORED_PATHS_SHOWN).map(flatPath);
-    const rest = ordered.length - shown.length;
-    const listed = `${shown.join(', ')}${rest > 0 ? ` (+${rest} more)` : ''}`;
-    if (shown.length === 0) {
-      parts.push(
-        ignored.truncated
-          ? `[ignored output ${verdict} — gitignored, and the listing could not be taken: ` +
-            'what was left behind is unknown, not nothing]'
-          : `[ignored output ${verdict} — gitignored; the row names no paths]`,
-      );
-    } else if (ignored.truncated) {
-      // `at least` carries the floor claim on its own, so the note below adds
-      // the reason without either one depending on the other's wording — the
-      // writer's note today ends "a floor, not the set" and saying it twice
-      // reads like two findings.
-      parts.push(
-        `[ignored output ${verdict}: at least ${listed} — gitignored, so no diff carried it out of the worktree` +
-          `${ignored.note != null ? '' : '; the listing is a floor, not the set'}]`,
-      );
-    } else {
-      parts.push(
-        `[ignored output ${verdict}: ${listed} — gitignored, so no diff carried it out of the worktree]`,
-      );
-    }
-    // What the caller asked for, beside what happened to it. Rendered only
-    // when the row states it — an older row says nothing, and nothing is what
-    // it gets to say.
-    if (entry.ignoredOutputPolicy != null) {
-      parts.push(
-        entry.ignoredOutputPolicy === 'kept' && verdict === 'DISCARDED'
-          ? '[ignored_output: kept — and it did not survive: a defect, not a policy outcome]'
-          : `[ignored_output: ${entry.ignoredOutputPolicy}]`,
-      );
-    }
-    // Why the listing is short, in the writer's words: a git failure and a
-    // ten-thousand-entry cap are both floors, and they have different
-    // remedies. Bounded like every other piece of writer prose in this view —
-    // the note can run to thousands of characters, and `--json` keeps all of
-    // it — but bounded generously, because a truncation whose reason is
-    // itself truncated helps nobody.
-    if (ignored.note != null) parts.push(`[ignored output note: ${excerpt(ignored.note, NOTE_EXCERPT)}]`);
-    // "Discarded" means two different things on the two arms. A challenger's
-    // worktree is retained, so its output is gone from the COMPARISON while
-    // still sitting on disk; a primary's is torn down, so its output really is
-    // gone. The writer states which — this never guesses from whether some
-    // other field happens to be set.
-    if (ignored.retainedAt != null) {
-      parts.push(`[still on disk at ${flatPath(ignored.retainedAt)} until \`fadeno clean\`]`);
-    }
-  }
-  // `--isolate` and `ignored_output: kept` asked for together. OUTSIDE the
-  // block above on purpose: the combination is worth reporting on a dispatch
-  // that produced no ignored output at all, because what it changed is where
-  // any such output WOULD have landed — and a caller who reads this only on
-  // the runs that happened to produce some learns the wrong rule.
-  if (entry.ignoredOutputPolicyConflict != null) {
-    parts.push(`[ignored_output: kept + --isolate: ${excerpt(entry.ignoredOutputPolicyConflict, NOTE_EXCERPT)}]`);
-  }
-
-  // Who else was writing while this ran. The lease that used to make this
-  // impossible is deleted, so the only thing standing between two writers and
-  // a silent lost write is this line. Rendered in the attestation register:
-  // an overlap is not proof of damage — path granularity means two agents
-  // editing different functions in one file land here — and a mark that
-  // over-claims is one a reader learns to skip, which costs the same as never
-  // rendering it. The machine token stays in the text for grep.
-  const overlaps = entry.concurrentWrite;
-  if (overlaps != null && overlaps.length > 0) {
-    // "N other deliveries wrote while this ran" is a claim, and only the
-    // `intersected` stamps support it. A stamp whose intersection could not be
-    // computed says the opposite — that nobody can say what was written — and
-    // folding it into that count is how an admission becomes an accusation.
-    // The log-unreadable stamp names no delivery, so it is not counted as one
-    // and contributes no id to the list. It still gets its own line below.
-    const named = overlaps.filter((stamp) => stamp.dispatchId !== UNREADABLE_WINDOW_LOG_ID);
-    const settled = named.filter((stamp) => concurrentWriteStrength(stamp) === 'intersected');
-    const pending = named.filter((stamp) => concurrentWriteStrength(stamp) === 'pending').length;
-    const unknown = named.length - settled.length - pending;
-    const floor = settled.some((stamp) => stamp.degraded);
-    const total = settled.reduce((sum, stamp) => sum + (stamp.pathsIntersecting ?? stamp.paths.length), 0);
-    const who = named.map((stamp) => stamp.dispatchId.slice(0, 8)).join(', ');
-    if (named.length > 0) parts.push(
-      `[concurrent_write: ${named.length} other ${named.length === 1 ? 'delivery' : 'deliveries'} ` +
-        `overlapped this one (${who})` +
-        (settled.length > 0
-          ? ` — ${floor ? 'at least ' : ''}${total} intersecting path${total === 1 ? '' : 's'}`
-          : '') +
-        (pending > 0 ? `${settled.length > 0 ? ',' : ' —'} ${pending} still open at this receipt` : '') +
-        (unknown > 0
-          ? `${settled.length > 0 || pending > 0 ? ',' : ' —'} ${unknown} where the intersection could not be computed`
-          : '') +
-        ']',
-    );
-    // The paths, the attribution and the "could not tell" all live in the
-    // writer's own sentence. Rendered one per overlap rather than folded into
-    // the summary above: a shared-tree attestation and an attributable
-    // worktree diff are different strengths of evidence and must not be
-    // averaged into one number.
-    for (const stamp of overlaps) parts.push(`[overlap ${describeConcurrentWrite(stamp)}]`);
-  }
-
-  // `true` stays a quiet mark; `false` does not. A row that says a relay
-  // altered the prompt is the loudest fact on the line, and rendering it in
-  // the same register as "attested" is how it read as a footnote next to a
-  // success. The machine token is kept inside the louder phrasing so anything
-  // grepping for `relay_attested: false` still finds it.
-  if (entry.relayAttested === false) {
-    parts.push('[RELAY FIDELITY FAILED — relay_attested: false]');
-    if (entry.relayMismatchAllowed) parts.push('[relay_mismatch_allowed: true — dispatched anyway]');
-  } else if (entry.relayAttested != null) {
-    parts.push(`[relay_attested: ${entry.relayAttested}]`);
-  }
-  if (entry.writeVariant === true) parts.push('[write variant]');
-  if (entry.gateEligible === false) parts.push('[shadow-only]');
-  if (entry.error != null) parts.push(`[error: ${excerpt(entry.error, ERROR_EXCERPT)}]`);
-  if (entry.promptSnapshot != null) parts.push(entry.promptSnapshot);
-  if (entry.legacy) parts.push('[legacy]');
-  if (entry.format != null && formatTier(entry.format) === 'older') parts.push(`[format ${entry.format}]`);
-  return parts.join('  ');
-}
-
-function summarize(opts: {
-  shown: number;
-  total: number;
-  skipped: number;
-  newerFormat: number;
-  exists: boolean;
-  path: string;
-  /** `--stops`: the listing is the stop rows themselves, uncollapsed. */
-  stopsOnly: boolean;
-  /** Stops the default listing collapsed, newest reading first. Empty otherwise. */
-  collapsed: readonly StopCollapse[];
-}): string {
-  const { shown, total, skipped, newerFormat, exists, path, stopsOnly, collapsed } = opts;
-  // Two distinct notes: an unreadable row is damage, a newer-format row is a
-  // fadeno that is behind its own evidence. Conflating them would send the
-  // reader to repair a log that is perfectly intact.
-  const notes =
-    (skipped > 0 ? `  (${skipped} unreadable row${skipped === 1 ? '' : 's'} skipped)` : '') +
-    (newerFormat > 0
-      ? `  (${newerFormat} row${newerFormat === 1 ? '' : 's'} from a newer format skipped)`
-      : '');
-  if (total === 0) {
-    if (stopsOnly) {
-      return exists
-        ? `No agent stops recorded in ${path}.${notes}`
-        : `No agent stops recorded yet (${path} absent).${notes}`;
-    }
-    return exists
-      ? `No dispatches recorded in ${path}.${notes}`
-      : `No dispatches recorded yet (${path} absent).${notes}`;
-  }
-  if (stopsOnly) {
-    return (
-      `${shown} of ${total} agent stop${total === 1 ? '' : 's'} shown — every stop row in the log, ` +
-      `none collapsed${notes}`
-    );
-  }
-  const head = `${shown} of ${total} dispatch${total === 1 ? '' : 'es'} shown${notes}`;
-  if (collapsed.length === 0) return head;
-  // What was collapsed, and the reading behind each count. A bare "7 collapsed"
-  // would be a positive claim about seven rows nobody stated a reason for; the
-  // caveat after it is the other half, because `clean` at the stop is evidence
-  // about a tree at a moment, never about whether an agent finished.
-  const held = collapsed.reduce((sum, group) => sum + group.count, 0);
-  return (
-    `${head}\n` +
-    `  ${held} agent stop${held === 1 ? '' : 's'} collapsed: ` +
-    `${collapsed.map((group) => `${group.count} ${group.reading}`).join('; ')}.\n` +
-    '  Collapsed is not a verdict on the work — a clean tree at the stop is not proof the agent did ' +
-    'nothing, and a final message is not a completeness claim. Every collapsed row is still in the ' +
-    'ledger: `fadeno dispatches --stops` lists them.'
-  );
-}
-
-/** One collapsed-stop count and the reading that collapsed it. */
-export interface StopCollapse {
-  risk: StopRisk;
-  reading: string;
-  count: number;
-}
-
-/**
- * Rank for the tail contest. Lower wins a slot; ties break by recency.
- *
- * Only stop rows are ranked. Every other entry keeps the unconditional claim
- * it has always had (`ORDINARY_RANK`), because making a dispatch row disappear
- * so a stop row could be louder would be a new way to hide evidence — the
- * failure this whole file is built against — and because the two loud tiers
- * are, by construction, rare.
- */
-const ORDINARY_RANK = 2;
-
-const STOP_RISK_RANK: Readonly<Record<StopRisk, number>> = {
-  // A known delivery died and nothing closed it: the one thing that must never
-  // be pushed off the end of the listing by a busier session.
-  unsettled_dispatch: 0,
-  // Something is in a tree and nothing else knows. The reported case.
-  unowned_dirty: 1,
-  // Could not tell. Competes exactly like an ordinary entry — never hidden,
-  // and never promoted above evidence that actually measured something.
-  unmeasured: ORDINARY_RANK,
-  settled_dispatch: ORDINARY_RANK,
-  agent_signed_off: ORDINARY_RANK,
-  tree_clean: ORDINARY_RANK,
-};
-
-/**
- * Which entries survive the tail, and in what order.
- *
- * RANK DECIDES WHAT FITS; CHRONOLOGY DECIDES THE ORDER OF WHAT FITS. The
- * listing is not re-sorted, and three things depend on that:
- *
- *   - This reader's stated contract is append order — "a killed dispatch's
- *     request row is still where it happened".
- *   - A stop line makes POSITIONAL claims. `[open at this point: …]` is only
- *     true where the row sits; hoisting the row above the dispatches it names
- *     would turn an accurate sentence into a false one.
- *   - A host reads this to reconstruct a session. A stop is read against the
- *     dispatch rows around it, and pulling it out of that sequence costs more
- *     than the visibility it buys — which selection already bought.
- */
-function selectShown(entries: readonly DispatchEntry[], tail: number): DispatchEntry[] {
-  const contenders: Array<{ entry: DispatchEntry; at: number; rank: number }> = [];
-  entries.forEach((entry, at) => {
-    const risk = entry.stop?.risk ?? null;
-    if (risk != null && isCollapsedStopRisk(risk)) return; // counted in the summary, not slotted
-    contenders.push({ entry, at, rank: risk != null ? STOP_RISK_RANK[risk] : ORDINARY_RANK });
-  });
-  if (contenders.length <= tail) return contenders.map((c) => c.entry); // already chronological
-  const kept = [...contenders].sort((a, b) => a.rank - b.rank || b.at - a.at).slice(0, tail);
-  kept.sort((a, b) => a.at - b.at);
-  return kept.map((c) => c.entry);
-}
-
-/**
- * Read `.fadeno/dispatches.jsonl` and answer "which executor actually ran
- * what?" — kernel `dispatch_requested`/`dispatch_completed` rows correlated by
- * `dispatch_id` into one logical entry each, `dispatch_refused` rows as
- * standalone command entries, plus the steering hook's `host_delivery` and
- * `host_refused` rows, and the stop hook's `host_agent_stopped` rows —
- * receipts an agent's DEATH leaves behind, which mark the dispatch they name
- * so it stops reading as live. Every refusal is a logical entry of its own and so
- * counts against `--tail` exactly like a delivery does: a denial loop is
- * evidence, and a tail that quietly dropped it would hide the one thing
- * worth seeing.
- *
- * Stop rows are the one population `--tail` does not take purely by recency,
- * because the hook has no matcher and fires for EVERY subagent: they are
- * ranked by what the row itself says is at risk (`StopRisk`), the three
- * readings that leave nothing unaccounted for collapse to a counted summary
- * line, and the rest compete for slots. Rank decides what FITS; chronology
- * still decides the ORDER of what fits — order is append order (oldest →
- * newest), never re-sorted by timestamp: a killed dispatch's request row is
- * still where it happened. A missing or empty log is a friendly answer, not an error, and
- * rows that cannot be read are counted rather than fatal — the log is
- * evidence, and a truncated tail must not hide the rows that survived.
- *
- * The log spans formats, so the reader is tiered on each row's `format` stamp
- * (see `formatTier`): stamped rows within the known major read normally,
- * pre-stamp rows read on their recorded shape — including the single
- * completion-shaped rows written before `dispatch_id`, which surface as
- * `[legacy]` entries — and rows from a future major are counted separately
- * from unreadable ones. This is the lightweight half of the run ledger's
- * versioning policy: a projection may read old evidence best-effort, where a
- * ledger *writer* must refuse it outright.
- */
-/** What one evidence row was to the reader that folded it. */
-type RowFold = 'read' | 'skipped' | 'newer-format' | 'no-entry';
-
-/**
- * Events this reader knows and deliberately renders no entry for. Membership
- * means "understood, produces nothing", which is not the same as `skipped`
- * ("could not read this"). See the fold's tail for why each is here.
- */
-const KNOWN_NON_ENTRY_EVENTS = new Set([
-  'dispatch_cancelled',
-  'dispatch_merged',
-  'artifact_created',
-  'shadow_apply',
-  'workspace_lease_recovered',
-  'workspace_lease_reclaim_denied',
-]);
-
-/**
- * Fold ONE evidence row into an entry list — the single row reader shared by
- * `runDispatches` (the tail view) and `loadAllEntries` (the whole-log view).
- *
- * These two were byte-for-byte duplicates of each other, which is the defect
- * this repo keeps re-committing in a new place: adding `dispatch_withdrawn` to
- * the view a host reads would have left the whole-log reader — the one behind
- * `fadeno clean` and shadow-pair resolution — silently unable to see it, and
- * counting every withdraw as an unreadable row. One reader, so a new receipt
- * cannot land in one view and not the other.
- *
- * The caller owns the JSON parse and the tallies; this owns what a row MEANS.
- */
-function foldEvidenceRow(
-  row: Record<string, unknown>,
-  entries: DispatchEntry[],
-  byDispatchId: Map<string, DispatchEntry>,
-): RowFold {
-  const tier = formatTier(row.format);
-  if (tier === 'newer') {
-    // Written by a fadeno that knows a format this one does not. Guessing at
-    // the fields would fabricate provenance, so say so and move on.
-    return 'newer-format';
-  }
-  const event = str(row.event);
-  // Pre-`dispatch_id` evidence: no `event`, no correlation, one row per
-  // dispatch. Recognized on shape, since shape is all that writer left.
-  if (tier === 'unversioned' && event == null && isLegacyCompletion(row)) {
-    entries.push(legacyEntry(row));
-    return 'read';
-  }
-  // `native_delivery` is the pre-0.6 name for the same row; a log written
-  // by an older hook still renders.
-  if (event === 'host_delivery' || event === 'native_delivery') {
-    entries.push(hostEntry(row));
-    return 'read';
-  }
-  // A spawn the steering hook DENIED. Its own entry, not a skipped row: a
-  // repo whose every worker spawn is being refused must not read like a
-  // repo where nobody spawned anything.
-  if (event === 'host_refused') {
-    entries.push(hostRefusedEntry(row));
-    return 'read';
-  }
-  // A spawn the steering hook REROUTED off the host lane. Its own entry for
-  // the same reason as a denial: the host spawn a director asked for did not
-  // happen, and until this row existed the only trace was a kernel dispatch
-  // that named the relay rather than the spawn that caused it.
-  if (event === 'host_rewritten') {
-    entries.push(hostRewrittenEntry(row));
-    return 'read';
-  }
-  // A GENERIC subagent the Codex spawn guard let through (host mode off).
-  // Not a Fadeno dispatch, and rendered as its own kind so it never reads
-  // like one — but recorded, because an unsteered spawn that leaves no trace
-  // is the failure this row exists to end.
-  if (event === 'native_spawn') {
-    entries.push(nativeSpawnEntry(row));
-    return 'read';
-  }
-  // An agent STOPPED — the receipt a death leaves behind. Its own entry for
-  // the same reason a refusal is: until this row existed, a host agent killed
-  // by a 429 left nothing at all, and `fadeno dispatches` went on showing its
-  // dispatch as potentially live forever.
-  if (event === 'host_agent_stopped') {
-    const entry = stoppedEntry(row);
-    correlateAgentStop(entry, byDispatchId);
-    entries.push(entry);
-    return 'read';
-  }
-  if (event === 'host_attestation') {
-    // Not its own entry: this row measures a PRECEDING host_delivery, so
-    // it folds onto that entry rather than rendering as a dispatch of its
-    // own — see `correlateAttestation`'s doc comment for what "nearest
-    // preceding" means and its precision limits.
-    correlateAttestation(entries, row);
-    return 'read';
-  }
-  if (event === 'dispatch_refused') {
-    entries.push(requestedEntry(row));
-    return 'read';
-  }
-  const dispatchId = str(row.dispatch_id);
-  // The RUNLESS host lane (`fadeno dispatch-open` / `dispatch-close`). Its
-  // request and receipt read through `dispatch-adhoc.ts`'s own vocabulary
-  // functions for the same reason the command lane's read through
-  // `commandDispatchTerminalState`: the writer owns the event names, and a
-  // reader that spells them out for itself is how a second receipt lands in
-  // the log and is counted as unreadable damage here.
-  const adhocTerminal = adhocHostTerminalState(event);
-  if ((isAdhocHostRequest(event) || adhocTerminal != null) && dispatchId == null) {
-    return 'skipped'; // uncorrelatable: the writer always pairs on dispatch_id
-  }
-  if (isAdhocHostRequest(event)) {
-    const entry = adhocHostEntry(row);
-    entries.push(entry);
-    byDispatchId.set(dispatchId!, entry);
-    return 'read';
-  }
-  if (adhocTerminal != null) {
-    // Same truncated-head fallback the command terminal takes: a receipt whose
-    // request row is gone is still evidence of a dispatch.
-    const open = byDispatchId.get(dispatchId!);
-    if (open != null) {
-      applyAdhocHostClose(open, row);
-    } else {
-      const entry = adhocHostEntry(row);
-      applyAdhocHostClose(entry, row);
-      entries.push(entry);
-      byDispatchId.set(dispatchId!, entry);
-    }
-    return 'read';
-  }
-  // The terminal receipts come from the ONE list (`dispatch.ts`), never from
-  // event names spelled out here: a reader carrying its own copy is how a new
-  // receipt renders everywhere except the view people actually read.
-  const terminal = commandDispatchTerminalState(event);
-  if ((event === 'dispatch_requested' || terminal != null) && dispatchId == null) {
-    return 'skipped'; // uncorrelatable: the writer always pairs on dispatch_id
-  }
-  if (event === 'dispatch_requested') {
-    const entry = requestedEntry(row);
-    entries.push(entry);
-    byDispatchId.set(dispatchId!, entry);
-    return 'read';
-  }
-  if (terminal != null) {
-    // Both terminal receipts fold the same way, and a truncated head is why
-    // the fallback exists: a receipt whose request row is gone is still
-    // evidence of a dispatch, so surface it rather than drop it.
-    const apply = terminal === 'completed' ? applyCompletion : applyWithdrawal;
-    const open = byDispatchId.get(dispatchId!);
-    if (open != null) {
-      apply(open, row);
-    } else {
-      const entry = requestedEntry(row);
-      apply(entry, row);
-      entries.push(entry);
-      byDispatchId.set(dispatchId!, entry);
-    }
-    return 'read';
-  }
-  // Rows this log carries ON PURPOSE that are not themselves dispatches.
-  // They are READ — the reader understands every one of them — they simply
-  // produce no entry. Counting them as `skipped` told the reader that an
-  // intact log had unreadable damage in it, and sent them to repair nothing:
-  // a repo that had merged one dispatch and applied one shadow arm reported
-  // two "unreadable rows". That is the same silent-wrong-answer shape the
-  // rest of this file is built to avoid, pointed at the log's own health.
-  //
-  //   dispatch_cancelled  a cancel is a REQUEST, not a receipt (see
-  //                       `commandDispatchTerminalState`), so it deliberately
-  //                       folds onto nothing and the receipt arrives later.
-  //   dispatch_merged     merge-back of an already-completed dispatch.
-  //   artifact_created    an artifact written beside a dispatch.
-  //   shadow_apply        a shadow arm applied to the tree.
-  //   workspace_lease_*   lease bookkeeping. Kept readable even as the leasing
-  //                       itself is removed: logs written before that removal
-  //                       still carry these rows, and a reader that forgets a
-  //                       retired event starts calling old evidence damage.
-  if (KNOWN_NON_ENTRY_EVENTS.has(event ?? '')) return 'no-entry';
-  return 'skipped'; // some other row kind: not renderable as a dispatch
-}
-
-export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
-  const cwd = opts.cwd ?? process.cwd();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const tail = opts.tail ?? DEFAULT_TAIL;
-  if (!Number.isInteger(tail) || tail < 1) {
-    throw new DispatchesCommandError(`tail must be a positive integer (got ${String(opts.tail)}).`);
-  }
-
-  const stopsOnly = opts.stops === true;
-  const path = DISPATCHES_FILE.split('\\').join('/');
-  const absolute = join(repoRoot, DISPATCHES_FILE);
-  if (!existsSync(absolute)) {
-    return {
-      repoRoot,
-      path,
-      exists: false,
-      total: 0,
-      skipped: 0,
-      skippedNewerFormat: 0,
-      tail,
-      entries: [],
-      lines: [],
-      summary: summarize({ shown: 0, total: 0, skipped: 0, newerFormat: 0, exists: false, path, stopsOnly, collapsed: [] }),
-      stopsOnly,
-      stopsTotal: 0,
-      stopsCollapsed: [],
-    };
-  }
-
-  const entries: DispatchEntry[] = [];
-  const byDispatchId = new Map<string, DispatchEntry>();
-  let skipped = 0;
-  let skippedNewerFormat = 0;
-
-  for (const line of readFileSync(absolute, 'utf8').split('\n')) {
-    if (line.trim() === '') continue;
-    let row: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(line) as unknown;
-      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
-      row = parsed as Record<string, unknown>;
-    } catch {
-      skipped += 1; // a torn or hand-edited line never stops the report
-      continue;
-    }
-    const fold = foldEvidenceRow(row, entries, byDispatchId);
-    if (fold === 'skipped') skipped += 1;
-    else if (fold === 'newer-format') skippedNewerFormat += 1;
-  }
-
-  // Classified AFTER the whole log is folded, never during it: `unsettled` is
-  // a fact about whether a receipt ever arrived, and a stop lands BEFORE the
-  // `dispatch-close` that settles it. Nothing is read from disk to answer it —
-  // `byDispatchId` already holds every dispatch this log carries — so the
-  // ranking costs one pass over the entries and no I/O.
-  const stopEntries = entries.filter((entry) => entry.kind === 'stopped' && entry.stop != null);
-  for (const entry of stopEntries) {
-    const risk = classifyStop(entry, byDispatchId);
-    entry.stop!.risk = risk;
-    entry.stop!.riskReading = STOP_RISK_READING[risk];
-  }
-
-  const collapsed: StopCollapse[] = stopsOnly
-    ? []
-    : COLLAPSED_STOP_ORDER.map((risk) => ({
-        risk,
-        reading: STOP_RISK_READING[risk],
-        count: stopEntries.filter((entry) => entry.stop!.risk === risk).length,
-      })).filter((group) => group.count > 0);
-
-  // `--stops` is the way back to the collapsed rows, so it collapses nothing
-  // and ranks nothing: it is the whole stop population in append order.
-  const shown = stopsOnly ? stopEntries.slice(-tail) : selectShown(entries, tail);
-  return {
+export async function runDispatch(opts: DispatchOptions): Promise<DispatchOutcome> {
+  const repoRoot = rootOf(opts);
+  const archetype = opts.archetype?.trim();
+  if (!archetype && !opts.model) throw new DispatchesError('pass --archetype <name> (or --model <ref> to bypass the dials).');
+  const prompt = readPromptInput(opts, opts.cwd ?? process.cwd());
+  const prepared = prepareDispatch({
     repoRoot,
-    path,
-    exists: true,
-    total: entries.length,
-    skipped,
-    skippedNewerFormat,
-    tail,
-    entries: shown,
-    lines: shown.map(renderDispatchLine),
-    summary: summarize({
-      shown: shown.length,
-      // In the stops view the denominator is the stop population, not the
-      // whole log: "3 of 41 shown" would invite the reader to think 38 stops
-      // were withheld.
-      total: stopsOnly ? stopEntries.length : entries.length,
-      skipped,
-      newerFormat: skippedNewerFormat,
-      exists: true,
-      path,
-      stopsOnly,
-      collapsed,
-    }),
-    stopsOnly,
-    stopsTotal: stopEntries.length,
-    stopsCollapsed: collapsed,
-  };
+    archetype: archetype || 'worker',
+    explicitModel: opts.model ?? null,
+    prompt,
+    name: opts.name,
+    shared: opts.shared,
+    from: opts.from,
+    session: opts.session ?? null,
+    parent: opts.parent,
+    lane: 'command',
+    userPathOptions: opts.userPathOptions,
+    env: opts.env,
+  });
+  if (!prepared.ok) return { ok: false, refused: prepared.refused };
+  const result = await runCommandDispatch({
+    repoRoot,
+    prepared: prepared.prepared,
+    env: opts.env,
+    onEcho: opts.onEcho,
+    heartbeatMs: opts.heartbeatMs,
+  });
+  return { ok: true, result };
 }
 
-/** A stop that IDENTIFIED a dispatch, plus the worktree scope it was read from. */
-export interface AgentStopRecord extends DispatchAgentStop {
-  /** The host-worktree scope the id came from — a run id, or `adhoc`. */
-  scope: string | null;
+// ---------------------------------------------------------------------------
+// dispatch-open / dispatch-stop — the host lane, driven by hooks
+// ---------------------------------------------------------------------------
+
+export interface DispatchOpenOptions extends CommonOptions {
+  archetype: string;
+  model?: string | null;
+  name?: string | null;
+  shared?: boolean;
+  from?: string | null;
+  prompt?: string | null;
+  promptFile?: string | null;
+  session?: string | null;
+  parent?: string | null;
+  /** Which harness is delivering; recorded on the row. */
+  harness?: string | null;
 }
 
-/**
- * Every `host_agent_stopped` row that NAMED a dispatch, keyed by dispatch id.
- *
- * The second consumer of the stop row, and deliberately built on the SAME
- * parser (`stoppedEntry`) as the listing: `fadeno show` projects the RUN
- * ledger, which the stop hook does not write to, so without this it would go
- * on rendering a killed agent's host dispatch as `running` while
- * `fadeno dispatches` said the agent was gone. Two surfaces disagreeing about
- * whether work is live is the failure this whole row exists to end, and a
- * second private reader of the same rows is how that lands.
- *
- * Keyed by dispatch id alone: ids are uuids, so the scope is carried for
- * display rather than for matching. The LAST stop wins — a dispatch whose
- * worktree saw two agents stop is described by the most recent one.
- *
- * Best-effort by construction: a missing log, a torn line or an unparseable
- * row yields no record, never an exception. This is a projection, and a
- * projection that throws takes the whole `show` with it.
- */
-export function loadAgentStops(opts: { cwd?: string; repoRoot?: string } = {}): Map<string, AgentStopRecord> {
-  const stops = new Map<string, AgentStopRecord>();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
-  const absolute = join(repoRoot, DISPATCHES_FILE);
-  if (!existsSync(absolute)) return stops;
-  let text: string;
-  try {
-    text = readFileSync(absolute, 'utf8');
-  } catch {
-    return stops;
-  }
-  for (const line of text.split('\n')) {
-    if (line.trim() === '') continue;
-    let row: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(line) as unknown;
-      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
-      row = parsed as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    if (str(row.event) !== 'host_agent_stopped') continue;
-    const entry = stoppedEntry(row);
-    const stop = entry.stop;
-    // No id, no record. A stop that could not identify a dispatch is real
-    // evidence and renders in the listing; it simply has nothing to say here.
-    if (stop?.correlation.dispatchId == null) continue;
-    stops.set(stop.correlation.dispatchId, {
-      at: entry.timestamp,
-      agentType: entry.agentType,
-      agentId: stop.agentId,
-      basis: stop.correlation.basis,
-      dirtyPaths: stop.git === 'unavailable' ? null : stop.entryCount,
-      scope: stop.correlation.scope,
-    });
-  }
-  return stops;
+export interface DispatchOpened {
+  ok: true;
+  id: string;
+  name: string;
+  archetype: string;
+  model: string;
+  modelId: string;
+  effort: string | null;
+  harness: string | null;
+  lane: Lane;
+  cwd: string;
+  workspace: { path: string; branch: string | null; base: string };
+  shared: boolean;
+  sharedReason: string | null;
+  /** The contract-bearing prompt the agent should receive. */
+  prompt: string;
+  contract: string;
+  nag: string;
 }
 
-interface OutputRecord {
-  dispatchId: string;
-  snapshot: string | null;
-  outputSha256: string | null;
-  completed: boolean;
-  /**
-   * A `dispatch_withdrawn` row landed — the OTHER terminal receipt, and the
-   * only one for a dispatch that never reported. Separate from `completed`
-   * because they answer different questions: `completed` is "did an executor
-   * finish and hash its bytes", `withdrawn` is "did an operator retire it".
-   * Every "is it still open?" reader must consult both, which is what
-   * `isOpenRecord` below exists to make impossible to forget.
-   */
-  withdrawn: boolean;
-  /** Why it was retired, as the operator stated it. Null unless withdrawn. */
-  withdrawnReason: string | null;
-  /**
-   * What the completion row says happened, and the facts behind it. A
-   * snapshot whose bytes hash to the row is *attested*, not *successful*: a
-   * dispatch the kernel killed at its deadline attests perfectly — zero bytes
-   * in, zero bytes hashed — and on 2026-08-22 that is exactly what a proxy
-   * relayed as "completed". The verdict has to ride along with the bytes.
-   */
-  outcome: DispatchOutcome | null;
-  exitCode: number | null;
-  signal: string | null;
-  outputBytes: number | null;
-  /**
-   * The retained executor stderr transcript, from the completion row.
-   *
-   * Read here for the reason this command exists: `dispatch` echoes the path
-   * on stderr, and stderr is what a killed Bash call takes with it. Without
-   * this, the one caller who most needs the transcript — the one recovering
-   * by tag after losing every byte the dispatch printed — could not be told
-   * where it is.
-   */
-  stderrSnapshot: string | null;
-  /** Bytes the executor wrote, which is not what the snapshot holds when truncated. */
-  stderrBytes: number | null;
-  /** The snapshot is a head+tail sample of `stderrBytes`, not the whole stream. */
-  stderrTruncated: boolean;
-  /** The deadline that killed it, when `outcome` is `timeout`. */
-  timeoutMs: number | null;
-  /** The merge-back stamp, when the dispatch ran isolated and one was attempted. */
-  primaryMerge: { status: string; detail?: string; conflicts?: string[]; rebased_onto?: string } | null;
-  /** The retained worktree, while a merge-back is `unresolved`; null once merged or torn down. */
-  workspace: string | null;
-  /** A `dispatch_merged` row landed: the retained worktree was merged by hand. */
-  merged: boolean;
-  /**
-   * The `relay_attested` verdict from this dispatch's own rows. `false` means
-   * a dispatch proxy sent bytes that did not match what it was handed — the
-   * report in the snapshot answers a prompt the caller never wrote.
-   */
-  relayAttested: boolean | null;
-  /** `--allow-relay-mismatch` is why a `relay_attested: false` dispatch ran. */
-  relayMismatchAllowed: boolean;
-  /**
-   * The resolved `ignored_output` policy, from whichever of this dispatch's
-   * rows states it. Null when none does — never the `discardable` default,
-   * which is exactly the invention the in-band banner must not make.
-   */
-  ignoredOutputPolicy: IgnoredOutputPolicyRecord | null;
-  /**
-   * Gitignored output this dispatch produced that no diff carried out of its
-   * worktree, from the completion row.
-   *
-   * Read on the RECOVERY path, not only in the listing, because the listing
-   * is not where anyone noticed a research deliverable disappearing twice.
-   * Whoever recovers the bytes is the one about to act on a report that may
-   * describe files which no longer exist.
-   */
-  ignoredOutputDiscarded: DispatchIgnoredOutputDiscarded | null;
-  /**
-   * Repo-relative paths `worktree_carry` copied INTO this dispatch's worktree
-   * before it ran, from the completion row. Empty when it declared none.
-   *
-   * Read for one job: `--merge` re-scans the worktree before removing it, and
-   * a carried `node_modules/` is ignored INPUT, not produced output. Without
-   * this list every merge in a repo that carries dependencies would find one
-   * and keep the worktree forever, which is the shape of false positive that
-   * teaches people to ignore the true ones. Taken from the row rather than
-   * from today's catalog because the catalog may have changed since — this is
-   * what was actually carried into this directory.
-   */
-  worktreeCarry: string[];
-  /** Other deliveries that wrote the same paths while this one ran. */
-  concurrentWrite: ConcurrentWriteRecord[] | null;
-  /**
-   * Whether this is a shadow duplication. Shadows stay recoverable and
-   * cancellable by explicit id, but are never candidates for `last`: the
-   * caller asking "which dispatch was mine?" launched the primary — the
-   * kernel launched the shadow. They are also excluded from the concurrency
-   * refusals, because a shadow overlaps its own primary by design.
-   */
-  shadow: boolean;
-  /** Caller-chosen `--tag`, when this dispatch was launched with one. */
-  tag: string | null;
-  /** Epoch ms of the request row; the start of this dispatch's lifetime. */
-  requestedAt: number | null;
-  /**
-   * Epoch ms this dispatch actually ended; `null` while still open.
-   *
-   * Still derived as `requestedAt + duration_ms` rather than read from the
-   * completion row's `timestamp`, even though the kernel now stamps that row
-   * with the real end time. The log is append-only and long-lived: every row
-   * written before that fix carries the dispatch's *start* in both rows, so
-   * trusting the stamp would collapse those dispatches to zero length and stop
-   * detecting the overlaps this exists to catch. The two agree on new rows by
-   * construction; on old ones only the derivation is right.
-   */
-  completedAt: number | null;
-}
+export type DispatchOpenOutcome = DispatchOpened | { ok: false; refused: string };
 
-/**
- * Whether this dispatch is still open — no terminal receipt of ANY kind.
- *
- * The one place that answers it. Before the withdraw receipt existed the
- * question was spelled `!rec.completed` at three call sites, and each of them
- * would have gone on calling a retired dispatch live: `last` would keep
- * offering it as the in-flight candidate, `--wait` would poll for a completion
- * row that is never coming, and `--cancel` would send the caller looking for a
- * process. One reading, so a fourth receipt lands in all of them at once.
- */
-function isOpenRecord(rec: OutputRecord): boolean {
-  return !rec.completed && !rec.withdrawn;
-}
-
-/** Whether two dispatches were ever in flight at the same moment. */
-function overlaps(a: OutputRecord, b: OutputRecord): boolean {
-  const start = (rec: OutputRecord): number => rec.requestedAt ?? Number.NEGATIVE_INFINITY;
-  // An open dispatch has not ended, so it overlaps everything after it began.
-  const end = (rec: OutputRecord): number => rec.completedAt ?? Number.POSITIVE_INFINITY;
-  return start(a) < end(b) && start(b) < end(a);
-}
-
-/**
- * Walk the evidence log for output-snapshot recovery. Unreadable lines are
- * skipped (same as the list reader): a torn tail must not hide a recoverable
- * snapshot. Format majors this list reader would set aside are still
- * consulted — recovery is about the file, not the stamp.
- */
-function loadOutputRecords(absolute: string): {
-  byId: Map<string, OutputRecord>;
-  lastWithSnapshot: string | null;
-  /**
-   * Dispatch ids in the order their request rows appeared — snapshots only,
-   * primaries only (see `OutputRecord.shadow`).
-   */
-  requestOrder: string[];
-} {
-  const byId = new Map<string, OutputRecord>();
-  let lastWithSnapshot: string | null = null;
-  const requestOrder: string[] = [];
-  if (!existsSync(absolute)) return { byId, lastWithSnapshot, requestOrder };
-
-  for (const line of readFileSync(absolute, 'utf8').split('\n')) {
-    if (line.trim() === '') continue;
-    let row: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(line) as unknown;
-      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
-      row = parsed as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const event = str(row.event);
-    const terminal = commandDispatchTerminalState(event);
-    const dispatchId = str(row.dispatch_id);
-    if (dispatchId == null) continue;
-    if (event === 'dispatch_merged') {
-      // The later fact wins: a merge by hand supersedes the completion row's
-      // `unresolved` stamp. The worktree it names is usually gone — but not
-      // when the merge found gitignored content the patch could not carry and
-      // kept the directory, which the row states with `workspace_retained`.
-      // Blanking `workspace` unconditionally would point a reader away from a
-      // directory that is still the only copy of something.
-      const merged = byId.get(dispatchId);
-      if (merged != null) {
-        merged.merged = true;
-        merged.workspace = row.workspace_retained === true && typeof row.workspace === 'string'
-          ? row.workspace
-          : null;
-        const keptIgnored = parseIgnoredOutputDiscarded(row.ignored_output_discarded);
-        if (keptIgnored != null) merged.ignoredOutputDiscarded = keptIgnored;
-        const stamp = row.merge;
-        if (stamp != null && typeof stamp === 'object' && !Array.isArray(stamp)) {
-          const s = stamp as Record<string, unknown>;
-          const status = str(s.status);
-          if (status != null) merged.primaryMerge = { status, ...(str(s.detail) != null ? { detail: str(s.detail)! } : {}), ...(typeof s.rebased_onto === 'string' ? { rebased_onto: s.rebased_onto } : {}) };
-        }
-      }
-      continue;
-    }
-    if (event !== 'dispatch_requested' && terminal == null) continue;
-
-    // Read before the terminal branch below and from any row that states it:
-    // the policy rides the kernel's `identity`, so the request row carries it
-    // and a dispatch recovered while still open can still say what it asked
-    // for. `??` keeps the first statement, and no two rows of one dispatch can
-    // disagree — one expression writes them all.
-    const rowPolicy = parseIgnoredOutputPolicy(row.ignored_output_policy);
-
-    let rec = byId.get(dispatchId);
-    if (rec == null) {
-      rec = {
-        dispatchId,
-        snapshot: null,
-        outputSha256: null,
-        completed: false,
-        withdrawn: false,
-        withdrawnReason: null,
-        outcome: null,
-        exitCode: null,
-        signal: null,
-        outputBytes: null,
-        stderrSnapshot: null,
-        stderrBytes: null,
-        stderrTruncated: false,
-        timeoutMs: null,
-        primaryMerge: null,
-        workspace: null,
-        merged: false,
-        relayAttested: null,
-        relayMismatchAllowed: false,
-        ignoredOutputPolicy: null,
-        ignoredOutputDiscarded: null,
-        worktreeCarry: [],
-        concurrentWrite: null,
-        shadow: false,
-        tag: null,
-        requestedAt: null,
-        completedAt: null,
-      };
-      byId.set(dispatchId, rec);
-    }
-    rec.ignoredOutputPolicy = rec.ignoredOutputPolicy ?? rowPolicy;
-    if (row.shadow === true) rec.shadow = true;
-    // Read off BOTH rows: the request row carries the verdict (it is decided
-    // before the spawn), and the completion row repeats it. Taking the first
-    // non-null means a recovery that runs while the dispatch is still open —
-    // the case this reader exists for — is warned just as loudly as one that
-    // reads a finished dispatch.
-    if (typeof row.relay_attested === 'boolean') rec.relayAttested = rec.relayAttested ?? row.relay_attested;
-    if (row.relay_mismatch_allowed === true) rec.relayMismatchAllowed = true;
-    const snapshot = str(row.output_snapshot);
-    if (snapshot != null) rec.snapshot = snapshot;
-    const tag = str(row.tag);
-    if (tag != null) rec.tag = tag;
-    const stamp = str(row.timestamp);
-    const at = stamp == null ? Number.NaN : Date.parse(stamp);
-    if (event === 'dispatch_requested' && snapshot != null) {
-      if (row.shadow !== true) {
-        lastWithSnapshot = dispatchId;
-        requestOrder.push(dispatchId);
-      }
-      if (!Number.isNaN(at)) rec.requestedAt = at;
-    }
-    if (terminal === 'withdrawn') {
-      rec.withdrawn = true;
-      rec.withdrawnReason = str(row.reason);
-      // A withdrawn dispatch has an END, and it is the moment the operator
-      // retired it. Without this the record's lifetime stays open-ended and
-      // `overlaps` keeps reporting it as concurrent with everything launched
-      // after it — which would make `last` refuse forever on a repo that had
-      // ever retired one.
-      if (!Number.isNaN(at)) rec.completedAt = at;
-      continue;
-    }
-    if (terminal === 'completed') {
-      rec.completed = true;
-      rec.outputSha256 = str(row.output_sha256);
-      rec.exitCode = typeof row.exit_code === 'number' ? row.exit_code : null;
-      rec.signal = str(row.signal);
-      rec.outputBytes = typeof row.output_bytes === 'number' ? row.output_bytes : null;
-      rec.stderrSnapshot = str(row.stderr_snapshot);
-      rec.stderrBytes = typeof row.stderr_bytes === 'number' ? row.stderr_bytes : null;
-      // Absent means "the whole stream is in that file". A row written before
-      // this field existed carries no transcript path either, so there is no
-      // legacy row for which the default could claim completeness it lacks.
-      rec.stderrTruncated = row.stderr_truncated === true;
-      rec.timeoutMs = typeof row.timeout_ms === 'number' ? row.timeout_ms : null;
-      // Stated outcome first, derived from the row's facts for rows written
-      // before the field — the same rule the listing applies.
-      rec.outcome = normalizeDispatchOutcome(row.outcome, {
-        exitCode: rec.exitCode,
-        signal: rec.signal,
-        error: str(row.error),
-        outputBytes: rec.outputBytes,
-        timedOut: rec.timeoutMs != null ? true : null,
-      });
-      rec.ignoredOutputDiscarded = parseIgnoredOutputDiscarded(row.ignored_output_discarded);
-      // `[{ path, mechanism }]` as the kernel writes it. Anything that is not
-      // a usable path is dropped rather than defaulted: this list only ever
-      // SUPPRESSES findings, so an invented entry silences a real one.
-      rec.worktreeCarry = Array.isArray(row.worktree_carry)
-        ? row.worktree_carry
-            .map((c) => (c != null && typeof c === 'object' && !Array.isArray(c) ? str((c as Record<string, unknown>).path) : null))
-            .filter((p): p is string => p != null)
-        : [];
-      rec.concurrentWrite = parseConcurrentWriteStamps(row.concurrent_write);
-      const merge = row.primary_merge;
-      if (merge != null && typeof merge === 'object' && !Array.isArray(merge)) {
-        const m = merge as Record<string, unknown>;
-        const status = str(m.status);
-        const detail = str(m.detail);
-        if (status != null) {
-          rec.primaryMerge = {
-            status,
-            ...(detail != null ? { detail } : {}),
-            ...(Array.isArray(m.conflicts) && m.conflicts.every((c) => typeof c === 'string') ? { conflicts: m.conflicts as string[] } : {}),
-            ...(typeof m.rebased_onto === 'string' ? { rebased_onto: m.rebased_onto } : {}),
-          };
-        }
-      }
-      if (row.workspace_retained === true && typeof row.workspace === 'string') rec.workspace = row.workspace;
-      const duration = typeof row.duration_ms === 'number' ? row.duration_ms : null;
-      // Prefer start + duration; fall back to the row's own stamp for legacy
-      // rows written before `duration_ms`, where it is the best available.
-      rec.completedAt =
-        rec.requestedAt != null && duration != null
-          ? rec.requestedAt + duration
-          : Number.isNaN(at)
-            ? null
-            : at;
-    }
-  }
-  return { byId, lastWithSnapshot, requestOrder };
-}
-
-/**
- * How `last` picked its record. `in-flight` is the keyword's actual purpose —
- * the one dispatch with no completion row is the killed or still-running one
- * the caller is trying to recover. `recency` is the weaker fallback, a guess
- * about the whole repo's log, and is reported as such.
- */
-export type OutputResolution = 'id' | 'tag' | 'in-flight' | 'recency';
-
-/** How a caller should name its own dispatch, once `last` has proved unsafe. */
-const NAME_YOURS =
-  'Name yours: `--tag <handle>` if you launched with one, otherwise the id the ' +
-  'kernel echoed as `dispatch id: <id>` at spawn.';
-
-/**
- * Resolve a caller-chosen handle. A tag is not required to be unique — nothing
- * stops two callers picking `retry` — so a reused one is refused rather than
- * silently resolved to the newest, which is the failure this whole path exists
- * to end.
- */
-function resolveByTag(
-  tag: string,
-  byId: Map<string, OutputRecord>,
-  requestOrder: readonly string[],
-): { record: OutputRecord; resolvedBy: OutputResolution } {
-  const hits = requestOrder.map((id) => byId.get(id)!).filter((rec) => rec.tag === tag);
-  if (hits.length === 0) {
-    const known = [...new Set([...byId.values()].map((rec) => rec.tag).filter((t) => t != null))];
-    throw new DispatchesCommandError(
-      `no dispatch carries the tag "${tag}".` +
-        (known.length > 0 ? ` Tags in this log: ${known.join(', ')}.` : ' No dispatch in this log was launched with a tag.'),
-    );
-  }
-  if (hits.length > 1) {
-    throw new DispatchesCommandError(
-      `ambiguous tag "${tag}": ${hits.length} dispatches carry it ` +
-        `(${hits.map((rec) => rec.dispatchId.slice(0, 8)).join(', ')}). ` +
-        'Use a distinct tag per dispatch, or name the id.',
-    );
-  }
-  return { record: hits[0]!, resolvedBy: 'tag' };
-}
-
-function resolveOutputRecord(
-  query: string,
-  byId: Map<string, OutputRecord>,
-  lastWithSnapshot: string | null,
-  requestOrder: readonly string[],
-): { record: OutputRecord; resolvedBy: OutputResolution } {
-  if (query === 'last') {
-    if (lastWithSnapshot == null) {
-      throw new DispatchesCommandError(
-        'unknown dispatch "last": no output_snapshot has been recorded.',
-      );
-    }
-    // Recovery, not recency: prefer the dispatch that never reached its
-    // completion row. Concurrent dispatches made bare recency actively wrong —
-    // a 2026-08-13 dogfood had one proxy recover another proxy's report and
-    // very nearly relay it as its own — so when more than one is still open,
-    // refuse and make the caller name the id the kernel echoed at spawn.
-    const open = requestOrder.filter((id) => {
-      const rec = byId.get(id);
-      return rec != null && isOpenRecord(rec);
-    });
-    if (open.length === 1) return { record: byId.get(open[0]!)!, resolvedBy: 'in-flight' };
-    if (open.length > 1) {
-      const candidates = open.map((id) => id.slice(0, 8)).join(', ');
-      throw new DispatchesCommandError(
-        `ambiguous dispatch "last": ${open.length} dispatches are still open (${candidates}). ` +
-          NAME_YOURS,
-      );
-    }
-    // Nothing open, so every candidate has finished and "which one is mine?"
-    // can no longer be answered by state. Recency is only safe when this
-    // dispatch ran alone: a 2026-08-14 dogfood recovered a *concurrent* proxy's
-    // report here, because both had completed by the time either looked. The
-    // note that flagged it was in-band and the agent consumed it anyway — a
-    // wrong answer with a caveat is still a wrong answer. Refuse instead.
-    const newest = byId.get(lastWithSnapshot)!;
-    const concurrent = requestOrder
-      .filter((id) => id !== newest.dispatchId)
-      .map((id) => byId.get(id)!)
-      .filter((rec) => overlaps(rec, newest));
-    if (concurrent.length > 0) {
-      const describe = (rec: OutputRecord): string =>
-        rec.tag != null ? `${rec.dispatchId.slice(0, 8)} (tag: ${rec.tag})` : rec.dispatchId.slice(0, 8);
-      throw new DispatchesCommandError(
-        `ambiguous dispatch "last": ${concurrent.length + 1} dispatches ran concurrently and all ` +
-          `have finished (${[newest, ...concurrent].map(describe).join(', ')}), so the newest is ` +
-          `not necessarily yours. ${NAME_YOURS}`,
-      );
-    }
-    return { record: newest, resolvedBy: 'recency' };
-  }
-
-  const exact = byId.get(query);
-  if (exact != null) return { record: exact, resolvedBy: 'id' };
-
-  if (query.length < OUTPUT_ID_PREFIX_MIN) {
-    throw new DispatchesCommandError(`unknown dispatch "${query}".`);
-  }
-  const hits = [...byId.values()].filter((rec) => rec.dispatchId.startsWith(query));
-  if (hits.length === 0) throw new DispatchesCommandError(`unknown dispatch "${query}".`);
-  if (hits.length > 1) {
-    throw new DispatchesCommandError(`ambiguous dispatch prefix "${query}".`);
-  }
-  return { record: hits[0]!, resolvedBy: 'id' };
-}
-
-/**
- * The in-band quarantine banner for a dispatch whose relay defected, or null
- * when there is nothing to say.
- *
- * One function, used by `--output` (which prefixes it onto the bytes) and by
- * `--merge` (which refuses with it), so the two cannot describe the same
- * finding differently. It is deliberately shaped as a banner rather than a
- * log line: it is read by whoever is about to act on the report, and the
- * action it is trying to stop is "relay this as the answer".
- *
- * Two shapes, because the two rows mean different things. A row with
- * `relay_mismatch_allowed` is a dispatch a person waved through with
- * `--allow-relay-mismatch`. A row without it, under the current build, cannot
- * exist — the `relay_fidelity` predicate refuses before the spawn — so it is
- * an OLD row, written while the failure was warn-only. Both are quarantined;
- * only the second needs to say where it came from.
- */
-export function relayQuarantineNotice(
-  dispatchId: string,
-  relayAttested: boolean | null,
-  relayMismatchAllowed: boolean,
-): string | null {
-  if (relayAttested !== false) return null;
-  const id8 = dispatchId.slice(0, 8);
-  const provenance = relayMismatchAllowed
-    ? 'It was dispatched anyway under --allow-relay-mismatch'
-    : 'It predates the `relay_fidelity` refusal, which now stops this before the executor spawns';
-  return (
-    `!! RELAY FIDELITY FAILED for dispatch ${id8} (relay_attested: false). ` +
-    'A dispatch proxy sent the executor bytes that did not match what it was handed, so the report ' +
-    `below answers a prompt the caller never wrote. ${provenance}. ` +
-    'QUARANTINE IT: do not relay this as an answer and do not act on it unread — re-dispatch without ' +
-    'the defecting relay, or verify every claim in it by hand first. ' +
-    '---- report follows ----'
-  );
-}
-
-/**
- * The in-band banner for a dispatch whose gitignored output was destroyed
- * with its worktree, or null when nothing was recorded.
- *
- * ## Why this one rides WITH the bytes
- *
- * `relayQuarantineNotice` is prefixed onto the returned report because every
- * other caveat this command raises travels on stderr, and the dispatch-proxy
- * contract discards stderr along with a timed-out call. The test for putting
- * a finding in-band is whether it changes what the bytes MEAN, and this one
- * does: a report that says "wrote the analysis to data/research/" is
- * describing files that are not where it says they are. Acting on it —
- * relaying it, building on it, closing the task — is acting on a statement
- * about the filesystem that is now false.
- *
- * Still in-band now that the kernel RETAINS the worktree rather than removing
- * it, and for the same reason. Retention changes the remedy from "that work
- * is gone" to "that work is at this path", which is a far better banner to
- * read — but the report's own claim about where the files are is wrong
- * either way, and the path they are actually at is exactly the fact a caller
- * needs and cannot derive.
- *
- * A `concurrent_write` stamp deliberately does NOT get this treatment. An
- * overlap does not make the report false, and reserving the in-band channel
- * for findings that invalidate the bytes is what keeps the banner from being
- * something readers scroll past.
- *
- * ## Not a quarantine
- *
- * The report itself is intact and worth reading; the work product beside it
- * is not where the report says. So this says what is missing, where it went,
- * and does not tell the caller to discard the bytes.
- */
-export function discardedOutputNotice(
-  dispatchId: string,
-  ignored: DispatchIgnoredOutputDiscarded | null,
-  policy: IgnoredOutputPolicyRecord | null = null,
-): string | null {
-  if (ignored == null) return null;
-  // The headline word, from `ignoredOutputVerdict` rather than from the
-  // function's own name. This banner is prefixed onto the bytes a caller
-  // acts on, and it announced GITIGNORED OUTPUT DISCARDED over a worktree
-  // that was retained and named three clauses further down — the loudest
-  // possible place to get the verb wrong.
-  const verdict = ignoredOutputVerdict(ignored);
-  // The remedy splits on whether the content survived, because the two cases
-  // ask for entirely different next actions: one is "go and get it", the
-  // other is "it is gone, re-run differently". Collapsing them into a single
-  // paragraph that hedges would serve neither.
-  const remedy = ignored.retainedAt != null
-    ? 'The report below may describe files that are not in your tree — they are in that worktree instead. ' +
-      'Copy what you need out of it before `fadeno clean --force` reclaims it, or re-run with `--shared` ' +
-      '(or set `ignored_output: kept` on the archetype) so this output lands in your tree directly.'
-    : 'The report below may describe files that are not in your tree: check before acting on it, and ' +
-      're-run with `--shared` (or set `ignored_output: kept` on the archetype) if this output is a ' +
-      'deliverable rather than a build artifact.';
-  return (
-    `!! GITIGNORED OUTPUT ${verdict} for dispatch ${dispatchId.slice(0, 8)}. ` +
-    `${describeIgnoredOutput(ignored, policy)} ` +
-    'An isolated dispatch reaches your tree as a patch from `git add -A`, which respects .gitignore, so ' +
-    `nothing at these paths was ever staged, diffed, or applied. ${remedy} ` +
-    '---- report follows ----'
-  );
-}
-
-/**
- * Recover the streamed output snapshot for one command dispatch. `dispatchId`
- * is a full `dispatch_id`, a unique prefix of at least 8 characters, or the
- * keyword `last` (most recent `dispatch_requested` row that carries
- * `output_snapshot`). The snapshot file's current bytes are the result; the
- * attestation compares their digest to the completion row, or reports
- * `incomplete` when that row never arrived.
- *
- * Not wired to a CLI flag here — the integrator adds
- * `fadeno dispatches --output <id|last>` in `src/cli.ts` (stdout = bytes
- * verbatim, stderr = one attestation note line).
- */
-export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOutputResult {
-  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
-  const query = opts.dispatchId.trim();
-  if (tag == null && query === '') {
-    throw new DispatchesCommandError(
-      'dispatch id is required (full id, unique prefix of 8+ characters, "last", or --tag <handle>).',
-    );
-  }
-
-  const cwd = opts.cwd ?? process.cwd();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const ledger = join(repoRoot, DISPATCHES_FILE);
-  let { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger);
-  let rec: OutputRecord;
-  let resolvedBy: OutputResolution;
-  if (tag != null) {
-    ({ record: rec, resolvedBy } = resolveByTag(tag, byId, requestOrder));
-  } else {
-    ({ record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder));
-  }
-
-  // Re-read until the completion row lands. The kernel appends it when the
-  // executor exits, which is routinely *after* the caller's own timeout: the
-  // answer is not missing, it has not been written yet.
-  const waitMs = opts.waitMs ?? 0;
-  if (waitMs > 0 && isOpenRecord(rec)) {
-    const pollMs = opts.pollMs ?? 1_000;
-    const heartbeatMs = opts.heartbeatMs ?? 30_000;
-    let lastBeat = Date.now();
-    const startedAt = lastBeat;
-    const deadline = startedAt + waitMs;
-    // How the caller reached this dispatch is settled; only its state is not.
-    const settledId = rec.dispatchId;
-    while (isOpenRecord(rec) && Date.now() < deadline) {
-      sleepSync(Math.min(pollMs, Math.max(0, deadline - Date.now())));
-      ({ byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger));
-      // Re-resolve by the id already settled on: `last` must not drift onto a
-      // different dispatch that started while this one was being waited for.
-      rec = resolveOutputRecord(settledId, byId, lastWithSnapshot, requestOrder).record;
-      if (isOpenRecord(rec) && opts.onHeartbeat != null && Date.now() - lastBeat >= heartbeatMs) {
-        lastBeat = Date.now();
-        opts.onHeartbeat(
-          `fadeno dispatches: ${settledId.slice(0, 8)} still running (elapsed ${formatElapsed(lastBeat - startedAt)})`,
-        );
-      }
-    }
-  }
-
-  if (rec.snapshot == null) {
-    throw new DispatchesCommandError(`dispatch "${rec.dispatchId}" predates output_snapshot.`);
-  }
-
-  const snapshotRel = rec.snapshot.split('\\').join('/');
-  const snapshotAbs = isAbsolute(snapshotRel) ? snapshotRel : join(repoRoot, snapshotRel);
-  if (!existsSync(snapshotAbs)) {
-    throw new DispatchesCommandError(`output snapshot missing: ${snapshotRel}.`);
-  }
-
-  const snapshotBytes = readFileSync(snapshotAbs, 'utf8');
-  const attested: DispatchOutputAttestation = !rec.completed
-    ? 'incomplete'
-    : sha256Hex(snapshotBytes) === rec.outputSha256
-      ? 'match'
-      : 'mismatch';
-  const relayNotice = relayQuarantineNotice(rec.dispatchId, rec.relayAttested, rec.relayMismatchAllowed);
-  // Only from a terminal receipt. An open dispatch's worktree still exists,
-  // so "this was destroyed" would be a claim about a teardown that has not
-  // happened; the same rule the verdict fields below follow.
-  const ignoredOutputDiscarded = rec.completed ? rec.ignoredOutputDiscarded : null;
-  // The policy is NOT gated on `completed`: it is an intent stated on the
-  // request row, true from the moment the dispatch was launched, and the
-  // banner is where a caller checks the tool's verdict against what they
-  // asked for.
-  const ignoredOutputNotice = discardedOutputNotice(rec.dispatchId, ignoredOutputDiscarded, rec.ignoredOutputPolicy);
-  // Relay first: it says the whole report answers the wrong prompt, which
-  // subsumes any question about what the work left behind.
-  const banners = [relayNotice, ignoredOutputNotice].filter((part): part is string => part != null);
+export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome {
+  const repoRoot = rootOf(opts);
+  const prompt = readPromptInput(opts, opts.cwd ?? process.cwd());
+  const outcome = prepareDispatch({
+    repoRoot,
+    archetype: opts.archetype,
+    explicitModel: opts.model ?? null,
+    prompt,
+    name: opts.name,
+    shared: opts.shared,
+    from: opts.from,
+    session: opts.session ?? null,
+    parent: opts.parent,
+    lane: 'host',
+    userPathOptions: opts.userPathOptions,
+    env: opts.env,
+  });
+  if (!outcome.ok) return { ok: false, refused: outcome.refused };
+  const p = outcome.prepared;
+  recordOpened(repoRoot, p, { lane: 'host', harness: opts.harness ?? p.resolution.harness });
   return {
-    dispatchId: rec.dispatchId,
-    path: snapshotRel,
-    bytes: banners.length === 0 ? snapshotBytes : `${banners.join('\n\n')}\n\n${snapshotBytes}`,
-    relayNotice,
-    relayAttested: rec.relayAttested,
-    relayMismatchAllowed: rec.relayMismatchAllowed,
-    ignoredOutputNotice,
-    ignoredOutputDiscarded,
-    ignoredOutputPolicy: rec.ignoredOutputPolicy,
-    concurrentWrite: rec.completed ? rec.concurrentWrite : null,
-    snapshotBytes,
-    attested,
-    withdrawn: rec.withdrawn,
-    withdrawnReason: rec.withdrawnReason,
-    outcome: rec.completed ? rec.outcome : null,
-    exitCode: rec.completed ? rec.exitCode : null,
-    signal: rec.completed ? rec.signal : null,
-    outputBytes: rec.completed ? rec.outputBytes : null,
-    stderrSnapshot: rec.completed ? rec.stderrSnapshot : null,
-    stderrBytes: rec.completed ? rec.stderrBytes : null,
-    stderrTruncated: rec.completed ? rec.stderrTruncated : false,
-    timeoutMs: rec.completed ? rec.timeoutMs : null,
-    primaryMerge: rec.completed ? rec.primaryMerge : null,
-    workspace: rec.completed ? rec.workspace : null,
-    resolvedBy,
+    ok: true,
+    id: p.id,
+    name: p.name,
+    archetype: p.archetype,
+    model: p.resolution.model,
+    modelId: p.resolution.modelId,
+    effort: p.resolution.effort,
+    harness: opts.harness ?? p.resolution.harness,
+    lane: 'host',
+    cwd: p.cwd,
+    workspace: p.workspace,
+    shared: p.shared,
+    sharedReason: p.sharedReason,
+    prompt: p.composedPrompt,
+    contract: p.contract,
+    nag: p.nag,
   };
 }
 
-// ---------------------------------------------------------------------------
-// --merge: the human half of the pull-request model, for an ad-hoc dispatch
-// ---------------------------------------------------------------------------
-
-export interface DispatchesMergeOptions {
-  /** Full id or an 8+ character prefix; ignored when `tag` is given. */
-  dispatchId?: string;
-  tag?: string | null;
-  repoRoot?: string;
-  cwd?: string;
-  now?: Date;
-  /**
-   * `--allow-relay-mismatch`: merge a `relay_attested: false` dispatch's
-   * worktree anyway.
-   *
-   * A SECOND override, not the one that ran the dispatch. Choosing to spend
-   * tokens on a tainted prompt and choosing to put its diff in your working
-   * tree are different decisions, made at different times by possibly
-   * different people, and the second is the one that is hard to undo.
-   */
-  allowRelayMismatch?: boolean;
+export interface DispatchStopOptions extends CommonOptions {
+  ref: string;
+  message?: string | null;
+  messageFile?: string | null;
+  /** Where the agent was actually working, when the harness says. */
+  agentCwd?: string | null;
 }
 
-export interface DispatchesMergeResult {
-  dispatchId: string;
-  tag: string | null;
-  mergeBack: MergeBackResult;
-  diffSnapshot: string;
-  diffBytes: number;
-  /** The worktree that was merged. Removed afterwards unless `ignoredOutputKept` says why not. */
-  workspace: string;
-  /**
-   * Ignored content the merged worktree still holds, which is why it was NOT
-   * removed. Null when the worktree was clean and went as usual.
-   *
-   * This command is the second place a `git add -A` diff meets a `.gitignore`
-   * and the only copy of something loses. It merged the patch — which by
-   * construction contains no ignored path — and then removed the directory
-   * that held the rest. `--merge` refused a tainted relay loudly and said
-   * nothing at all about this.
-   */
-  ignoredOutputKept: DispatchIgnoredOutputDiscarded | null;
-  resolvedBy: OutputResolution;
+export interface DispatchStopped {
+  record: DispatchRecord;
+  row: StoppedRow;
+  replayed: boolean;
+  /** Set when the agent's cwd was known and was not its assigned tree. */
+  mismatchedCwd: string | null;
 }
 
-/**
- * Merge a dispatch whose merge-back ended `unresolved`, once whoever launched
- * it has resolved the markers in the retained worktree. An ad-hoc dispatch
- * has no engine to re-invoke its executor, so the branch owner here is the
- * caller — a human, or the session that ran the proxy.
- *
- * Same turn as the kernel's own merge-back, same window lease: apply, rebase
- * if the tree moved again, re-apply; refuse with the files named if markers
- * remain or the rebase conflicts, and leave the worktree where it is. On
- * success a `dispatch_merged` row carries the stamp, and the worktree goes —
- * unless it still holds gitignored content the merged patch could not carry,
- * in which case it stays and the result says so, by the same rule and the
- * same `ignoredOutputClean` predicate the kernel's own teardown obeys.
- *
- * The scan is taken FRESH rather than read off the completion row. The row
- * describes the worktree as the executor left it; between then and now a
- * human resolved conflict markers in that directory and may have built,
- * deleted, or moved things while they were in there. What matters is what is
- * in the directory at the moment it would be deleted.
- */
-export function runDispatchesMerge(opts: DispatchesMergeOptions = {}): DispatchesMergeResult {
-  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
-  const query = (opts.dispatchId ?? '').trim();
-  if (tag == null && query === '') {
-    throw new DispatchesCommandError('dispatch id is required (full id, unique prefix of 8+ characters, or tag:<handle>).');
+export function runDispatchStop(opts: DispatchStopOptions): DispatchStopped {
+  const repoRoot = rootOf(opts);
+  const record = lookup(repoRoot, opts.ref);
+  if (record.opened == null) throw new DispatchesError(`dispatch ${record.id} has no opened row; nothing to stop.`);
+  const assigned = workspaceDir(repoRoot, record.opened);
+  const agentCwd = opts.agentCwd?.trim() || null;
+  const mismatchedCwd = agentCwd != null && assigned != null && canonical(agentCwd) !== canonical(assigned) ? agentCwd : null;
+  if (record.stopped != null) return { record, row: record.stopped, replayed: true, mismatchedCwd };
+  let message: string | null = null;
+  if (opts.messageFile != null && opts.messageFile.trim() !== '') {
+    const path = resolve(opts.cwd ?? process.cwd(), opts.messageFile);
+    message = existsSync(path) ? readFileSync(path, 'utf8') : null;
+  } else if (typeof opts.message === 'string') message = opts.message;
+  const row = recordStopped(repoRoot, record.id, {
+    finalMessage: message != null && message.trim().length > 0 ? message : null,
+    cwd: assigned,
+  });
+  return { record: { ...record, stopped: row, state: record.closed ? 'closed' : 'stopped' }, row, replayed: false, mismatchedCwd };
+}
+
+// ---------------------------------------------------------------------------
+// dispatch-close / cancel
+// ---------------------------------------------------------------------------
+
+export interface DispatchCloseOptions extends CommonOptions {
+  ref: string;
+  verb: string;
+  note?: string | null;
+}
+
+export interface DispatchClosed {
+  record: DispatchRecord;
+  verb: CloseVerb;
+  replayed: boolean;
+  worktree: string | null;
+  branch: string | null;
+}
+
+export function runDispatchClose(opts: DispatchCloseOptions): DispatchClosed {
+  const repoRoot = rootOf(opts);
+  if (!isCloseVerb(opts.verb)) throw new DispatchesError(`close needs exactly one of --merged, --kept, --discarded, --failed; got "${opts.verb}".`);
+  const record = lookup(repoRoot, opts.ref);
+  const outcome = closeDispatch(repoRoot, record, opts.verb, opts.note ?? null);
+  if (!outcome.ok) throw new DispatchesError(outcome.message);
+  const opened = record.opened;
+  return {
+    record,
+    verb: opts.verb,
+    replayed: outcome.replayed,
+    worktree: opened?.workspace != null && opened.workspace.path !== '.' ? opened.workspace.path : null,
+    branch: opened?.workspace?.branch ?? null,
+  };
+}
+
+export async function runCancel(opts: CommonOptions & { ref: string; graceMs?: number }): Promise<CancelOutcome & { record: DispatchRecord }> {
+  const repoRoot = rootOf(opts);
+  const record = lookup(repoRoot, opts.ref);
+  const outcome = await cancelDispatch(repoRoot, record, { graceMs: opts.graceMs });
+  return { ...outcome, record };
+}
+
+// ---------------------------------------------------------------------------
+// dispatches — list, show, output
+// ---------------------------------------------------------------------------
+
+export interface DispatchEntry {
+  id: string;
+  name: string | null;
+  archetype: string | null;
+  model: string | null;
+  effort: string | null;
+  lane: Lane | null;
+  harness: string | null;
+  state: DispatchState;
+  at: string | null;
+  age: string;
+  branch: string | null;
+  shared: boolean;
+  dirty: number | 'unavailable' | null;
+  exit: { code: number | null; signal: string | null } | null;
+  verb: CloseVerb | null;
+  note: string | null;
+  task: string | null;
+  parent: string | null;
+}
+
+export interface DispatchesResult {
+  entries: DispatchEntry[];
+  total: number;
+  unclosed: number;
+  unreadable: number;
+  unknown: number;
+}
+
+export function entryOf(record: DispatchRecord, now?: Date): DispatchEntry {
+  const o = record.opened;
+  const s = record.stopped;
+  return {
+    id: record.id,
+    name: o?.name ?? null,
+    archetype: o?.archetype ?? null,
+    model: o?.model ?? null,
+    effort: o?.effort ?? null,
+    lane: o?.lane ?? null,
+    harness: o?.harness ?? null,
+    state: record.state,
+    at: o?.at ?? s?.at ?? null,
+    age: formatAge(ageMinutes(record, now)),
+    branch: o?.workspace?.branch ?? null,
+    shared: o?.workspace != null && o.workspace.branch == null,
+    dirty: s == null ? null : s.dirty === 'unavailable' ? 'unavailable' : s.dirty.paths.length,
+    exit: s?.exit ?? null,
+    verb: record.closed?.verb ?? null,
+    note: record.closed?.note ?? null,
+    task: o?.task ?? null,
+    parent: o?.parent ?? null,
+  };
+}
+
+export function runDispatches(opts: CommonOptions & { tail?: number | null; all?: boolean; now?: Date } = {}): DispatchesResult {
+  const repoRoot = rootOf(opts);
+  const reading = readDispatches(repoRoot);
+  const chosen = opts.all ? reading.records : reading.records.filter((r) => r.closed == null);
+  const tail = opts.tail ?? 20;
+  const shown = tail > 0 ? chosen.slice(-tail) : chosen;
+  return {
+    entries: shown.map((r) => entryOf(r, opts.now)),
+    total: reading.records.length,
+    unclosed: reading.records.filter((r) => r.closed == null && r.opened != null).length,
+    unreadable: reading.unreadable,
+    unknown: reading.unknown,
+  };
+}
+
+export function renderDispatchLine(e: DispatchEntry): string {
+  const state = e.state === 'closed' ? `closed: ${e.verb}` : e.state === 'stopped' ? 'stopped — awaiting close' : 'open';
+  const where = e.branch ?? (e.shared ? 'shared tree' : '-');
+  const route = e.model == null ? '?' : `${e.model}${e.effort ? `@${e.effort}` : ''}${e.harness ? ` on ${e.harness}` : ''}`;
+  const dirty = e.dirty == null ? '' : e.dirty === 'unavailable' ? '; tree unreadable' : e.dirty > 0 ? `; ${e.dirty} dirty path(s)` : '';
+  const exit = e.exit == null ? '' : e.exit.signal ? `; killed by ${e.exit.signal}` : e.exit.code === 0 ? '' : `; exit ${e.exit.code}`;
+  return `${e.id.slice(0, 8)}  ${(e.name ?? '?').padEnd(24)} ${(e.archetype ?? '?').padEnd(9)} ${e.lane ?? '?'}  ${route}  ${where}  ${state}${dirty}${exit}  ${e.age}`;
+}
+
+export function renderDispatches(result: DispatchesResult): string[] {
+  const lines: string[] = [];
+  if (result.entries.length === 0) {
+    lines.push(result.total === 0 ? 'No dispatches recorded in this repository.' : `No unclosed dispatches (${result.total} recorded; --all shows them).`);
+  } else {
+    for (const e of result.entries) lines.push(renderDispatchLine(e));
+    lines.push('', `${result.unclosed} unclosed of ${result.total} recorded.`);
   }
-  const cwd = opts.cwd ?? process.cwd();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const ledger = join(repoRoot, DISPATCHES_FILE);
-  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger);
-  const { record, resolvedBy } = tag != null
-    ? resolveByTag(tag, byId, requestOrder)
-    : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
-  const id8 = record.dispatchId.slice(0, 8);
-  if (record.withdrawn) {
-    throw new DispatchesCommandError(
-      `dispatch ${id8} was withdrawn` +
-        `${record.withdrawnReason != null ? ` (${record.withdrawnReason})` : ''}; it recorded no merge-back to finish. ` +
-        'Any work it left is in the tree the withdrawal named, and merging it is a hand edit rather than a fadeno step.',
-    );
+  if (result.unreadable > 0) lines.push(`${result.unreadable} unreadable row(s) skipped — the ledger has damage; the rows above are the readable ones.`);
+  if (result.unknown > 0) lines.push(`${result.unknown} row(s) of a kind this version does not know were skipped.`);
+  return lines;
+}
+
+export interface DispatchDetail {
+  record: DispatchRecord;
+  entry: DispatchEntry;
+  worktree: string | null;
+  prompt: string | null;
+  transcript: string | null;
+  stderr: string | null;
+}
+
+export function runDispatchShow(opts: CommonOptions & { ref: string }): DispatchDetail {
+  const repoRoot = rootOf(opts);
+  const record = lookup(repoRoot, opts.ref);
+  const paths = outputPaths(record.id);
+  const worktree = record.opened != null ? workspaceDir(repoRoot, record.opened) : null;
+  return {
+    record,
+    entry: entryOf(record),
+    worktree,
+    prompt: readPrompt(repoRoot, record),
+    transcript: existsSync(join(repoRoot, paths.stdout)) ? paths.stdout : null,
+    stderr: existsSync(join(repoRoot, paths.stderr)) ? paths.stderr : null,
+  };
+}
+
+export function renderDispatchDetail(d: DispatchDetail): string[] {
+  const e = d.entry;
+  const lines = [
+    `${e.name ?? '?'} (${d.record.id})`,
+    `  archetype: ${e.archetype ?? '?'}   model: ${e.model ?? '?'}${e.effort ? `@${e.effort}` : ''}   harness: ${e.harness ?? '?'}   lane: ${e.lane ?? '?'}`,
+    `  opened:    ${e.at ?? '?'} (${e.age} ago)${e.parent ? `   parent: ${e.parent}` : ''}`,
+    `  worktree:  ${d.worktree ?? '(none recorded)'}${e.branch ? ` on ${e.branch}` : e.shared ? ' (shared tree)' : ''}`,
+    `  state:     ${e.state}${e.verb ? ` (${e.verb}${e.note ? `: ${e.note}` : ''})` : ''}`,
+  ];
+  if (d.record.stopped != null) {
+    const s = d.record.stopped;
+    const dirty = s.dirty === 'unavailable' ? 'unreadable' : s.dirty.paths.length === 0 ? 'clean' : `${s.dirty.paths.length}${s.dirty.truncated ? '+' : ''} path(s): ${s.dirty.paths.slice(0, 8).join(', ')}`;
+    lines.push(`  stopped:   ${s.at}${s.exit ? ` — ${s.exit.signal ? `killed by ${s.exit.signal}` : `exit ${s.exit.code}`}` : ''}; tree ${dirty}`);
+    if (s.final_message != null) lines.push('', '--- final message ---', s.final_message.trimEnd());
+    else lines.push('  final message: none recorded');
   }
-  if (!record.completed) throw new DispatchesCommandError(`dispatch ${id8} has not completed; there is nothing to merge yet.`);
-  if (record.merged) throw new DispatchesCommandError(`dispatch ${id8} was already merged.`);
-  // Before anything is read from the worktree, let alone applied. Merging is
-  // the point of no return for a tainted dispatch: the diff stops being
-  // something the ledger describes and becomes something the working tree
-  // contains.
-  if (record.relayAttested === false && opts.allowRelayMismatch !== true) {
-    throw new DispatchesCommandError(
-      `${relayQuarantineNotice(record.dispatchId, record.relayAttested, record.relayMismatchAllowed)}\n` +
-        `Refusing to merge ${id8} into your workspace. Nothing was applied and ` +
-        `${record.workspace != null ? `the worktree ${record.workspace}` : 'its worktree'} is untouched — ` +
-        'read the diff there first. Pass --allow-relay-mismatch to merge it anyway.',
-    );
+  if (d.record.opened != null) lines.push('', `  prompt: ${d.record.opened.prompt}${d.transcript ? `   transcript: ${d.transcript}` : ''}${d.stderr ? `   stderr: ${d.stderr}` : ''}`);
+  if (e.task) lines.push(`  task: ${e.task.split('\n')[0]}${d.record.opened?.task_truncated ? ' …' : ''}`);
+  return lines;
+}
+
+export interface DispatchOutput {
+  record: DispatchRecord;
+  text: string | null;
+  source: 'transcript' | 'final_message' | null;
+}
+
+/** The dispatch's report: the full transcript when one exists, else what the stop row recorded. */
+export function runDispatchOutput(opts: CommonOptions & { ref: string }): DispatchOutput {
+  const repoRoot = rootOf(opts);
+  const record = lookup(repoRoot, opts.ref);
+  const transcript = join(repoRoot, outputPaths(record.id).stdout);
+  if (existsSync(transcript)) return { record, text: readFileSync(transcript, 'utf8'), source: 'transcript' };
+  if (record.stopped?.final_message != null) return { record, text: record.stopped.final_message, source: 'final_message' };
+  return { record, text: null, source: null };
+}
+
+// ---------------------------------------------------------------------------
+// worktrees — the cross-session safety net
+// ---------------------------------------------------------------------------
+
+export interface WorktreeEntry extends WorktreeReport {
+  dispatch: { id: string; name: string | null; state: DispatchState } | null;
+}
+
+export function runWorktrees(opts: CommonOptions = {}): WorktreeEntry[] {
+  const repoRoot = rootOf(opts);
+  const byBranch = new Map<string, DispatchRecord>();
+  for (const record of readDispatches(repoRoot).records) {
+    const branch = record.opened?.workspace?.branch;
+    if (branch != null && !byBranch.has(branch)) byBranch.set(branch, record);
   }
-  if (record.primaryMerge?.status !== 'unresolved' || record.workspace == null) {
-    throw new DispatchesCommandError(
-      `dispatch ${id8} has no unresolved merge-back to finish (merge-back: ${record.primaryMerge?.status ?? 'none recorded'}).`,
-    );
+  return reportWorktrees(repoRoot).map((wt) => {
+    const record = wt.branch != null ? byBranch.get(wt.branch) ?? null : null;
+    return { ...wt, dispatch: record == null ? null : { id: record.id, name: record.opened?.name ?? null, state: record.state } };
+  });
+}
+
+export function renderWorktrees(entries: WorktreeEntry[]): string[] {
+  if (entries.length === 0) return ['No Fadeno worktrees registered.'];
+  const lines: string[] = [];
+  for (const w of entries) {
+    const dirty = w.dirty === 'unavailable' ? 'status unreadable' : w.dirty.paths.length === 0 ? 'clean' : `${w.dirty.paths.length}${w.dirty.truncated ? '+' : ''} uncommitted`;
+    const unmerged = w.unmerged === 'unavailable' ? 'unmerged: ?' : `${w.unmerged} unmerged commit(s)`;
+    const owner = w.dispatch == null ? 'no dispatch names it' : `${w.dispatch.name ?? w.dispatch.id.slice(0, 8)} (${w.dispatch.state})`;
+    lines.push(`${w.path}  ${w.branch ?? '(detached)'}  ${dirty}; ${unmerged}  — ${owner}${w.exists ? '' : '  [directory missing]'}`);
   }
-  const worktreeAbs = join(repoRoot, ...record.workspace.split('/'));
-  if (!existsSync(worktreeAbs)) {
-    throw new DispatchesCommandError(`the retained worktree ${record.workspace} is gone; there is nothing to merge.`);
-  }
-  const diffRel = join('.fadeno', 'local', 'outputs', `isolated-${id8}-merged.diff`).split('\\').join('/');
-  const diff = collectIsolatedDiff({ repoRoot, worktreeAbs, diffAbs: join(repoRoot, diffRel), diffRel });
-  // No window lease. A merge-back is a plain `git apply`: it lands whole or
-  // touches nothing, so a concurrent writer cannot make it half-apply — it can
-  // only make it refuse, which is the signal to rebase and re-apply, which is
-  // what `settleIsolatedWork` already does. The lease bought nothing here and
-  // cost a reservation nobody could prove dead.
-  let settled: ReturnType<typeof settleIsolatedWork>;
+  const holding = entries.filter((w) => (w.dirty !== 'unavailable' && w.dirty.paths.length > 0) || (typeof w.unmerged === 'number' && w.unmerged > 0) || w.dirty === 'unavailable' || w.unmerged === 'unavailable');
+  lines.push('', holding.length === 0 ? 'Nothing here holds work that is not on HEAD.' : `${holding.length} worktree(s) hold work that is not on HEAD, or could not be read.`);
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
+// context — what a host or a spawned director is told
+// ---------------------------------------------------------------------------
+
+export function runContext(opts: CommonOptions & { now?: Date } = {}): { text: string; archetypes: ArchetypeLine[] } {
+  const repoRoot = rootOf(opts);
+  let profile;
   try {
-    settled = settleIsolatedWork({ repoRoot, worktreeAbs, diff, baselineRef: `${record.dispatchId}:merged`, armLabel: 'primary', priorConflicts: record.primaryMerge?.conflicts ?? [] });
+    profile = loadLayeredProfile(repoRoot, opts.userPathOptions).profile;
   } catch (err) {
-    if (err instanceof WorkspaceIsolationError) throw new DispatchesCommandError(`could not merge ${id8}: ${err.message}. Nothing was applied.`);
+    if (err instanceof ExecutorProfileError) throw new DispatchesError(err.message);
     throw err;
   }
-  if (settled.stamp.status === 'unresolved') {
-    throw new DispatchesCommandError(
-      `the worktree ${record.workspace} still conflicts with the workspace (${(settled.stamp.conflicts ?? []).join(', ')}): ` +
-        `${settled.stamp.detail ?? 'unresolved'}. Nothing was applied; resolve the markers there and run --merge again.`,
-    );
-  }
-  if (settled.stamp.status === 'blocked') {
-    throw new DispatchesCommandError(`could not merge ${id8}: ${settled.stamp.detail ?? 'blocked'}. Nothing was applied; the worktree is kept.`);
-  }
-  const stamp: MergeBackResult = {
-    ...settled.stamp,
-    detail: settled.stamp.detail ?? 'merged by hand after the conflict was resolved in the retained worktree',
-  };
-  // Between the successful apply and the teardown, because both of those are
-  // now conditional on it: the row has to state the worktree's fate, and the
-  // teardown has to honour what the row said.
-  // Two shapes of one fact, and they are not interchangeable: `keptStamp` is
-  // the snake_case WIRE object the row carries, `ignoredOutputKept` the
-  // camelCase record a reader gets. Writing the parsed record onto the row
-  // would spell `retained_at` as `retainedAt` and every reader — including
-  // this file's own — would read it back as "not retained", which is the one
-  // answer that sends someone looking for a directory instead of into it.
-  const keptStamp = ignoredOutputStamp(scanIgnoredOutput(worktreeAbs, record.worktreeCarry), record.workspace);
-  const ignoredOutputKept = parseIgnoredOutputDiscarded(keptStamp);
-  appendEvidenceRow(repoRoot, {
-    format: DISPATCHES_FORMAT,
-    timestamp: (opts.now ?? new Date()).toISOString(),
-    event: 'dispatch_merged',
-    dispatch_id: record.dispatchId,
-    ...(record.tag != null ? { tag: record.tag } : {}),
-    merged_by: 'host',
-    merge: stamp,
-    diff_snapshot: settled.diff.diffRel,
-    diff_bytes: settled.diff.diffBytes,
-    workspace: record.workspace,
-    // The merged patch carried no ignored path, so the directory is still the
-    // only copy of whatever this names. Kept, and said so on the row rather
-    // than only in the return value: `--merge` is run by a human at a
-    // terminal and by a proxy that keeps nothing but the ledger.
-    ...(keptStamp != null
-      ? { ignored_output_discarded: keptStamp, workspace_retained: true }
-      : { workspace_removed: true }),
-  });
-  if (keptStamp == null) removeIsolatedWorktree(repoRoot, worktreeAbs);
-  return {
-    dispatchId: record.dispatchId,
-    tag: record.tag,
-    mergeBack: stamp,
-    diffSnapshot: settled.diff.diffRel,
-    diffBytes: settled.diff.diffBytes,
-    workspace: record.workspace,
-    ignoredOutputKept,
-    resolvedBy,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Comparisons (shadow pairs + ModelComparison artifacts)
-// ---------------------------------------------------------------------------
-
-export const BAKEOFFS_DIR = join('.fadeno', 'bakeoffs');
-
-export interface DispatchBakeoffPair {
-  primaryId: string | null;
-  shadowId: string | null;
-  primaryDispatchId: string | null;
-  archetype: string | null;
-  primary: {
-    dispatchId: string | null;
-    executor: string | null;
-    model: string | null;
-    exitCode: number | null;
-    outputBytes: number | null;
-    durationMs: number | null;
-    promptSha256: string | null;
-    /**
-     * Set whenever the primary's own completion row carries `diff_snapshot`/
-     * `diff_bytes` — today that means an `--isolate`d primary, whose diff was
-     * already reaching `DispatchEntry` but being dropped on the floor here.
-     * The struct is symmetric with `shadow` on purpose: the moment a
-     * non-isolated primary also gets a retained worktree, this field is
-     * already the place that data lands.
-     */
-    diffBytes: number | null;
-    diffSnapshot: string | null;
-    /** Repo-relative retained worktree path, when the primary has one. */
-    workspace: string | null;
-    /** The pair's shared starting-state commit; same value as `shadow`'s. */
-    baselineCommit: string | null;
-  };
-  shadow: {
-    dispatchId: string | null;
-    executor: string | null;
-    model: string | null;
-    exitCode: number | null;
-    outputBytes: number | null;
-    durationMs: number | null;
-    diffBytes: number | null;
-    diffSnapshot: string | null;
-    promptSha256: string | null;
-    /**
-     * Present when the shadow never ran — capacity, eligibility, write
-     * posture, a constraint refusal, or a baseline that could not be
-     * snapshotted. A refused arm has no exit code, duration, or output: it
-     * must render as refused, not as a challenger that measured empty.
-     */
-    refusal: { predicate: string; message: string } | null;
-  };
-  promptShaMismatch: boolean;
-  orphan: boolean;
-}
-
-
-export interface DispatchBakeoffGroup {
-  challenger: string;
-  pairs: DispatchBakeoffPair[];
-  comparisons: BakeoffArtifact[];
-  tally: {
-    pairs: number;
-    comparisons: number;
-    preferChallenger: number;
-    preferBaseline: number;
-    graft: number;
-    tieOrInconclusive: number;
-  };
-  /**
-   * Model-level dispositions accumulated across every valid comparison in this
-   * group, most-distinguishing first. Verdicts say who won; this says what the
-   * two models are LIKE, which is the reading a single pair cannot give.
-   */
-  traitTally: Array<{ dimension: string; challenger: number; baseline: number; neither: number }>;
-}
-
-export interface DispatchesBakeoffsOptions {
-  cwd?: string;
-  repoRoot?: string;
-}
-
-export interface DispatchesBakeoffsResult {
-  repoRoot: string;
-  path: string;
-  comparisonsDir: string;
-  totalPairs: number;
-  totalComparisons: number;
-  skippedComparisons: number;
-  skipped: number;
-  skippedNewerFormat: number;
-  groups: DispatchBakeoffGroup[];
-  lines: string[];
-  summary: string;
-}
-
-function loadAllEntries(absolute: string): {
-  entries: DispatchEntry[];
-  skipped: number;
-  skippedNewerFormat: number;
-} {
-  const entries: DispatchEntry[] = [];
-  const byDispatchId = new Map<string, DispatchEntry>();
-  let skipped = 0;
-  let skippedNewerFormat = 0;
-  if (!existsSync(absolute)) return { entries, skipped, skippedNewerFormat };
-  for (const line of readFileSync(absolute, 'utf8').split('\n')) {
-    if (line.trim() === '') continue;
-    let row: Record<string, unknown>;
+  const local = readLocalDialState(repoRoot);
+  const names = archetypeDisplaySort(knownArchetypes(profile.archetypes, profile.dials, local.dials, readUserDials(opts.userPathOptions)));
+  const archetypes: ArchetypeLine[] = names.map((name) => {
     try {
-      const parsed = JSON.parse(line) as unknown;
-      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
-      row = parsed as Record<string, unknown>;
-    } catch {
-      skipped += 1; // a torn or hand-edited line never stops the report
+      const r = resolveArchetype({ repoRoot, archetype: name, userPathOptions: opts.userPathOptions });
+      const source = r.source === 'base' ? 'no dial' : r.source === 'binding' ? 'binding' : `${r.source} dial`;
+      return { name, description: describeArchetype(name, profile.archetypes[name]?.description), model: r.model, effort: r.effort, source };
+    } catch (err) {
+      return { name, description: describeArchetype(name, profile.archetypes[name]?.description), model: 'unresolvable', effort: null, source: (err as Error).message };
+    }
+  });
+  const unclosed = unclosedDispatches(repoRoot);
+  const limit = profile.unclosedLimit ?? DEFAULT_UNCLOSED_LIMIT;
+  return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, now: opts.now }), archetypes };
+}
+
+// ---------------------------------------------------------------------------
+// clean — machine-local scratch only
+// ---------------------------------------------------------------------------
+
+export interface CleanResult {
+  dryRun: boolean;
+  /** Worktrees removed, or that would be. */
+  worktrees: string[];
+  /** Worktrees left alone, and why. */
+  kept: Array<{ path: string; reason: string }>;
+  outputs: string | null;
+}
+
+/**
+ * Remove worktrees whose dispatch is closed (or unknown to the ledger) and
+ * that hold no uncommitted work, plus the command-lane transcripts. Never
+ * prompts, never the ledger, never a tree with uncommitted changes.
+ */
+export function runClean(opts: CommonOptions & { force?: boolean } = {}): CleanResult {
+  const repoRoot = rootOf(opts);
+  const dryRun = !opts.force;
+  const result: CleanResult = { dryRun, worktrees: [], kept: [], outputs: null };
+  for (const wt of runWorktrees({ repoRoot })) {
+    if (wt.dispatch != null && wt.dispatch.state !== 'closed') {
+      result.kept.push({ path: wt.path, reason: `dispatch ${wt.dispatch.name ?? wt.dispatch.id.slice(0, 8)} is ${wt.dispatch.state}; close it first` });
       continue;
     }
-    const fold = foldEvidenceRow(row, entries, byDispatchId);
-    if (fold === 'skipped') skipped += 1;
-    else if (fold === 'newer-format') skippedNewerFormat += 1;
-  }
-  return { entries, skipped, skippedNewerFormat };
-}
-
-export interface RetainedShadowWorktree {
-  dispatchId: string | null;
-  /** Repo-relative worktree path, as recorded in the ledger's `workspace` field. */
-  workspace: string;
-  pairId: string | null;
-  baselineCommit: string | null;
-}
-
-/**
- * Every shadow challenger worktree the ledger's `workspace` field still names
- * (see `DispatchEntry.workspace`) — the retained work product of a shadow
- * pair, kept for later judgment rather than cleaned up when the pair
- * finishes. This is how `fadeno clean` finds a registered git worktree to
- * deregister with `git worktree remove` before it deletes `.fadeno/local`,
- * instead of pulling the directory out from under git and leaving a stale
- * entry in `.git/worktrees`.
- *
- * Reads the whole log, not just the default tail: a worktree from ten
- * dispatches ago is exactly as retained, and exactly as much a cleanup
- * target, as one from the last row.
- */
-export function listRetainedShadowWorktrees(opts: { cwd?: string; repoRoot?: string } = {}): RetainedShadowWorktree[] {
-  const cwd = opts.cwd ?? process.cwd();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const { entries } = loadAllEntries(join(repoRoot, DISPATCHES_FILE));
-  const out: RetainedShadowWorktree[] = [];
-  for (const entry of entries) {
-    if (!entry.shadow || entry.workspace == null) continue;
-    out.push({
-      dispatchId: entry.dispatchId,
-      workspace: entry.workspace,
-      pairId: entry.pairId,
-      baselineCommit: entry.baselineCommit,
-    });
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Shadow pair resolution (for `fadeno shadow-apply`)
-// ---------------------------------------------------------------------------
-
-export interface ResolvedDispatchPair {
-  pairId: string;
-  /** The non-shadow arm's entry, or null when this log lacks its rows. */
-  primary: DispatchEntry | null;
-  /** The shadow arm's entry, or null when this log lacks its rows. */
-  shadow: DispatchEntry | null;
-}
-
-export interface ResolveDispatchPairOptions {
-  cwd?: string;
-  repoRoot?: string;
-}
-
-/**
- * Resolve a caller-given `pair_id` or either arm's `dispatch_id` (full, or an
- * 8+ character prefix — the read-side convention `resolveOutputRecord` above
- * already established) to the shadow pair it names. Built for
- * `fadeno shadow-apply <pair-id|dispatch-id>`.
- *
- * Reads the WHOLE log, like `listRetainedShadowWorktrees`: a pair from ten
- * dispatches ago is exactly as applicable as one from the last row, and the
- * default `--tail` view must never silently hide it from this lookup.
- *
- * `pair_id` and `dispatch_id` are drawn from the same `randomUUID()` space
- * (see dispatch.ts), so an exact match is always checked, on both axes,
- * before any prefix matching is attempted — exactness never loses to a
- * shorter, coincidentally-matching prefix on the other axis.
- */
-export function resolveDispatchPair(
-  query: string,
-  opts: ResolveDispatchPairOptions = {},
-): ResolvedDispatchPair {
-  const trimmed = query.trim();
-  if (trimmed === '') {
-    throw new DispatchesCommandError('name a pair id or dispatch id (full, or an 8+ character prefix).');
-  }
-  const cwd = opts.cwd ?? process.cwd();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const { entries } = loadAllEntries(join(repoRoot, DISPATCHES_FILE));
-
-  const primaryByPairId = new Map<string, DispatchEntry>();
-  const primaryById = new Map<string, DispatchEntry>();
-  const shadowByPairId = new Map<string, DispatchEntry>();
-  const shadowById = new Map<string, DispatchEntry>();
-  for (const entry of entries) {
-    if (entry.shadow) {
-      if (entry.dispatchId != null) shadowById.set(entry.dispatchId, entry);
-      if (entry.pairId != null) shadowByPairId.set(entry.pairId, entry);
-    } else {
-      if (entry.dispatchId != null) primaryById.set(entry.dispatchId, entry);
-      if (entry.pairId != null) primaryByPairId.set(entry.pairId, entry);
+    if (wt.dirty === 'unavailable') {
+      result.kept.push({ path: wt.path, reason: 'status unreadable; not removing a tree that may hold work' });
+      continue;
     }
-  }
-
-  const pairFor = (pairId: string): ResolvedDispatchPair => ({
-    pairId,
-    primary: primaryByPairId.get(pairId) ?? null,
-    shadow: shadowByPairId.get(pairId) ?? null,
-  });
-
-  if (primaryByPairId.has(trimmed) || shadowByPairId.has(trimmed)) return pairFor(trimmed);
-
-  const exactDispatch = shadowById.get(trimmed) ?? primaryById.get(trimmed);
-  if (exactDispatch != null) {
-    if (exactDispatch.pairId == null) {
-      throw new DispatchesCommandError(
-        `dispatch "${trimmed.slice(0, 8)}" is not part of any recorded shadow pair (its evidence carries no pair_id).`,
-      );
+    if (wt.dirty.paths.length > 0) {
+      result.kept.push({ path: wt.path, reason: `${wt.dirty.paths.length} uncommitted path(s); commit or discard them first` });
+      continue;
     }
-    return pairFor(exactDispatch.pairId);
-  }
-
-  if (trimmed.length < OUTPUT_ID_PREFIX_MIN) {
-    throw new DispatchesCommandError(
-      `unknown pair or dispatch "${trimmed}" (no exact match, and a prefix must be at least ${OUTPUT_ID_PREFIX_MIN} characters).`,
-    );
-  }
-
-  // Prefix match: a hit can name a pair either directly (its pair_id) or
-  // through one of its arms' dispatch_ids. Collected as a SET of resolved
-  // pair ids so a prefix that happens to match both a pair's own id and one
-  // of its arms' ids does not falsely read as ambiguous.
-  const matchedPairIds = new Set<string>();
-  for (const id of primaryByPairId.keys()) if (id.startsWith(trimmed)) matchedPairIds.add(id);
-  for (const id of shadowByPairId.keys()) if (id.startsWith(trimmed)) matchedPairIds.add(id);
-  const unpaired: DispatchEntry[] = [];
-  for (const [id, entry] of [...primaryById, ...shadowById]) {
-    if (!id.startsWith(trimmed)) continue;
-    if (entry.pairId != null) matchedPairIds.add(entry.pairId);
-    else unpaired.push(entry);
-  }
-
-  if (matchedPairIds.size === 0 && unpaired.length === 0) {
-    throw new DispatchesCommandError(`unknown pair or dispatch prefix "${trimmed}".`);
-  }
-  if (matchedPairIds.size === 0) {
-    // Every hit named a real dispatch, just not one that is part of a pair.
-    const names = unpaired.map((e) => (e.dispatchId ?? '?').slice(0, 8)).join(', ');
-    throw new DispatchesCommandError(
-      `"${trimmed}" matches dispatch${unpaired.length === 1 ? '' : 'es'} ${names}, but ` +
-        `${unpaired.length === 1 ? 'it is' : 'none are'} part of a recorded shadow pair.`,
-    );
-  }
-  if (matchedPairIds.size > 1) {
-    throw new DispatchesCommandError(
-      `ambiguous prefix "${trimmed}": matches ${matchedPairIds.size} distinct pairs ` +
-        `(${[...matchedPairIds].map((p) => p.slice(0, 8)).join(', ')}). Use a longer prefix or the full id.`,
-    );
-  }
-  return pairFor([...matchedPairIds][0]!);
-}
-
-function scanBakeoffs(repoRoot: string, dirRel: string): { artifacts: BakeoffArtifact[]; skipped: number } {
-  const abs = join(repoRoot, dirRel);
-  if (!existsSync(abs)) return { artifacts: [], skipped: 0 };
-  let files: string[];
-  try {
-    files = readdirSync(abs).filter((f) => f.endsWith('.md')).sort();
-  } catch {
-    return { artifacts: [], skipped: 0 };
-  }
-  const artifacts: BakeoffArtifact[] = [];
-  let skipped = 0;
-  for (const file of files) {
-    const rel = join(dirRel, file).split('\\').join('/');
-    const artifact = parseBakeoffFile(repoRoot, rel);
-    if (!artifact.valid) skipped += 1;
-    artifacts.push(artifact);
-  }
-  return { artifacts, skipped };
-}
-
-function formatBakeoffPair(pair: DispatchBakeoffPair): string {
-  const primaryId8 = pair.primaryId ? pair.primaryId.slice(0, 8) : '?';
-  const shadowId8 = pair.shadowId ? pair.shadowId.slice(0, 8) : '?';
-  const arch = pair.archetype ?? '(none)';
-  // Only rendered when the primary actually has a diff on its own completion
-  // row (today, an --isolated primary) — most primaries share the workspace
-  // and have no diff concept at all, so "diff ? bytes" would read as a
-  // missing value rather than a not-applicable one.
-  const primaryDiff = pair.primary.diffBytes != null ? ` diff ${pair.primary.diffBytes} bytes` : '';
-  const primaryInfo = `${pair.primary.executor ?? '(unresolved)'} (${pair.primary.model ?? '?'}) exit ${pair.primary.exitCode ?? '?'} in ${formatBakeoffDuration(pair.primary.durationMs)} output ${pair.primary.outputBytes ?? '?'} bytes${primaryDiff}`;
-  // A refused shadow never ran: exit code, duration, and output are all
-  // absent, and rendering them as "?" would read as a challenger that
-  // measured empty rather than one that was never allowed to fire. Name the
-  // predicate instead — this is the whole reason the refusal was worth a row.
-  const shadowInfo = pair.shadow.refusal != null
-    ? `refused [${pair.shadow.refusal.predicate}]: ${pair.shadow.refusal.message}`
-    : `${pair.shadow.executor ?? '(unresolved)'} (${pair.shadow.model ?? '?'}) exit ${pair.shadow.exitCode ?? '?'} in ${formatBakeoffDuration(pair.shadow.durationMs)} output ${pair.shadow.outputBytes ?? '?'} bytes diff ${pair.shadow.diffBytes ?? '?'} bytes`;
-  const mismatch = pair.promptShaMismatch ? '  PROMPT SHA MISMATCH' : '';
-  const orphan = pair.orphan ? '  [orphan: primary missing]' : '';
-  const baseline = pair.primary.baselineCommit != null ? `  [baseline ${pair.primary.baselineCommit.slice(0, 8)}]` : '';
-  const workspace = pair.primary.workspace != null ? `  [primary workspace: ${pair.primary.workspace}]` : '';
-  return `${primaryId8} → ${shadowId8}  ${arch}  primary ${primaryInfo}  vs shadow ${shadowInfo}${mismatch}${orphan}${baseline}${workspace}`;
-}
-
-/**
- * `command` is the ordinary case (a kernel-dispatched judge) and renders
- * silently; anything else — today only `host`, `fadeno bakeoff --record` —
- * earns a marker, because that is the delivery a reader must discount: no
- * dispatch receipt backs it. Rendered verbatim rather than narrowed to the
- * known pair, so a delivery kind a newer fadeno introduces still surfaces
- * instead of silently reading as the default.
- */
-function judgeDeliveryNote(judgeDelivery: string | null): string {
-  if (judgeDelivery == null || judgeDelivery === 'command') return '';
-  return judgeDelivery === 'host'
-    ? '  [judge delivery: host — unattested, see Confounds]'
-    : `  [judge delivery: ${judgeDelivery}]`;
-}
-
-function formatBakeoffArtifact(artifact: BakeoffArtifact): string {
-  const verdict = artifact.verdict ?? '?';
-  const baseline = artifact.baseline ?? '?';
-  const challenger = artifact.challenger ?? '?';
-  const date = artifact.date ?? '?';
-  if (!artifact.valid) return `${artifact.file}: invalid (${artifact.error ?? 'unknown'})`;
-  return `${artifact.file}: ${verdict} (baseline ${baseline} vs challenger ${challenger} on ${date})${judgeDeliveryNote(artifact.judgeDelivery)}`;
-}
-
-export function runDispatchesBakeoffs(opts: DispatchesBakeoffsOptions = {}): DispatchesBakeoffsResult {
-  const cwd = opts.cwd ?? process.cwd();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const path = DISPATCHES_FILE.split('\\').join('/');
-  const comparisonsDir = BAKEOFFS_DIR.split('\\').join('/');
-  const absolute = join(repoRoot, DISPATCHES_FILE);
-  const { entries, skipped, skippedNewerFormat } = loadAllEntries(absolute);
-
-  const primaryById = new Map<string, DispatchEntry>();
-  // `pair_id` is the addressable correlation from the start (see
-  // `DispatchEntry.pairId`); it lands on the primary's own row only once a
-  // shadow actually fires, via its completion row. Rows written before the
-  // field existed carry none, so this map is a preference, not a
-  // replacement — `primaryById` below stays the fallback for them.
-  const primaryByPairId = new Map<string, DispatchEntry>();
-  for (const entry of entries) {
-    if (entry.shadow) continue;
-    if (entry.dispatchId) primaryById.set(entry.dispatchId, entry);
-    if (entry.pairId) primaryByPairId.set(entry.pairId, entry);
-  }
-
-  const pairs: DispatchBakeoffPair[] = [];
-  for (const entry of entries) {
-    if (!entry.shadow) continue;
-    const shadowId = entry.dispatchId;
-    const primaryId = entry.primaryDispatchId;
-    const primary =
-      (entry.pairId != null ? primaryByPairId.get(entry.pairId) : undefined) ??
-      (primaryId != null ? primaryById.get(primaryId) : undefined) ??
-      null;
-    const orphan = primary == null;
-    const promptShaMismatch = !orphan && entry.promptSha256 != null && primary!.promptSha256 != null && entry.promptSha256 !== primary!.promptSha256;
-    pairs.push({
-      primaryId: primary?.dispatchId ?? primaryId,
-      shadowId,
-      primaryDispatchId: primaryId,
-      archetype: entry.archetype ?? primary?.archetype ?? null,
-      primary: {
-        dispatchId: primary?.dispatchId ?? primaryId,
-        executor: primary?.executor ?? null,
-        model: primary?.model ?? null,
-        exitCode: primary?.exitCode ?? null,
-        outputBytes: primary?.outputBytes ?? null,
-        durationMs: primary?.durationMs ?? null,
-        promptSha256: primary?.promptSha256 ?? null,
-        diffBytes: primary?.diffBytes ?? null,
-        diffSnapshot: primary?.diffSnapshot ?? null,
-        workspace: primary?.workspace ?? null,
-        baselineCommit: primary?.baselineCommit ?? entry.baselineCommit ?? null,
-      },
-      shadow: {
-        dispatchId: shadowId,
-        executor: entry.executor,
-        model: entry.model,
-        exitCode: entry.exitCode,
-        outputBytes: entry.outputBytes,
-        durationMs: entry.durationMs,
-        diffBytes: entry.diffBytes,
-        diffSnapshot: entry.diffSnapshot,
-        promptSha256: entry.promptSha256,
-        refusal: entry.refusal,
-      },
-      promptShaMismatch: Boolean(promptShaMismatch),
-      orphan,
-    });
-  }
-
-  const { artifacts, skipped: skippedComparisons } = scanBakeoffs(repoRoot, comparisonsDir);
-
-  const challengers = new Set<string>();
-  for (const p of pairs) {
-    const name = p.shadow.executor ?? '(unknown)';
-    challengers.add(name);
-  }
-  for (const a of artifacts) {
-    if (a.challenger) challengers.add(a.challenger);
-  }
-
-  const sortedChallengers = [...challengers].sort();
-
-  const groups: DispatchBakeoffGroup[] = [];
-  for (const challenger of sortedChallengers) {
-    const groupPairs = pairs.filter((p) => (p.shadow.executor ?? '(unknown)') === challenger);
-    const groupComparisons = artifacts.filter((a) => a.challenger === challenger);
-
-    // Traits accumulated across the group. This is the reading a single
-    // comparison cannot give: one artifact says "arm_b validated its own
-    // output", ten say "this challenger is consistently more self-verifying
-    // and consistently writes more" — a fact about the MODEL rather than about
-    // any one task, which is what shadow pairs are collected FOR.
-    //
-    // Counts are kept separately rather than netted, because 5-5 and 0-0 are
-    // different findings: one is a model that varies by task, the other a
-    // dimension that never distinguishes these two at all.
-    const traitCounts = new Map<string, { dimension: string; challenger: number; baseline: number; neither: number }>();
-    for (const artifact of groupComparisons) {
-      if (!artifact.valid) continue;
-      for (const trait of artifact.traits ?? []) {
-        const row = traitCounts.get(trait.dimension)
-          ?? { dimension: trait.dimension, challenger: 0, baseline: 0, neither: 0 };
-        if (trait.more === 'challenger') row.challenger += 1;
-        else if (trait.more === 'primary' || trait.more === 'baseline') row.baseline += 1;
-        else row.neither += 1;
-        traitCounts.set(trait.dimension, row);
+    if (!dryRun) {
+      const removed = removeWorktree({ repoRoot, absolute: wt.absolute });
+      if (!removed.ok) {
+        result.kept.push({ path: wt.path, reason: removed.reason });
+        continue;
       }
     }
-    const traitTally = [...traitCounts.values()].sort(
-      (x, y) => (y.challenger + y.baseline) - (x.challenger + x.baseline) || x.dimension.localeCompare(y.dimension),
-    );
-
-    // Bucketed through VERDICT_BUCKET rather than by comparing to literals.
-    // The literal form silently dropped any verdict it did not name: `graft`
-    // would have parsed as valid, counted toward `comparisons`, and landed in
-    // none of the buckets, so the row's own numbers would stop adding up with
-    // nothing to say so — and `graft` is the COMMON case, not an edge one.
-    const bucketed = groupComparisons.filter((a) => a.valid && isBakeoffVerdict(a.verdict))
-      .map((a) => VERDICT_BUCKET[a.verdict as BakeoffVerdict]);
-    const preferChallenger = bucketed.filter((b) => b === 'challenger').length;
-    const preferBaseline = bucketed.filter((b) => b === 'baseline').length;
-    const graft = bucketed.filter((b) => b === 'graft').length;
-    const tieOrInconclusive = bucketed.filter((b) => b === 'neither').length;
-    groups.push({
-      challenger,
-      pairs: groupPairs,
-      comparisons: groupComparisons,
-      tally: {
-        pairs: groupPairs.length,
-        comparisons: groupComparisons.filter((a) => a.valid).length,
-        preferChallenger,
-        preferBaseline,
-        graft,
-        tieOrInconclusive,
-      },
-      traitTally,
-    });
+    result.worktrees.push(wt.path);
   }
+  const outputs = join(repoRoot, OUTPUTS_DIR);
+  if (existsSync(outputs)) {
+    result.outputs = relative(repoRoot, outputs);
+    if (!dryRun) rmSync(outputs, { recursive: true, force: true });
+  }
+  return result;
+}
 
-  const totalPairs = pairs.length;
-  const totalComparisons = artifacts.filter((a) => a.valid).length;
-
+export function renderClean(result: CleanResult): string[] {
+  const verb = result.dryRun ? 'would remove' : 'removed';
   const lines: string[] = [];
-  if (totalPairs === 0 && totalComparisons === 0) {
-    lines.push(`No shadow pairs recorded in ${path}.`);
-    if (!existsSync(join(repoRoot, comparisonsDir))) {
-      lines.push(`No comparisons found in ${comparisonsDir} (missing).`);
-    } else if (artifacts.length === 0) {
-      lines.push(`No ModelComparison artifacts in ${comparisonsDir}.`);
-    }
-  } else {
-    for (const group of groups) {
-      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} bakeoffs: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.graft} graft / ${group.tally.tieOrInconclusive} tie/inconclusive`);
-      // The model-level reading, printed only once there is something to
-      // accumulate — a trait line off ONE comparison is an anecdote wearing a
-      // tally's clothes, and the design's own rule is that single comparisons
-      // are noise.
-      if (group.tally.comparisons > 1 && group.traitTally.length > 0) {
-        lines.push('  model traits across these bakeoffs (who exhibited MORE — not who was better):');
-        for (const t of group.traitTally) {
-          lines.push(`    ${t.dimension.padEnd(22)} challenger ${t.challenger} / baseline ${t.baseline} / neither ${t.neither}`);
-        }
-      }
-      for (const pair of group.pairs) {
-        lines.push(`  ${formatBakeoffPair(pair)}`);
-      }
-      for (const comp of group.comparisons) {
-        lines.push(`  ${formatBakeoffArtifact(comp)}`);
-      }
-    }
-  }
-
-  const summary = totalPairs === 0 && totalComparisons === 0
-    ? `No comparisons to show (${path})`
-    : `${totalPairs} shadow pair${totalPairs === 1 ? '' : 's'}, ${totalComparisons} comparison${totalComparisons === 1 ? '' : 's'} across ${groups.length} challenger${groups.length === 1 ? '' : 's'}`;
-
-  return {
-    repoRoot,
-    path,
-    comparisonsDir,
-    totalPairs,
-    totalComparisons,
-    skippedComparisons,
-    skipped,
-    skippedNewerFormat,
-    groups,
-    lines,
-    summary,
-  };
+  for (const path of result.worktrees) lines.push(`${verb} worktree ${path} (branch kept)`);
+  if (result.outputs != null) lines.push(`${verb} ${result.outputs}/ (command-lane transcripts)`);
+  for (const k of result.kept) lines.push(`kept ${k.path}: ${k.reason}`);
+  if (lines.length === 0) lines.push('Nothing to clean.');
+  else if (result.dryRun) lines.push('Re-run with --force to remove. Prompts and the ledger are never touched.');
+  return lines;
 }
 
-
-/**
- * Cancel a running dispatch.
- *
- * The gap this closes, reported 2026-08-14: a proxy correctly refuses to fold
- * a mid-flight amendment into a live dispatch, because a second executor would
- * race the first on the same files. But with no way to *stop* the first, a
- * corrected instruction had no path at all — not amendable, not safely
- * re-dispatchable, not abortable. Roughly half of dispatches outlive the
- * caller's 600s window, so this is the common case rather than the corner.
- *
- * Delivering the amendment itself is not possible and is not attempted: every
- * harness command is a one-shot CLI that read its whole prompt from a stdin that has
- * since closed. Cancel makes the honest path — abort, then re-dispatch with
- * the corrected prompt — deterministic instead of a race.
- *
- * The kernel still writes the completion row: killing the supervisor unblocks
- * its `spawnSync`, which reports the signal exactly as any other terminal
- * state. The `dispatch_cancelled` row added here records who asked and when,
- * and never stands in for that completion.
- */
-/**
- * Record that a cancellation was *requested*. Deliberately not a terminal
- * event: the kernel still owns the completion row, and this row says only that
- * a signal was sent — which is the one thing this process actually witnessed.
- */
-function appendCancellationRow(repoRoot: string, fields: Record<string, unknown>, now: Date): void {
-  appendEvidenceRow(repoRoot, {
-    format: DISPATCHES_FORMAT,
-    timestamp: now.toISOString(),
-    event: 'dispatch_cancelled',
-    ...fields,
-  });
-}
-
-export interface DispatchesCancelOptions {
-  /** Full id or an 8+ character prefix; ignored when `tag` is given. */
-  dispatchId?: string;
-  tag?: string | null;
-  repoRoot?: string;
-  cwd?: string;
-  /** Test seam for the signal itself. */
-  kill?: (pid: number, signal: NodeJS.Signals) => void;
-  /** Test seam for supervisor/executor process liveness. */
-  probe?: (pid: number, signal: 0) => void;
-  now?: Date;
-}
-
-export interface DispatchesCancelResult {
-  dispatchId: string;
-  tag: string | null;
-  /** Supervisor process signalled. */
-  pid: number;
-  resolvedBy: OutputResolution;
-}
-
-export function runDispatchesCancel(opts: DispatchesCancelOptions = {}): DispatchesCancelResult {
-  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
-  const query = (opts.dispatchId ?? '').trim();
-  if (tag == null && query === '') {
-    throw new DispatchesCommandError(
-      'name what to cancel: a dispatch id, an 8+ character prefix, or tag:<handle>.',
-    );
-  }
-  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
-  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(join(repoRoot, DISPATCHES_FILE));
-  const { record, resolvedBy } =
-    tag != null
-      ? resolveByTag(tag, byId, requestOrder)
-      : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
-
-  if (record.withdrawn) {
-    // The second move already happened. Signalling now would either hit
-    // nothing or hit a process this ledger says nobody owns any more.
-    throw new DispatchesCommandError(
-      `dispatch ${record.dispatchId.slice(0, 8)} was withdrawn` +
-        `${record.withdrawnReason != null ? ` (${record.withdrawnReason})` : ''} — nothing to cancel.`,
-    );
-  }
-  const claimPath = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${record.dispatchId}.json`);
-  const claim = readInflightClaim(claimPath, (path) => readFileSync(path, 'utf8'));
-  // A normal terminal dispatch has no claim and is not cancellable. A
-  // reportless/SIGKILLed supervisor is different: the kernel may have written
-  // a failed completion row while deliberately preserving the claim because
-  // its detached executor group is still alive.
-  if (record.completed && claim == null) {
-    throw new DispatchesCommandError(
-      `dispatch ${record.dispatchId.slice(0, 8)} has already completed — nothing to cancel. ` +
-        `Read what it produced with \`fadeno dispatches --output ${
-          record.tag != null ? `tag:${record.tag}` : record.dispatchId.slice(0, 8)
-        }\`.`,
-    );
-  }
-  if (claim == null) {
-    // Open in the ledger but unclaimed on this machine: the kernel died
-    // without writing a completion row, or the dispatch belongs to another
-    // host. Either way there is no process here to signal, and saying
-    // "cancelled" would be a claim about work this call did not touch.
-    throw new DispatchesCommandError(
-      `dispatch ${record.dispatchId.slice(0, 8)} has no running executor on this machine ` +
-        '(no in-flight claim), yet its evidence shows no completion. Nothing was signalled. ' +
-        'Check the workspace before re-dispatching — an executor killed with its kernel can ' +
-        'have left work behind. Once you have, retire it with ' +
-        `\`fadeno dispatches --withdraw ${record.dispatchId.slice(0, 8)} --reason <text>\` ` +
-        '(add `--work-left <path>` when the tree still holds its edits) so it stops reading as ' +
-        'potentially live.',
-    );
-  }
-
-  const kill = opts.kill ?? ((pid, signal) => { process.kill(pid, signal); });
-  const probe = opts.probe ?? ((pid: number, signal: 0) => { process.kill(pid, signal); });
-  const alive = (pid: number): boolean => {
-    try { probe(pid, 0); return true; }
-    catch (err) { return (err as NodeJS.ErrnoException).code !== 'ESRCH'; }
-  };
-  const supervisorPid = claim.supervisorPid ?? claim.pid;
-  // Preserve the simple injected-kill test seam unless it also supplies a
-  // liveness probe. Production probes the supervisor first, then falls back to
-  // the detached executor group left by a SIGKILLed supervisor.
-  const targetPid = (opts.kill != null && opts.probe == null) || alive(supervisorPid)
-    ? supervisorPid
-    : claim.processGroupId != null && alive(-claim.processGroupId)
-      ? -claim.processGroupId
-      : claim.executorPid != null && alive(claim.executorPid)
-        ? claim.executorPid
-        : null;
-  if (targetPid == null) {
-    throw new DispatchesCommandError(
-      `dispatch ${record.dispatchId.slice(0, 8)} has a stale in-flight claim but no live supervisor or executor group. ` +
-        'Nothing was signalled; retrying may first require stale-state recovery.',
-    );
-  }
-  try {
-    // SIGTERM, never SIGKILL: the supervisor catches it and reaps the
-    // executor's whole process group, then escalates on its own schedule.
-    // SIGKILL here would leave exactly the orphan the supervisor exists for.
-    kill(targetPid, 'SIGTERM');
-  } catch (err) {
-    throw new DispatchesCommandError(
-      `could not signal the executor for ${record.dispatchId.slice(0, 8)} (pid ${targetPid}): ` +
-        `${(err as Error).message}`,
-    );
-  }
-
-  appendCancellationRow(repoRoot, {
-    dispatch_id: record.dispatchId,
-    ...(record.tag != null ? { tag: record.tag } : {}),
-    supervisor_pid: supervisorPid,
-    ...(targetPid < 0 ? { process_group_id: -targetPid } : {}),
-    ...(claim.startedAt != null ? { executor_started_at: claim.startedAt } : {}),
-  }, opts.now ?? new Date());
-
-  return { dispatchId: record.dispatchId, tag: record.tag, pid: targetPid, resolvedBy };
-}
-
-// ---------------------------------------------------------------------------
-// --withdraw: the second move, for a command dispatch nothing can signal
-// ---------------------------------------------------------------------------
-
-/**
- * The list of terminal receipts a command dispatch can carry lives in
- * `dispatch.ts` (`commandDispatchTerminalState`); this is the writer for the
- * one of them that no executor produces.
- *
- * The gap this closes, reported 2026-09-05: `fadeno dispatches --cancel` on
- * two dead dispatches refused both — *"no running executor on this machine
- * (no in-flight claim), yet its evidence shows no completion. Nothing was
- * signalled."* That refusal is CORRECT and stays exactly as it is: cancel
- * signals a process, and it will not report having cancelled work it never
- * touched. The defect was that there was no SECOND move. With no terminal
- * receipt reachable, the two dispatches read as open forever, and the
- * reporter's summary was that "missing terminal receipts made dead workers
- * look potentially live."
- *
- * So a withdraw answers a different question from a cancel. Cancel asks *stop
- * this process*; withdraw asks *record that this dispatch is over*. Withdraw
- * signals nothing, kills nothing, and is refused outright while any process
- * behind the claim is still alive — the operator is told to cancel first,
- * because a receipt written over a live executor would be the same lie in the
- * other direction.
- *
- * Two deliberate differences from the host-lane `withdrawHostDispatch`:
- *
- *   - It does NOT remove a workspace. A host request is withdrawn *before it
- *     starts*, so its prepared worktree is empty by construction. A command
- *     dispatch is withdrawn *after it died*, and the whole reason the field
- *     report matters is that a killed executor leaves edits behind. Deleting
- *     that tree is the destructive act, not the cleanup.
- *   - It carries `--work-left`, which the host lane has no use for: the
- *     operator has just been told by `--cancel` to check the workspace, and
- *     this is where what they found gets recorded, so the next reader of
- *     `fadeno dispatches` learns it without a transcript.
- */
-export interface DispatchesWithdrawOptions {
-  /** Full id, an 8+ character prefix, or `last`; ignored when `tag` is given. */
-  dispatchId?: string;
-  tag?: string | null;
-  /** Required, non-empty: why this dispatch is being retired. */
-  reason?: string;
-  /** A tree that still holds this dispatch's uncommitted work, if the operator found one. */
-  workLeft?: string | null;
-  repoRoot?: string;
-  cwd?: string;
-  /** Test seam for supervisor/executor process liveness. */
-  probe?: (pid: number, signal: 0) => void;
-  now?: Date;
-}
-
-export interface DispatchesWithdrawResult {
-  dispatchId: string;
-  tag: string | null;
-  reason: string;
-  /** A prior identical withdrawal already stood; nothing new was appended. */
-  idempotent: boolean;
-  /** Repo-relative path the receipt records as still holding work, when given. */
-  workLeft: string | null;
-  /** What the in-flight claim looked like at the moment of the receipt. */
-  claim: 'none' | 'stale';
-  resolvedBy: OutputResolution;
-}
-
-export function runDispatchesWithdraw(opts: DispatchesWithdrawOptions = {}): DispatchesWithdrawResult {
-  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
-  const query = (opts.dispatchId ?? '').trim();
-  if (tag == null && query === '') {
-    throw new DispatchesCommandError(
-      'name what to withdraw: a dispatch id, an 8+ character prefix, or tag:<handle>.',
-    );
-  }
-  const reason = (opts.reason ?? '').trim();
-  if (reason === '') {
-    throw new DispatchesCommandError(
-      '--reason is required and must not be empty: a terminal receipt with no stated reason is a ' +
-        'dispatch that stops looking live without anyone being able to say why it stopped.',
-    );
-  }
-  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
-  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(join(repoRoot, DISPATCHES_FILE));
-  const { record, resolvedBy } =
-    tag != null
-      ? resolveByTag(tag, byId, requestOrder)
-      : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
-  const id8 = record.dispatchId.slice(0, 8);
-
-  if (record.completed) {
-    throw new DispatchesCommandError(
-      `dispatch ${id8} already has a completion row; it cannot be withdrawn. ` +
-        `Read what it produced with \`fadeno dispatches --output ${
-          record.tag != null ? `tag:${record.tag}` : id8
-        }\`.`,
-    );
-  }
-  if (record.withdrawn) {
-    // Replay the receipt that already stands rather than appending a second
-    // one — the same rule the host lane applies, for the same reason: a
-    // repeat is answering for the withdrawal that already happened.
-    if (record.withdrawnReason === reason) {
-      return {
-        dispatchId: record.dispatchId,
-        tag: record.tag,
-        reason,
-        idempotent: true,
-        workLeft: null,
-        claim: 'none',
-        resolvedBy,
-      };
-    }
-    throw new DispatchesCommandError(
-      `dispatch ${id8} was already withdrawn for a different reason ` +
-        `(${record.withdrawnReason ?? 'unstated'}). The ledger is append-only; a second reason would ` +
-        'not replace the first.',
-    );
-  }
-
-  // A live executor is cancel's business, not this command's. Probing before
-  // writing is the whole difference between a receipt and a guess: the field
-  // report's two dispatches had absent pids, and it is exactly that absence
-  // this receipt is allowed to record.
-  const claimPath = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${record.dispatchId}.json`);
-  const claim = readInflightClaim(claimPath, (path) => readFileSync(path, 'utf8'));
-  let claimState: 'none' | 'stale' = 'none';
-  if (claim != null) {
-    const probe = opts.probe ?? ((pid: number, signal: 0) => { process.kill(pid, signal); });
-    const alive = (pid: number): boolean => {
-      try { probe(pid, 0); return true; }
-      catch (err) { return (err as NodeJS.ErrnoException).code !== 'ESRCH'; }
-    };
-    const supervisorPid = claim.supervisorPid ?? claim.pid;
-    const livePid = alive(supervisorPid)
-      ? supervisorPid
-      : claim.processGroupId != null && alive(-claim.processGroupId)
-        ? -claim.processGroupId
-        : claim.executorPid != null && alive(claim.executorPid)
-          ? claim.executorPid
-          : null;
-    if (livePid != null) {
-      throw new DispatchesCommandError(
-        `dispatch ${id8} still has a live executor (pid ${livePid}); refusing to record it as ` +
-          `withdrawn. Stop it first with \`fadeno dispatches --cancel ${
-            record.tag != null ? `tag:${record.tag}` : id8
-          }\` and let the kernel write the completion row.`,
-      );
-    }
-    claimState = 'stale';
-  }
-
-  // The path is recorded, never touched: this receipt's entire purpose is to
-  // point at work that survived, and a command that deleted what it pointed
-  // at would be the failure it was written to prevent.
-  let workLeft: string | null = null;
-  const given = opts.workLeft?.trim();
-  if (given != null && given !== '') {
-    const abs = isAbsolute(given) ? given : resolve(repoRoot, given);
-    const rel = relative(repoRoot, abs).split('\\').join('/');
-    if (rel === '' || rel.startsWith('../')) {
-      throw new DispatchesCommandError(`--work-left ${given} is outside the repository; name a path inside it.`);
-    }
-    if (!existsSync(abs)) {
-      throw new DispatchesCommandError(
-        `--work-left ${rel} does not exist. A marker pointing at nothing is worse than no marker; ` +
-          'name the tree that actually holds the work, or omit the flag.',
-      );
-    }
-    workLeft = rel;
-  }
-
-  appendEvidenceRow(repoRoot, {
-    format: DISPATCHES_FORMAT,
-    timestamp: (opts.now ?? new Date()).toISOString(),
-    event: 'dispatch_withdrawn',
-    dispatch_id: record.dispatchId,
-    ...(record.tag != null ? { tag: record.tag } : {}),
-    reason,
-    withdrawn_by: 'operator',
-    // What was actually observed, not what was assumed: `none` means no claim
-    // file at all, `stale` means one whose processes are all gone.
-    claim: claimState,
-    ...(workLeft != null ? { work_left: workLeft } : {}),
-  });
-
-  return { dispatchId: record.dispatchId, tag: record.tag, reason, idempotent: false, workLeft, claim: claimState, resolvedBy };
-}
+/** Re-exported so the CLI can special-case the wrapper's own refusals. */
+export { SpawnError, WORKTREES_DIR };

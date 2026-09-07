@@ -3,19 +3,22 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import {
+  renderClean,
+  renderDispatchDetail,
+  renderDispatches,
+  renderWorktrees,
+  runCancel,
+  runClean,
+  runContext,
   runDispatch,
-} from './commands/dispatch.ts';
-import {
+  runDispatchClose,
+  runDispatchOpen,
+  runDispatchOutput,
+  runDispatchShow,
+  runDispatchStop,
   runDispatches,
-  runDispatchesCancel,
-  runDispatchesBakeoffs,
-  runDispatchesOutput,
-  relayQuarantineNotice,
-  runDispatchesWithdraw,
-  type DispatchesResult,
-  runDispatchesMerge,
+  runWorktrees,
 } from './commands/dispatches.ts';
-import { renderExecutorStderr } from './lib/diagnostics.ts';
 import {
   
   formatShadowLine,
@@ -32,24 +35,13 @@ import {
 import { runModels, runModelsAdd, runModelsHarness, runModelsRemove, type HarnessListingResult, type ModelAddResult, type ModelRemoveResult, type ModelsResult } from './commands/models.ts';
 import { runModelsVerify, type ModelsVerifyResult } from './commands/models-verify.ts';
 import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
-import { IGNORED_DEADLINE_NOTE_TOKEN } from './lib/executors.ts';
 import { knownFlagsFor, retiredFlagFor, runCompletion, runCompletionCandidates, suggestFlag, TOP_LEVEL_COMMANDS, unknownFlagsFor } from './commands/completion.ts';
-import { runDispatchClose, runDispatchOpen } from './commands/dispatch-adhoc.ts';
-import { mergeBackReapplyCommand } from './lib/workspace-baseline.ts';
-import {
-  classifyIgnoredOutput,
-  describeIgnoredOutput,
-  ignoredOutputSignalOrder,
-  ignoredOutputVerdict,
-} from './lib/receipt-attestations.ts';
 import { runSetup } from './commands/setup.ts';
 import { runStatus } from './commands/status.ts';
-import { runClean, runCleanWindows } from './commands/clean.ts';
 import { packageVersion } from './lib/paths.ts';
 import { readInstallationManifest, syncManagedRuntime } from './lib/installations.ts';
 import { userPaths } from './lib/user-paths.ts';
 import { renderFocusedHelp, renderGlobalHelp, resolveHelpPath } from './lib/cli-help.ts';
-import { UNREADABLE_WINDOW_LOG_ID } from './lib/receipt-attestations.ts';
 
 export const KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
 
@@ -162,15 +154,6 @@ function clearShadow(archetype: string | null, json: boolean): number {
   }
   console.log(`cleared shadow attachment: ${result.archetype} (was ${result.cleared!.model});`);
   return 0;
-}
-
-function printDispatches(result: DispatchesResult): void {
-  if (result.lines.length === 0) {
-    console.log(result.summary);
-    return;
-  }
-  for (const line of result.lines) console.log(line);
-  console.log(`\n${result.summary}`);
 }
 
 const DIAL_SOURCE_TEXT: Record<string, string> = {
@@ -446,7 +429,7 @@ function optionalTarget(values: TargetFlags): Target | undefined {
   return selected[0];
 }
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
   // The generated completer places the complete COMP_WORDS vector after an
   // explicit `--` boundary. Parse this tiny protocol before node:util.parseArgs
   // so partially typed flags in that vector cannot be consumed as CLI options.
@@ -536,6 +519,16 @@ function main(argv: string[]): number {
         run: { type: 'string' },
         'dispatch-id': { type: 'string' },
         'prompt-file': { type: 'string' },
+        name: { type: 'string' },
+        parent: { type: 'string' },
+        'session-id': { type: 'string' },
+        'message-file': { type: 'string' },
+        'agent-cwd': { type: 'string' },
+        merged: { type: 'boolean' },
+        kept: { type: 'boolean' },
+        discarded: { type: 'boolean' },
+        failed: { type: 'boolean' },
+        heartbeat: { type: 'string' },
         'no-brief': { type: 'boolean' },
         isolate: { type: 'boolean' },
         shared: { type: 'boolean' },
@@ -615,9 +608,8 @@ function main(argv: string[]): number {
   // stop an executor on a clock. Same wording doctor uses for `timeout_ms`.
   if (command != null && values.timeout != null && retiredFlagFor(command, '--timeout')) {
     console.error(
-      `warning: \`--timeout\` ${IGNORED_DEADLINE_NOTE_TOKEN}. Nothing will stop this executor on a ` +
-        'clock — a clock cannot tell slow from stuck. Stop work with `fadeno cancel <run>` or ' +
-        '`fadeno dispatches --cancel <id|tag:<tag>>`. Remove the flag; it will go away.',
+      'warning: `--timeout` is retired and ignored. Nothing stops an executor on a clock — a clock cannot ' +
+        'tell slow from stuck. Stop work with `fadeno cancel <name|id>`. Remove the flag; it will go away.',
     );
   }
   if (command != null && values.help !== true && values.version !== true) {
@@ -700,66 +692,7 @@ function main(argv: string[]): number {
       return 0;
     }
     case 'clean': {
-      // `--windows` is a mode, not a modifier: it compacts the write-window
-      // log and deletes nothing. Checked before `--force` is read, because
-      // `--force` on the ordinary path DELETES that log along with the rest of
-      // `.fadeno/local` — including the open windows of deliveries writing
-      // right now — which is the opposite of what compaction is for.
-      if (values.windows) {
-        const { compaction } = runCleanWindows();
-        if (!compaction.compacted) {
-          console.log(`${compaction.path}: nothing compacted — ${compaction.skipped ?? 'no reason recorded'}`);
-          return 0;
-        }
-        console.log(
-          `compacted ${compaction.path}: ${compaction.rowsBefore} rows → ` +
-            `${compaction.rowsBefore - compaction.rowsDropped + compaction.rowsDrained} ` +
-            `(${compaction.unreadableRowsDropped} unreadable, ${compaction.windowsDropped} closed window(s) ` +
-            `past overlap, ${compaction.openWindowsKept} open window(s) kept)`,
-        );
-        console.log(`  ${compaction.bytesBefore} → ${compaction.bytesAfter} bytes`);
-        return 0;
-      }
-      const result = runClean({ force: values.force });
-      const paths = result.dryRun ? result.candidates : result.removed;
-      for (const path of paths) console.log(`${result.dryRun ? 'would remove' : 'removed'} ${path}`);
-      // What git still has registered under `.fadeno/local` — every kind,
-      // asked of git rather than derived from a list of kinds this file would
-      // then have to keep current. On the dry run it is the preview; on a
-      // --force run it is what was actually deregistered.
-      if (result.registeredWorktrees.length > 0) {
-        const count = result.registeredWorktrees.length;
-        console.log(
-          `${count} registered git worktree${count === 1 ? '' : 's'} under .fadeno/local ` +
-            `${result.dryRun ? 'would be deregistered and removed' : 'deregistered'}:`,
-        );
-        const shown = result.dryRun ? result.registeredWorktrees : result.deregisteredWorktrees;
-        for (const path of shown) console.log(`  ${path}`);
-      }
-      // Shadow retention is otherwise invisible and unbounded, so a user about
-      // to delete pair evidence sees what they are about to delete. Listed on
-      // both runs: on the dry run it is the warning, on a --force run it is
-      // the record of what went.
-      if (result.retainedShadowWorktrees.length > 0) {
-        const count = result.retainedShadowWorktrees.length;
-        console.log(
-          `${count} retained shadow worktree${count === 1 ? '' : 's'} named by the ledger — ` +
-            `${result.dryRun ? 'this would delete' : 'this deleted'} that pair evidence:`,
-        );
-        for (const path of result.retainedShadowWorktrees) console.log(`  ${path}`);
-      }
-      // Counted, not listed: one line is the signal (shared host deliveries
-      // dying before their terminal receipt), where a hundred paths would be
-      // noise. `fadeno doctor` names them.
-      if (result.overlapSnapshots.length > 0) {
-        const count = result.overlapSnapshots.length;
-        console.log(
-          `${count} pre-delivery workspace snapshot${count === 1 ? '' : 's'} under .fadeno/local ` +
-            `${result.dryRun ? 'would go' : 'went'} with it (overlap detection's baselines; ` +
-            'one per shared host delivery that never reached a terminal receipt).',
-        );
-      }
-      if (result.dryRun && paths.length > 0) console.log('Re-run with --force to remove these ignored runtime files.');
+      for (const line of renderClean(runClean({ force: values.force }))) console.log(line);
       return 0;
     }
     case 'plugin': {
@@ -1003,444 +936,163 @@ function main(argv: string[]): number {
     }
     case 'dispatch': {
       const promptFile = values['prompt-file'];
-      const result = (runDispatch as any)({
-        archetype: values.archetype,
-        role: values.role,
+      const outcome = await runDispatch({
+        archetype: values.archetype ?? null,
         model: values.model ?? null,
-        harness: values.harness ?? null,
-        tag: values.tag,
-        shadow: values.shadow,
-        isolate: Boolean(values.isolate),
+        name: values.name ?? null,
         shared: Boolean(values.shared),
-        allowRelayMismatch: Boolean(values['allow-relay-mismatch']),
-        ignoredOutput: ((): 'kept' | 'discardable' | null => {
-          const raw = values['ignored-output'];
-          if (typeof raw !== 'string') return null;
-          const trimmed = raw.trim();
-          if (trimmed === 'kept' || trimmed === 'discardable') return trimmed;
-          throw new Error(`--ignored-output must be "kept" or "discardable"; got "${raw}"`);
-        })(),
-        diagnostics: Boolean(values.diagnostics),
-        noBrief: Boolean(values['no-brief']),
+        from: values.from ?? null,
         promptFile,
         prompt: promptFile == null ? readFileSync(0, 'utf8') : undefined,
-        onEcho: (line: string) => console.error(line),
+        session: values['session-id'] ?? null,
+        parent: values.parent,
+        onEcho: (line) => console.error(line),
+        heartbeatMs: values.heartbeat != null ? Number(values.heartbeat) * 1000 : 30_000,
       });
-      // The quarantine banner goes to STDOUT, ahead of the report, and only
-      // when a person used --allow-relay-mismatch to get here (without it the
-      // dispatch was refused and never reached this line).
-      //
-      // stdout is normally the executor's pure report, and breaking that is
-      // the deliberate cost. A proxy relays stdout and discards stderr, so a
-      // warning on stderr about bytes on stdout is a warning that does not
-      // reach the one reader who must not act on them. Better a report with a
-      // banner on it than a tainted report that looks clean.
-      if (result.relayAttested === false) {
-        process.stdout.write(
-          `${relayQuarantineNotice(result.dispatchId, result.relayAttested, result.relayMismatchAllowed)}\n\n`,
-        );
+      if (!outcome.ok) {
+        console.error(outcome.refused);
+        return 3;
       }
-      if (result.stdout.length > 0) process.stdout.write(result.stdout);
-      // The executor's raw transcript is NOT relayed here any more. It used to
-      // be, unbounded: a Codex director's 7 KB report arrived beside ~127,000
-      // output tokens of executor chatter, which for a host agent lands in a
-      // context window and pushes out the answer it asked for.
-      //
-      // Silencing it wholesale is the opposite mistake, and one this line has
-      // already paid for twice (7c7a0f6, 828dbcf): a finding on a stream
-      // nobody reads is not a finding. The reconciliation is that Fadeno's own
-      // decision-changing notices do not travel here at all — the relay
-      // quarantine banner is on stdout above, and resolution, isolation,
-      // ignored-output and transcript notices came out through `onEcho` before
-      // this point — so what is left in `result.stderr` is a third party's
-      // diagnostic noise. That is retained to a path (echoed by `onEcho`, and
-      // stamped on the completion row for the caller who lost the echo), and
-      // reaches the terminal only when the caller has no working result to
-      // read instead.
-      const dispatchFailed = result.exitCode !== 0 || result.outcome === 'empty';
-      const executorStderr = renderExecutorStderr({
-        stderr: result.stderr,
-        transcript: result.transcript,
-        // A retention failure prints the excerpt whatever the outcome: with no
-        // file to point at, the terminal is the only copy left.
-        actionable: dispatchFailed || result.transcript.path == null,
-      });
-      if (executorStderr != null) process.stderr.write(executorStderr);
-      if (result.exitCode !== 0) {
-        // CLI-level diagnosis on stderr — a quiet executor otherwise leaves
-        // only a bare exit code. stdout stays the executor's pure report.
-        console.error(
-          result.signal != null
-            ? `dispatch: executor ${result.executor} was killed by ${result.signal}`
-            : `dispatch: executor ${result.executor} exited ${result.exitCode}`,
-        );
-      } else if (result.outcome === 'empty') {
-        // Exit 0 and nothing written is not a success anyone can use: it is
-        // what an unusable model id, or a worker that stopped after
-        // backgrounding its real work, looks like from out here. Say so and
-        // fail, rather than hand the caller an empty report to relay.
-        console.error(
-          // "above" is now always true: `renderExecutorStderr` says "none"
-          // out loud rather than printing nothing, so this never points a
-          // reader at output they will assume scrolled past.
-          `dispatch: executor ${result.executor} exited 0 but produced no output — ` +
-            `nothing was relayed. Check the executor's stderr above, and that ` +
-            `its model id resolves (fadeno dial resolve --archetype <archetype>).`,
-        );
-        return 1;
-      }
-      return result.exitCode;
+      const r = outcome.result;
+      if (r.stdout.length > 0) process.stdout.write(r.stdout.endsWith('\n') ? r.stdout : `${r.stdout}\n`);
+      const ending = r.signal != null ? `killed by ${r.signal}` : `exit ${r.exitCode}`;
+      const where = r.opened.workspace?.branch != null ? `branch ${r.opened.workspace.branch}` : 'shared tree';
+      const empty = r.stdout.trim().length === 0;
+      console.error(
+        `dispatch ${r.name} (${r.id}) stopped: ${ending}; ${where}` +
+          (empty ? '; NO OUTPUT — the executor wrote nothing' : '') +
+          (r.stderrBytes > 0 ? `; stderr at ${r.stderrPath}` : '') +
+          `. Close it: fadeno dispatch-close ${r.name} --merged|--kept|--discarded|--failed`,
+      );
+      if (r.exitCode === 0 && empty) return 1;
+      return r.exitCode ?? 1;
     }
     case 'dispatch-open': {
-      const result = runDispatchOpen({
+      if (!values.archetype) {
+        throw new Error(
+          'Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--shared] [--from <ref>] ' +
+            '[--session-id <id>] [--parent <id>] [--harness <id>] (--prompt-file <path> | stdin) [--json]',
+        );
+      }
+      const promptFile = values['prompt-file'];
+      const outcome = runDispatchOpen({
         archetype: values.archetype,
-        tag: values.tag,
-        note: values.note,
+        model: values.model ?? null,
+        name: values.name ?? null,
+        shared: Boolean(values.shared),
+        from: values.from ?? null,
+        promptFile,
+        prompt: promptFile == null ? readFileSync(0, 'utf8') : undefined,
+        session: values['session-id'] ?? null,
+        parent: values.parent,
+        harness: values.harness ?? null,
       });
-      console.log(`${result.dispatchId} opened (host lane, isolated)`);
-      console.log(`  workspace: ${result.workspaceAbs}`);
-      console.log(`  base:      ${result.baseCommit.slice(0, 12)}`);
-      // The one thing the host must actually do next, spelled out: spawn into
-      // that directory, then close. A director that reads only this block has
-      // everything the command lane's single invocation would have done for it.
+      if (!outcome.ok) {
+        if (values.json) console.log(JSON.stringify({ ok: false, refused: outcome.refused }));
+        else console.error(outcome.refused);
+        return 3;
+      }
+      if (values.json) {
+        console.log(JSON.stringify(outcome));
+        return 0;
+      }
       console.log(
-        '  Spawn your in-session agent with that directory as its working tree, then record the receipt:',
+        `${outcome.name} (${outcome.id}) opened on the host lane: ${outcome.model}${outcome.effort ? `@${outcome.effort}` : ''}` +
+          `${outcome.harness ? ` on ${outcome.harness}` : ''}`,
       );
+      console.log(`  work in: ${outcome.cwd}${outcome.workspace.branch ? ` (${outcome.workspace.branch})` : ' (shared tree)'}`);
+      console.log('  the contract-bearing prompt is in the --json output; the hook hands it to the agent.');
+      console.log(outcome.nag);
+      return 0;
+    }
+    case 'dispatch-stop': {
+      const [, ref] = positionals;
+      if (!ref) throw new Error('Usage: fadeno dispatch-stop <name|id> [--message-file <path> | stdin] [--agent-cwd <dir>] [--json]');
+      const messageFile = values['message-file'];
+      const stopped = runDispatchStop({
+        ref,
+        messageFile,
+        message: messageFile == null && !process.stdin.isTTY ? readFileSync(0, 'utf8') : null,
+        agentCwd: values['agent-cwd'] ?? null,
+      });
+      const name = stopped.record.opened?.name ?? stopped.record.id;
+      const dirty = stopped.row.dirty === 'unavailable' ? 'unreadable' : stopped.row.dirty.paths.length === 0 ? 'clean' : `${stopped.row.dirty.paths.length} dirty path(s)`;
+      if (values.json) {
+        console.log(JSON.stringify({ id: stopped.record.id, name, replayed: stopped.replayed, dirty: stopped.row.dirty, mismatchedCwd: stopped.mismatchedCwd }));
+        return 0;
+      }
       console.log(
-        `    fadeno dispatch-close ${result.tag != null ? `tag:${result.tag}` : result.dispatchId.slice(0, 8)}` +
-          '            # merges the agent\'s diff back',
-      );
-      console.log(
-        `    fadeno dispatch-close ${result.tag != null ? `tag:${result.tag}` : result.dispatchId.slice(0, 8)} --reason <text>  # it failed; nothing is merged`,
+        `${name} stopped${stopped.replayed ? ' (already recorded)' : ''}; tree ${dirty}` +
+          (stopped.mismatchedCwd != null ? `; WARNING: the agent worked in ${stopped.mismatchedCwd}, not its assigned worktree` : '') +
+          `. Close it: fadeno dispatch-close ${name} --merged|--kept|--discarded|--failed`,
       );
       return 0;
     }
     case 'dispatch-close': {
-      const [, target] = positionals;
-      if (!target) {
-        throw new Error('Usage: fadeno dispatch-close <id|tag:<handle>|last> [--reason <text>] [--no-merge] [--agent-id <id>]');
+      const [, ref] = positionals;
+      const verbs = (['merged', 'kept', 'discarded', 'failed'] as const).filter((verb) => values[verb]);
+      if (!ref || verbs.length !== 1) {
+        throw new Error('Usage: fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>] — exactly one verb.');
       }
-      const inlineTag = target.startsWith('tag:') ? target.slice(4) : null;
-      const result = runDispatchClose({
-        dispatchId: inlineTag != null ? '' : target,
-        tag: inlineTag ?? values.tag,
-        reason: values.reason,
-        noMerge: values['no-merge'] === true,
-        agentId: values['agent-id'],
-        onEcho: (line) => console.error(line),
-      });
-      const how = result.resolvedBy === 'tag' ? ` (tag: ${result.tag})` : '';
+      const closed = runDispatchClose({ ref, verb: verbs[0]!, note: values.note ?? null });
+      const name = closed.record.opened?.name ?? closed.record.id;
       console.log(
-        `${result.dispatchId.slice(0, 8)}${how} closed: ${result.outcome}` +
-          `${result.idempotent ? ' (idempotent)' : ''}`,
+        `${name} closed: ${closed.verb}${closed.replayed ? ' (already recorded)' : ''}` +
+          (closed.branch != null
+            ? `; branch ${closed.branch} kept${closed.worktree != null ? `, worktree ${closed.worktree} stays until fadeno clean` : ''}`
+            : ''),
       );
-      if (result.diffSnapshot != null) {
-        console.log(`  diff: ${result.diffBytes ?? 0} bytes at ${result.diffSnapshot}`);
+      return 0;
+    }
+    case 'cancel': {
+      const [, ref] = positionals;
+      if (!ref) throw new Error('Usage: fadeno cancel <name|id>');
+      const outcome = await runCancel({ ref });
+      if (!outcome.ok) {
+        console.error(outcome.message);
+        return 1;
       }
-      if (result.merge != null) {
-        console.log(
-          `  merge-back: ${result.merge.status}${result.merge.detail != null ? ` — ${result.merge.detail}` : ''}`,
-        );
-      }
-      if (result.workspaceRetained != null) {
-        // Never silent about a tree that still holds work: this is the one
-        // fact a host cannot recover from anywhere else.
-        console.log(
-          `  worktree RETAINED at ${result.workspaceRetained}` +
-            (result.diffSnapshot != null
-              ? ` — apply it with \`${mergeBackReapplyCommand(result.diffSnapshot)}\``
-              : ''),
-        );
-        // And WHY, when the reason is that a merged delivery's worktree is
-        // still the only copy of something. Without this the retention reads
-        // as a merge that did not finish.
-        if (result.ignoredOutput != null) {
-          // Ordered so anything NOT recognisable as build output is named
-          // first: this sample is capped at six, and a `data/research/` tree
-          // beside four build directories must not be the entry that gets
-          // counted away. The imperative is dropped when every entry is
-          // build-shaped — that is the line directors learned to skip.
-          const ordered = ignoredOutputSignalOrder(result.ignoredOutput.paths);
-          const onlyBuild = ordered.length > 0 && classifyIgnoredOutput(ordered).unclassified.length === 0;
-          console.log(
-            `  it holds gitignored output the diff could not carry: ` +
-              `${ordered.slice(0, 6).join(', ') || 'content the listing could not enumerate'}` +
-              `${result.ignoredOutput.truncated ? ' (a FLOOR, not the set)' : ''}. ` +
-              (onlyBuild
-                ? 'All of it is recognised as build or dependency output by NAME alone — most likely a rebuild ' +
-                  'rather than a loss, but nothing was opened to check, so it was kept rather than destroyed.'
-                : 'Copy what you need out before `fadeno clean --force` reclaims it.'),
-          );
-        }
-      } else if (result.workspaceRemoved) {
-        console.log('  worktree removed; the work is in this workspace.');
-      }
+      const name = outcome.record.opened?.name ?? outcome.record.id;
+      console.log(
+        `cancelled ${name}: signalled process group ${outcome.processGroup}` +
+          (outcome.stoppedRecorded ? '; stop recorded' : '; its launcher recorded the stop') +
+          `. Close it: fadeno dispatch-close ${name} --failed|--kept|--discarded`,
+      );
+      return 0;
+    }
+    case 'worktrees': {
+      const entries = runWorktrees();
+      if (values.json) console.log(JSON.stringify(entries));
+      else for (const line of renderWorktrees(entries)) console.log(line);
+      return 0;
+    }
+    case 'context': {
+      const context = runContext();
+      if (values.json) console.log(JSON.stringify(context));
+      else console.log(context.text);
       return 0;
     }
     case 'dispatches': {
-      if (values.bakeoffs) {
-        const result = runDispatchesBakeoffs({});
-        if (values.json) {
-          console.log(JSON.stringify(result, null, 2));
-          return 0;
-        }
-        for (const line of result.lines) console.log(line);
-        return 0;
-      }
-      if (values.cancel != null) {
-        const inline = values.cancel.startsWith('tag:') ? values.cancel.slice(4) : null;
-        const result = runDispatchesCancel({
-          dispatchId: inline != null ? '' : values.cancel,
-          tag: inline ?? values.tag,
-        });
-        const how = result.resolvedBy === 'tag' ? ` (tag: ${result.tag})` : '';
-        console.log(`cancel signalled: ${result.dispatchId.slice(0, 8)}${how} — SIGTERM to supervisor ${result.pid}`);
-        // Say what was and was not settled. The executor's process group is
-        // being reaped now; the kernel writes the completion row when its
-        // spawn returns, and only the workspace can say how far the work got.
-        console.log('  the executor and its children are being reaped; the kernel records the completion row.');
-        console.log('  check the workspace before re-dispatching — a cancelled executor may have written already.');
-        return 0;
-      }
-      if (values.withdraw != null) {
-        const inline = values.withdraw.startsWith('tag:') ? values.withdraw.slice(4) : null;
-        const result = runDispatchesWithdraw({
-          dispatchId: inline != null ? '' : values.withdraw,
-          tag: inline ?? values.tag,
-          reason: values.reason,
-          workLeft: values['work-left'] ?? null,
-        });
-        const how = result.resolvedBy === 'tag' ? ` (tag: ${result.tag})` : '';
-        console.log(
-          `withdrawn: ${result.dispatchId.slice(0, 8)}${how}${result.idempotent ? ' (idempotent)' : ''} — ${result.reason}`,
-        );
-        // Say what was RECORDED and what was not touched. A withdraw signals
-        // nothing and deletes nothing; a reader who assumed otherwise would
-        // stop looking for the work this dispatch may have left behind.
-        console.log(
-          `  a dispatch_withdrawn row is the terminal receipt; nothing was signalled and no workspace was removed` +
-            `${result.claim === 'stale' ? ' (a stale in-flight claim was found and left in place)' : ''}.`,
-        );
-        if (result.workLeft != null) {
-          console.log(`  recorded as still holding this dispatch's work: ${result.workLeft}`);
-        } else {
-          console.log('  no tree was named as holding its work; add `--work-left <path>` if it left edits behind.');
-        }
-        return 0;
-      }
-      if (values.merge != null) {
-        const inline = values.merge.startsWith('tag:') ? values.merge.slice(4) : null;
-        const result = runDispatchesMerge({
-          dispatchId: inline != null ? '' : values.merge,
-          tag: inline ?? values.tag,
-          allowRelayMismatch: Boolean(values['allow-relay-mismatch']),
-        });
-        const how = result.resolvedBy === 'tag' ? ` (tag: ${result.tag})` : '';
-        console.log(
-          `merged ${result.dispatchId.slice(0, 8)}${how}: ${result.diffBytes} bytes applied to the workspace from ${result.workspace}` +
-            `${result.mergeBack.rebased_onto != null ? ` (rebased onto ${result.mergeBack.rebased_onto.slice(0, 12)} first)` : ''}; ` +
-            `${result.ignoredOutputKept != null ? 'the worktree is KEPT.' : 'the worktree is removed.'}`,
-        );
-        console.log(`  diff kept at ${result.diffSnapshot}; a dispatch_merged row records the merge.`);
-        // The patch that just landed carried no gitignored path, so removing
-        // the worktree would have destroyed this. Said here rather than only
-        // on the row: `--merge` is the last moment anyone is looking.
-        if (result.ignoredOutputKept != null) {
-          console.log(`  ${describeIgnoredOutput(result.ignoredOutputKept)}`);
-          console.log('  Copy what you need out of it, then `fadeno clean --force` reclaims it.');
-        }
-        return 0;
-      }
+      const [, ref] = positionals;
       if (values.output != null) {
-        // `--wait` in seconds: the number a caller reaches for after a
-        // ten-minute wait is "another minute", not "60000".
-        let waitMs = 0;
-        if (values.wait != null) {
-          const seconds = values.wait === '' ? 120 : Number(values.wait);
-          if (!Number.isFinite(seconds) || seconds < 0) {
-            throw new Error(`Invalid --wait "${values.wait}". Use seconds (a non-negative number).`);
-          }
-          waitMs = Math.round(seconds * 1000);
+        const out = runDispatchOutput({ ref: values.output });
+        if (out.text == null) {
+          const name = out.record.opened?.name ?? out.record.id;
+          console.error(`${name}: no report recorded${out.record.state === 'open' ? ' — it is still open' : ''}.`);
+          return 1;
         }
-        // Two spellings on purpose. `--tag <handle>` is the natural one, but it
-        // cannot stand alone: `--output` takes a value, so `--output --tag x`
-        // would swallow the flag. `--output tag:<handle>` is the single-token
-        // form that always parses — and it is the one the proxy guard permits,
-        // because a caller recovering from an interruption should not also have to
-        // get flag ordering right.
-        const inline = values.output.startsWith('tag:') ? values.output.slice(4) : null;
-        const result = runDispatchesOutput({
-          dispatchId: inline != null ? '' : values.output,
-          tag: inline ?? values.tag,
-          waitMs,
-          // Progress goes to stderr so stdout stays relay-safe; a host agent
-          // blocked on this call sees life instead of a hang.
-          onHeartbeat: (line) => console.error(line),
-        });
-        // stdout carries the snapshot bytes (relay-safe); the attestation
-        // verdict goes to stderr so piping stays clean.
-        //
-        // One exception, and it is the reason this fix exists: when the relay
-        // attestation failed, `result.bytes` already carries the quarantine
-        // banner ahead of the report. Everything else here is a caveat ABOUT
-        // the bytes and can live on stderr; that one says the bytes answer a
-        // different question, and stderr is discarded on exactly the
-        // recover-by-tag path this command serves.
-        process.stdout.write(result.bytes);
-        // The verdict leads. "attested" only says these are the bytes the
-        // completion row hashed — a dispatch the kernel killed attests
-        // perfectly, zero bytes to zero bytes, and on
-        // 2026-08-22 a proxy relayed exactly that as "completed". The bytes
-        // are worthless without the verdict, so the verdict is what a relay
-        // must carry, and it is spelled in capitals a reader cannot miss.
-        const verdict = ((): string | null => {
-          switch (result.outcome) {
-            case 'timeout': {
-              // Legacy rows only: Fadeno no longer runs executors under a
-              // deadline, so nothing written now can reach this branch. A
-              // ledger recorded before the removal still can, and relaying
-              // its bytes as a success is exactly the 2026-08-22 failure.
-              const deadline = result.timeoutMs != null ? `${Math.round(result.timeoutMs / 1000)}s ` : '';
-              return (
-                `TIMED OUT: the kernel killed the executor at its ${deadline}deadline` +
-                `${result.signal != null ? ` (${result.signal})` : ''}; the work did NOT finish. ` +
-                `${result.outputBytes ?? 0} bytes of output were captured before the kill. ` +
-                'This is an old receipt: executor deadlines were removed, and a re-dispatch runs without one.'
-              );
-            }
-            case 'failed':
-              if (result.signal == null && result.exitCode === 0) {
-                // Only the executor's outcome claim lands here: every other
-                // failed derivation has a nonzero exit or a signal behind it.
-                return 'FAILED: exit 0, but the report claimed failure (FADENO-DISPATCH-RESULT: failed) — do not relay this as a success';
-              }
-              return result.signal != null
-                ? `FAILED: the executor was killed by ${result.signal}`
-                : `FAILED: exit ${result.exitCode ?? '?'}`;
-            case 'empty':
-              return 'NO OUTPUT: exit 0 with 0 bytes — nothing to relay';
-            case 'ok':
-              return `ok: exit 0, ${result.outputBytes ?? '?'} bytes`;
-            default:
-              return null;
-          }
-        })();
-        const merge = result.primaryMerge == null
-          ? null
-          : result.primaryMerge.status === 'unresolved'
-            ? `merge-back UNRESOLVED: the work conflicts with the workspace and did NOT land; the worktree is retained with conflict markers` +
-              `${result.workspace != null ? ` at ${result.workspace}` : ''}${result.primaryMerge.detail != null ? ` (${result.primaryMerge.detail})` : ''}. ` +
-              `Resolve them there, then \`fadeno dispatches --merge ${result.dispatchId.slice(0, 8)}\``
-            : result.primaryMerge.status === 'conflicted'
-              ? `merge-back CONFLICTED: the tree MAY be partly applied — inspect \`git status\`${result.primaryMerge.detail != null ? ` (${result.primaryMerge.detail})` : ''}`
-            : result.primaryMerge.status === 'blocked'
-              ? `merge-back BLOCKED: nothing was applied, the workspace is untouched${result.primaryMerge.detail != null ? ` (${result.primaryMerge.detail})` : ''}`
-              : result.primaryMerge.detail != null
-                ? `merge-back clean: ${result.primaryMerge.detail}`
-                : null;
-        const attestation =
-          result.attested === 'match'
-            ? 'output attested: sha matches the completion row'
-            : result.attested === 'mismatch'
-              ? 'WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)'
-              : result.withdrawn
-                ? 'WITHDRAWN: an operator retired this dispatch' +
-                  `${result.withdrawnReason != null ? ` (${result.withdrawnReason})` : ''}; these are all the bytes ` +
-                  'it ever produced and no completion row is coming. Do not wait on it.'
-              : waitMs > 0
-                ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1000)}s. ` +
-                  'The executor has not exited; this is its output so far. Not a failure — ' +
-                  're-run this command to check again.'
-                : 'no completion row recorded YET: the executor may still be running, and the ' +
-                  'kernel writes that row only when it exits. This is its output so far, not a ' +
-                  'failure. Re-run with --wait <seconds> to wait for the real answer.';
-        // Repeated on stderr as well as in the bytes. The banner is what
-        // survives a relay; this is what a human watching the terminal sees
-        // first, and neither is a substitute for the other.
-        const relay = result.relayAttested === false
-          ? `RELAY FIDELITY FAILED (relay_attested: false${result.relayMismatchAllowed ? ', dispatched under --allow-relay-mismatch' : ''}) — ` +
-            'the report above answers a prompt the caller never wrote; do not relay it as an answer'
-          : null;
-        // Repeated here for the human at the terminal; the banner in the bytes
-        // is what survives a relay. Neither is a substitute for the other.
-        // Through the shared phrasing rather than a local slice-and-join.
-        // This line predates `receipt-attestations.ts` and had drifted into a
-        // third spelling that could not say a worktree still holds the
-        // content — the one thing a reader can act on.
-        const discarded = result.ignoredOutputDiscarded == null
-          ? null
-          : `GITIGNORED OUTPUT ${ignoredOutputVerdict(result.ignoredOutputDiscarded)} — ` +
-            describeIgnoredOutput(result.ignoredOutputDiscarded, result.ignoredOutputPolicy);
-        // Not prefixed onto the bytes: an overlap does not make the report
-        // false. It is still stated, because nothing prevents a concurrent
-        // writer any more and this is one of the two places it can be read.
-        // The log-unreadable stamp names no delivery; counting it as one would
-        // turn "I could not see who else was there" into "someone else was".
-        const overlapNamed = (result.concurrentWrite ?? []).filter((stamp) => stamp.dispatchId !== UNREADABLE_WINDOW_LOG_ID);
-        const overlap = overlapNamed.length === 0
-          ? null
-          : `concurrent_write: ${overlapNamed.length} other ` +
-            `${overlapNamed.length === 1 ? 'delivery' : 'deliveries'} overlapped this one ` +
-            `(${overlapNamed.map((stamp) => stamp.dispatchId.slice(0, 8)).join(', ')}) — an ` +
-            'attestation, not proof of damage; `fadeno dispatches` names the intersecting paths';
-        // Where the executor's stderr went. Last in the list because it is a
-        // pointer, not a finding — but present at all because `dispatch`
-        // stopped relaying that transcript and now echoes its path on stderr,
-        // and stderr is precisely what the caller reaching for this command
-        // has already lost.
-        const transcript = result.stderrSnapshot == null
-          ? null
-          : `executor stderr: ${result.stderrBytes ?? '?'} bytes at ${result.stderrSnapshot}` +
-            (result.stderrTruncated ? ' (a head+tail sample; a floor, not the set)' : '');
-        const note = [relay, discarded, verdict, merge, attestation, overlap, transcript]
-          .filter((part) => part != null)
-          .join('; ');
-        // Say how `last` landed. Recency now only survives when nothing
-        // overlapped this dispatch — concurrent-and-finished refuses outright —
-        // so the note reports that narrowed claim rather than a bare warning.
-        const how =
-          result.resolvedBy === 'recency'
-            ? ' [resolved by recency: nothing was open and nothing overlapped it, so this is the ' +
-              'only candidate — launch with `--tag <handle>` to name it outright]'
-            : result.resolvedBy === 'tag'
-              ? ' [resolved by tag]'
-              : '';
-        console.error(`[${result.dispatchId}] ${result.path} — ${note}${how}`);
+        process.stdout.write(out.text.endsWith('\n') ? out.text : `${out.text}\n`);
         return 0;
       }
-      let tail: number | undefined;
-      if (values.tail != null) {
-        const n = Number(values.tail);
-        if (!Number.isInteger(n) || n < 1) {
-          throw new Error(`Invalid --tail "${values.tail}". Use a positive integer.`);
-        }
-        tail = n;
-      }
-      const result = runDispatches({ tail, stops: Boolean(values.stops) });
-      if (values.json) {
-        console.log(
-          JSON.stringify(
-            {
-              path: result.path,
-              total: result.total,
-              shown: result.entries.length,
-              skipped: result.skipped,
-              skippedNewerFormat: result.skippedNewerFormat,
-              // What the listing did NOT slot, and why. A JSON consumer that
-              // only read `entries` would see the same silence the terminal
-              // reader is protected from: rows exist that this view collapsed.
-              stopsOnly: result.stopsOnly,
-              stopsTotal: result.stopsTotal,
-              stopsCollapsed: result.stopsCollapsed,
-              entries: result.entries,
-            },
-            null,
-            2,
-          ),
-        );
+      if (ref != null) {
+        const detail = runDispatchShow({ ref });
+        if (values.json) console.log(JSON.stringify(detail.record));
+        else for (const line of renderDispatchDetail(detail)) console.log(line);
         return 0;
       }
-      printDispatches(result);
+      const result = runDispatches({ tail: values.tail != null ? Number(values.tail) : undefined, all: Boolean(values.all) });
+      if (values.json) console.log(JSON.stringify(result));
+      else for (const line of renderDispatches(result)) console.log(line);
       return 0;
     }
     default:
@@ -1459,10 +1111,13 @@ const _isMain = (() => {
   return a1.endsWith('src/cli.ts') || a1.endsWith('dist/cli.js') || a1.endsWith('/fadeno') || a1.endsWith('/fadeno.cmd') || a1.endsWith('/fadeno.js');
 })();
 if (_isMain) {
-  try {
-    process.exitCode = main(process.argv.slice(2));
-  } catch (err) {
-    console.error(`Error: ${(err as Error).message}`);
-    process.exitCode = 1;
-  }
+  main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err: unknown) => {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exitCode = 1;
+    },
+  );
 }

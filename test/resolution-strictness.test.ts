@@ -5,11 +5,11 @@ import { spawnSync } from 'node:child_process';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DialError, runDialResolve, runDialShow } from '../src/commands/dial.ts';
-import { DispatchCommandError, runDispatch } from '../src/commands/dispatch.ts';
+import { SpawnError, resolveArchetype } from '../src/lib/spawn.ts';
 import { loadLayeredProfile } from '../src/lib/config-layers.ts';
 import { ExecutorProfileError } from '../src/lib/executors.ts';
 import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
-import { echoedStdin, tempRepo } from './helpers.ts';
+import { tempRepo } from './helpers.ts';
 
 /**
  * Resolution strictness under dials:
@@ -117,12 +117,12 @@ test('dial resolve: a malformed v3 pin throws the same message dispatch would', 
   const { root, paths } = seedProject(t);
   writeMalformedPin(root);
   const resolveErr = thrownMessage(() => runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker' }));
-  const dispatchErr = thrownMessage(() => runDispatch({ archetype: 'worker', prompt: 'hi', repoRoot: root, userPathOptions: paths }));
+  const dispatchErr = thrownMessage(() => resolveArchetype({ archetype: 'worker', repoRoot: root, userPathOptions: paths }));
   // Both strict paths share the exact local pin error (fix hint included)
   assert.match(resolveErr, /has unknown key/);
   assert.equal(dispatchErr, resolveErr);
   assert.throws(() => runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker' }), (err: unknown) => err instanceof DialError && err.message === resolveErr);
-  assert.throws(() => runDispatch({ archetype: 'worker', prompt: 'hi', repoRoot: root, userPathOptions: paths }), (err: unknown) => err instanceof DispatchCommandError && err.message === resolveErr);
+  assert.throws(() => resolveArchetype({ archetype: 'worker', repoRoot: root, userPathOptions: paths }), (err: unknown) => err instanceof SpawnError && /has unknown key/.test((err as Error).message));
 });
 
 
@@ -150,8 +150,8 @@ test('dial resolve: legacy pin does NOT block strict resolve (note only)', (t) =
   assert.equal(resolved.model, 'sol');
   assert.equal(resolved.source, 'repo');
   // Dispatch also succeeds
-  const disp = runDispatch({ archetype: 'worker', prompt: 'hi', repoRoot: root, userPathOptions: paths });
-  assert.equal(disp.executor, 'sol');
+  const disp = resolveArchetype({ archetype: 'worker', repoRoot: root, userPathOptions: paths });
+  assert.equal(disp.model, 'sol');
   assert.equal(disp.source, 'repo');
 });
 

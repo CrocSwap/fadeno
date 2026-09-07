@@ -50,15 +50,14 @@ test('focused help uses semantic options and preserves safety-critical modes', (
   assert.match(plugin, /Claude Code is the default plugin/);
   assert.doesNotMatch(renderFocusedHelp('dial'), /\n  --rate|\n  --archetype/);
 
-  assert.match(renderFocusedHelp('clean'), /Remove ignored runtime state/);
+  assert.match(renderFocusedHelp('clean'), /Remove machine-local scratch/);
   assert.match(renderFocusedHelp('dispatch'), /--archetype.*--model|--model.*--archetype/s);
-  assert.match(renderFocusedHelp('dispatch'), /--shadow <ref>/);
-  assert.match(renderFocusedHelp('dispatch'), /isolate by default.*merge.*--isolate.*withholds/s);
+  assert.match(renderFocusedHelp('dispatch'), /--name <name>/);
   assert.match(renderFocusedHelp('dispatch'), /required unless `--model` is\s+supplied; both are accepted/);
-  assert.match(renderFocusedHelp('dispatch'), /--ignored-output <kept\|discardable>/);
-  assert.match(renderFocusedHelp('dispatches'), /--output <id\|last\|tag:<tag>>/);
-  assert.match(renderFocusedHelp('dispatches'), /--cancel <id\|tag:<tag>>/);
-  assert.match(renderFocusedHelp('dispatches'), /--merge <id\|tag:<tag>>/);
+  assert.match(renderFocusedHelp('dispatch'), /--shared\s+Work in the live tree/);
+  assert.match(renderFocusedHelp('dispatches'), /--output <name\|id>/);
+  assert.match(renderFocusedHelp('dispatch-close'), /--merged\|--kept\|--discarded\|--failed/);
+  assert.match(renderFocusedHelp('cancel'), /process group/);
   assert.match(renderFocusedHelp('models add'), /direct OpenCode.*OpenCode\/OpenRouter/s);
   assert.match(renderFocusedHelp('model'), /--harness <id>/);
   for (const path of ['models add', 'model add', 'dial clear-shadow']) {
@@ -106,7 +105,7 @@ test('source and every bundled CLI render representative focused and global help
   for (const bin of [process.execPath, ...BUNDLES]) {
     const prefix = bin === process.execPath ? [SOURCE] : [];
     const global = run(bin, [...prefix, '--help'], root);
-    assert.match(global, /Get started/);
+    assert.match(global, /Routing/);
     const nested = run(bin, [...prefix, 'dial', 'shadow', '--help'], root);
     assert.match(nested, /fadeno dial shadow/);
     const alias = run(bin, [...prefix, 'model', 'add', '--help'], root);
@@ -159,5 +158,5 @@ test('help keeps version precedence and unknown-command global fallback', (t) =>
   const version = run(process.execPath, [SOURCE, 'unknown-command', '--help', '--version'], root).trim();
   assert.equal(version, packageVersion());
   const unknown = run(process.execPath, [SOURCE, 'unknown-command', '--help'], root);
-  assert.match(unknown, /Get started/);
+  assert.match(unknown, /Routing/);
 });

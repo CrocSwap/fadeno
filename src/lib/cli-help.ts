@@ -55,13 +55,38 @@ const MODEL_VERIFY_PAGE = page(
 const TOP_LEVEL: Record<string, PageSeed> = {
   setup: page('Install safe user-scoped integration.', 'fadeno setup [--codex|--claude] [options]'),
   status: page('Show effective definitions, routing, and runtime state.', 'fadeno status [options]'),
-  clean: page('Preview or remove ignored repository runtime state.', [
-    'fadeno clean [--force]',
-    'fadeno clean --windows',
-  ], [
-    '--windows deletes nothing: it compacts .fadeno/local/dispatch-windows.jsonl, dropping torn rows and closed windows that can no longer overlap anything, and keeping every open one. Use it when doctor reports the write-window log degraded — `--force` would delete that log along with the open windows of deliveries writing right now.',
-  ]),
   models: MODELS_PAGE,
+  clean: page('Remove machine-local scratch: worktrees of closed dispatches and command-lane transcripts.', 'fadeno clean [--force]', [
+    'Previews by default. A worktree holding uncommitted work, or belonging to a dispatch that is not closed, is kept and the reason printed. Prompts and the ledger are never touched; branches are left behind.',
+  ]),
+  dispatch: page('Run one dispatch on the command lane: resolve the archetype, cut a worktree, run the executor, record it.', ['fadeno dispatch --archetype <name> [options]', 'fadeno dispatch --model <ref> [options]'], [
+    'Reads the prompt from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted, and an explicit model is recorded as a one-dispatch override.',
+    'The executor runs in a worktree cut from HEAD (`--from <ref>` cuts elsewhere; `--shared` works in the live tree on your explicit request), with the dispatch contract appended to the prompt. Its stdout is the report and is printed verbatim; its exit code is yours.',
+    'Every dispatch must be closed afterwards: `fadeno dispatch-close <name> --merged|--kept|--discarded|--failed`. Fadeno performs no merge.',
+  ]),
+  'dispatch-open': page('Open a host-lane dispatch: resolve, cut a worktree, record the row, print the contract.', 'fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--shared] [--from <ref>] [--session-id <id>] [--parent <id>] [--harness <id>] (--prompt-file <path> | stdin) [--json]', [
+    'The hook\'s entry point: the harness runs the agent, this records that it exists and hands back the prompt the agent should receive. `--json` carries the composed prompt, the worktree and the nag.',
+    'Refused (exit 3) at the unclosed-dispatch limit; the refusal names what to close.',
+  ]),
+  'dispatch-stop': page('Record that a host-lane dispatch\'s agent stopped, and what its tree holds.', 'fadeno dispatch-stop <name|id> [--message-file <path> | stdin] [--agent-cwd <dir>] [--json]', [
+    'The stop hook\'s entry point. Records presence of a final message, never completeness, and the uncommitted paths in the assigned worktree. A second stop for the same dispatch is a replay.',
+  ]),
+  'dispatch-close': page('Record the terminal decision for a dispatch.', 'fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>]', [
+    'Exactly one verb. The same verb twice is a replay; a different verb for an already-closed dispatch is refused. Closing removes nothing: the branch stays, and the worktree stays until `fadeno clean`.',
+  ]),
+  cancel: page('Stop a running command-lane dispatch by signalling its process group.', 'fadeno cancel <name|id>', [
+    'Refuses a host-lane dispatch (the subagent is the harness\'s to stop) and a dispatch that is not running. Writes the stop row if the launcher did not. The dispatch still needs closing.',
+  ]),
+  dispatches: page('List dispatches, show one, or print a report.', ['fadeno dispatches [--all] [--tail <count>] [--json]', 'fadeno dispatches <name|id> [--json]', 'fadeno dispatches --output <name|id>'], [
+    'Unclosed dispatches by default; `--all` includes closed ones. A name resolves when it is unique, a unique id prefix too; ambiguity is refused rather than guessed.',
+    '`--output` prints the command-lane transcript, or the final message the stop row recorded.',
+  ]),
+  worktrees: page('Report every Fadeno worktree holding work that is not on HEAD.', 'fadeno worktrees [--json]', [
+    'The cross-session safety net: uncommitted paths and unmerged commits per worktree, joined to the dispatch that owns it. A tree that cannot be read is reported as such, never as clean.',
+  ]),
+  context: page('Print what a host session is told: archetypes with live routing, the rules, and every unclosed dispatch.', 'fadeno context [--json]', [
+    'One source for the host-mode hook, a spawned director\'s prompt, and a human who wants to see it.',
+  ]),
   model: aliasPage(MODELS_PAGE, [
     'fadeno model [<name>]',
     'fadeno model --harness <id>',
@@ -85,26 +110,6 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     '`clear-shadow` with an archetype detaches that one and fails if it has none; with NO archetype it detaches EVERY attachment. Shadows live only in `.fadeno/local/dials`, so — unlike `clear` — it takes no `--session|--user|--repo` scope flag.',
   ]),
   shadow: aliasPage(SHADOW_PAGE, ['fadeno shadow', 'fadeno shadow <archetype> <model>[@effort] [options]', 'fadeno shadow clear [<archetype>]'], '`fadeno shadow` is an alias for `fadeno dial shadow`, and `fadeno shadow clear` for `fadeno dial clear-shadow`.'),
-  dispatch: page('Resolve an archetype and invoke it once.', ['fadeno dispatch --archetype <name> [options]', 'fadeno dispatch --model <ref> [options]'], ['Read prompt text from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted.', 'Dispatches isolate by default and merge a successful primary diff back. `--isolate` withholds merge-back; `--shadow <ref>` adds a one-shot challenger.', 'A failed relay-fidelity check refuses the dispatch before the executor spawns; `--allow-relay-mismatch` proceeds and records `relay_mismatch_allowed: true`.', 'Recover output with `fadeno dispatches --output tag:<tag> --wait 120`.']),
-  'dispatch-open': page(
-    'Open a runless host dispatch: an isolated worktree, an id, and a receipt to come.',
-    'fadeno dispatch-open [--archetype <name>] [--tag <handle>] [--note <text>]',
-    [
-      'The host-lane twin of `fadeno dispatch --isolate`, with no playbook run behind it: it cuts a worktree from HEAD with your uncommitted state replayed into it, mints a dispatch id, and records the request in `.fadeno/dispatches.jsonl`.',
-      'Spawn your in-session agent against the printed workspace, then close it with `fadeno dispatch-close`. Nothing is merged and no receipt exists until you do.',
-      'There is no run ledger, so `fadeno verify` has nothing to audit here; `fadeno dispatches` is where the dispatch and its receipt appear.',
-    ],
-  ),
-  'dispatch-close': page(
-    'Record the terminal receipt for a runless host dispatch.',
-    'fadeno dispatch-close <id|tag:<handle>|last> [--reason <text>] [--no-merge] [--agent-id <id>]',
-    [
-      'Collects the worktree\'s diff, merges it back into this workspace, and removes the worktree — the same ending `fadeno dispatch` gives a command-lane primary.',
-      '`--reason <text>` records a FAILED outcome and merges nothing. `--no-merge` records success but leaves the diff for you to apply.',
-      'The worktree is removed on exactly one condition: the work landed in this tree. Every other ending retains it and the command says where it is.',
-    ],
-  ),
-  dispatches: page('Inspect or recover command dispatches.', ['fadeno dispatches [--tail <count>] [--stops] [--json] [--bakeoffs]', 'fadeno dispatches --output <id|last|tag:<tag>> [--wait <seconds>]', 'fadeno dispatches --cancel <id|tag:<tag>> | --merge <id|tag:<tag>>', 'fadeno dispatches --withdraw <id|tag:<tag>> --reason <text> [--work-left <path>]'], ['`--output` writes the saved snapshot bytes verbatim to stdout; use `--wait` only for a completion row.', '`--cancel` signals a live executor. `--withdraw` is the second move for one nothing can signal: it records the terminal receipt, signals nothing, and removes no workspace. It is refused while any process behind the claim is alive.', 'A `relay_attested: false` dispatch is quarantined: `--output` prefixes the bytes with the failure, and `--merge` refuses without `--allow-relay-mismatch`.', 'The listing ranks agent-stop rows by what each one says is at risk, and collapses to a counted summary the ones that left nothing unaccounted for — a settled dispatch, a final message from the agent, or a tree git found clean. Collapsed is not a verdict on the work: `--stops` lists every stop row with the reading that collapsed it.']),
   plugin: page('Generate a harness plugin from this checkout.', 'fadeno plugin [dir] [--codex|--omp] [--force]', ['Claude Code is the default plugin; `--codex` and `--omp` select their generators. OpenCode and Grok use `fadeno init` instead.']),
   completion: page('Emit sourceable Bash completion.', 'fadeno completion bash'),
 };
@@ -128,43 +133,47 @@ const NESTED: Record<string, PageSeed> = {
 };
 
 const OPTION_HINTS: Record<string, string> = {
-  '--adversarial': 'Adversarial judgment file', '--agent-id': 'Host agent identity', '--all': 'Every managed harness',
-  '--allow-failed': 'Accept a failed terminal run', '--archetype': 'Archetype name', '--arm': 'Shadow-pair arm',
-  '--artifact': 'Artifact path', '--actor': 'Actor or role name', '--actor-call': 'Engine actor-call id',
-  '--bakeoffs': 'Show bakeoff scorecards', '--bind': 'Role-to-executor override', '--branch': 'Host branch provenance',
-  '--cancel': 'Dispatch id or tag to cancel', '--check': 'Check applicability only', '--claude': 'Target Claude Code',
-  '--codex': 'Target Codex', '--commit': 'Optional commit provenance', '--comparison': 'Comparison judgment file',
-  '--data-only': 'Definitions without host capability', '--decision': 'Pending decision id', '--diagnostics': 'Persist bounded process diagnostics',
-  '--dispatch-id': 'Immutable host dispatch id', '--harness': 'Executor harness', '--events': 'Include raw event timeline',
-  '--evidence': 'Judge evidence mode', '--event': 'Custom run event type', '--feedback': 'Human decision feedback', '--field': 'Additional event field',
-  '--file': 'Progress status file', '--force': 'Overwrite managed files', '--format': 'Rendered output format',
-  '--from': 'Runtime source directory', '--grok': 'Target Grok Build', '--help': 'Show this command help',
-  '--host-executor': 'Materialized host executor', '--ignored-output': 'Gitignored output retention policy', '--inline': 'Embed input contents',
-  '--input': 'Declared input name and path', '--isolate': 'Use an isolated worktree', '--iteration': 'Loop iteration to target', '--json': 'Emit structured JSON output',
-  '--judge': 'Override judge model reference', '--latest': 'Use newest run', '--legacy': 'Enable explicit legacy compatibility',
-  '--max-transitions': 'Engine transition limit', '--measure-only': 'Measure without adjudicating', '--member': 'Map member attribution',
-  '--merge': 'Dispatch id or tag to merge', '--model': 'Direct model reference', '--n': 'Maximum shadow pairings',
-  '--allow-relay-mismatch': 'Proceed despite a failed relay-fidelity check',
-  '--native-executor': 'Legacy host-executor spelling', '--no-brief': 'Skip archetype brief preamble',
-  '--no-merge': 'Keep the diff instead of merging it back', '--note': 'Free text recorded on the request',
-  '--no-record': 'Preview without recording',
-  '--no-steering': 'Do not scaffold steering', '--non-interactive': 'Never prompt during setup', '--omp': 'Target omp',
-  '--opencode': 'Target OpenCode', '--output': 'Output artifact path or selector', '--parallel': 'Concurrent deliveries in isolated worktrees',
-  '--prepare': 'Write blinded judge prompts', '--prompt-file': 'Read prompt from file', '--prompt-sha256': 'Prompt content SHA-256',
-  '--purge-user-data': 'Also remove shared user data', '--rate': 'Shadow sampling rate', '--reason': 'Failure or withdrawal reason', '--withdraw': 'Retire a dead dispatch by id or tag',
-  '--work-left': 'Tree still holding a withdrawn dispatch\u2019s work',
-  '--record': 'Record supplied host judgments', '--repo': 'Repository scope', '--report': 'Legacy artifact-path spelling',
-  '--reset-runtime': 'Allow runtime downgrade', '--role': 'Role name', '--run': 'Immutable engine run id',
-  '--schema': 'Document schema kind', '--scope': 'Steering installation scope', '--session': 'Local session scope',
-  '--shadow': 'One-shot challenger reference', '--shared': 'Run in the current worktree', '--source': 'Progress observation source',
-  '--status': 'Run status', '--step': 'Run step id', '--stops': 'List every agent-stop row, uncollapsed',
+  '--agent-cwd': 'Where the agent actually worked',
+  '--all': 'Include closed dispatches',
+  '--archetype': 'Archetype name',
+  '--claude': 'Target Claude Code',
+  '--codex': 'Target Codex',
+  '--discarded': 'Close: the work is not wanted',
+  '--failed': 'Close: the dispatch did not succeed',
+  '--force': 'Overwrite managed files',
+  '--from': 'Ref to cut the worktree from (dispatch), or runtime source directory (setup)',
+  '--grok': 'Target Grok Build',
+  '--harness': 'Executor harness',
+  '--heartbeat': 'Seconds between still-running echoes',
+  '--help': 'Show this command help',
+  '--json': 'Emit structured JSON output',
+  '--kept': 'Close: keep the branch for later',
+  '--merged': 'Close: the work landed',
+  '--message-file': 'File holding the agent\u2019s final message',
+  '--model': 'Direct model reference',
+  '--n': 'Maximum shadow pairings',
+  '--name': 'Semantic dispatch name; also the branch',
+  '--non-interactive': 'Never prompt during setup',
+  '--note': 'Free text recorded on the decision',
+  '--omp': 'Target omp',
+  '--opencode': 'Target OpenCode',
+  '--output': 'Print the report of a dispatch',
+  '--parent': 'Dispatch id this spawn belongs to',
+  '--prompt-file': 'Read prompt from file',
+  '--prompt-sha256': 'Prompt content SHA-256',
+  '--rate': 'Shadow sampling rate',
+  '--repo': 'Repository scope',
+  '--reset-runtime': 'Allow runtime downgrade',
+  '--scope': 'Installation scope',
+  '--session': 'Local session scope',
+  '--session-id': 'Host session the spawn came from',
+  '--shadow': 'One-shot challenger reference',
+  '--shared': 'Work in the live tree instead of a worktree',
   '--strict': 'Fail on an unreachable listing too',
-  '--tag': 'Dispatch recovery label', '--tail': 'Number of recent entries',
-  '--unbind': 'Release a role bound earlier in this run',
-  '--tool': 'Registered tool name', '--user': 'User-default scope',
-  '--verbose': 'Include diagnostic detail', '--version': 'Show Fadeno version',
-  '--wait': 'Wait before recovering output', '--with-hooks': 'Scaffold enforcement hooks', '--with-steering': 'Deprecated compatibility alias; steering is already default',
-  '--workspace': 'Host workspace provenance',
+  '--tail': 'Number of recent entries',
+  '--user': 'User-default scope',
+  '--verbose': 'Include diagnostic detail',
+  '--version': 'Show Fadeno version',
 };
 
 const OPTION_FORMS: Record<string, string> = {
@@ -198,15 +207,19 @@ const withGlobals = (...flags: string[]): readonly string[] => ['--help', '--ver
 const PAGE_OPTIONS: Record<string, readonly string[]> = {
   setup: withGlobals('--codex', '--claude', '--from', '--reset-runtime'),
   status: withGlobals('--verbose', '--codex', '--claude', '--opencode', '--omp'),
-  clean: withGlobals('--force', '--windows'),
   models: withGlobals('--harness', '--json'),
   model: withGlobals('--harness', '--json'),
   dial: withGlobals('--harness', '--session', '--user', '--repo', '--json'),
   shadow: withGlobals('--harness', '--rate', '--n', '--json'),
-  dispatch: withGlobals('--archetype', '--model', '--role', '--harness', '--prompt-file', '--tag', '--shadow', '--isolate', '--shared', '--ignored-output', '--diagnostics', '--no-brief', '--allow-relay-mismatch'),
-  'dispatch-open': withGlobals('--archetype', '--tag', '--note'),
-  'dispatch-close': withGlobals('--reason', '--no-merge', '--tag', '--agent-id'),
-  dispatches: withGlobals('--tail', '--stops', '--json', '--bakeoffs', '--output', '--wait', '--tag', '--cancel', '--withdraw', '--work-left', '--reason', '--merge', '--allow-relay-mismatch'),
+  clean: withGlobals('--force'),
+  dispatch: withGlobals('--archetype', '--model', '--name', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--heartbeat'),
+  'dispatch-open': withGlobals('--archetype', '--model', '--name', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--harness', '--json'),
+  'dispatch-stop': withGlobals('--message-file', '--agent-cwd', '--json'),
+  'dispatch-close': withGlobals('--merged', '--kept', '--discarded', '--failed', '--note'),
+  cancel: withGlobals(),
+  dispatches: withGlobals('--all', '--tail', '--json', '--output'),
+  worktrees: withGlobals('--json'),
+  context: withGlobals('--json'),
   plugin: withGlobals('--codex', '--omp', '--force'),
   completion: withGlobals(),
   'models add': withGlobals('--json'),
@@ -223,36 +236,18 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
 };
 
 const PATH_OPTION_HINTS: Record<string, Record<string, string>> = {
-  clean: {
-    '--force': 'Remove ignored runtime state',
-    '--windows': 'Compact the write-window log instead; deletes nothing, keeps every open window',
-  },
+  clean: { '--force': 'Remove what the preview listed' },
   plugin: { '--force': 'Overwrite generated plugin files' },
   'models remove': { '--force': 'Remove despite live dials, naming each stranded' },
   'model remove': { '--force': 'Remove despite live dials, naming each stranded' },
-  dispatches: {
-    '--output': 'Print saved snapshot bytes for an id, last dispatch, or tag',
-    '--withdraw': 'Retire a dead dispatch that has no executor to signal',
-    '--work-left': 'Tree that still holds the withdrawn dispatch\u2019s work',
-    '--allow-relay-mismatch': 'Merge a relay_attested: false dispatch anyway',
-  },
-  dispatch: {
-    '--isolate': 'Withhold the primary diff from merge-back',
-    '--shared': 'Run directly in the current worktree',
-    '--shadow': 'One-shot challenger model reference',
-    '--allow-relay-mismatch': 'Dispatch despite relay_attested: false, on the record',
-  },
 };
 
 const PATH_OPTION_FORMS: Record<string, Record<string, string>> = {
-  dispatches: {
-    '--output': '--output <id|last|tag:<tag>>',
-    '--cancel': '--cancel <id|tag:<tag>>',
-    '--withdraw': '--withdraw <id|tag:<tag>>',
-    '--work-left': '--work-left <path>',
-    '--merge': '--merge <id|tag:<tag>>',
-  },
-  dispatch: { '--ignored-output': '--ignored-output <kept|discardable>' },
+  dispatches: { '--output': '--output <name|id>', '--tail': '--tail <count>' },
+  dispatch: { '--name': '--name <name>', '--from': '--from <ref>', '--heartbeat': '--heartbeat <seconds>' },
+  'dispatch-open': { '--name': '--name <name>', '--from': '--from <ref>', '--session-id': '--session-id <id>', '--parent': '--parent <id>' },
+  'dispatch-stop': { '--message-file': '--message-file <path>', '--agent-cwd': '--agent-cwd <dir>' },
+  'dispatch-close': { '--note': '--note <text>' },
 };
 
 export const HELP_PATHS: readonly string[] = Object.freeze([...Object.keys(TOP_LEVEL), ...Object.keys(NESTED)].sort());
@@ -306,17 +301,17 @@ export function renderGlobalHelp(): string {
 
 Usage: fadeno <command> [options]
 
-Get started
-  setup       Link the CLI and install host integration
-  status      Effective routing and runtime state
-  dial        Show, set and resolve archetype bindings
+Routing
+  dial        Show, set and resolve archetype bindings (shadow is its alias)
+  models (model)  Inspect the model registry
+  context     What a host session is told
 
-Models and delivery
-  dial, shadow, models (model), steering, dispatch, dispatches, attest
-  dispatch-open, dispatch-close  (runless host lane)
+Dispatches
+  dispatch, dispatch-close, cancel, dispatches, worktrees
+  dispatch-open, dispatch-stop  (the hooks' entry points)
 
 Setup and maintenance
-  setup, status, init, vendor, unvendor, clean, uninstall, plugin, completion
+  setup, status, clean, plugin, completion
 
 Global options
   -h, --help       Show this page or focused command help
