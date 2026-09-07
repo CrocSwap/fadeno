@@ -5,8 +5,8 @@ survive it.
 
 | file | what it is |
 | --- | --- |
-| `spec.html` | **The spec.** What Fadeno becomes. Four OPEN CALL blocks mark decisions made while drafting rather than in the design session. |
-| `decisions.html` | 33 decisions with the reasoning that produced each, plus the measured harness facts. The spec's source. |
+| `spec.html` | **The spec.** What Fadeno becomes. Draft 2: amended 2026-09-07 to keep `cancel` for the command lane (decision 34). |
+| `decisions.html` | 34 decisions with the reasoning that produced each, plus the measured harness facts. The spec's source. |
 | `inventory-2026-09-06.html` | The 45 promises the code made *before* the redesign, with what each cost. Accurate description of the tree as of `fdf3c08`. |
 
 Published copies:

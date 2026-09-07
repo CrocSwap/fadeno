@@ -104,11 +104,11 @@ p { max-width: 68ch; }
 
 <div class="figures">
   <div class="fig cut"><span class="n">~18k</span><div class="l">lines identified<br>for deletion</div></div>
-  <div class="fig cut"><span class="n">74 → 22</span><div class="l">ledger fields</div></div>
+  <div class="fig cut"><span class="n">74 → 23</span><div class="l">ledger fields</div></div>
   <div class="fig keep"><span class="n">4</span><div class="l">surviving pillars:<br>route · spawn · log · context</div></div>
   <div class="fig"><span class="n">5</span><div class="l">canonical archetypes<br>(set is open)</div></div>
   <div class="fig"><span class="n">2</span><div class="l">lanes, invisible<br>to the host</div></div>
-  <div class="fig keep"><span class="n">33</span><div class="l">decisions,<br>none open</div></div>
+  <div class="fig keep"><span class="n">34</span><div class="l">decisions,<br>none open</div></div>
 </div>
 
 <section>
@@ -278,13 +278,13 @@ p { max-width: 68ch; }
 </section>
 
 <section>
-  <h2>The ledger — 74 fields become 22</h2>
+  <h2>The ledger — 74 fields become 23</h2>
   <p style="color:var(--muted);font-size:14px;margin:0 0 16px;">Three row types rather than one, because "started", "the agent stopped" and "the host decided" are three facts, recorded by three parties, at three times.</p>
   <div class="schema">
     <div class="schema-row">
       <div class="rt">opened<span class="rw">by the wrapper — hook on host lane, CLI on command lane</span></div>
       <div class="fields">
-        <span>id</span><span>name</span><span>at</span><span>session</span><span class="n">parent</span><span>archetype</span><span>model</span><span>effort</span><span>explicit_model</span><span>lane</span><span>harness</span><span>workspace{path,branch,base}</span><span>task</span>
+        <span>id</span><span>name</span><span>at</span><span>session</span><span class="n">parent</span><span>archetype</span><span>model</span><span>effort</span><span>explicit_model</span><span>lane</span><span>harness</span><span>workspace{path,branch,base}</span><span>task</span><span>prompt</span><span class="n">process_group</span>
       </div>
     </div>
     <div class="schema-row">
@@ -367,6 +367,17 @@ p { max-width: 68ch; }
     <p class="why">This gives the host/driver ontology a concrete test instead of a judgement call: <em>a harness is a host harness if Fadeno can observe spawns there.</em> Claude and Codex are confirmed; <code>omp</code> qualifies because it already reuses Claude-style hook manifests. Everything else in the catalog — <code>grok</code>, <code>opencode</code>, <code>muse</code>, <code>agy</code> — is driver-only and reached through the command lane, which loses them nothing: the command lane is where Fadeno controls the process outright.</p>
   </div></div>
 </section>
+
+<section>
+  <h2>Amended after acceptance</h2>
+
+  <div class="d"><div class="num">34</div><div>
+    <h3><code>cancel</code> stays, for the command lane only<span class="tag keep">keep</span></h3>
+    <p class="why">Surfaced 2026-09-07 during test triage, when the old cancel verb landed in the delete bucket and the question became whether the need died with the mechanism. The mechanism dies: the supervisor, its inflight claim files and the run-scoped <code>fadeno cancel</code> all belong to drive. The need does not. The spec forbids killing on a timer, and the closing verbs of decisions 21 and 27 are decisions made after the fact; neither is a way for a person to stop a process Fadeno launched. Without one, stopping a command-lane worker means finding the pid by hand, and the ledger did not record it.
+    <br><br>So the opened row gains one field, <code>process_group</code>, present only on the command lane, and one verb signals it. On a host-lane dispatch <code>cancel</code> refuses and says the subagent is the harness's to stop. That reveals the lane, and that is fine: the lane is already on the ledger row, and decision 18's invisibility is about the spawn, not the record. Cancel writes a <code>stopped</code> row, because a signalled process is an outside observation rather than a decision; the dispatch still needs closing. Never automatic: Fadeno never decides to stop anything on its own.</p>
+  </div></div>
+</section>
+
 
 
 </div>

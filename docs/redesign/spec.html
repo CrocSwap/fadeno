@@ -88,7 +88,7 @@ pre .c { color: var(--faint); }
 <div class="wrap">
 
 <header class="masthead">
-  <div class="eyebrow"><span>Specification</span><span>Draft 1</span><span>2026-09-07</span><span>derives from decisions 01–33</span><span>accepted</span></div>
+  <div class="eyebrow"><span>Specification</span><span>Draft 2</span><span>2026-09-07</span><span>derives from decisions 01–34</span><span>accepted</span></div>
   <h1>Fadeno</h1>
   <p class="standfirst">A meta-harness for common subagent workflow patterns, neutral across harnesses and models. It routes work to models by role, wraps the spawn with deterministic scaffolding, and keeps a record nobody has to think about. Everything else is the intelligence's job.</p>
 </header>
@@ -215,7 +215,7 @@ pre .c { color: var(--faint); }
 
 <pre><span class="c"># opened — by the wrapper</span>
 id · name · at · session · <b>parent</b> · archetype · model · effort
-explicit_model · lane · harness · workspace{path,branch,base} · task · prompt
+explicit_model · lane · harness · workspace{path,branch,base} · task · prompt · process_group
 
 <span class="c"># stopped — by the stop hook, an outside observation</span>
 id · at · final_message · dirty
@@ -229,6 +229,7 @@ id · at · verb · note</pre>
   <li>Prompts live <b>outside <code>local/</code></b> so <code>clean</code> cannot orphan the rows that reference them. They are evidence of what was asked, not scratch. Unbounded by design.</li>
   <li>The log records <b>what was asked, never what Fadeno injected</b> — injected text is identical every time, so storing it would make the log describe Fadeno instead of the work.</li>
   <li><code>final_message</code> records <b>presence, never completeness</b>. On Claude's interrupted path the harness supplies no message at all, so its absence says nothing about whether work finished.</li>
+  <li><code>process_group</code> is <b>command lane only</b>: the process group Fadeno launched, recorded so <code>cancel</code> has something to signal. Absent on the host lane, where the subagent belongs to the harness.</li>
 </ul>
 
 <h2><span class="sn">08</span>Command surface</h2>
@@ -240,6 +241,7 @@ id · at · verb · note</pre>
       <tr><td class="m">models</td><td>Inspect the registry; verify an alias actually resolves against its backend.</td></tr>
       <tr><td class="m">dispatches</td><td>List dispatches; show one; find output by UUID or name.</td></tr>
       <tr><td class="m">dispatch-close</td><td>Record the terminal decision for a dispatch.</td></tr>
+      <tr><td class="m">cancel</td><td>Stop a running command-lane dispatch by signalling its process group. Writes a <code>stopped</code> row; the dispatch still needs closing. On a host-lane dispatch it refuses and says the subagent is the harness's to stop.</td></tr>
       <tr><td class="m">worktrees</td><td>Report worktrees holding unmerged work. The cross-session safety net.</td></tr>
       <tr><td class="m">status</td><td>Effective routing, harness integration, and whether anything needs attention.</td></tr>
       <tr><td class="m">clean</td><td>Remove machine-local scratch — worktrees and outputs, never prompts or the ledger.</td></tr>
@@ -262,7 +264,7 @@ id · at · verb · note</pre>
     <li><b>Enforce or attest.</b> No prompt digests, no relay attestation, no tamper detection, no <code>verify</code>. The ledger records; it does not police.</li>
     <li><b>Materialize agent files.</b> Model and effort are set at spawn time. Nothing is written to <code>~/.codex/agents</code> or <code>.claude/agents</code>, so nothing goes stale and no <code>steering apply</code> exists. <b>Fadeno does report a hand-created agent file</b>, because such a file silently overrides what a spawn passes.</li>
     <li><b>Police concurrent writes.</b> No window log, no overlap stamps, no lease, no lock. Worktrees and real merges remove the shared-tree world that machinery existed for.</li>
-    <li><b>Impose deadlines.</b> Nothing Fadeno launches is killed on a timer.</li>
+    <li><b>Impose deadlines.</b> Nothing Fadeno launches is killed on a timer. A person may stop it — that is <code>cancel</code> — but Fadeno never decides to on its own.</li>
     <li><b>Decide what work is worth keeping.</b> It never destroys a worktree holding uncommitted work, and never judges whether output matters.</li>
     <li><b>Diagnose itself.</b> No <code>doctor</code>. With nothing materialized, no second CLI copy and no run ledgers, there is nothing to diagnose.</li>
   </ul>
