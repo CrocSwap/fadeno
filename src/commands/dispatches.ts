@@ -247,6 +247,68 @@ export interface DispatchIgnoredOutputDiscarded {
  * delivery, and `[never attested]` is never printed for a spawn that was never
  * under the attestation contract.
  */
+/**
+ * A `host_agent_stopped` row that NAMED this dispatch — the stop hook read the
+ * id out of the host worktree the agent was standing in, so it is an
+ * identification rather than a correlation heuristic.
+ *
+ * Its presence is the whole point: an entry carrying one must never go on
+ * rendering as potentially live. It says only what is known — an agent stopped
+ * and no terminal receipt was recorded — and never that the work was
+ * unfinished, which nothing here can support.
+ */
+export interface DispatchAgentStop {
+  at: string | null;
+  agentType: string | null;
+  agentId: string | null;
+  /** How the stop row named this dispatch. The writer's vocabulary, kept open. */
+  basis: string;
+  /**
+   * Uncommitted paths in the agent's tree at the stop, or null when git could
+   * not answer. Zero is a real answer and is not the same as null.
+   */
+  dirtyPaths: number | null;
+}
+
+/**
+ * What one `host_agent_stopped` row recorded — the stop hook's whole payload,
+ * as its own entry.
+ *
+ * `git` is a closed vocabulary of three and the distinction is load-bearing:
+ * `clean` is a claim (git answered and listed nothing), `unavailable` is an
+ * admission (git could not answer), and folding the second into the first
+ * would turn "I could not tell" into "there was nothing".
+ *
+ * `lastMessage*` reports the PRESENCE of the agent's final message as its own
+ * fact, because Claude Code measurably supplies none on the interrupted path —
+ * the path that matters. It is not a completeness verdict and must never be
+ * rendered as one: a stop hook fires when the agent is already gone, so nobody
+ * asked it whether the work was done.
+ */
+export interface DispatchStopRecord {
+  agentId: string | null;
+  sessionId: string | null;
+  transcriptPath: string | null;
+  lastMessagePresent: boolean;
+  lastMessageExcerpt: string | null;
+  git: 'clean' | 'dirty' | 'unavailable' | null;
+  /** `git status --short` lines, bounded by the writer. */
+  entries: string[];
+  entryCount: number | null;
+  truncated: boolean;
+  /** Why git could not answer, in git's own words. Null when it did. */
+  note: string | null;
+  /** The isolated host worktree the agent was in, repo-relative; null in the repo root. */
+  tree: string | null;
+  correlation: { dispatchId: string | null; scope: string | null; basis: string };
+  /**
+   * Dispatch ids that had no terminal receipt at this row's position in the
+   * log — computed by the reader, never claimed by the writer. It says what
+   * was open, never which one was this agent's.
+   */
+  openDispatchIds: string[];
+}
+
 export interface DispatchEntry {
   /**
    * Which lane produced this row.
@@ -257,8 +319,14 @@ export interface DispatchEntry {
    * `host` — a `host_delivery` row is a spawn the steering hook recorded, with
    * no worktree, no id and no receipt — and it is not `command`, because
    * nothing was spawned out of process and there is no exit code to read.
+   *
+   * `stopped` is not a dispatch at all: it is a `host_agent_stopped` row, the
+   * receipt an agent's DEATH leaves behind. It gets an entry of its own for
+   * the same reason a refusal does — a repo where every agent is being killed
+   * must not read like a repo where nothing happened — and because most stops
+   * name no dispatch, so there is often nothing to fold it onto.
    */
-  kind: 'command' | 'host' | 'native' | 'rewritten' | 'adhoc-host';
+  kind: 'command' | 'host' | 'native' | 'rewritten' | 'adhoc-host' | 'stopped';
   format: string | null;
   legacy: boolean;
   timestamp: string | null;
@@ -546,6 +614,19 @@ export interface DispatchEntry {
   attestedEffort: string | null;
   /** Whether the matched attestation measured `effort` or said so was `unavailable`; null with no match. */
   attestedEffortEvidence: 'measured' | 'unavailable' | null;
+  /**
+   * A `host_agent_stopped` row named THIS dispatch. Null on every entry no
+   * stop row identified — which is most of them, and which is a silence, never
+   * a claim that the agent is still alive.
+   *
+   * Set only from a stop row whose correlation basis is an identification (the
+   * dispatch id read out of the host worktree path). Nothing here is ever
+   * inferred from timing or from an agent type: a row that names the wrong
+   * dispatch is worse than one that names none.
+   */
+  agentStopped: DispatchAgentStop | null;
+  /** The stop row itself, on a `kind: 'stopped'` entry. Null on every other kind. */
+  stop: DispatchStopRecord | null;
 }
 
 export interface DispatchesOptions {
@@ -1031,6 +1112,10 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     attestedAt: null,
     attestedEffort: null,
     attestedEffortEvidence: null,
+    // Set only by a later `host_agent_stopped` row that NAMES this dispatch id
+    // — see `correlateAgentStop`. Absent is a silence, not a liveness claim.
+    agentStopped: null,
+    stop: null, // only a `kind: 'stopped'` entry carries one
   };
 }
 
@@ -1131,6 +1216,11 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     attestedAt: null,
     attestedEffort: null,
     attestedEffortEvidence: null,
+    // A host spawn carries no dispatch id, so no stop row can ever NAME one.
+    // It stays null here for the life of the entry — which is honest, and is
+    // exactly why the stop row renders as an entry of its own.
+    agentStopped: null,
+    stop: null, // only a `kind: 'stopped'` entry carries one
   };
 }
 
@@ -1223,6 +1313,133 @@ function hostRewrittenEntry(row: Record<string, unknown>): DispatchEntry {
     rate: num(row.rate),
   };
   return entry;
+}
+
+/** The stop hook's tree vocabulary, or null when the row states none we know. */
+function stopGitOf(value: unknown): 'clean' | 'dirty' | 'unavailable' | null {
+  const state = str(value);
+  return state === 'clean' || state === 'dirty' || state === 'unavailable' ? state : null;
+}
+
+/** An object field, or an empty object — so every read below is total. */
+function objectOf(value: unknown): Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * A `host_agent_stopped` row: a subagent (or Codex managed agent) stopped —
+ * finished, interrupted, killed, or cut off by a session limit — and the stop
+ * hook recorded what was sitting in the tree it had been working in.
+ *
+ * Built on `hostEntry` because the identity half is the same shape, then given
+ * its own `kind` so it can never be mistaken for a delivery. NOTHING was
+ * delivered here and nothing ran: this row is a death certificate, and the
+ * only positive claims on it are the ones the hook could observe.
+ *
+ * The event name is the claim, exactly as in `hostRefusedEntry`: a row whose
+ * `workspace` object is missing or malformed still renders as a stop, with the
+ * tree marked unreadable, rather than quietly reading as a clean one.
+ *
+ * NOT correlated with attestations, and it must not be: `correlateAttestation`
+ * walks `kind: 'host'` entries only, and a stop is not a delivery that could
+ * have attested anything.
+ */
+function stoppedEntry(row: Record<string, unknown>): DispatchEntry {
+  const entry = hostEntry(row);
+  const workspace = objectOf(row.workspace);
+  const message = objectOf(row.last_message);
+  const correlation = objectOf(row.dispatch_correlation);
+  const entryCount = num(workspace.entry_count);
+  entry.kind = 'stopped';
+  entry.archetype = null; // a stop names an agent type, never an archetype
+  entry.agentType = str(row.agent_type);
+  entry.model = str(row.model); // Codex publishes it on this event; Claude does not
+  entry.stop = {
+    agentId: str(row.agent_id),
+    sessionId: str(row.session_id),
+    transcriptPath: str(row.agent_transcript_path),
+    // Presence is its own fact, and it is deliberately read from the object
+    // rather than from whether an excerpt survived truncation: a message of
+    // whitespace is still a message the harness handed over.
+    lastMessagePresent: message.present === true,
+    lastMessageExcerpt: str(message.excerpt),
+    git: stopGitOf(workspace.git),
+    entries: Array.isArray(workspace.entries)
+      ? workspace.entries.filter((line): line is string => typeof line === 'string')
+      : [],
+    entryCount,
+    truncated: workspace.truncated === true,
+    note: str(workspace.note),
+    tree: str(workspace.tree),
+    correlation: {
+      dispatchId: str(correlation.dispatch_id),
+      scope: str(correlation.scope),
+      // A row that states no basis is treated as stating none at all — the
+      // conservative reading, and the one that cannot invent an identification.
+      basis: str(correlation.basis) ?? 'unestablished',
+    },
+    openDispatchIds: [], // filled by the reader, which can see the whole log
+  };
+  return entry;
+}
+
+/**
+ * Fold a `host_agent_stopped` row into the log around it.
+ *
+ * Two effects, and the split is the honest part.
+ *
+ * 1. The stop always gets an entry of its own. It is evidence in its own right
+ *    — five agents killed by one 429 is the thing the reporters most needed to
+ *    see — and it must not become invisible just because it happened to land
+ *    near a dispatch.
+ *
+ * 2. It marks a dispatch ONLY when the row named one, and the row only names
+ *    one when the stop hook could read the id out of the host worktree the
+ *    agent was standing in (`.fadeno/local/host-worktrees/<scope>/<id>`). That
+ *    is an identification, not a match: the path IS the id.
+ *
+ * What this deliberately does NOT do is guess. A stop event names an agent,
+ * never a dispatch, and the nearest-preceding heuristic `correlateAttestation`
+ * uses would be available here — same archetype, same append order — but an
+ * attestation that lands on the wrong delivery costs a mislabelled effort,
+ * while a stop that lands on the wrong dispatch tells a host that live work is
+ * dead. So an uncorrelated stop says outright that it names no dispatch, and
+ * carries the ids that were open at that point in the log as context rather
+ * than as an answer.
+ *
+ * The open list is computed HERE rather than written by the hook, for two
+ * reasons: the reader can see the whole log where the hook can only see one
+ * moment of it, and a hook that read the ledger could not finish inside the
+ * 5s budget a killed subagent's cleanup gives it.
+ */
+function correlateAgentStop(
+  entry: DispatchEntry,
+  byDispatchId: Map<string, DispatchEntry>,
+): void {
+  const stop = entry.stop;
+  if (stop == null) return;
+  const named = stop.correlation.dispatchId;
+  const target = named == null ? undefined : byDispatchId.get(named);
+  // A named dispatch that has already settled is not marked: the agent stopped
+  // after its work was received, which is what an ordinary finish looks like.
+  if (target != null && !target.completed && !target.withdrawn) {
+    target.agentStopped = {
+      at: entry.timestamp,
+      agentType: entry.agentType,
+      agentId: stop.agentId,
+      basis: stop.correlation.basis,
+      dirtyPaths: stop.git === 'unavailable' ? null : stop.entryCount,
+    };
+    return;
+  }
+  // Nothing was named, or what was named is not in this log (a truncated head,
+  // a run-scoped worktree whose dispatch lives in a run ledger instead). Say
+  // what was open and claim nothing about which one this agent held.
+  for (const [id, candidate] of byDispatchId) {
+    if (!candidate.completed && !candidate.withdrawn) stop.openDispatchIds.push(id);
+  }
 }
 
 /**
@@ -1474,6 +1691,43 @@ function refusalMarker(predicate: string): string {
   return CHOICE_REFUSALS.get(predicate) ?? `[refused: ${predicate}]`;
 }
 
+/** Status lines named inline on a stop entry before the count takes over. */
+const STOP_PATHS_SHOWN = 3;
+
+/** Open dispatch ids named inline when a stop could not identify one. */
+const STOP_OPEN_SHOWN = 4;
+
+/**
+ * The mark a dispatch carries once a `host_agent_stopped` row NAMED it.
+ *
+ * Rendered on the entry itself rather than only on the stop row, because the
+ * line a host reads when they ask "what is still running?" is this one — and
+ * before this mark existed it said "killed or in flight" (or "OPEN") for a
+ * dispatch whose agent had been dead for seven hours.
+ *
+ * Every clause is something the hook observed. The dirty-path count is a count
+ * of the TREE, never an attribution of those paths to this agent: a host, a
+ * user and other agents write there too. Nothing here says the work was
+ * unfinished, because nothing knows that.
+ */
+function agentStoppedParts(stop: DispatchAgentStop | null): string[] {
+  if (stop == null) return [];
+  const who = stop.agentType ?? '(unnamed agent)';
+  const when = stop.at != null ? ` at ${stop.at}` : '';
+  const parts = [`[agent stopped: ${who}${when} — no terminal receipt was recorded]`];
+  if (stop.dirtyPaths == null) {
+    parts.push('[tree at the stop: git could not answer — unknown, not clean]');
+  } else if (stop.dirtyPaths > 0) {
+    parts.push(
+      `[tree at the stop: ${stop.dirtyPaths} uncommitted path${stop.dirtyPaths === 1 ? '' : 's'} — ` +
+        'the tree\'s, not necessarily this agent\'s]',
+    );
+  } else {
+    parts.push('[tree at the stop: no uncommitted changes]');
+  }
+  return parts;
+}
+
 /**
  * How a merge-back into the caller's tree renders, for every lane that does one.
  *
@@ -1529,6 +1783,8 @@ function mergeParts(merge: DispatchPrimaryMerge | null, recovery: () => string |
  *   — a native spawn writes no snapshot, so its line ends in the prompt digest rather than a path.
  * <ts>  [rewritten]  <agent_type> → <proxy> (relay <model>)  [off the host lane: <reason>]  sha256:<8>
  *   — likewise no snapshot: the kernel owns the one for the dispatch this rewrite produced.
+ * <ts>  [stopped]  <agent_type> (agent <id8>)  STOPPED — no terminal receipt was recorded  [tree: 5 uncommitted paths — …]  [dispatch: NOT ESTABLISHED …]
+ *   — a death certificate, not a dispatch: nothing was dialed, delivered or run.
  * ```
  *
  * Host deliveries render `[host]`, fold any `model_override` into the
@@ -1590,6 +1846,82 @@ export function renderDispatchLine(entry: DispatchEntry): string {
     if (entry.promptSha256 != null) parts.push(`sha256:${entry.promptSha256.slice(0, 8)}`);
     return parts.join('  ');
   }
+  if (entry.kind === 'stopped') {
+    // Deliberately NOT the shared renderer below. Nothing was dialed, nothing
+    // was delivered and nothing ran: `archetype → executor (model)` would read
+    // as a dispatch that failed to resolve rather than as an agent that died.
+    const stop = entry.stop;
+    parts.push(
+      `${entry.agentType ?? '(unnamed agent)'}` +
+        `${stop?.agentId != null ? ` (agent ${stop.agentId.slice(0, 8)})` : ''}` +
+        `${entry.model != null ? ` on ${entry.model}` : ''}`,
+    );
+    parts.push('STOPPED — no terminal receipt was recorded');
+    // The tree, which is the half a transcript cannot give cheaply. The three
+    // states are worded so they can never be confused: a count, an explicit
+    // "nothing", and an explicit "could not tell".
+    if (stop?.git === 'dirty') {
+      const shown = stop.entries.slice(0, STOP_PATHS_SHOWN);
+      const total = stop.entryCount ?? shown.length;
+      const rest = total - shown.length;
+      parts.push(
+        `[tree: ${stop.truncated ? 'at least ' : ''}${total} uncommitted path${total === 1 ? '' : 's'}` +
+          `${shown.length > 0 ? ` — ${shown.join(', ')}${rest > 0 ? ` (+${rest} more)` : ''}` : ''}]`,
+      );
+    } else if (stop?.git === 'clean') {
+      parts.push('[tree: no uncommitted changes at the stop]');
+    } else {
+      // Never "clean". A probe that could not run said nothing about the tree,
+      // and reading its silence as an all-clear is the exact shape of the
+      // silent wrong answer the rest of this file is built to avoid.
+      parts.push(
+        `[tree: git could not answer — unknown, not clean` +
+          `${stop?.note != null ? `: ${excerpt(stop.note, ERROR_EXCERPT)}` : ''}]`,
+      );
+    }
+    if (stop?.tree != null) parts.push(`[in ${flatPath(stop.tree)}]`);
+    // The agent's own last words, and NOT a verdict on them. A stop hook fires
+    // when the agent is already gone, so nobody asked it whether the work was
+    // complete — this line reports whether the harness handed over a final
+    // message at all, which is a different and knowable fact. Claude supplies
+    // none on the interrupted path, so absence here is routine and is never
+    // evidence that the agent had nothing to say.
+    if (stop?.lastMessagePresent === true) {
+      parts.push(
+        `[final message: ${stop.lastMessageExcerpt != null ? `"${excerpt(stop.lastMessageExcerpt, NOTE_EXCERPT)}"` : '(recorded, no excerpt)'}]`,
+      );
+    } else {
+      parts.push('[no final message recorded — the agent stated no completion verdict]');
+    }
+    // Which dispatch, or an explicit refusal to name one.
+    const correlated = stop?.correlation.dispatchId;
+    if (correlated != null) {
+      parts.push(
+        `[dispatch ${correlated.slice(0, 8)}` +
+          `${stop!.correlation.scope != null ? ` (${stop!.correlation.scope})` : ''}` +
+          ` — identified by ${stop!.correlation.basis}]`,
+      );
+    } else {
+      parts.push('[dispatch: NOT ESTABLISHED — a stop event names an agent, never a dispatch]');
+      const open = stop?.openDispatchIds ?? [];
+      if (open.length > 0) {
+        const shown = open.slice(0, STOP_OPEN_SHOWN).map((id) => id.slice(0, 8));
+        const rest = open.length - shown.length;
+        parts.push(
+          `[open at this point: ${shown.join(', ')}${rest > 0 ? ` (+${rest} more)` : ''} — ` +
+            'which, if any, was this agent\'s is not recorded]',
+        );
+      } else {
+        parts.push('[no dispatch was open at this point]');
+      }
+    }
+    if (stop?.transcriptPath != null) {
+      parts.push(`[transcript ${excerpt(flatPath(stop.transcriptPath), PATH_EXCERPT)}]`);
+    }
+    if (entry.sessionEffort != null) parts.push(`[session effort: ${entry.sessionEffort}]`);
+    if (entry.format != null && formatTier(entry.format) === 'older') parts.push(`[format ${entry.format}]`);
+    return parts.join('  ');
+  }
   if (entry.kind === 'adhoc-host') {
     // Deliberately NOT the shared renderer below. That one reads
     // `archetype → executor (model)`, and a runless host dispatch has no
@@ -1603,7 +1935,16 @@ export function renderDispatchLine(entry: DispatchEntry): string {
     // does not exist here.
     parts.push(`${entry.archetype ?? '(no archetype)'} → in-session agent (isolated worktree)`);
     if (!entry.completed) {
-      parts.push('OPEN — no terminal receipt yet');
+      // "OPEN" reads as "possibly still working", and for seven hours on
+      // 2026-09-05 that is exactly what a dead agent's dispatch said. A stop
+      // row that NAMED this dispatch settles the question the other way — the
+      // agent is gone — without claiming anything about whether it finished.
+      parts.push(
+        entry.agentStopped != null
+          ? 'AGENT STOPPED — no terminal receipt'
+          : 'OPEN — no terminal receipt yet',
+      );
+      parts.push(...agentStoppedParts(entry.agentStopped));
       if (entry.workspace != null) parts.push(`[workspace ${flatPath(entry.workspace)}]`);
       parts.push(
         `[close it: fadeno dispatch-close ${entry.dispatchId != null ? entry.dispatchId.slice(0, 8) : '<id>'}]`,
@@ -1694,9 +2035,17 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       parts.push(
         `retired by the operator, no completion row${entry.withdrawnReason != null ? `: ${excerpt(entry.withdrawnReason, ERROR_EXCERPT)}` : ''}`,
       );
+    } else if (entry.agentStopped != null) {
+      // Same fix as the withdraw receipt, arriving by a different route: this
+      // line used to say "killed or in flight" forever. A stop row that named
+      // this dispatch removes the "in flight" half — the agent is gone — and
+      // still refuses to invent an exit code nobody measured, or a verdict on
+      // whether the work was done.
+      parts.push('AGENT STOPPED — no completion row was ever written');
     } else {
       parts.push('no completion recorded (killed or in flight)');
     }
+    parts.push(...agentStoppedParts(entry.agentStopped));
     // Rendered outside the chain on purpose. A ledger carrying BOTH receipts
     // is corrupt — the withdraw preconditions refuse a completed dispatch —
     // and the honest render of a corrupt pair shows both facts rather than
@@ -1939,7 +2288,9 @@ function summarize(
  * what?" — kernel `dispatch_requested`/`dispatch_completed` rows correlated by
  * `dispatch_id` into one logical entry each, `dispatch_refused` rows as
  * standalone command entries, plus the steering hook's `host_delivery` and
- * `host_refused` rows. Every refusal is a logical entry of its own and so
+ * `host_refused` rows, and the stop hook's `host_agent_stopped` rows —
+ * receipts an agent's DEATH leaves behind, which mark the dispatch they name
+ * so it stops reading as live. Every refusal is a logical entry of its own and so
  * counts against `--tail` exactly like a delivery does: a denial loop is
  * evidence, and a tail that quietly dropped it would hide the one thing
  * worth seeing. Order is append order (oldest → newest), never
@@ -2032,6 +2383,16 @@ function foldEvidenceRow(
   // is the failure this row exists to end.
   if (event === 'native_spawn') {
     entries.push(nativeSpawnEntry(row));
+    return 'read';
+  }
+  // An agent STOPPED — the receipt a death leaves behind. Its own entry for
+  // the same reason a refusal is: until this row existed, a host agent killed
+  // by a 429 left nothing at all, and `fadeno dispatches` went on showing its
+  // dispatch as potentially live forever.
+  if (event === 'host_agent_stopped') {
+    const entry = stoppedEntry(row);
+    correlateAgentStop(entry, byDispatchId);
+    entries.push(entry);
     return 'read';
   }
   if (event === 'host_attestation') {
@@ -2187,6 +2548,70 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
     lines: shown.map(renderDispatchLine),
     summary: summarize(shown.length, entries.length, skipped, skippedNewerFormat, true, path),
   };
+}
+
+/** A stop that IDENTIFIED a dispatch, plus the worktree scope it was read from. */
+export interface AgentStopRecord extends DispatchAgentStop {
+  /** The host-worktree scope the id came from — a run id, or `adhoc`. */
+  scope: string | null;
+}
+
+/**
+ * Every `host_agent_stopped` row that NAMED a dispatch, keyed by dispatch id.
+ *
+ * The second consumer of the stop row, and deliberately built on the SAME
+ * parser (`stoppedEntry`) as the listing: `fadeno show` projects the RUN
+ * ledger, which the stop hook does not write to, so without this it would go
+ * on rendering a killed agent's host dispatch as `running` while
+ * `fadeno dispatches` said the agent was gone. Two surfaces disagreeing about
+ * whether work is live is the failure this whole row exists to end, and a
+ * second private reader of the same rows is how that lands.
+ *
+ * Keyed by dispatch id alone: ids are uuids, so the scope is carried for
+ * display rather than for matching. The LAST stop wins — a dispatch whose
+ * worktree saw two agents stop is described by the most recent one.
+ *
+ * Best-effort by construction: a missing log, a torn line or an unparseable
+ * row yields no record, never an exception. This is a projection, and a
+ * projection that throws takes the whole `show` with it.
+ */
+export function loadAgentStops(opts: { cwd?: string; repoRoot?: string } = {}): Map<string, AgentStopRecord> {
+  const stops = new Map<string, AgentStopRecord>();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  const absolute = join(repoRoot, DISPATCHES_FILE);
+  if (!existsSync(absolute)) return stops;
+  let text: string;
+  try {
+    text = readFileSync(absolute, 'utf8');
+  } catch {
+    return stops;
+  }
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue;
+    let row: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+      row = parsed as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (str(row.event) !== 'host_agent_stopped') continue;
+    const entry = stoppedEntry(row);
+    const stop = entry.stop;
+    // No id, no record. A stop that could not identify a dispatch is real
+    // evidence and renders in the listing; it simply has nothing to say here.
+    if (stop?.correlation.dispatchId == null) continue;
+    stops.set(stop.correlation.dispatchId, {
+      at: entry.timestamp,
+      agentType: entry.agentType,
+      agentId: stop.agentId,
+      basis: stop.correlation.basis,
+      dirtyPaths: stop.git === 'unavailable' ? null : stop.entryCount,
+      scope: stop.correlation.scope,
+    });
+  }
+  return stops;
 }
 
 interface OutputRecord {

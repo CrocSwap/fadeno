@@ -160,6 +160,31 @@ const CLAIMS: Claim[] = [
     // inert cargo, and a guard that stops writing its row makes an unsteered
     // spawn indistinguishable from no spawn at all — which is precisely the
     // state the 2026-09-04 receipt was recorded in.
+    // The stop receipt, whose two halves fail silently in exactly the way the
+    // spawn guard's do — a manifest that never registers the script makes the
+    // hook inert cargo, and a hook that stops writing its row puts a killed
+    // agent back to reading as potentially live forever, which is the state
+    // three field reports were filed from. Both harnesses' scripts and both
+    // manifests are registered, plus the reader's own event name: a row kind
+    // `foldEvidenceRow` does not handle is counted as unreadable DAMAGE, so the
+    // writer and the reader have to move together.
+    id: 'agent-stop-receipt',
+    doc: {
+      files: ['docs/architecture.md'],
+      patterns: [/agent-stop\.mjs/, /host_agent_stopped/, /SubagentStop/],
+    },
+    src: {
+      files: [
+        'templates/claude/hooks/agent-stop.mjs',
+        'templates/claude/hooks/hooks.json',
+        'templates/codex/hooks/agent-stop.mjs',
+        'templates/codex/hooks/hooks.json',
+        'src/commands/dispatches.ts',
+      ],
+      patterns: [/host_agent_stopped/, /agent-stop\.mjs/, /SubagentStop/],
+    },
+  },
+  {
     id: 'codex-spawn-guard',
     doc: {
       files: ['docs/architecture.md'],

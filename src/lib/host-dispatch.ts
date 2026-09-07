@@ -114,6 +114,22 @@ export function hostRequestTerminalState(events: RunEvent[], dispatchId: string)
   return 'requested';
 }
 
+/**
+ * Whether a request state is one of the terminal receipts — "is this over?"
+ * asked of a state rather than of a ledger.
+ *
+ * Derived from the SAME `TERMINAL_RECEIPTS` list as `hostRequestTerminalState`
+ * rather than re-spelled at the call site, for the reason that list's own
+ * comment gives: a private copy is how a new receipt becomes terminal in most
+ * of the codebase and invisible in the one caller that wrote it out by hand.
+ * `hostRequestTerminalState` never returns null — a live request answers
+ * `requested` or `started` — so a caller testing for "still open" needs this
+ * and not a null check.
+ */
+export function isHostRequestSettled(state: HostRequestState): boolean {
+  return TERMINAL_RECEIPTS.some((receipt) => receipt.state === state);
+}
+
 export type DispatchProgressState = 'running' | 'waiting_input' | 'blocked' | 'idle';
 export type DispatchProgressSource = 'agent' | 'harness' | 'director';
 

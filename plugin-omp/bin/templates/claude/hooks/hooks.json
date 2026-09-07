@@ -1,6 +1,17 @@
 {
-  "description": "Route command-backed Fadeno agents, enforce proxy relay, and retain explicitly enabled host mode for one session.",
+  "description": "Route command-backed Fadeno agents, enforce proxy relay, record every subagent's stop, and retain explicitly enabled host mode for one session.",
   "hooks": {
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/agent-stop.mjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "startup|resume|clear|compact",

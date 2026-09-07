@@ -20525,6 +20525,9 @@ function hostRequestTerminalState(events, dispatchId) {
   if (mine.some((event) => event.type === "actor_dispatched")) return "started";
   return "requested";
 }
+function isHostRequestSettled(state) {
+  return TERMINAL_RECEIPTS.some((receipt) => receipt.state === state);
+}
 function hostRequestProfile(lookup) {
   const snapshots = lookup.events.filter((event) => event.type === "profile_snapshotted");
   if (snapshots.length !== 1) {
@@ -25564,7 +25567,12 @@ function requestedEntry(row) {
     // already a kernel measurement, so these stay null for its whole life.
     attestedAt: null,
     attestedEffort: null,
-    attestedEffortEvidence: null
+    attestedEffortEvidence: null,
+    // Set only by a later `host_agent_stopped` row that NAMES this dispatch id
+    // — see `correlateAgentStop`. Absent is a silence, not a liveness claim.
+    agentStopped: null,
+    stop: null
+    // only a `kind: 'stopped'` entry carries one
   };
 }
 function hostEntry(row) {
@@ -25664,7 +25672,13 @@ function hostEntry(row) {
     // one — see `correlateAttestation`, called from the main read loop below.
     attestedAt: null,
     attestedEffort: null,
-    attestedEffortEvidence: null
+    attestedEffortEvidence: null,
+    // A host spawn carries no dispatch id, so no stop row can ever NAME one.
+    // It stays null here for the life of the entry — which is honest, and is
+    // exactly why the stop row renders as an entry of its own.
+    agentStopped: null,
+    stop: null
+    // only a `kind: 'stopped'` entry carries one
   };
 }
 function hostRefusedEntry(row) {
@@ -25697,6 +25711,69 @@ function hostRewrittenEntry(row) {
     rate: num(row.rate)
   };
   return entry;
+}
+function stopGitOf(value) {
+  const state = str2(value);
+  return state === "clean" || state === "dirty" || state === "unavailable" ? state : null;
+}
+function objectOf(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function stoppedEntry(row) {
+  const entry = hostEntry(row);
+  const workspace = objectOf(row.workspace);
+  const message = objectOf(row.last_message);
+  const correlation = objectOf(row.dispatch_correlation);
+  const entryCount = num(workspace.entry_count);
+  entry.kind = "stopped";
+  entry.archetype = null;
+  entry.agentType = str2(row.agent_type);
+  entry.model = str2(row.model);
+  entry.stop = {
+    agentId: str2(row.agent_id),
+    sessionId: str2(row.session_id),
+    transcriptPath: str2(row.agent_transcript_path),
+    // Presence is its own fact, and it is deliberately read from the object
+    // rather than from whether an excerpt survived truncation: a message of
+    // whitespace is still a message the harness handed over.
+    lastMessagePresent: message.present === true,
+    lastMessageExcerpt: str2(message.excerpt),
+    git: stopGitOf(workspace.git),
+    entries: Array.isArray(workspace.entries) ? workspace.entries.filter((line) => typeof line === "string") : [],
+    entryCount,
+    truncated: workspace.truncated === true,
+    note: str2(workspace.note),
+    tree: str2(workspace.tree),
+    correlation: {
+      dispatchId: str2(correlation.dispatch_id),
+      scope: str2(correlation.scope),
+      // A row that states no basis is treated as stating none at all — the
+      // conservative reading, and the one that cannot invent an identification.
+      basis: str2(correlation.basis) ?? "unestablished"
+    },
+    openDispatchIds: []
+    // filled by the reader, which can see the whole log
+  };
+  return entry;
+}
+function correlateAgentStop(entry, byDispatchId) {
+  const stop = entry.stop;
+  if (stop == null) return;
+  const named = stop.correlation.dispatchId;
+  const target = named == null ? void 0 : byDispatchId.get(named);
+  if (target != null && !target.completed && !target.withdrawn) {
+    target.agentStopped = {
+      at: entry.timestamp,
+      agentType: entry.agentType,
+      agentId: stop.agentId,
+      basis: stop.correlation.basis,
+      dirtyPaths: stop.git === "unavailable" ? null : stop.entryCount
+    };
+    return;
+  }
+  for (const [id, candidate] of byDispatchId) {
+    if (!candidate.completed && !candidate.withdrawn) stop.openDispatchIds.push(id);
+  }
 }
 function correlateAttestation(entries, row) {
   const archetype = str2(row.archetype);
@@ -25813,6 +25890,24 @@ var CHOICE_REFUSALS = /* @__PURE__ */ new Map([
 function refusalMarker(predicate) {
   return CHOICE_REFUSALS.get(predicate) ?? `[refused: ${predicate}]`;
 }
+var STOP_PATHS_SHOWN = 3;
+var STOP_OPEN_SHOWN = 4;
+function agentStoppedParts(stop) {
+  if (stop == null) return [];
+  const who = stop.agentType ?? "(unnamed agent)";
+  const when = stop.at != null ? ` at ${stop.at}` : "";
+  const parts = [`[agent stopped: ${who}${when} \u2014 no terminal receipt was recorded]`];
+  if (stop.dirtyPaths == null) {
+    parts.push("[tree at the stop: git could not answer \u2014 unknown, not clean]");
+  } else if (stop.dirtyPaths > 0) {
+    parts.push(
+      `[tree at the stop: ${stop.dirtyPaths} uncommitted path${stop.dirtyPaths === 1 ? "" : "s"} \u2014 the tree's, not necessarily this agent's]`
+    );
+  } else {
+    parts.push("[tree at the stop: no uncommitted changes]");
+  }
+  return parts;
+}
 function mergeParts(merge, recovery) {
   if (merge == null || merge.status === "skipped") return [];
   const parts = [];
@@ -25860,10 +25955,66 @@ function renderDispatchLine(entry) {
     if (entry.promptSha256 != null) parts.push(`sha256:${entry.promptSha256.slice(0, 8)}`);
     return parts.join("  ");
   }
+  if (entry.kind === "stopped") {
+    const stop = entry.stop;
+    parts.push(
+      `${entry.agentType ?? "(unnamed agent)"}${stop?.agentId != null ? ` (agent ${stop.agentId.slice(0, 8)})` : ""}${entry.model != null ? ` on ${entry.model}` : ""}`
+    );
+    parts.push("STOPPED \u2014 no terminal receipt was recorded");
+    if (stop?.git === "dirty") {
+      const shown = stop.entries.slice(0, STOP_PATHS_SHOWN);
+      const total = stop.entryCount ?? shown.length;
+      const rest = total - shown.length;
+      parts.push(
+        `[tree: ${stop.truncated ? "at least " : ""}${total} uncommitted path${total === 1 ? "" : "s"}${shown.length > 0 ? ` \u2014 ${shown.join(", ")}${rest > 0 ? ` (+${rest} more)` : ""}` : ""}]`
+      );
+    } else if (stop?.git === "clean") {
+      parts.push("[tree: no uncommitted changes at the stop]");
+    } else {
+      parts.push(
+        `[tree: git could not answer \u2014 unknown, not clean${stop?.note != null ? `: ${excerpt(stop.note, ERROR_EXCERPT)}` : ""}]`
+      );
+    }
+    if (stop?.tree != null) parts.push(`[in ${flatPath(stop.tree)}]`);
+    if (stop?.lastMessagePresent === true) {
+      parts.push(
+        `[final message: ${stop.lastMessageExcerpt != null ? `"${excerpt(stop.lastMessageExcerpt, NOTE_EXCERPT)}"` : "(recorded, no excerpt)"}]`
+      );
+    } else {
+      parts.push("[no final message recorded \u2014 the agent stated no completion verdict]");
+    }
+    const correlated = stop?.correlation.dispatchId;
+    if (correlated != null) {
+      parts.push(
+        `[dispatch ${correlated.slice(0, 8)}${stop.correlation.scope != null ? ` (${stop.correlation.scope})` : ""} \u2014 identified by ${stop.correlation.basis}]`
+      );
+    } else {
+      parts.push("[dispatch: NOT ESTABLISHED \u2014 a stop event names an agent, never a dispatch]");
+      const open = stop?.openDispatchIds ?? [];
+      if (open.length > 0) {
+        const shown = open.slice(0, STOP_OPEN_SHOWN).map((id) => id.slice(0, 8));
+        const rest = open.length - shown.length;
+        parts.push(
+          `[open at this point: ${shown.join(", ")}${rest > 0 ? ` (+${rest} more)` : ""} \u2014 which, if any, was this agent's is not recorded]`
+        );
+      } else {
+        parts.push("[no dispatch was open at this point]");
+      }
+    }
+    if (stop?.transcriptPath != null) {
+      parts.push(`[transcript ${excerpt(flatPath(stop.transcriptPath), PATH_EXCERPT)}]`);
+    }
+    if (entry.sessionEffort != null) parts.push(`[session effort: ${entry.sessionEffort}]`);
+    if (entry.format != null && formatTier(entry.format) === "older") parts.push(`[format ${entry.format}]`);
+    return parts.join("  ");
+  }
   if (entry.kind === "adhoc-host") {
     parts.push(`${entry.archetype ?? "(no archetype)"} \u2192 in-session agent (isolated worktree)`);
     if (!entry.completed) {
-      parts.push("OPEN \u2014 no terminal receipt yet");
+      parts.push(
+        entry.agentStopped != null ? "AGENT STOPPED \u2014 no terminal receipt" : "OPEN \u2014 no terminal receipt yet"
+      );
+      parts.push(...agentStoppedParts(entry.agentStopped));
       if (entry.workspace != null) parts.push(`[workspace ${flatPath(entry.workspace)}]`);
       parts.push(
         `[close it: fadeno dispatch-close ${entry.dispatchId != null ? entry.dispatchId.slice(0, 8) : "<id>"}]`
@@ -25928,9 +26079,12 @@ function renderDispatchLine(entry) {
       parts.push(
         `retired by the operator, no completion row${entry.withdrawnReason != null ? `: ${excerpt(entry.withdrawnReason, ERROR_EXCERPT)}` : ""}`
       );
+    } else if (entry.agentStopped != null) {
+      parts.push("AGENT STOPPED \u2014 no completion row was ever written");
     } else {
       parts.push("no completion recorded (killed or in flight)");
     }
+    parts.push(...agentStoppedParts(entry.agentStopped));
     if (entry.withdrawn && entry.completed) parts.push("[ALSO withdrawn \u2014 corrupt: two terminal receipts]");
     if (entry.withdrawnWorkLeft != null) {
       parts.push(`[work left at ${excerpt(flatPath(entry.withdrawnWorkLeft), PATH_EXCERPT)}]`);
@@ -26057,6 +26211,12 @@ function foldEvidenceRow(row, entries, byDispatchId) {
     entries.push(nativeSpawnEntry(row));
     return "read";
   }
+  if (event === "host_agent_stopped") {
+    const entry = stoppedEntry(row);
+    correlateAgentStop(entry, byDispatchId);
+    entries.push(entry);
+    return "read";
+  }
   if (event === "host_attestation") {
     correlateAttestation(entries, row);
     return "read";
@@ -26169,6 +26329,42 @@ function runDispatches(opts = {}) {
     lines: shown.map(renderDispatchLine),
     summary: summarize(shown.length, entries.length, skipped, skippedNewerFormat, true, path)
   };
+}
+function loadAgentStops(opts = {}) {
+  const stops = /* @__PURE__ */ new Map();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  const absolute = (0, import_node_path19.join)(repoRoot, DISPATCHES_FILE);
+  if (!(0, import_node_fs19.existsSync)(absolute)) return stops;
+  let text2;
+  try {
+    text2 = (0, import_node_fs19.readFileSync)(absolute, "utf8");
+  } catch {
+    return stops;
+  }
+  for (const line of text2.split("\n")) {
+    if (line.trim() === "") continue;
+    let row;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      row = parsed;
+    } catch {
+      continue;
+    }
+    if (str2(row.event) !== "host_agent_stopped") continue;
+    const entry = stoppedEntry(row);
+    const stop = entry.stop;
+    if (stop?.correlation.dispatchId == null) continue;
+    stops.set(stop.correlation.dispatchId, {
+      at: entry.timestamp,
+      agentType: entry.agentType,
+      agentId: stop.agentId,
+      basis: stop.correlation.basis,
+      dirtyPaths: stop.git === "unavailable" ? null : stop.entryCount,
+      scope: stop.correlation.scope
+    });
+  }
+  return stops;
 }
 function isOpenRecord(rec) {
   return !rec.completed && !rec.withdrawn;
@@ -33261,6 +33457,15 @@ function runPlugin(opts = {}) {
     path: guardPath,
     status: emitFile(guardPath, (0, import_node_fs27.readFileSync)((0, import_node_path28.join)(tpl, "claude", "hooks", "dispatch-proxy-guard.mjs"), "utf8"), force)
   });
+  const agentStopPath = (0, import_node_path28.join)(outDir, "hooks", "agent-stop.mjs");
+  results.push({
+    path: agentStopPath,
+    status: emitFile(
+      agentStopPath,
+      stampHookVersion((0, import_node_fs27.readFileSync)((0, import_node_path28.join)(tpl, "claude", "hooks", "agent-stop.mjs"), "utf8")),
+      force
+    )
+  });
   const hostModePath = (0, import_node_path28.join)(outDir, "hooks", "host-mode.mjs");
   results.push({
     path: hostModePath,
@@ -33359,6 +33564,15 @@ function runCodexPlugin(opts = {}) {
     status: emitFile(
       proxyGuardPath,
       stampHookVersion((0, import_node_fs27.readFileSync)((0, import_node_path28.join)(tpl, "codex", "hooks", "dispatch-proxy-guard.mjs"), "utf8")),
+      force
+    )
+  });
+  const agentStopPath = (0, import_node_path28.join)(outDir, "hooks", "agent-stop.mjs");
+  results.push({
+    path: agentStopPath,
+    status: emitFile(
+      agentStopPath,
+      stampHookVersion((0, import_node_fs27.readFileSync)((0, import_node_path28.join)(tpl, "codex", "hooks", "agent-stop.mjs"), "utf8")),
       force
     )
   });
@@ -38876,6 +39090,7 @@ function projectHostRequests(repoRoot, runId, events, now) {
     (event) => event.type === "host_dispatch_requested" && typeof event.extra.dispatch_id === "string"
   );
   const out = [];
+  const stops = loadAgentStops({ repoRoot });
   for (const event of requested) {
     const dispatchId = event.extra.dispatch_id;
     const start = events.find((candidate) => candidate.type === "actor_dispatched" && candidate.extra.dispatch_id === dispatchId);
@@ -38964,7 +39179,14 @@ function projectHostRequests(repoRoot, runId, events, now) {
       workspace,
       baseCommit,
       diffSnapshot,
-      diffBytes
+      diffBytes,
+      // Only while the dispatch is still open. A settled one whose agent later
+      // stopped is just an agent that finished after its work was received,
+      // and marking it would turn an ordinary completion into an alarm.
+      // `hostRequestTerminalState` answers `requested`/`started` for a live
+      // request rather than null, so "still open" is asked of the one terminal
+      // list and never of a null.
+      agentStopped: isHostRequestSettled(settled) ? null : stops.get(dispatchId) ?? null
     });
   }
   return out;
@@ -43410,9 +43632,9 @@ var PERSISTED_SURFACES = [
     format: "jsonl",
     versionField: "format",
     currentVersion: "1.1",
-    reader: "lookupInputProducers / findTagOccupant (src/commands/dispatch.ts), src/commands/dispatches.ts, readAdhocHostRecords (src/commands/dispatch-adhoc.ts)",
-    writer: "appendEvidenceRow (src/commands/dispatch.ts), called by the command lane, by the runless host lane (src/commands/dispatch-adhoc.ts), and by the Claude steering hook, which writes the stamp as a literal",
-    notes: "Per-ROW stamp, not per-file: the log is append-only, so rows outlive the shape they were written in. THREE lanes write here \u2014 command (`dispatch_requested`/`dispatch_completed`/`dispatch_withdrawn`), runless host (`adhoc_host_dispatch_requested`/`adhoc_host_dispatch_closed`), and the steering hook (`host_delivery`/`host_refused`/`host_rewritten`/`native_spawn`/`host_attestation`) \u2014 and every one of their event names is additive under format 1.x, because readers tier on the MAJOR. A row kind the entry reader does not handle is counted as unreadable DAMAGE, so a new event name always ships with its `foldEvidenceRow` case."
+    reader: "lookupInputProducers / findTagOccupant (src/commands/dispatch.ts), src/commands/dispatches.ts, readAdhocHostRecords (src/commands/dispatch-adhoc.ts), loadAgentStops (src/commands/dispatches.ts, consumed by src/commands/show.ts so a run projection can see a killed host agent)",
+    writer: "appendEvidenceRow (src/commands/dispatch.ts), called by the command lane, by the runless host lane (src/commands/dispatch-adhoc.ts), by the Claude steering hook, and by both harnesses' SubagentStop hooks (templates/{claude,codex}/hooks/agent-stop.mjs) \u2014 every hook writes the stamp as a literal",
+    notes: "Per-ROW stamp, not per-file: the log is append-only, so rows outlive the shape they were written in. FOUR writers land here \u2014 command (`dispatch_requested`/`dispatch_completed`/`dispatch_withdrawn`), runless host (`adhoc_host_dispatch_requested`/`adhoc_host_dispatch_closed`), the steering hook (`host_delivery`/`host_refused`/`host_rewritten`/`native_spawn`/`host_attestation`), and the stop hook (`host_agent_stopped`) \u2014 and every one of their event names is additive under format 1.x, because readers tier on the MAJOR. A row kind the entry reader does not handle is counted as unreadable DAMAGE, so a new event name always ships with its `foldEvidenceRow` case."
   },
   {
     id: "run-ledger",
@@ -46725,6 +46947,13 @@ ${heading} \u2014 gitignored content no diff carried out of its worktree${trunca
         const model = request.model != null && request.reasoningEffort != null ? `${request.model}/${request.reasoningEffort}` : request.executor;
         const details = [request.state];
         if (request.withdrawnReason != null) details.push(truncateWithEllipsis(request.withdrawnReason, 120));
+        if (request.agentStopped != null) {
+          const stopped = request.agentStopped;
+          const tree = stopped.dirtyPaths == null ? "tree unknown (git could not answer)" : stopped.dirtyPaths > 0 ? `${stopped.dirtyPaths} uncommitted path${stopped.dirtyPaths === 1 ? "" : "s"} in its tree` : "no uncommitted changes in its tree";
+          details.push(
+            `AGENT STOPPED \u2014 no terminal receipt (${stopped.agentType ?? "unnamed agent"}${stopped.at != null ? ` at ${stopped.at}` : ""}; ${tree})`
+          );
+        }
         const runtime = formatDuration(request.runtimeMs);
         if (runtime != null) details.push(runtime);
         if (request.phase != null) details.push(request.phase);

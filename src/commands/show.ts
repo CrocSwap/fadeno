@@ -15,7 +15,8 @@ import {
   type RunEvent,
   type RunSummary,
 } from '../lib/run-ledger.ts';
-import { hostRequestTerminalState } from '../lib/host-dispatch.ts';
+import { hostRequestTerminalState, isHostRequestSettled } from '../lib/host-dispatch.ts';
+import { loadAgentStops, type AgentStopRecord } from './dispatches.ts';
 import {
   describeConcurrentWrite,
   describeIgnoredOutput,
@@ -270,6 +271,23 @@ export interface HostRequestView {
   baseCommit: string | null;
   diffSnapshot: string | null;
   diffBytes: number | null;
+  /**
+   * The agent working this dispatch STOPPED — a `host_agent_stopped` row named
+   * this dispatch id, read out of the isolated worktree the agent was standing
+   * in — and no terminal receipt followed.
+   *
+   * Set only while `state` is still open. A run ledger has no way to learn
+   * this on its own: nothing writes to it when a subagent is killed by a 429,
+   * so before this field a dead agent's dispatch read `running` for as long as
+   * anyone cared to look — which on 2026-09-05 was about seven hours.
+   *
+   * It is NOT folded into `state`. `state` is the run ledger's own vocabulary,
+   * derived from receipts this run wrote; this is an outside observation about
+   * the agent, and merging the two would let a projection claim a lifecycle
+   * transition no ledger event supports. Null is a silence, never a claim that
+   * the agent is alive.
+   */
+  agentStopped: AgentStopRecord | null;
 }
 
 export interface ShowResult {
@@ -1062,6 +1080,11 @@ function projectHostRequests(repoRoot: string, runId: string, events: RunEvent[]
     (event) => event.type === 'host_dispatch_requested' && typeof event.extra.dispatch_id === 'string',
   );
   const out: HostRequestView[] = [];
+  // Read once for the whole projection. The stop hook writes into
+  // `.fadeno/dispatches.jsonl`, which this ledger knows nothing about, so this
+  // is the only way a run projection can learn that one of its host agents is
+  // gone.
+  const stops = loadAgentStops({ repoRoot });
   for (const event of requested) {
     const dispatchId = event.extra.dispatch_id as string;
     const start = events.find((candidate) => candidate.type === 'actor_dispatched' && candidate.extra.dispatch_id === dispatchId);
@@ -1176,6 +1199,13 @@ function projectHostRequests(repoRoot: string, runId: string, events: RunEvent[]
       baseCommit,
       diffSnapshot,
       diffBytes,
+      // Only while the dispatch is still open. A settled one whose agent later
+      // stopped is just an agent that finished after its work was received,
+      // and marking it would turn an ordinary completion into an alarm.
+      // `hostRequestTerminalState` answers `requested`/`started` for a live
+      // request rather than null, so "still open" is asked of the one terminal
+      // list and never of a null.
+      agentStopped: isHostRequestSettled(settled) ? null : stops.get(dispatchId) ?? null,
     });
   }
   return out;

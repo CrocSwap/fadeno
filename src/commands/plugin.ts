@@ -224,6 +224,18 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
     path: guardPath,
     status: emitFile(guardPath, readFileSync(join(tpl, 'claude', 'hooks', 'dispatch-proxy-guard.mjs'), 'utf8'), force),
   });
+  // The `SubagentStop` receipt. Stamped like the steering hook, and for the
+  // same reason: a stop row has to name the generation that wrote it, which a
+  // session-start hook cache otherwise hides.
+  const agentStopPath = join(outDir, 'hooks', 'agent-stop.mjs');
+  results.push({
+    path: agentStopPath,
+    status: emitFile(
+      agentStopPath,
+      stampHookVersion(readFileSync(join(tpl, 'claude', 'hooks', 'agent-stop.mjs'), 'utf8')),
+      force,
+    ),
+  });
   const hostModePath = join(outDir, 'hooks', 'host-mode.mjs');
   results.push({
     path: hostModePath,
@@ -378,6 +390,19 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
     status: emitFile(
       proxyGuardPath,
       stampHookVersion(readFileSync(join(tpl, 'codex', 'hooks', 'dispatch-proxy-guard.mjs'), 'utf8')),
+      force,
+    ),
+  });
+  // The `SubagentStop` receipt — the twin of the Claude plugin's, stamped for
+  // the same reason. Registered under its own event key rather than inside an
+  // existing `PreToolUse` group, so the guards above keep their trusted hashes
+  // and only the new entry goes through Codex's review flow.
+  const agentStopPath = join(outDir, 'hooks', 'agent-stop.mjs');
+  results.push({
+    path: agentStopPath,
+    status: emitFile(
+      agentStopPath,
+      stampHookVersion(readFileSync(join(tpl, 'codex', 'hooks', 'agent-stop.mjs'), 'utf8')),
       force,
     ),
   });

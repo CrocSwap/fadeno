@@ -573,6 +573,24 @@ function printProjection(projection: ShowProjection): void {
         const model = request.model != null && request.reasoningEffort != null ? `${request.model}/${request.reasoningEffort}` : request.executor;
         const details: string[] = [request.state];
         if (request.withdrawnReason != null) details.push(truncateWithEllipsis(request.withdrawnReason, 120));
+        // The agent working this dispatch is GONE. Pushed second, right behind
+        // the state it contradicts, because the state on its own reads
+        // `running` — which is what a dispatch whose agent a 429 had killed
+        // seven hours earlier used to say. It says only what was observed: an
+        // agent stopped, no receipt followed, and this much was sitting in its
+        // tree. Never that the work was unfinished; nothing knows that.
+        if (request.agentStopped != null) {
+          const stopped = request.agentStopped;
+          const tree = stopped.dirtyPaths == null
+            ? 'tree unknown (git could not answer)'
+            : stopped.dirtyPaths > 0
+              ? `${stopped.dirtyPaths} uncommitted path${stopped.dirtyPaths === 1 ? '' : 's'} in its tree`
+              : 'no uncommitted changes in its tree';
+          details.push(
+            `AGENT STOPPED — no terminal receipt (${stopped.agentType ?? 'unnamed agent'}` +
+              `${stopped.at != null ? ` at ${stopped.at}` : ''}; ${tree})`,
+          );
+        }
         const runtime = formatDuration(request.runtimeMs);
         if (runtime != null) details.push(runtime);
         if (request.phase != null) details.push(request.phase);

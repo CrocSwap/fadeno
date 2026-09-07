@@ -1026,6 +1026,69 @@ not read as running one. This entry is appended after the `Agent` group in
 `hooks/hooks.json` so Codex's per-group trust keys leave the spawn guard's
 existing trusted hash valid and put only the new group through review.
 
+### The stop receipt
+
+Both plugins register a third hook, `templates/claude/hooks/agent-stop.mjs` and
+its Codex twin, on **`SubagentStop`**. It answers a question nothing else in
+Fadeno could: *an agent died — what did it leave behind?* Three field reports in
+two repos say why it exists. On 2026-09-05 a session 429 killed five in-flight
+host agents in polymarket, one of them mid-edit with five partial files, and
+Fadeno recorded none of it; the user found out roughly seven hours later. On
+2026-09-06 the same 429 killed both live worker dispatches, and the reporter's
+own summary is the point — "a live experiment's uncommitted edits sat unverified
+in a shared tree for an hour with no owner". basanos lost three dispatches to
+credit exhaustion the same day. In every case the only record of what the agent
+had been doing was its transcript, and `fadeno dispatches` went on showing the
+dispatch as potentially live forever.
+
+The hook appends one `host_agent_stopped` row carrying the agent's identity as
+the harness gave it (`agent_type`, `agent_id`, `session_id`,
+`agent_transcript_path`) and a `git status --short` snapshot of the tree the
+agent was standing in — which files are dirty, right now, which is the half a
+transcript cannot give cheaply. It fires for **every** agent stop, not only
+Fadeno's, matching the spawn side's `native_spawn` rule: an unsteered agent must
+not read as no agent. Claude Code 2.1.263 runs `SubagentStop` explicitly on the
+interrupted path (`runAgent`'s cleanup stage, on a 5s budget), so a 429, an
+abort and a kill all reach it; a SIGKILL of the harness itself does not, and
+nothing in a hook can change that. Whether Codex fires the event on a killed
+managed agent is **unverified** — its schemas say what the payload is, not when
+it is emitted — so the Codex half covers at least ordinary stops.
+
+Three things it refuses to claim. `git: "unavailable"` is never rendered as
+`clean` — "I could not tell" is not "there was nothing". The dirty-path count is
+a fact about the **tree**, never an attribution to the agent, because a host, a
+user and other agents write there too. And there is **no completeness verdict**:
+a stop hook fires when the agent is already gone, so nobody asked it whether the
+work was done. What the row records instead is whether the harness handed over a
+final assistant message at all — measured, and measurably absent on Claude's
+interrupted path, which is exactly when it would matter most.
+
+Correlation is the hard part and is answered narrowly. A stop event names an
+agent, never a dispatch. The one basis that is not a guess is the isolated host
+worktree: an agent working under `.fadeno/local/host-worktrees/<scope>/<id>` has
+its dispatch id **in its own cwd**, so the hook reads it out of the path (and
+walks up to the repo through that layout and no other, since a worktree has no
+`.fadeno/` of its own). Everything else records `basis: "unestablished"` with a
+null id. The nearest-preceding heuristic `host_attestation` uses was available
+and was deliberately not taken: an attestation landing on the wrong delivery
+costs a mislabelled effort, while a stop landing on the wrong dispatch tells a
+host that live work is dead. The reader supplies the context instead — a stop
+that named nothing renders the dispatch ids that were open at that point in the
+log, as context and never as an answer.
+
+Both surfaces read it. In `fadeno dispatches` a `host_agent_stopped` row is a
+`[stopped]` entry of its own — five agents killed by one 429 is the thing worth
+seeing — and a row that identified a dispatch marks it, so `OPEN — no terminal
+receipt yet` becomes `AGENT STOPPED — no terminal receipt` and the command
+lane's `no completion recorded (killed or in flight)` loses its "in flight"
+half. `fadeno show` reads the same rows through `loadAgentStops`, because the
+run ledger has no way to learn any of this on its own: nothing writes to it when
+a subagent is killed, so a dead agent's host dispatch read `running` for as long
+as anyone cared to look. The stop is surfaced beside `state` rather than folded
+into it — `state` is the run ledger's own vocabulary, and an outside observation
+about an agent must not masquerade as a lifecycle event the ledger never
+recorded.
+
 The Claude `claude-agents/` dir carries two kinds of subagents: the host role
 subagents (`worker`/`reviewer`/`judge`) and the **dispatch proxy agents**
 (`dispatch-worker`/`dispatch-reviewer`/`dispatch-judge`). Claude Code can't run
