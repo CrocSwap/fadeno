@@ -73,70 +73,42 @@ test('codex plugin: skills are the shared bodies + in-plugin invocation policy',
   assert.match(read(outDir, 'skills/fadeno-host/agents/openai.yaml'), /allow_implicit_invocation:\s*false/);
 });
 
-test('codex plugin: carries setup, host-mode hooks, bundled CLI, and built-in definitions', (t) => {
+test('codex plugin: carries setup, the hook family, bundled CLI, and built-in definitions', (t) => {
   const root = tempRepo(t);
   const { outDir } = runCodexPlugin({ cwd: root, outDir: join(root, 'plugin-codex') });
 
-  // User-scoped host agents remain outside the plugin; the runtime and immutable
-  // definitions are self-contained inside it.
+  // No agents: Codex custom agents live outside a plugin, and a Codex hook can
+  // refuse a spawn but not rewrite one, so archetype work goes through the
+  // command lane. No commands either.
   assert.ok(!exists(outDir, 'agents'), 'codex plugin must not ship subagents');
   assert.ok(!exists(outDir, 'commands'), 'codex plugin has no commands component');
   assert.ok(exists(outDir, 'skills/fadeno-setup/SKILL.md'));
   assert.ok(exists(outDir, 'skills/fadeno-host/SKILL.md'));
-  assert.ok(exists(outDir, 'hooks/host-mode.mjs'));
-  assert.ok(exists(outDir, 'hooks/spawn-guard.mjs'));
+  for (const hook of ['hook-lib.mjs', 'spawn-codex.mjs', 'bash-guard.mjs', 'agent-stop.mjs', 'host-mode.mjs']) {
+    assert.ok(exists(outDir, `hooks/${hook}`), hook);
+    assert.equal(read(outDir, `hooks/${hook}`), readFileSync(join(REPO, 'templates', 'hooks', hook), 'utf8'), `${hook} is the template, byte for byte`);
+  }
+  assert.ok(!exists(outDir, 'hooks/spawn-claude.mjs'), 'the Claude spawn hook is not Codex cargo');
   const hooks = JSON.parse(read(outDir, 'hooks/hooks.json'));
   assert.ok(Array.isArray(hooks.hooks.UserPromptSubmit));
   assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/host-mode\.mjs/);
-  // The spawn guard is registered on `PreToolUse`/`Agent` — without the
+  // The spawn hook is registered on `PreToolUse`/`Agent` — without the
   // manifest entry the script is inert cargo, which is exactly the state the
   // Codex plugin was in when a host session spawned three unsteered subagents.
-  assert.ok(Array.isArray(hooks.hooks.PreToolUse));
-  assert.equal(hooks.hooks.PreToolUse[0].matcher, 'Agent');
-  assert.match(hooks.hooks.PreToolUse[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/spawn-guard\.mjs/);
-  // The Bash guard — relay attestation's dispatch side plus the role agents'
-  // destructive-git refusal — is the second `PreToolUse` group, and its
-  // POSITION is part of the contract: Codex keys hook trust per matcher group
-  // by index, so appending leaves the spawn guard's existing trusted hash
-  // valid and puts only the new group through review.
-  assert.ok(exists(outDir, 'hooks/dispatch-proxy-guard.mjs'));
+  // Codex keys hook trust per matcher group by index, so the ORDER is part of
+  // the contract: the spawn hook first, the Bash guard second.
   assert.equal(hooks.hooks.PreToolUse.length, 2);
+  assert.equal(hooks.hooks.PreToolUse[0].matcher, 'Agent');
+  assert.match(hooks.hooks.PreToolUse[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/spawn-codex\.mjs/);
   assert.match(hooks.hooks.PreToolUse[1].matcher, /(^|\|)Bash(\||$)/);
-  assert.match(
-    hooks.hooks.PreToolUse[1].hooks[0].command,
-    /\$\{PLUGIN_ROOT\}\/hooks\/dispatch-proxy-guard\.mjs/,
-  );
-  const proxyGuardTemplate = readFileSync(
-    join(REPO, 'templates', 'codex', 'hooks', 'dispatch-proxy-guard.mjs'),
-    'utf8',
-  );
-  assert.ok(
-    proxyGuardTemplate.includes("const HOOK_VERSION = 'dev';"),
-    "the codex proxy-guard template must keep the literal 'dev' placeholder",
-  );
-  const emittedProxyGuard = read(outDir, 'hooks/dispatch-proxy-guard.mjs');
-  assert.ok(!emittedProxyGuard.includes("HOOK_VERSION = 'dev'"));
-  // Stamped like the Claude steering hook: every evidence row it writes names
-  // the generation that wrote it, which a session-start hook cache hides.
-  const guard = read(outDir, 'hooks/spawn-guard.mjs');
-  const guardTemplate = readFileSync(
-    join(REPO, 'templates', 'codex', 'hooks', 'spawn-guard.mjs'),
-    'utf8',
-  );
-  assert.ok(
-    guardTemplate.includes("const HOOK_VERSION = 'dev';"),
-    "the spawn-guard template must keep the literal 'dev' placeholder",
-  );
-  const guardVersion = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
-  assert.ok(guard.includes(`const HOOK_VERSION = '${guardVersion}';`));
-  assert.ok(!guard.includes("HOOK_VERSION = 'dev'"));
+  assert.match(hooks.hooks.PreToolUse[1].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/bash-guard\.mjs/);
+  assert.match(hooks.hooks.SubagentStop[0].hooks[0].command, /agent-stop\.mjs/);
   assert.ok(exists(outDir, 'bin/fadeno'), 'codex plugin must bundle a binary');
   assert.ok(exists(outDir, 'bin/templates/common/fadeno/executors.yaml'));
   const binary = join(outDir, 'bin', 'fadeno');
   assert.notEqual(statSync(binary).mode & 0o111, 0, 'generated Codex plugin CLI must be executable');
   const expectedVersion = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
   assert.equal(execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim(), expectedVersion);
-  // Also assert bin/package.json markers without executing
   const pkg = JSON.parse(readFileSync(join(outDir, 'bin', 'package.json'), 'utf8'));
   assert.equal(pkg.name, 'fadeno-runtime');
   assert.equal(pkg.version, expectedVersion);

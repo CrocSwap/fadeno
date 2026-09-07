@@ -22,10 +22,22 @@ import { spawn } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { loadLayeredProfile } from './config-layers.ts';
-import { DEFAULT_UNCLOSED_LIMIT, composeWorkerPrompt, nagText, spawnRefusedByLimit, workerContract } from './contracts.ts';
+import {
+  DEFAULT_UNCLOSED_LIMIT,
+  composeWorkerPrompt,
+  describeArchetype,
+  hostVocabulary,
+  nagText,
+  spawnRefusedByLimit,
+  workerContract,
+  type ArchetypeLine,
+} from './contracts.ts';
 import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
+  activeHarness,
+  archetypeDisplaySort,
+  knownArchetypes,
   parseDialRef,
   readLocalDialState,
   resolveDelivery,
@@ -61,6 +73,14 @@ export class SpawnError extends Error {}
 export const DISPATCH_ID_ENV = 'FADENO_DISPATCH_ID';
 /** Where command-lane transcripts land. Machine-local: `clean` may remove them. */
 export const OUTPUTS_DIR = join('.fadeno', 'local', 'outputs');
+/**
+ * Where a host-observed spawn's prompt waits for the dispatch proxy. The hook
+ * cannot hand a proxy the prompt bytes without them travelling through a
+ * model, so the CLI stages them here and the proxy names the file. Scratch:
+ * `fadeno dispatch` copies the prompt into `.fadeno/prompts/<id>.md` as the
+ * record, and `clean` may remove this directory.
+ */
+export const RELAY_DIR = join('.fadeno', 'local', 'relay');
 /** How long `cancel` waits for a signalled group to die before writing the stop itself. */
 export const CANCEL_GRACE_MS = 5_000;
 
@@ -109,15 +129,10 @@ export function resolveArchetype(input: ResolveInput): Resolution {
   if (!BARE_IDENTIFIER_RE.test(archetype)) {
     throw new SpawnError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
   }
-  const layered = (() => {
-    try {
-      return loadLayeredProfile(input.repoRoot, input.userPathOptions);
-    } catch (err) {
-      if (err instanceof ExecutorProfileError) throw new SpawnError(err.message);
-      throw err;
-    }
-  })();
-  const profile = layered.profile;
+  // The host this call runs inside (`FADENO_HARNESS`, set by the hooks and the
+  // plugin launchers) decides which dials are host candidates; a bare shell
+  // is `standalone`, where nothing is.
+  const profile = loadProfile(input.repoRoot, input.userPathOptions);
   const host = profile.host ?? 'standalone';
   try {
     let delivery: CompiledDelivery;
@@ -151,6 +166,94 @@ export function resolveArchetype(input: ResolveInput): Resolution {
     if (err instanceof ExecutorProfileError) throw new SpawnError(err.message);
     throw err;
   }
+}
+
+function loadProfile(repoRoot: string, userPathOptions?: UserPathOptions): ExecutorProfile {
+  try {
+    return loadLayeredProfile(repoRoot, userPathOptions, activeHarness(undefined, userPathOptions)).profile;
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SpawnError(err.message);
+    throw err;
+  }
+}
+
+/** The command lane needs an argv; a resolution without one has nothing to invoke. */
+export function requireCommand(resolution: Resolution): string[] {
+  if (resolution.command == null || resolution.command.length === 0) {
+    throw new SpawnError(
+      `archetype "${resolution.archetype}" resolves to ${resolution.model} on ${resolution.harness ?? 'no harness'}, which cannot be run as a process from here — ` +
+        'there is nothing to invoke. Dial it onto a model with a command lane, or spawn it from inside a host session.',
+    );
+  }
+  return resolution.command;
+}
+
+/**
+ * Every archetype the catalog and the dials know, each with its description
+ * and live routing — the list a host or a spawned director reads. One
+ * function, because `fadeno context` and the director's contract must show
+ * the same table.
+ */
+export function describeArchetypes(input: { repoRoot: string; userPathOptions?: UserPathOptions }): { archetypes: ArchetypeLine[]; profile: ExecutorProfile } {
+  const profile = loadProfile(input.repoRoot, input.userPathOptions);
+  const local = readLocalDialState(input.repoRoot);
+  const names = archetypeDisplaySort(knownArchetypes(profile.archetypes, profile.dials, local.dials, readUserDials(input.userPathOptions)));
+  const archetypes = names.map((name): ArchetypeLine => {
+    const description = describeArchetype(name, profile.archetypes[name]?.description);
+    try {
+      const r = resolveArchetype({ repoRoot: input.repoRoot, archetype: name, userPathOptions: input.userPathOptions });
+      const source = r.source === 'base' ? 'no dial' : r.source === 'binding' ? 'binding' : `${r.source} dial`;
+      return { name, description, model: r.model, effort: r.effort, source };
+    } catch (err) {
+      return { name, description, model: 'unresolvable', effort: null, source: (err as Error).message };
+    }
+  });
+  return { archetypes, profile };
+}
+
+// ---------------------------------------------------------------------------
+// The relay: a host-observed spawn handed to the command lane
+// ---------------------------------------------------------------------------
+
+export interface Relay {
+  /** Absolute path of the staged prompt. */
+  promptFile: string;
+  /** `fadeno` arguments that run the dispatch; argv[0] is the caller's to choose. */
+  args: string[];
+  /** The same, as one shell line with `fadeno` in front. */
+  command: string;
+}
+
+function shellQuote(word: string): string {
+  return /^[A-Za-z0-9_./:@=+,-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Stage a prompt for the dispatch proxy and say exactly what the proxy runs.
+ * Nothing is recorded here: `fadeno dispatch` is the wrapper on that lane and
+ * writes the rows when the proxy invokes it.
+ */
+export function stageRelay(
+  repoRoot: string,
+  input: { prompt: string; archetype: string; name?: string | null; explicitModel?: string | null; shared?: boolean; from?: string | null; parent?: string | null; now?: Date },
+): Relay {
+  const dir = join(repoRoot, RELAY_DIR);
+  mkdirSync(dir, { recursive: true });
+  const stamp = (input.now ?? new Date()).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  const label = sanitizeName(input.name?.trim() || input.archetype);
+  const promptFile = join(dir, `${stamp}-${label}-${shortHex()}.md`);
+  writeFileSync(promptFile, input.prompt);
+  const args = ['dispatch', '--archetype', input.archetype];
+  if (input.name?.trim()) args.push('--name', input.name.trim());
+  if (input.explicitModel?.trim()) args.push('--model', input.explicitModel.trim());
+  if (input.shared) args.push('--shared');
+  if (input.from?.trim()) args.push('--from', input.from.trim());
+  // A host-lane parent has no process to inherit `FADENO_DISPATCH_ID` from, so
+  // the relay carries it by hand; a command-lane parent's child would read the
+  // same id from its environment either way.
+  if (input.parent?.trim()) args.push('--parent', input.parent.trim());
+  args.push('--prompt-file', promptFile);
+  return { promptFile, args, command: ['fadeno', ...args].map(shellQuote).join(' ') };
 }
 
 // ---------------------------------------------------------------------------
@@ -234,12 +337,7 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
     explicitModel: input.explicitModel,
     userPathOptions: input.userPathOptions,
   });
-  if (input.lane === 'command' && (resolution.command == null || resolution.command.length === 0)) {
-    throw new SpawnError(
-      `archetype "${resolution.archetype}" resolves to ${resolution.model} on ${resolution.harness ?? 'no harness'}, which cannot be run as a process from here — ` +
-        'there is nothing to invoke. Dial it onto a model with a command lane, or spawn it from inside a host session.',
-    );
-  }
+  if (input.lane === 'command') requireCommand(resolution);
   const unclosed = unclosedDispatches(repoRoot);
   const refused = spawnRefusedByLimit(unclosed, resolution.unclosedLimit);
   if (refused != null) return { ok: false, refused };
@@ -273,7 +371,18 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
     contractWorktree = { kind: 'shared', reason: sharedReason };
   }
 
-  const contract = workerContract({ id, name, archetype: resolution.archetype, repoRoot, worktree: contractWorktree! });
+  // A director is the archetype whose job is spawning, so its contract carries
+  // the host vocabulary (spec §06): the archetype table with live routing, the
+  // spawn rules, the close obligation and every unclosed dispatch.
+  const vocabulary = resolution.archetype === 'director'
+    ? hostVocabulary({
+        archetypes: describeArchetypes({ repoRoot, userPathOptions: input.userPathOptions }).archetypes,
+        unclosed,
+        unclosedLimit: resolution.unclosedLimit,
+        now,
+      })
+    : null;
+  const contract = workerContract({ id, name, archetype: resolution.archetype, repoRoot, worktree: contractWorktree!, vocabulary });
   const composedPrompt = composeWorkerPrompt(prompt, contract);
   const promptRel = writePrompt(repoRoot, id, prompt);
   const env = input.env ?? process.env;
@@ -337,7 +446,13 @@ export function recordOpened(repoRoot: string, prepared: Prepared, extra: { lane
 export function recordStopped(
   repoRoot: string,
   id: string,
-  input: { finalMessage: string | null; cwd: string | null; exit?: { code: number | null; signal: string | null }; now?: Date },
+  input: {
+    finalMessage: string | null;
+    cwd: string | null;
+    exit?: { code: number | null; signal: string | null };
+    modelObserved?: string | null;
+    now?: Date;
+  },
 ): StoppedRow {
   const dirty = input.cwd != null && existsSync(input.cwd) ? dirtyPaths(input.cwd) : 'unavailable';
   const row: StoppedRow = {
@@ -348,6 +463,7 @@ export function recordStopped(
     dirty,
     cwd: input.cwd,
     ...(input.exit != null ? { exit: input.exit } : {}),
+    ...(input.modelObserved != null ? { model_observed: input.modelObserved } : {}),
   };
   appendRow(repoRoot, row);
   return row;

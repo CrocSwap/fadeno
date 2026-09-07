@@ -85,6 +85,12 @@ export interface StoppedRow {
   cwd?: string | null;
   /** Command lane: how the process ended. */
   exit?: { code: number | null; signal: string | null };
+  /**
+   * The model the agent's transcript says it ran on, when the harness left a
+   * transcript to read. An observation, recorded so a dial the harness did
+   * not apply is visible next to the model the opened row asked for.
+   */
+  model_observed?: string | null;
 }
 
 export interface ClosedRow {

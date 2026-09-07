@@ -1,119 +1,87 @@
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+#!/usr/bin/env node
+// Session-scoped host mode on Claude Code and Codex. The user turns it on
+// with the host command (`/fadeno:host` on Claude, `$fadeno-host` on Codex)
+// and off with `off`; a marker under the plugin's data directory, keyed by
+// session id, carries the state across turns and compaction so nothing has
+// to be written into a repository instruction file.
+//
+// What the session is told (spec §06): the host policy below, and the output
+// of `fadeno context` — the archetype table with live routing, the spawn
+// rules, the close obligation, and every unclosed dispatch. Both come from
+// one source: the policy is mirrored sentence for sentence in the host skill
+// (a test holds them together), and the vocabulary is the CLI's. The full
+// text goes in at activation and again whenever the session starts or is
+// compacted; an ordinary turn gets a one-line reminder, because the nag
+// belongs to spawns, not to prompts.
 
-// Static developer context injected only after this plugin user's explicit
-// /fadeno:host (Claude) or $fadeno-host (Codex) activation. Keep this aligned
-// with templates/common/skills/fadeno-host/SKILL.md; the skill governs the
-// activation turn, while this hook makes the same policy survive later turns
-// and compaction without touching a repository instruction file.
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { finish, hostModeMarker, readEvent, resolveCli, runFadeno, str } from './hook-lib.mjs';
+
+// Mirrored in templates/common/skills/fadeno-host/SKILL.md; keep the sentences identical.
 const HOST_POLICY = `# Fadeno host mode (session-scoped)
 
-The user explicitly enabled Fadeno host mode for this root session. Operate as
-the host coordinator: decompose, route, monitor, and integrate work through
-Fadeno. For complex tasks, independent workstreams, specialist review, or work
-that benefits from recorded verification, prefer Fadeno playbooks and routed
-archetypes. Parallelize independent work only when its expected latency or
-quality benefit outweighs dispatch overhead and merge-conflict risk.
+The user explicitly enabled Fadeno host mode for this session. Operate as the host: decompose the task, delegate through Fadeno's archetypes, read every report yourself, integrate the work, and close every dispatch. Perform small, local, low-risk changes directly when delegation would cost more than the work itself. Do not forward this policy to the agents you spawn; Fadeno gives them their own contract.
 
-Route delegated work through Fadeno's skills, engine, and routed archetypes.
-The managed role agents (worker, reviewer, judge) are the host lane. Generic
-native subagents are refused while host mode is on (both plugins enforce
-this); \`off\` lifts that. Perform small, local, low-risk changes
-directly when delegation would cost more than the work itself. The host
-retains responsibility for decomposition, user decisions, integration,
-verification, and the final report. Do not forward this coordinator policy to
-workers, reviewers, judges, or command executors.
+Generic subagents are refused while host mode is on; name an archetype instead. \`off\` lifts that for the rest of the session.
 
-Fadeno failing is a user-facing event, not a routing problem to solve quietly.
-The user enabled host mode expecting Fadeno delegation to work, so a failure
-of that system stops the work and goes to the user first: a dispatch that is
-refused, fails, times out, or returns nothing; a resolver that errors; a role
-agent that cannot be spawned or is refused for drift; an executor that cannot
-run the checks it was asked to run; a workspace lease that will not clear.
-Report it in the reply, not only in the feedback file, with the dispatch id
-or ledger row, the error text, and what you intend to do next. Never
-substitute a generic native subagent, a different model, or your own hands
-for delegated work without the user's explicit go, and when you propose a
-fallback say what it runs on and what it costs. A feedback entry records the
-friction; it does not authorize working around it.
+Fadeno failing is a user-facing event, not a routing problem to solve quietly. A refused spawn, a dispatch that fails or returns nothing, or a resolver error stops the work and goes to the user first: report it in the reply with the dispatch id or name and the error text. Never substitute a generic subagent, a different model, or your own hands for delegated work without the user's explicit go.
 
-While dispatches are live, every reply names what is running, waiting, failed,
-and completed, with the model and lane of each, so a substitution cannot hide
-inside a progress summary.
+While dispatches are open, every reply names what is running, stopped, and closed, with the model and lane of each.
 
-Fadeno is in beta. When concrete friction attributable to Fadeno occurs, append
-it to ./.fadeno/feedback.md with the date, host, task, observed behavior,
-evidence, impact, and workaround when known. Do not invent feedback. Delegated
-agents report friction to the host; the host alone edits the feedback file.`;
+When concrete friction attributable to Fadeno occurs, append it to ./.fadeno/feedback.md with the date, host, task, observed behavior, evidence, impact, and workaround when known. Do not invent feedback. Delegated agents report friction to you; you alone edit the feedback file.`;
 
-function readInput() {
-  try {
-    const parsed = JSON.parse(readFileSync(0, 'utf8'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
+const REMINDER = 'Fadeno host mode is on for this session: delegate through archetypes, report Fadeno failures to the user, close every dispatch. `fadeno context` prints the vocabulary and every unclosed dispatch.';
+
+const event = readEvent();
+if (event == null) finish(null);
+const name = str(event.hook_event_name) ?? '';
+const session = str(event.session_id);
+const marker = hostModeMarker(session);
+const cwd = str(event.cwd) ?? process.cwd();
+
+/** on / off / null, from the activation surfaces of either harness. */
+function action() {
+  if (name === 'UserPromptExpansion') {
+    if (!/(^|:)host$/.test(str(event.command_name) ?? '')) return null;
+    return /^off(?:\s|$)/i.test((str(event.command_args) ?? '').trim()) ? 'off' : 'on';
   }
-}
-
-function dataRoot() {
-  const value = process.env.PLUGIN_DATA || process.env.CLAUDE_PLUGIN_DATA;
-  return typeof value === 'string' && value.trim() !== '' ? value : null;
-}
-
-function markerPath(input) {
-  const root = dataRoot();
-  const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
-  if (root == null || sessionId === '') return null;
-  const key = createHash('sha256').update(sessionId).digest('hex');
-  return join(root, 'host-mode', `${key}.enabled`);
-}
-
-function actionFor(input) {
-  if (input.hook_event_name === 'UserPromptExpansion') {
-    const name = typeof input.command_name === 'string' ? input.command_name : '';
-    if (!/(^|:)host$/.test(name)) return null;
-    const args = typeof input.command_args === 'string' ? input.command_args.trim() : '';
-    return /^off(?:\s|$)/i.test(args) ? 'off' : 'on';
-  }
-  if (input.hook_event_name === 'UserPromptSubmit') {
-    const prompt = typeof input.prompt === 'string' ? input.prompt : '';
-    const match = /(?:^|\s)\$fadeno-host(?:\s+([^\s]+))?/m.exec(prompt);
+  if (name === 'UserPromptSubmit') {
+    const match = /(?:^|\s)\$fadeno-host(?:\s+(\S+))?/m.exec(str(event.prompt) ?? '');
     if (match == null) return null;
     return (match[1] ?? '').toLowerCase() === 'off' ? 'off' : 'on';
   }
   return null;
 }
 
-function emitContext(event) {
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: event,
-      additionalContext: HOST_POLICY,
-    },
-  }));
+function vocabulary() {
+  const cli = resolveCli(import.meta.url);
+  const harness = process.env.CLAUDE_PLUGIN_ROOT ? 'claude' : process.env.PLUGIN_ROOT ? 'codex' : undefined;
+  const run = runFadeno(cli, ['context'], { cwd, harness });
+  if (run.status === 0 && run.stdout.trim() !== '') return run.stdout.trimEnd();
+  return `(\`fadeno context\` could not be read here: ${run.stderr || run.error || `exit ${run.status}`}. Run it yourself for the archetype table and the unclosed dispatches.)`;
 }
 
-const input = readInput();
-if (input != null) {
-  const marker = markerPath(input);
-  const event = typeof input.hook_event_name === 'string' ? input.hook_event_name : '';
-  const action = actionFor(input);
-
-  if (event === 'SessionEnd') {
-    if (marker != null) rmSync(marker, { force: true });
-  } else if (action === 'off') {
-    if (marker != null) rmSync(marker, { force: true });
-  } else {
-    if (action === 'on' && marker != null) {
-      mkdirSync(dirname(marker), { recursive: true });
-      writeFileSync(marker, 'enabled\n', 'utf8');
-    }
-    // Claude's command expansion already loads the host skill for its current
-    // turn. Returning context there as well would duplicate the whole policy.
-    // Codex has no expansion event, so its activation happens here and needs
-    // the developer-context reinforcement immediately.
-    const active = action === 'on' || (marker != null && existsSync(marker));
-    if (active && event !== 'UserPromptExpansion') emitContext(event);
-  }
+function emit(text) {
+  finish({ hookSpecificOutput: { hookEventName: name, additionalContext: text } });
 }
+
+const act = action();
+if (name === 'SessionEnd' || act === 'off') {
+  if (marker != null) rmSync(marker, { force: true });
+  finish(null);
+}
+if (act === 'on' && marker != null) {
+  mkdirSync(dirname(marker), { recursive: true });
+  writeFileSync(marker, 'enabled\n', 'utf8');
+}
+const active = act === 'on' || (marker != null && existsSync(marker));
+if (!active) finish(null);
+
+// Claude's command expansion loads the host skill for the activating turn, so
+// the policy is not repeated there; the vocabulary still is, because the
+// skill cannot run the CLI. Codex activates on UserPromptSubmit and gets both.
+if (act === 'on') emit(name === 'UserPromptExpansion' ? vocabulary() : `${HOST_POLICY}\n\n${vocabulary()}`);
+if (name === 'SessionStart') emit(`${HOST_POLICY}\n\n${vocabulary()}`);
+if (name === 'UserPromptSubmit') emit(REMINDER);
+finish(null);

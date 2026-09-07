@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DialError, runDialResolve, runDialShow } from '../src/commands/dial.ts';
@@ -15,11 +14,8 @@ import { tempRepo } from './helpers.ts';
  * Resolution strictness under dials:
  * - malformed v3 pin is a hard error on every resolving path (resolve/dispatch/steering share the same message)
  * - legacy pin (bare string or {loadout, overrides}) is a graceful note: show surfaces it, resolution falls through to base
- * - hook deny/fail-open keep exact semantics
  * All calls pin the harness explicitly.
  */
-
-const STEERING_HOOK = join(import.meta.dirname, '..', 'templates', 'claude', 'hooks', 'dispatch-steering.mjs');
 
 const V3_BASE = {
   schema_version: 4,
@@ -87,30 +83,6 @@ function thrownMessage(fn: () => unknown): string {
     return (err as Error).message;
   }
   throw new Error('expected a throw');
-}
-
-function writeFakeFadeno(root: string, script: string): string {
-  const bin = join(root, 'bin');
-  mkdirSync(bin, { recursive: true });
-  const path = join(bin, 'fadeno');
-  writeFileSync(path, script);
-  chmodSync(path, 0o755);
-  return bin;
-}
-
-function runSteeringHook(
-  root: string,
-  event: Record<string, unknown>,
-  fadenoScript: string,
-): { status: number | null; stdout: string; stderr: string } {
-  const bin = writeFakeFadeno(root, fadenoScript);
-  const result = spawnSync(process.execPath, [STEERING_HOOK], {
-    cwd: root,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
-    input: JSON.stringify(event),
-    encoding: 'utf8',
-  });
-  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
 test('dial resolve: a malformed v3 pin throws the same message dispatch would', (t) => {
@@ -186,95 +158,4 @@ test('dial show: render the canon note on the effective view', (t) => {
   const open = runDialShow({ repoRoot: layered, userPathOptions: layeredPaths });
   assert.deepEqual(open.suppressed_canon_archetypes, []);
   assert.equal(open.note, null);
-});
-
-
-test('Claude steering hook: resolver error denies a spawn that would have been rewritten', (t) => {
-  const root = tempRepo(t);
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-  const event = {
-    cwd: root,
-    tool_name: 'Agent',
-    tool_input: { prompt: 'Implement it.', description: 'x', subagent_type: 'worker' },
-  };
-  const result = runSteeringHook(
-    root,
-    event,
-    '#!/bin/sh\nprintf \'%s\\n\' \'.fadeno/local/loadout has unknown key(s) unknown\' >&2\nexit 1\n',
-  );
-  assert.equal(result.status, 0, result.stderr);
-  const decision = JSON.parse(result.stdout) as {
-    hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string };
-  };
-  assert.equal(decision.hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(decision.hookSpecificOutput.permissionDecisionReason, /unknown key/);
-});
-
-test('Claude steering hook: unreadable resolve stdout still fail-opens; native success is unchanged', (t) => {
-  const root = tempRepo(t);
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-  const event = {
-    cwd: root,
-    tool_name: 'Agent',
-    tool_input: { prompt: 'Review it.', description: 'x', subagent_type: 'reviewer' },
-  };
-  const unreadable = runSteeringHook(root, event, '#!/bin/sh\nprintf \'%s\\n\' \'not-json\'\nexit 0\n');
-  assert.equal(unreadable.status, 0, unreadable.stderr);
-  assert.equal(unreadable.stdout, '');
-
-  const native = runSteeringHook(
-    root,
-    event,
-    '#!/bin/sh\nprintf \'%s\\n\' \'{"adapter":"host","model":"opus"}\'\nexit 0\n',
-  );
-  assert.equal(native.status, 0, native.stderr);
-  const decision = JSON.parse(native.stdout) as {
-    hookSpecificOutput: { permissionDecision?: string; updatedInput: { subagent_type: string; model: string } };
-  };
-  assert.equal(decision.hookSpecificOutput.permissionDecision, undefined);
-  assert.equal(decision.hookSpecificOutput.updatedInput.subagent_type, 'fadeno:reviewer');
-  assert.equal(decision.hookSpecificOutput.updatedInput.model, 'opus');
-});
-
-function evidenceRows(root: string): Record<string, unknown>[] {
-  return readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8')
-    .trim()
-    .split('\n')
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-}
-
-test('Claude steering hook: host_delivery records model_applied, distinct from model_override', (t) => {
-  const root = tempRepo(t);
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-
-  // Case 1: a dial-driven rewrite. The caller's tool_input names no model at
-  // all (model_override stays null, same as before), but the resolved slot
-  // rewrites the spawn to opus. Only model_applied can say the rewrite
-  // happened — model_override alone would just look like "nothing asked".
-  const rewriteEvent = {
-    cwd: root,
-    tool_name: 'Agent',
-    tool_input: { prompt: 'Review it.', description: 'x', subagent_type: 'reviewer' },
-  };
-  runSteeringHook(root, rewriteEvent, '#!/bin/sh\nprintf \'%s\\n\' \'{"adapter":"host","model":"opus"}\'\nexit 0\n');
-  const rewritten = evidenceRows(root);
-  assert.equal(rewritten.length, 1);
-  assert.equal(rewritten[0]!.model_override, null);
-  assert.equal(rewritten[0]!.model_applied, 'opus');
-
-  // Case 2: an inheriting host slot (model: current-host) reached through an
-  // explicitly named proxy, so recordHostDelivery still runs. The hook
-  // applies no rewrite at all here, so model_applied must equal whatever the
-  // caller's own tool_input already carried — same value as model_override,
-  // because nothing changed it.
-  const inheritEvent = {
-    cwd: root,
-    tool_name: 'Agent',
-    tool_input: { prompt: 'Review it again.', description: 'x', subagent_type: 'dispatch-reviewer', model: 'sonnet' },
-  };
-  runSteeringHook(root, inheritEvent, '#!/bin/sh\nprintf \'%s\\n\' \'{"adapter":"host","model":"current-host"}\'\nexit 0\n');
-  const inherited = evidenceRows(root);
-  assert.equal(inherited.length, 2);
-  assert.equal(inherited[1]!.model_override, 'sonnet');
-  assert.equal(inherited[1]!.model_applied, 'sonnet');
 });

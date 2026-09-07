@@ -50,6 +50,8 @@ export interface WorkerContractInput {
   worktree:
     | { kind: 'worktree'; absolute: string; branch: string; base: string; upstream: string }
     | { kind: 'shared'; reason: string | null };
+  /** The host vocabulary, for an archetype that will itself spawn (a director). */
+  vocabulary?: string | null;
 }
 
 /** Sentinel lines the reader and tests key on; keep them stable. */
@@ -87,6 +89,10 @@ export function workerContract(input: WorkerContractInput): string {
   lines.push('- Say what you verified and how, and what you could not verify.');
   lines.push('- Recommend whether your work should be merged or discarded, in one line, and why. It is a recommendation: your caller reaches their own conclusion.');
   lines.push('- Do not ask questions you cannot get answered; make a reasonable call, state the assumption, and continue.', '');
+  if (input.vocabulary != null && input.vocabulary.trim() !== '') {
+    lines.push('**You may spawn.** The dispatches you open are recorded under yours; close every one before you finish, and report each by name. What follows is what a host session is told.', '');
+    lines.push(input.vocabulary.trim(), '');
+  }
   lines.push(CONTRACT_FOOTER);
   return lines.join('\n');
 }

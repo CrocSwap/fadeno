@@ -1,7 +1,8 @@
-import { chmodSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { BUILTIN_ARCHETYPE_DESCRIPTIONS } from '../lib/contracts.ts';
+import { ARCHETYPE_DISPLAY_ORDER, parseExecutorProfile, resolveRelay } from '../lib/executors.ts';
 import { copyTree, emitFile, type EmitResult } from '../lib/fsutil.ts';
-import { parseExecutorProfile, resolveRelay } from '../lib/executors.ts';
 import { packageVersion, templatesDir } from '../lib/paths.ts';
 
 export interface PluginOptions {
@@ -16,15 +17,20 @@ export interface PluginResult {
   results: EmitResult[];
 }
 
-// Plugin skill dirs are short (namespaced as fadeno:host, fadeno:setup) and are
-// generated from the same shared SKILL.md bodies used by `fadeno init`. They
-// stay model-invocable; the matching commands/ entries give explicit
-// /fadeno:host, /fadeno:setup slash handles (plugin skills are not reliably
-// slash-invocable on their own).
+const DESCRIPTION =
+  'A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.';
+
+// Plugin skill dirs are short (namespaced as fadeno:host, fadeno:setup) and
+// are generated from the shared SKILL.md bodies. They stay model-invocable;
+// the matching commands/ entries give explicit /fadeno:host, /fadeno:setup
+// slash handles (plugin skills are not reliably slash-invocable on their own).
 const SKILLS = [
   { src: 'fadeno-host', dst: 'host' },
   { src: 'fadeno-setup', dst: 'setup' },
 ] as const;
+
+/** The hooks every plugin ships, and the harness-specific spawn hook each adds. */
+const COMMON_HOOKS = ['hook-lib.mjs', 'bash-guard.mjs', 'agent-stop.mjs', 'host-mode.mjs'] as const;
 
 /**
  * Append `[fadeno <version>]` to a definition's frontmatter description. The
@@ -37,21 +43,6 @@ export function stampSurfaceVersion(md: string): string {
   return md.replace(/^(description:.*?)\s*$/m, `$1 [fadeno ${packageVersion()}]`);
 }
 
-/** The template's placeholder declaration — the anchor both emitters replace. */
-const HOOK_VERSION_DECL = "const HOOK_VERSION = 'dev';";
-
-/**
- * Stamp an emitted hook copy with the package version, so every evidence row it
- * writes names the generation that wrote it. Plugin hooks load once at session
- * start from a version-keyed cache: a session keeps running the previous build's
- * hook after an upgrade, and without the stamp there is no way to tell which
- * generation produced a row written across that transition. The template keeps
- * `'dev'`, so a `dev` row means the template ran directly.
- */
-export function stampHookVersion(js: string): string {
-  return js.replace(HOOK_VERSION_DECL, `const HOOK_VERSION = '${packageVersion()}';`);
-}
-
 /**
  * The Claude relay identity declared by one executor catalog, or null when
  * that catalog states no opinion (or cannot be read at all).
@@ -59,13 +50,10 @@ export function stampHookVersion(js: string): string {
  * Deliberately ONE file rather than the layered profile. An emitted artifact
  * has to be a function of what it is emitted from: `plugin/` is committed and
  * checked for drift, so folding in a developer's user-scope catalog would make
- * the build machine-dependent, and `.claude/agents/` is scaffolding for one
- * repo, so it should follow that repo's catalog and nothing else.
+ * the build machine-dependent.
  *
- * Failure is silent by design, and it is the one place that is right: the
- * alternative to the catalog's value here is the template's own literal, which
- * is valid and servable. (At *resolve* time there is no such alternative, so
- * `dial resolve` raises an unservable relay instead of swallowing it.)
+ * Failure is silent by design: the alternative to the catalog's value here is
+ * the template's own literal, which is valid and servable.
  */
 export function relayModelForClaude(catalogPath: string): string | null {
   if (!existsSync(catalogPath)) return null;
@@ -78,36 +66,92 @@ export function relayModelForClaude(catalogPath: string): string | null {
 }
 
 /**
- * Rewrite a dispatch proxy's frontmatter `model:` to the catalog's relay.
+ * Rewrite the dispatch proxy's frontmatter `model:` to the catalog's relay.
  *
- * A post-copy rewrite rather than a placeholder in the template, for the same
- * reason `stampHookVersion` is one: the template stays a valid, readable,
- * directly-runnable artifact — `templates/claude/claude-agents/*.md` is a real
- * agent definition a developer can read and a test can assert against, and a
- * `__FADENO_RELAY__` token would make it neither. It also keeps the literal
- * that the hook falls back to and the literal the frontmatter ships as the
- * same visible value in the same place.
- *
- * `null` (the catalog states no opinion) leaves the template untouched — the
- * built-in default, never an invented relay. Only a `dispatch-*` proxy's
- * frontmatter is touched: the role agents (`worker.md` and friends) declare no
- * model on purpose, and if one ever did it would be a ROLE identity, which the
- * dial owns and the relay must never overwrite.
+ * A post-copy rewrite rather than a placeholder in the template, so the
+ * template stays a valid, readable, directly-runnable agent definition. `null`
+ * (the catalog states no opinion) leaves the template untouched — the built-in
+ * default, never an invented relay. Only the proxy is touched: the role agents
+ * declare no model on purpose, and if one ever did it would be a ROLE
+ * identity, which the dial owns and the relay must never overwrite.
  */
 export function stampRelayModel(md: string, relayModelId: string | null): string {
   if (relayModelId == null || !md.startsWith('---\n')) return md;
   const end = md.indexOf('\n---\n', 4);
   if (end < 0) return md;
   const frontmatter = md.slice(0, end);
-  if (!/^name: dispatch-/m.test(frontmatter) || !/^model: .*$/m.test(frontmatter)) return md;
+  if (!/^name: dispatch$/m.test(frontmatter) || !/^model: .*$/m.test(frontmatter)) return md;
   return frontmatter.replace(/^model: .*$/m, `model: ${relayModelId}`) + md.slice(end);
 }
 
 /**
- * Emit a Claude Code plugin (the "capability" layer) from the shared templates,
- * so the skills/subagents stay in sync with `fadeno init` rather than being a
- * hand-maintained copy. The plugin also carries the bundled CLI and immutable
- * built-in definitions, so a repo-local data-only init is optional.
+ * A role agent definition for one canonical archetype, in the markdown
+ * frontmatter shape Claude Code and omp both read. Generated, not templated:
+ * the description is the one `fadeno context` prints (contracts.ts), so the
+ * agent list a director reads and the vocabulary it is told cannot drift.
+ * The body is deliberately thin — the task and the dispatch contract arrive
+ * in the prompt, put there by the spawn wrapper.
+ */
+export function roleAgentDefinition(archetype: string, harness: 'claude' | 'omp'): string {
+  const description = BUILTIN_ARCHETYPE_DESCRIPTIONS[archetype];
+  if (description == null) throw new Error(`no builtin description for archetype ${archetype}`);
+  const spawnAs = harness === 'claude' ? `fadeno:${archetype}` : archetype;
+  return [
+    '---',
+    `name: ${archetype}`,
+    `description: ${description} Spawn it as ${spawnAs}; Fadeno routes it to the dialed model, cuts its worktree, and appends the dispatch contract to your prompt.`,
+    '---',
+    '',
+    `You are the \`${archetype}\` archetype of a Fadeno dispatch. Your task and the`,
+    'dispatch contract are in your prompt: the contract says where to work, what',
+    'you own, and what your final message must contain. Follow both. If your prompt',
+    'carries no `## Fadeno dispatch` contract, you were spawned outside Fadeno; do',
+    'the task as asked and say so in your report.',
+    '',
+  ].join('\n');
+}
+
+function emit(results: EmitResult[], path: string, content: string, force: boolean): void {
+  results.push({ path, status: emitFile(path, content, force) });
+}
+
+function emitHooks(results: EmitResult[], outDir: string, tpl: string, spawnHook: string, manifest: string, force: boolean): void {
+  for (const file of [...COMMON_HOOKS, spawnHook]) {
+    emit(results, join(outDir, 'hooks', file), readFileSync(join(tpl, 'hooks', file), 'utf8'), force);
+  }
+  emit(results, join(outDir, 'hooks', 'hooks.json'), readFileSync(join(tpl, 'hooks', manifest), 'utf8'), force);
+}
+
+function emitBundledBin(results: EmitResult[], outDir: string, tpl: string, committedDirName: string, force: boolean): void {
+  // The committed standalone bundle is copied during generation and rebuilt by
+  // scripts/build-bin.mjs, so a fresh plugin has the same self-contained
+  // runtime surface as the committed one.
+  const repoBundle = join(tpl, '..', committedDirName, 'bin');
+  const adjacentBundle = dirname(tpl);
+  const bundledBin = existsSync(join(repoBundle, 'fadeno'))
+    ? repoBundle
+    : existsSync(join(adjacentBundle, 'fadeno'))
+      ? adjacentBundle
+      : null;
+  const destinationBin = join(outDir, 'bin');
+  if (bundledBin != null && resolve(bundledBin) !== resolve(destinationBin)) {
+    copyTree(bundledBin, destinationBin, force, results);
+  }
+  const destinationCli = join(destinationBin, 'fadeno');
+  if (existsSync(destinationCli)) chmodSync(destinationCli, 0o755);
+}
+
+function emitLauncher(results: EmitResult[], skillDir: string, tpl: string, harness: string, force: boolean): void {
+  const launcherPath = join(skillDir, 'scripts', 'fadeno.cjs');
+  emit(results, launcherPath, readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8').replace('__FADENO_HARNESS__', harness), force);
+  chmodSync(launcherPath, 0o755);
+}
+
+/**
+ * Emit a Claude Code plugin from the shared templates: the host and setup
+ * skills with their slash commands, one role agent per canonical archetype
+ * plus the dispatch proxy, the hook family (spawn wrapper, Bash guard, stop
+ * hook, host mode), and the bundled CLI.
  */
 export function runPlugin(opts: PluginOptions = {}): PluginResult {
   const cwd = opts.cwd ?? process.cwd();
@@ -121,8 +165,7 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
     JSON.stringify(
       {
         name: 'fadeno',
-        description:
-          'A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.',
+        description: DESCRIPTION,
         version: packageVersion(),
         author: { name: 'Fadeno' },
         keywords: ['ai', 'agents', 'subagents', 'workflow', 'skills'],
@@ -130,20 +173,13 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
       null,
       2,
     ) + '\n';
-  const manifestPath = join(outDir, '.claude-plugin', 'plugin.json');
-  results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
+  emit(results, join(outDir, '.claude-plugin', 'plugin.json'), manifest, force);
 
   for (const { src, dst } of SKILLS) {
     let md = readFileSync(join(tpl, 'common', 'skills', src, 'SKILL.md'), 'utf8');
-    // Use the short, namespaced skill name (fadeno:runner, fadeno:builder).
-    //
     // Assert before replacing: `String.replace` with a needle that does not
     // occur is a SILENT no-op, so a template whose frontmatter name disagrees
-    // with its directory ships the WRONG name and nothing says so. Observed
-    // when `fadeno-judge/` was renamed to `fadeno-bakeoff/` and the
-    // frontmatter inside was not — the generator emitted `name: fadeno-judge`
-    // into a directory called `compare`, and only a test asserting the
-    // rendered name caught it.
+    // with its directory would ship the WRONG name and nothing would say so.
     if (!md.includes(`name: ${src}`)) {
       throw new Error(
         `templates/common/skills/${src}/SKILL.md must declare \`name: ${src}\` in its frontmatter — ` +
@@ -151,132 +187,61 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
       );
     }
     md = stampSurfaceVersion(md.replace(`name: ${src}`, `name: ${dst}`));
-    const skillPath = join(outDir, 'skills', dst, 'SKILL.md');
-    results.push({ path: skillPath, status: emitFile(skillPath, md, force) });
+    emit(results, join(outDir, 'skills', dst, 'SKILL.md'), md, force);
     const references = join(tpl, 'common', 'skills', src, 'references');
     if (existsSync(references)) copyTree(references, join(outDir, 'skills', dst, 'references'), force, results);
-    const launcherPath = join(outDir, 'skills', dst, 'scripts', 'fadeno.cjs');
-    results.push({
-      path: launcherPath,
-      status: emitFile(
-        launcherPath,
-        readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8')
-          .replace('__FADENO_HARNESS__', 'claude'),
-        force,
-      ),
-    });
-    chmodSync(launcherPath, 0o755);
+    emitLauncher(results, join(outDir, 'skills', dst), tpl, 'claude', force);
   }
 
-  // Slash-command entry points (/fadeno:runner, /fadeno:builder). Plugin skills
-  // are not reliably slash-invocable, so these commands are the explicit handles;
-  // each one drives the matching model-invocable skill.
+  // Slash-command entry points (/fadeno:host, /fadeno:setup).
   copyTree(join(tpl, 'common', 'commands'), join(outDir, 'commands'), force, results);
 
-  // Subagents: reuse the Claude markdown agent definitions (no hooks/mcp/perms,
-  // which plugin agents disallow). They namespace as fadeno:worker / :reviewer /
-  // :judge, plus the fadeno:dispatch-* proxies that relay archetype-shaped
-  // subtasks to `fadeno dispatch` (loadouts-and-dispatch.md, plugin surface).
-  // Descriptions get the version stamp for surface-staleness detection.
-  // The proxies' `model:` is the RELAY, and it comes from the catalog this
-  // plugin ships (`relay.claude`) rather than a frozen literal. Frontmatter is
-  // read once at session start, so this is the only moment it can be refreshed
-  // — the steering hook re-reads the same key per spawn and wins where the two
-  // disagree.
-  const relayModel = relayModelForClaude(join(tpl, 'common', 'fadeno', 'executors.yaml'));
-  for (const file of readdirSync(join(tpl, 'claude', 'claude-agents')).sort()) {
-    const agentPath = join(outDir, 'agents', file);
-    results.push({
-      path: agentPath,
-      status: emitFile(
-        agentPath,
-        stampRelayModel(
-          stampSurfaceVersion(readFileSync(join(tpl, 'claude', 'claude-agents', file), 'utf8')),
-          relayModel,
-        ),
-        force,
-      ),
-    });
+  // Agents: one per canonical archetype, generated from the descriptions the
+  // vocabulary prints, plus the dispatch proxy. The proxy's `model:` is the
+  // RELAY, taken from the catalog this plugin ships (`relay` under the claude
+  // harness) rather than a frozen literal.
+  for (const archetype of ARCHETYPE_DISPLAY_ORDER) {
+    emit(results, join(outDir, 'agents', `${archetype}.md`), stampSurfaceVersion(roleAgentDefinition(archetype, 'claude')), force);
   }
-  // Claude plugin hook surface: use the plugin-local bundled `fadeno` and keep
-  // the hook selective/inert for the native loadout.
-  const hookPath = join(outDir, 'hooks', 'dispatch-steering.mjs');
-  results.push({
-    path: hookPath,
-    status: emitFile(
-      hookPath,
-      stampHookVersion(readFileSync(join(tpl, 'claude', 'hooks', 'dispatch-steering.mjs'), 'utf8')),
-      force,
-    ),
-  });
-  const guardPath = join(outDir, 'hooks', 'dispatch-proxy-guard.mjs');
-  results.push({
-    path: guardPath,
-    status: emitFile(guardPath, readFileSync(join(tpl, 'claude', 'hooks', 'dispatch-proxy-guard.mjs'), 'utf8'), force),
-  });
-  // The `SubagentStop` receipt. Stamped like the steering hook, and for the
-  // same reason: a stop row has to name the generation that wrote it, which a
-  // session-start hook cache otherwise hides.
-  const agentStopPath = join(outDir, 'hooks', 'agent-stop.mjs');
-  results.push({
-    path: agentStopPath,
-    status: emitFile(
-      agentStopPath,
-      stampHookVersion(readFileSync(join(tpl, 'claude', 'hooks', 'agent-stop.mjs'), 'utf8')),
-      force,
-    ),
-  });
-  const hostModePath = join(outDir, 'hooks', 'host-mode.mjs');
-  results.push({
-    path: hostModePath,
-    status: emitFile(
-      hostModePath,
-      readFileSync(join(tpl, 'common', 'plugin', 'host-mode-hook.mjs'), 'utf8'),
-      force,
-    ),
-  });
-  const hookManifestPath = join(outDir, 'hooks', 'hooks.json');
-  results.push({
-    path: hookManifestPath,
-    status: emitFile(hookManifestPath, readFileSync(join(tpl, 'claude', 'hooks', 'hooks.json'), 'utf8'), force),
-  });
+  const relayModel = relayModelForClaude(join(tpl, 'common', 'fadeno', 'executors.yaml'));
+  emit(
+    results,
+    join(outDir, 'agents', 'dispatch.md'),
+    stampRelayModel(stampSurfaceVersion(readFileSync(join(tpl, 'claude', 'claude-agents', 'dispatch.md'), 'utf8')), relayModel),
+    force,
+  );
 
+  emitHooks(results, outDir, tpl, 'spawn-claude.mjs', 'hooks-claude.json', force);
   return { outDir, results };
 }
 
 // Codex plugin skills keep their full `fadeno-` names — Codex invokes them as
 // `$fadeno-host` / `$fadeno-setup` (the openai.yaml policies reference those
-// handles), unlike the Claude plugin which shortens to the `fadeno:host`
-// namespace form.
+// handles), unlike the Claude plugin which shortens to the `fadeno:` namespace.
 const CODEX_SKILLS = ['fadeno-host', 'fadeno-setup'] as const;
 
 /**
- * Emit a Codex CLI plugin (`.codex-plugin/plugin.json` + `skills/`) from the
- * SAME shared skill templates as the Claude plugin and `fadeno init`. Codex
- * role subagents remain user-scoped host materialization, while the plugin
- * carries its own CLI and immutable built-in definitions. Project init remains
- * available for explicit overrides and vendoring.
+ * Emit a Codex CLI plugin (`.codex-plugin/plugin.json` + `skills/` + `hooks/`
+ * + `bin/`) from the same shared templates. No agents: Codex custom agents are
+ * user-scoped TOML files outside a plugin, and a Codex hook can refuse a spawn
+ * but not rewrite one, so delegated work there goes through the command lane
+ * (see `templates/hooks/spawn-codex.mjs`).
  */
 export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
   const cwd = opts.cwd ?? process.cwd();
   const tpl = templatesDir();
-  // Payload lives in a visible top-level dir (parallel to the Claude `plugin/`);
-  // only the required marketplace pointer sits in `.agents/plugins/marketplace.json`.
   const ref = opts.outDir ?? 'plugin-codex';
   const outDir = isAbsolute(ref) ? ref : resolve(cwd, ref);
   const force = opts.force ?? false;
   const results: EmitResult[] = [];
 
-  // `.codex-plugin/plugin.json` — only documented fields (the manifest validator
-  // rejects unknown keys). Version is single-sourced from package.json, exactly
-  // like the Claude manifest, so the no-drift guard keeps them in lockstep.
+  // Only documented fields: the manifest validator rejects unknown keys.
   const manifest =
     JSON.stringify(
       {
         name: 'fadeno',
         version: packageVersion(),
-        description:
-          'A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.',
+        description: DESCRIPTION,
         author: { name: 'Fadeno' },
         repository: 'https://github.com/CrocSwap/fadeno',
         license: 'MIT',
@@ -284,151 +249,43 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
         skills: './skills/',
         interface: {
           displayName: 'Fadeno',
-          shortDescription:
-            'Plan/implement/review/test workflows with file-backed run traces.',
+          shortDescription: 'Route delegated work by archetype, in worktrees, with a ledger.',
           category: 'Engineering',
         },
       },
       null,
       2,
     ) + '\n';
-  const manifestPath = join(outDir, '.codex-plugin', 'plugin.json');
-  results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
+  emit(results, join(outDir, '.codex-plugin', 'plugin.json'), manifest, force);
 
   for (const skill of CODEX_SKILLS) {
-    // Full-named, unmodified SKILL.md — byte-identical to the Claude plugin's
-    // body and `fadeno init`'s (the shared single source).
-    const skillMd = readFileSync(join(tpl, 'common', 'skills', skill, 'SKILL.md'), 'utf8');
-    const skillMdPath = join(outDir, 'skills', skill, 'SKILL.md');
-    results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
+    // Full-named, unmodified SKILL.md — byte-identical to the shared source.
+    emit(results, join(outDir, 'skills', skill, 'SKILL.md'), readFileSync(join(tpl, 'common', 'skills', skill, 'SKILL.md'), 'utf8'), force);
     const references = join(tpl, 'common', 'skills', skill, 'references');
     if (existsSync(references)) copyTree(references, join(outDir, 'skills', skill, 'references'), force, results);
-    // Per-skill invocation policy (runner implicit; builder/driver explicit-only)
-    // — the same openai.yaml `fadeno init --codex` installs, honored in-plugin.
-    const policy = readFileSync(join(tpl, 'codex', 'openai', `${skill}.yaml`), 'utf8');
-    const policyPath = join(outDir, 'skills', skill, 'agents', 'openai.yaml');
-    results.push({ path: policyPath, status: emitFile(policyPath, policy, force) });
-    const launcherPath = join(outDir, 'skills', skill, 'scripts', 'fadeno.cjs');
-    results.push({
-      path: launcherPath,
-      status: emitFile(
-        launcherPath,
-        readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8')
-          .replace('__FADENO_HARNESS__', 'codex'),
-        force,
-      ),
-    });
-    chmodSync(launcherPath, 0o755);
+    // Per-skill invocation policy: the openai.yaml that says host mode is explicit-only.
+    emit(results, join(outDir, 'skills', skill, 'agents', 'openai.yaml'), readFileSync(join(tpl, 'codex', 'openai', `${skill}.yaml`), 'utf8'), force);
+    emitLauncher(results, join(outDir, 'skills', skill), tpl, 'codex', force);
   }
 
-  // The committed standalone bundle is copied during generation and rebuilt by
-  // scripts/build-bin.mjs. Keeping it in the generator's result means a fresh
-  // Codex plugin has the same self-contained runtime surface as Claude.
-  const repoBundle = join(tpl, '..', 'plugin-codex', 'bin');
-  const adjacentBundle = dirname(tpl);
-  const bundledBin = existsSync(join(repoBundle, 'fadeno'))
-    ? repoBundle
-    : existsSync(join(adjacentBundle, 'fadeno'))
-      ? adjacentBundle
-      : null;
-  const destinationBin = join(outDir, 'bin');
-  if (bundledBin != null && resolve(bundledBin) !== resolve(destinationBin)) {
-    copyTree(bundledBin, destinationBin, force, results);
-  }
-  const destinationCli = join(destinationBin, 'fadeno');
-  if (existsSync(destinationCli)) chmodSync(destinationCli, 0o755);
-
-  // Codex plugins discover hooks/hooks.json by convention. Host mode is inert
-  // until this plugin user's explicit $fadeno-host invocation, then stores its
-  // marker in PLUGIN_DATA rather than the repository.
-  const hostModePath = join(outDir, 'hooks', 'host-mode.mjs');
-  results.push({
-    path: hostModePath,
-    status: emitFile(
-      hostModePath,
-      readFileSync(join(tpl, 'common', 'plugin', 'host-mode-hook.mjs'), 'utf8'),
-      force,
-    ),
-  });
-  // The `PreToolUse` spawn guard, stamped like the Claude steering hook so the
-  // evidence rows it writes name the generation that wrote them. A NEW hook
-  // entry in hooks.json goes through Codex's review-and-trust flow on the next
-  // session start, so an upgraded plugin only starts guarding after the user
-  // accepts it.
-  const spawnGuardPath = join(outDir, 'hooks', 'spawn-guard.mjs');
-  results.push({
-    path: spawnGuardPath,
-    status: emitFile(
-      spawnGuardPath,
-      stampHookVersion(readFileSync(join(tpl, 'codex', 'hooks', 'spawn-guard.mjs'), 'utf8')),
-      force,
-    ),
-  });
-  // The `PreToolUse` Bash guard: the proxy-side half of relay attestation plus
-  // the role agents' destructive-git refusal. Stamped for the same reason the
-  // spawn guard is — the marker rows it writes name the generation that wrote
-  // them, which a session-start hook cache otherwise hides.
-  //
-  // Its manifest entry sits AFTER the `Agent` group on purpose. Codex keys hook
-  // trust per matcher group by index
-  // (`hooks.state."<plugin>:hooks/hooks.json:pre_tool_use:<group>:<handler>"`),
-  // so a new group at the end leaves the spawn guard's existing trusted hash
-  // valid and puts only the new entry through review on the next session start.
-  const proxyGuardPath = join(outDir, 'hooks', 'dispatch-proxy-guard.mjs');
-  results.push({
-    path: proxyGuardPath,
-    status: emitFile(
-      proxyGuardPath,
-      stampHookVersion(readFileSync(join(tpl, 'codex', 'hooks', 'dispatch-proxy-guard.mjs'), 'utf8')),
-      force,
-    ),
-  });
-  // The `SubagentStop` receipt — the twin of the Claude plugin's, stamped for
-  // the same reason. Registered under its own event key rather than inside an
-  // existing `PreToolUse` group, so the guards above keep their trusted hashes
-  // and only the new entry goes through Codex's review flow.
-  const agentStopPath = join(outDir, 'hooks', 'agent-stop.mjs');
-  results.push({
-    path: agentStopPath,
-    status: emitFile(
-      agentStopPath,
-      stampHookVersion(readFileSync(join(tpl, 'codex', 'hooks', 'agent-stop.mjs'), 'utf8')),
-      force,
-    ),
-  });
-  const hookManifestPath = join(outDir, 'hooks', 'hooks.json');
-  results.push({
-    path: hookManifestPath,
-    status: emitFile(
-      hookManifestPath,
-      readFileSync(join(tpl, 'codex', 'hooks', 'hooks.json'), 'utf8'),
-      force,
-    ),
-  });
-
+  emitBundledBin(results, outDir, tpl, 'plugin-codex', force);
+  // Codex keys hook trust per matcher group by index, so the manifest's group
+  // ORDER is part of the contract: the spawn hook first, the Bash guard second.
+  emitHooks(results, outDir, tpl, 'spawn-codex.mjs', 'hooks-codex.json', force);
   return { outDir, results };
 }
 
 // omp plugin skills keep their full `fadeno-` names (the Codex convention):
 // omp deduplicates skills by name across providers and hands every skill a
-// native `/skill:<name>` command, so the Claude plugin's shortened names would
-// buy nothing here while risking collisions with unrelated plugins.
+// native `/skill:<name>` command. `fadeno-setup` is absent: `<cli> setup`
+// supports only --codex/--claude.
 const OMP_SKILLS = ['fadeno-host'] as const;
 
 /**
- * Emit an omp plugin (`package.json` manifest + `skills/` + `agents/`) from the
- * SAME shared skill templates as the Claude and Codex plugins. Bodies stay
- * byte-identical to `fadeno init`'s — no surface-version stamps — because omp
- * keys plugin upgrades off the manifest version, exactly like Codex.
- *
- * Deliberately absent, with reasons:
- * - `commands/`: omp registers `/skill:<name>` for every discovered skill, so
- *   slash entry points need no separate artifact.
- * - `hooks/`: steering is an omp extension module under `extensions/`, loaded
- *   from the manifest's `omp.extensions` entry.
- * - `fadeno-setup` skill: `<cli> setup` supports only --codex/--claude, and
- *   the skill's own text says to use only the current host's line — shipping
- *   it here would teach an invocation that refuses.
+ * Emit an omp plugin (`package.json` manifest + `skills/` + `agents/` +
+ * `extensions/`). The spawn wrapper is an extension module, loaded from the
+ * manifest's `omp.extensions` entry; there is no hooks directory. No
+ * `commands/` either: omp registers `/skill:<name>` for every skill.
  */
 export function runOmpPlugin(opts: PluginOptions = {}): PluginResult {
   const cwd = opts.cwd ?? process.cwd();
@@ -439,98 +296,39 @@ export function runOmpPlugin(opts: PluginOptions = {}): PluginResult {
   const results: EmitResult[] = [];
 
   // `package.json` IS the omp plugin manifest: the `omp` key is what runtime
-  // plugin discovery requires before a package counts as loadable, and the
-  // version is single-sourced from package.json like both other manifests.
+  // plugin discovery requires before a package counts as loadable.
   const manifest =
     JSON.stringify(
       {
         name: 'fadeno',
         version: packageVersion(),
-        description:
-          'A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.',
+        description: DESCRIPTION,
         license: 'MIT',
         repository: 'https://github.com/CrocSwap/fadeno',
         keywords: ['ai', 'agents', 'omp', 'subagents', 'workflow', 'skills'],
-        omp: { extensions: ['./extensions/fadeno-steering.ts'] },
+        omp: { extensions: ['./extensions/fadeno.ts'] },
       },
       null,
       2,
     ) + '\n';
-  const manifestPath = join(outDir, 'package.json');
-  results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
+  emit(results, join(outDir, 'package.json'), manifest, force);
 
   for (const skill of OMP_SKILLS) {
-    // Full-named, unmodified SKILL.md — byte-identical to the other plugins'
-    // bodies and `fadeno init`'s (the shared single source).
-    const skillMd = readFileSync(join(tpl, 'common', 'skills', skill, 'SKILL.md'), 'utf8');
-    const skillMdPath = join(outDir, 'skills', skill, 'SKILL.md');
-    results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
+    emit(results, join(outDir, 'skills', skill, 'SKILL.md'), readFileSync(join(tpl, 'common', 'skills', skill, 'SKILL.md'), 'utf8'), force);
     const references = join(tpl, 'common', 'skills', skill, 'references');
     if (existsSync(references)) copyTree(references, join(outDir, 'skills', skill, 'references'), force, results);
-    const launcherPath = join(outDir, 'skills', skill, 'scripts', 'fadeno.cjs');
-    results.push({
-      path: launcherPath,
-      status: emitFile(
-        launcherPath,
-        readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8')
-          .replace('__FADENO_HARNESS__', 'omp'),
-        force,
-      ),
-    });
-    chmodSync(launcherPath, 0o755);
+    emitLauncher(results, join(outDir, 'skills', skill), tpl, 'omp', force);
   }
 
-  const extensionPath = join(outDir, 'extensions', 'fadeno-steering.ts');
-  results.push({
-    path: extensionPath,
-    status: emitFile(
-      extensionPath,
-      stampHookVersion(readFileSync(join(tpl, 'omp', 'extensions', 'fadeno-steering.ts'), 'utf8')),
-      force,
-    ),
-  });
+  emit(results, join(outDir, 'extensions', 'fadeno.ts'), readFileSync(join(tpl, 'omp', 'extensions', 'fadeno.ts'), 'utf8'), force);
 
-  // Task agents: role agents plus dispatch proxies in omp's format (name +
-  // description frontmatter required; proxies are bash-only relays). Discovered
-  // from the installed plugin tree's `agents/` subdir by task-agent discovery.
-  copyTree(join(tpl, 'omp', 'omp-agents'), join(outDir, 'agents'), force, results);
-  // The extension may need an alias when a project owns the conventional
-  // `worker`/`dispatch-worker` name. Carry both native and alias role surfaces
-  // in the global plugin so a plugin-only setup remains routable.
-  for (const archetype of ['worker', 'reviewer', 'judge']) {
-    const roleSource = readFileSync(join(tpl, 'omp', 'omp-agents', `${archetype}.md`), 'utf8');
-    const dispatchSource = readFileSync(join(tpl, 'omp', 'omp-agents', `dispatch-${archetype}.md`), 'utf8');
-    const refusal = `---\nname: fadeno-steering-refused-${archetype}\ndescription: Reports why Fadeno refused a ${archetype} spawn, then stops.\ntools: read\n---\n\nRelay the Fadeno steering refusal verbatim, state that the requested work was not started, and stop.\n`;
-    const refusalAlias = refusal.replace(`name: fadeno-steering-refused-${archetype}`, `name: fadeno-steering-refusal-${archetype}`);
-    const hostAlias = roleSource.replace(`name: ${archetype}`, `name: fadeno-steering-host-${archetype}`);
-    const dispatch = dispatchSource.replace(`name: dispatch-${archetype}`, `name: fadeno-dispatch-${archetype}`);
-    const dispatchAlias = dispatch.replace(`name: fadeno-dispatch-${archetype}`, `name: fadeno-steering-command-${archetype}`);
-    for (const [name, body] of [
-      [`fadeno-steering-host-${archetype}.md`, hostAlias],
-      [`fadeno-dispatch-${archetype}.md`, dispatch],
-      [`fadeno-steering-command-${archetype}.md`, dispatchAlias],
-      [`fadeno-steering-refused-${archetype}.md`, refusal],
-      [`fadeno-steering-refusal-${archetype}.md`, refusalAlias],
-    ] as const) {
-      results.push({ path: join(outDir, 'agents', name), status: emitFile(join(outDir, 'agents', name), body, force) });
-    }
+  // Task agents: one per canonical archetype plus the dispatch proxy, in omp's
+  // format (name + description frontmatter required; the proxy is bash-only).
+  for (const archetype of ARCHETYPE_DISPLAY_ORDER) {
+    emit(results, join(outDir, 'agents', `${archetype}.md`), roleAgentDefinition(archetype, 'omp'), force);
   }
+  emit(results, join(outDir, 'agents', 'dispatch.md'), readFileSync(join(tpl, 'omp', 'omp-agents', 'dispatch.md'), 'utf8'), force);
 
-  // The committed standalone bundle is copied during generation and rebuilt by
-  // scripts/build-bin.mjs, exactly like the Codex plugin's bin/.
-  const repoBundle = join(tpl, '..', 'plugin-omp', 'bin');
-  const adjacentBundle = dirname(tpl);
-  const bundledBin = existsSync(join(repoBundle, 'fadeno'))
-    ? repoBundle
-    : existsSync(join(adjacentBundle, 'fadeno'))
-      ? adjacentBundle
-      : null;
-  const destinationBin = join(outDir, 'bin');
-  if (bundledBin != null && resolve(bundledBin) !== resolve(destinationBin)) {
-    copyTree(bundledBin, destinationBin, force, results);
-  }
-  const destinationCli = join(destinationBin, 'fadeno');
-  if (existsSync(destinationCli)) chmodSync(destinationCli, 0o755);
-
+  emitBundledBin(results, outDir, tpl, 'plugin-omp', force);
   return { outDir, results };
 }

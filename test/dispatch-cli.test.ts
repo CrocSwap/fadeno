@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
@@ -102,7 +102,7 @@ test('dispatch: an empty prompt, a missing prompt file, an unknown archetype sha
 
 test('dispatch-open and dispatch-stop: the host lane\'s two halves through the CLI', (t) => {
   const root = repo(t);
-  const opened = cli(root, ['dispatch-open', '--archetype', 'worker', '--name', 'in-host', '--session-id', 's-1', '--json'], 'Do the host thing.');
+  const opened = cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', 'in-host', '--session-id', 's-1', '--json'], 'Do the host thing.');
   assert.equal(opened.status, 0, opened.stderr);
   const json = JSON.parse(opened.stdout) as { ok: boolean; id: string; name: string; cwd: string; prompt: string; nag: string; lane: string; workspace: { branch: string } };
   assert.equal(json.ok, true);
@@ -117,7 +117,8 @@ test('dispatch-open and dispatch-stop: the host lane\'s two halves through the C
   assert.equal(row.opened?.lane, 'host');
   assert.equal(row.opened?.process_group, undefined);
 
-  const second = cli(root, ['dispatch-open', '--archetype', 'reviewer', '--json'], 'Review it.');
+  // From a bare shell nothing is a host candidate, so the host lane is asked for by name.
+  const second = cli(root, ['dispatch-open', '--archetype', 'reviewer', '--lane', 'host', '--json'], 'Review it.');
   assert.equal(second.status, 0, second.stderr);
   assert.match((JSON.parse(second.stdout) as { nag: string }).nag, /## Unclosed dispatches \(1 of 5 allowed\)/);
 
@@ -133,13 +134,17 @@ test('dispatch-open and dispatch-stop: the host lane\'s two halves through the C
   assert.match(cli(root, ['cancel', 'in-host']).stderr, /harness's to stop/);
 });
 
-test('dispatch-open refuses at the limit with exit 3 and --json carries the refusal', (t) => {
+test('dispatch-open refuses at the limit with exit 3 on both lanes, and --json carries the refusal', (t) => {
   const root = repo(t);
-  for (let i = 0; i < 5; i += 1) assert.equal(cli(root, ['dispatch-open', '--archetype', 'worker'], `job ${i}`).status, 0);
-  const refused = cli(root, ['dispatch-open', '--archetype', 'worker', '--json'], 'six');
+  for (let i = 0; i < 5; i += 1) assert.equal(cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host'], `job ${i}`).status, 0);
+  const refused = cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--json'], 'six');
   assert.equal(refused.status, 3);
   assert.match((JSON.parse(refused.stdout) as { refused: string }).refused, /5 dispatches are unclosed and the limit is 5/);
+  // The relay is refused too: a proxy sent to be refused one process later would waste a turn.
+  const relayRefused = cli(root, ['dispatch-open', '--archetype', 'worker', '--json'], 'seven');
+  assert.equal(relayRefused.status, 3);
   assert.equal(readDispatches(root).records.length, 5);
+  assert.ok(!existsSync(join(root, '.fadeno', 'local', 'relay')), 'nothing is staged for a refused relay');
 });
 
 test('worktrees and clean: a closed clean worktree is reclaimed, an open or dirty one is kept and the reason printed', (t) => {
@@ -169,7 +174,7 @@ test('worktrees and clean: a closed clean worktree is reclaimed, an open or dirt
 
 test('context prints the vocabulary with live routing and the nag', (t) => {
   const root = repo(t);
-  cli(root, ['dispatch-open', '--archetype', 'worker', '--name', 'pending'], 'x');
+  cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', 'pending'], 'x');
   const ctx = cli(root, ['context']);
   assert.equal(ctx.status, 0, ctx.stderr);
   assert.match(ctx.stdout, /- \*\*worker\*\* — Implements .* _\(routes to echo@high; repo dial\)_/);
@@ -183,10 +188,111 @@ test('context prints the vocabulary with live routing and the nag', (t) => {
 
 test('the ledger stays readable when a row is torn, and the listing says so', (t) => {
   const root = repo(t);
-  cli(root, ['dispatch-open', '--archetype', 'worker', '--name', 'good'], 'x');
+  cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', 'good'], 'x');
   writeFileSync(join(root, LEDGER_FILE), readFileSync(join(root, LEDGER_FILE), 'utf8') + '{"row":"opened","id":"torn"\n');
   const list = cli(root, ['dispatches']);
   assert.equal(list.status, 0);
   assert.match(list.stdout, /good/);
   assert.match(list.stdout, /1 unreadable row\(s\) skipped/);
+});
+
+test('dispatch-open on auto hands a command-lane archetype to the proxy: prompt staged, nothing opened, and the relayed command runs the dispatch', (t) => {
+  const root = repo(t);
+  const relayed = cli(root, ['dispatch-open', '--archetype', 'worker', '--name', 'Fix Login', '--json'], 'Fix the login bug.\n');
+  assert.equal(relayed.status, 0, relayed.stderr);
+  const json = JSON.parse(relayed.stdout) as { ok: boolean; opened: boolean; lane: string; name: string; model: string; harness: string; relay: { prompt_file: string; args: string[]; command: string }; nag: string };
+  assert.equal(json.ok, true);
+  assert.equal(json.opened, false);
+  assert.equal(json.lane, 'command');
+  assert.equal(json.model, 'echo');
+  assert.equal(json.harness, 'codex');
+  assert.ok(json.relay.prompt_file.startsWith(join(realpathSync(root), '.fadeno', 'local', 'relay')), json.relay.prompt_file);
+  assert.equal(readFileSync(json.relay.prompt_file, 'utf8'), 'Fix the login bug.\n', 'the caller\'s bytes, untouched');
+  assert.deepEqual(json.relay.args, ['dispatch', '--archetype', 'worker', '--name', 'Fix Login', '--prompt-file', json.relay.prompt_file]);
+  assert.equal(json.relay.command, `fadeno dispatch --archetype worker --name 'Fix Login' --prompt-file ${json.relay.prompt_file}`);
+  assert.equal(json.nag, 'No unclosed dispatches in this repository.');
+  assert.ok(!existsSync(join(root, LEDGER_FILE)), 'a relay writes no row; fadeno dispatch does');
+  const plain = cli(root, ['dispatch-open', '--archetype', 'worker'], 'again');
+  assert.match(plain.stdout, /worker resolves to echo@high on codex, a command lane: nothing opened here\. The dispatch proxy runs:\n  fadeno dispatch --archetype worker --prompt-file /);
+
+  // The proxy runs exactly what it was handed.
+  const ran = cli(root, json.relay.args);
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.ok(ran.stdout.startsWith('REPORT:Fix the login bug.\n\n' + CONTRACT_HEADER));
+  const record = readDispatches(root).records[0]!;
+  assert.equal(record.opened?.name, 'fix-login');
+  assert.equal(record.opened?.lane, 'command');
+  assert.equal(record.opened?.task, 'Fix the login bug.');
+
+  // A forced command lane on an archetype with nothing to invoke is refused before anything is staged.
+  const nothing = cli(root, ['dispatch-open', '--archetype', 'reviewer', '--lane', 'command'], 'x');
+  assert.notEqual(nothing.status, 0);
+  assert.match(nothing.stderr, /nothing to invoke/);
+  assert.match(cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'sideways'], 'x').stderr, /--lane sideways: expected one of auto, host, command/);
+
+  // Staged prompts are scratch: clean removes them, and only them.
+  cli(root, ['dispatch-close', 'fix-login', '--merged']);
+  assert.match(cli(root, ['clean']).stdout, /would remove \.fadeno\/local\/relay\/ \(staged relay prompts\)/);
+  cli(root, ['clean', '--force']);
+  assert.ok(!existsSync(join(root, '.fadeno', 'local', 'relay')));
+  assert.ok(existsSync(join(root, '.fadeno', 'prompts')));
+});
+
+test('dispatch-stop --transcript names the dispatch from the contract header, records the model that ran and the last words, and says when the dial was not applied', (t) => {
+  const root = repo(t);
+  const opened = JSON.parse(cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', 'observed', '--json'], 'Do it.').stdout) as { id: string; prompt: string };
+  const transcript = join(root, 'agent-x.jsonl');
+  const record = (o: unknown) => JSON.stringify(o) + '\n';
+  writeFileSync(transcript,
+    record({ type: 'user', message: { role: 'user', content: opened.prompt } }) +
+    record({ type: 'assistant', message: { role: 'assistant', model: 'claude-haiku-4-5', content: [{ type: 'thinking', thinking: '…' }, { type: 'text', text: 'Working.' }] } }) +
+    '{"torn":' + '\n' +
+    record({ type: 'assistant', message: { role: 'assistant', model: 'claude-haiku-4-5', content: [{ type: 'text', text: 'All done; merge it.' }] } }),
+  );
+  const stopped = cli(root, ['dispatch-stop', '--transcript', transcript]);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.match(stopped.stdout, /observed stopped; tree clean; WARNING: ran on claude-haiku-4-5, the dial asked for echo\. Close it:/);
+  const row = readDispatches(root).records[0]!.stopped!;
+  assert.equal(row.final_message, 'All done; merge it.');
+  assert.equal(row.model_observed, 'claude-haiku-4-5');
+  assert.match(cli(root, ['dispatches', 'observed']).stdout, /ran on:    claude-haiku-4-5  \(the dial asked for echo\)/);
+  // An explicit message wins over the transcript's last words; a replay changes nothing.
+  assert.match(cli(root, ['dispatch-stop', 'observed', '--transcript', transcript], 'later words').stdout, /already recorded/);
+  assert.equal(readDispatches(root).records[0]!.stopped!.final_message, 'All done; merge it.');
+
+  // A transcript with no contract is not a dispatch: exit 4, nothing recorded, and --json says so.
+  const foreign = join(root, 'agent-y.jsonl');
+  writeFileSync(foreign, record({ type: 'user', message: { role: 'user', content: 'Explore the repo.' } }));
+  const notOurs = cli(root, ['dispatch-stop', '--transcript', foreign, '--json']);
+  assert.equal(notOurs.status, 4);
+  assert.deepEqual(JSON.parse(notOurs.stdout).dispatch, null);
+  assert.equal(readDispatches(root).records.length, 1);
+  assert.match(cli(root, ['dispatch-stop']).stderr, /a transcript can name the dispatch/);
+});
+
+test('a director\'s contract carries the host vocabulary, and a dispatch run from inside a worktree still lands in the main repository\'s ledger', (t) => {
+  const root = gitRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 4,
+    models: { echo: { provider: 'openai', id: 'echo-model', effort: 'high' } },
+    harnesses: { codex: { provider: 'openai', command: ECHO } },
+    archetypes: { director: {}, worker: {} },
+    dials: { director: 'echo', worker: 'echo' },
+  }));
+  git(root, ['add', '-A']);
+  git(root, ['commit', '-q', '-m', 'catalog']);
+  const run = cli(root, ['dispatch', '--archetype', 'director', '--name', 'lead'], 'Coordinate the fix.');
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /\*\*You may spawn\.\*\* The dispatches you open are recorded under yours/);
+  assert.match(run.stdout, /## Archetypes\n\n[\s\S]*- \*\*director\*\* — Coordinates a whole task[\s\S]*_\(routes to echo@high; repo dial\)_/);
+  assert.match(run.stdout, /## Closing/);
+  assert.ok(run.stdout.trimEnd().endsWith('## End of Fadeno dispatch contract'), 'the vocabulary sits inside the contract');
+  const worktree = join(root, '.fadeno', 'local', 'worktrees', 'lead');
+  const nested = cli(worktree, ['dispatch', '--archetype', 'worker', '--name', 'child'], 'Child task.');
+  assert.equal(nested.status, 0, nested.stderr);
+  const records = readDispatches(root).records;
+  assert.equal(records.length, 2, 'both rows in the main ledger, none in the worktree');
+  assert.ok(!existsSync(join(worktree, '.fadeno', 'dispatches.jsonl')));
+  assert.ok(existsSync(join(root, '.fadeno', 'local', 'worktrees', 'child')));
 });

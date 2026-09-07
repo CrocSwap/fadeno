@@ -18,7 +18,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Fadeno",
-    "shortDescription": "Plan/implement/review/test workflows with file-backed run traces.",
+    "shortDescription": "Route delegated work by archetype, in worktrees, with a ledger.",
     "category": "Engineering"
   }
 }

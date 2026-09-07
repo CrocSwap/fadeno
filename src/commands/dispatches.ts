@@ -11,9 +11,7 @@
 
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { loadLayeredProfile } from '../lib/config-layers.ts';
-import { DEFAULT_UNCLOSED_LIMIT, describeArchetype, formatAge, hostVocabulary, type ArchetypeLine } from '../lib/contracts.ts';
-import { ExecutorProfileError, archetypeDisplaySort, knownArchetypes, readLocalDialState } from '../lib/executors.ts';
+import { DEFAULT_UNCLOSED_LIMIT, formatAge, hostVocabulary, nagText, spawnRefusedByLimit, type ArchetypeLine } from '../lib/contracts.ts';
 import {
   ageMinutes,
   closeDispatch,
@@ -31,19 +29,25 @@ import {
 import { findRepoRoot } from '../lib/paths.ts';
 import {
   OUTPUTS_DIR,
+  RELAY_DIR,
   SpawnError,
   cancelDispatch,
+  describeArchetypes,
   outputPaths,
   prepareDispatch,
   recordOpened,
   recordStopped,
+  requireCommand,
   resolveArchetype,
   runCommandDispatch,
+  stageRelay,
   workspaceDir,
   type CancelOutcome,
+  type Relay,
   type RunResult,
 } from '../lib/spawn.ts';
-import { readUserDials, type UserPathOptions } from '../lib/user-paths.ts';
+import { readTranscriptFacts } from '../lib/transcript.ts';
+import type { UserPathOptions } from '../lib/user-paths.ts';
 import { WORKTREES_DIR, canonical, removeWorktree, reportWorktrees, type WorktreeReport } from '../lib/worktree.ts';
 
 export class DispatchesError extends Error {}
@@ -141,10 +145,27 @@ export interface DispatchOpenOptions extends CommonOptions {
   parent?: string | null;
   /** Which harness is delivering; recorded on the row. */
   harness?: string | null;
+  /**
+   * The transcript of the agent making this spawn, when the spawn comes from
+   * inside a subagent: its contract header names the parent dispatch. Used
+   * only when `parent` is not given.
+   */
+  parentTranscript?: string | null;
+  /**
+   * `auto` (the default) lets the resolution choose: a host candidate opens on
+   * the host lane, anything else is handed to the command lane as a relay.
+   * `host` opens on the host lane regardless — the caller is about to run the
+   * agent in-session itself. `command` stages the relay regardless.
+   */
+  lane?: OpenLane;
 }
+
+export type OpenLane = 'auto' | 'host' | 'command';
+export const OPEN_LANES: readonly OpenLane[] = ['auto', 'host', 'command'];
 
 export interface DispatchOpened {
   ok: true;
+  opened: true;
   id: string;
   name: string;
   archetype: string;
@@ -152,7 +173,7 @@ export interface DispatchOpened {
   modelId: string;
   effort: string | null;
   harness: string | null;
-  lane: Lane;
+  lane: 'host';
   cwd: string;
   workspace: { path: string; branch: string | null; base: string };
   shared: boolean;
@@ -163,11 +184,69 @@ export interface DispatchOpened {
   nag: string;
 }
 
-export type DispatchOpenOutcome = DispatchOpened | { ok: false; refused: string };
+/**
+ * The spawn belongs on the command lane: nothing was opened, the prompt is
+ * staged, and `relay.command` is what the dispatch proxy runs. `fadeno
+ * dispatch` writes the rows when it does.
+ */
+export interface DispatchRelayed {
+  ok: true;
+  opened: false;
+  lane: 'command';
+  archetype: string;
+  name: string | null;
+  model: string;
+  modelId: string;
+  effort: string | null;
+  harness: string | null;
+  relay: { prompt_file: string; args: string[]; command: string };
+  nag: string;
+}
+
+export type DispatchOpenOutcome = DispatchOpened | DispatchRelayed | { ok: false; refused: string };
 
 export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome {
   const repoRoot = rootOf(opts);
   const prompt = readPromptInput(opts, opts.cwd ?? process.cwd());
+  if (prompt.trim().length === 0) throw new SpawnError('empty prompt: nothing to dispatch.');
+  const resolution = resolveArchetype({ repoRoot, archetype: opts.archetype, explicitModel: opts.model ?? null, userPathOptions: opts.userPathOptions });
+  const wanted = opts.lane ?? 'auto';
+  if (!OPEN_LANES.includes(wanted)) throw new DispatchesError(`--lane ${String(wanted)}: expected one of ${OPEN_LANES.join(', ')}.`);
+  const lane = wanted === 'auto' ? resolution.lane : wanted;
+  const parentTranscript = opts.parentTranscript?.trim() ? resolve(opts.cwd ?? process.cwd(), opts.parentTranscript.trim()) : null;
+  const parent = opts.parent !== undefined && opts.parent !== null
+    ? opts.parent
+    : parentTranscript != null && existsSync(parentTranscript)
+      ? readTranscriptFacts(parentTranscript).dispatchId ?? undefined
+      : opts.parent;
+  if (lane === 'command') {
+    requireCommand(resolution);
+    const unclosed = unclosedDispatches(repoRoot);
+    const refused = spawnRefusedByLimit(unclosed, resolution.unclosedLimit);
+    if (refused != null) return { ok: false, refused };
+    const relay: Relay = stageRelay(repoRoot, {
+      prompt,
+      archetype: resolution.archetype,
+      name: opts.name,
+      explicitModel: opts.model ?? null,
+      shared: opts.shared,
+      from: opts.from,
+      parent: parent ?? null,
+    });
+    return {
+      ok: true,
+      opened: false,
+      lane: 'command',
+      archetype: resolution.archetype,
+      name: opts.name?.trim() || null,
+      model: resolution.model,
+      modelId: resolution.modelId,
+      effort: resolution.effort,
+      harness: resolution.harness,
+      relay: { prompt_file: relay.promptFile, args: relay.args, command: relay.command },
+      nag: nagText(unclosed, resolution.unclosedLimit),
+    };
+  }
   const outcome = prepareDispatch({
     repoRoot,
     archetype: opts.archetype,
@@ -177,16 +256,18 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
     shared: opts.shared,
     from: opts.from,
     session: opts.session ?? null,
-    parent: opts.parent,
+    parent,
     lane: 'host',
     userPathOptions: opts.userPathOptions,
     env: opts.env,
+    resolution,
   });
   if (!outcome.ok) return { ok: false, refused: outcome.refused };
   const p = outcome.prepared;
   recordOpened(repoRoot, p, { lane: 'host', harness: opts.harness ?? p.resolution.harness });
   return {
     ok: true,
+    opened: true,
     id: p.id,
     name: p.name,
     archetype: p.archetype,
@@ -206,11 +287,18 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
 }
 
 export interface DispatchStopOptions extends CommonOptions {
-  ref: string;
+  /** Name or id; optional when `transcript` names the dispatch itself. */
+  ref?: string | null;
   message?: string | null;
   messageFile?: string | null;
   /** Where the agent was actually working, when the harness says. */
   agentCwd?: string | null;
+  /**
+   * The agent's transcript, as the stop hook receives it. Read for the
+   * dispatch id the injected contract carries, the model that ran, and the
+   * last assistant text when no message was passed.
+   */
+  transcript?: string | null;
 }
 
 export interface DispatchStopped {
@@ -221,9 +309,20 @@ export interface DispatchStopped {
   mismatchedCwd: string | null;
 }
 
+/** A transcript that names no dispatch: not an error, but nothing to record. */
+export class NotADispatchError extends DispatchesError {}
+
 export function runDispatchStop(opts: DispatchStopOptions): DispatchStopped {
   const repoRoot = rootOf(opts);
-  const record = lookup(repoRoot, opts.ref);
+  const transcriptPath = opts.transcript?.trim() ? resolve(opts.cwd ?? process.cwd(), opts.transcript.trim()) : null;
+  const facts = transcriptPath != null ? readTranscriptFacts(transcriptPath) : null;
+  const ref = opts.ref?.trim() || facts?.dispatchId || null;
+  if (ref == null) {
+    throw transcriptPath != null
+      ? new NotADispatchError(`${transcriptPath} carries no Fadeno dispatch contract; this agent was not a dispatch.`)
+      : new DispatchesError('name a dispatch (<name|id>) or pass --transcript <path> so the contract header can name it.');
+  }
+  const record = lookup(repoRoot, ref);
   if (record.opened == null) throw new DispatchesError(`dispatch ${record.id} has no opened row; nothing to stop.`);
   const assigned = workspaceDir(repoRoot, record.opened);
   const agentCwd = opts.agentCwd?.trim() || null;
@@ -234,9 +333,11 @@ export function runDispatchStop(opts: DispatchStopOptions): DispatchStopped {
     const path = resolve(opts.cwd ?? process.cwd(), opts.messageFile);
     message = existsSync(path) ? readFileSync(path, 'utf8') : null;
   } else if (typeof opts.message === 'string') message = opts.message;
+  if ((message == null || message.trim().length === 0) && facts?.lastAssistantText != null) message = facts.lastAssistantText;
   const row = recordStopped(repoRoot, record.id, {
     finalMessage: message != null && message.trim().length > 0 ? message : null,
     cwd: assigned,
+    modelObserved: facts?.model ?? null,
   });
   return { record: { ...record, stopped: row, state: record.closed ? 'closed' : 'stopped' }, row, replayed: false, mismatchedCwd };
 }
@@ -414,6 +515,11 @@ export function renderDispatchDetail(d: DispatchDetail): string[] {
     const s = d.record.stopped;
     const dirty = s.dirty === 'unavailable' ? 'unreadable' : s.dirty.paths.length === 0 ? 'clean' : `${s.dirty.paths.length}${s.dirty.truncated ? '+' : ''} path(s): ${s.dirty.paths.slice(0, 8).join(', ')}`;
     lines.push(`  stopped:   ${s.at}${s.exit ? ` — ${s.exit.signal ? `killed by ${s.exit.signal}` : `exit ${s.exit.code}`}` : ''}; tree ${dirty}`);
+    if (s.model_observed != null) {
+      const asked = d.record.opened?.model ?? null;
+      const agrees = asked != null && (asked === s.model_observed || asked === 'current-host');
+      lines.push(`  ran on:    ${s.model_observed}${agrees ? '' : asked != null ? `  (the dial asked for ${asked})` : ''}`);
+    }
     if (s.final_message != null) lines.push('', '--- final message ---', s.final_message.trimEnd());
     else lines.push('  final message: none recorded');
   }
@@ -479,24 +585,7 @@ export function renderWorktrees(entries: WorktreeEntry[]): string[] {
 
 export function runContext(opts: CommonOptions & { now?: Date } = {}): { text: string; archetypes: ArchetypeLine[] } {
   const repoRoot = rootOf(opts);
-  let profile;
-  try {
-    profile = loadLayeredProfile(repoRoot, opts.userPathOptions).profile;
-  } catch (err) {
-    if (err instanceof ExecutorProfileError) throw new DispatchesError(err.message);
-    throw err;
-  }
-  const local = readLocalDialState(repoRoot);
-  const names = archetypeDisplaySort(knownArchetypes(profile.archetypes, profile.dials, local.dials, readUserDials(opts.userPathOptions)));
-  const archetypes: ArchetypeLine[] = names.map((name) => {
-    try {
-      const r = resolveArchetype({ repoRoot, archetype: name, userPathOptions: opts.userPathOptions });
-      const source = r.source === 'base' ? 'no dial' : r.source === 'binding' ? 'binding' : `${r.source} dial`;
-      return { name, description: describeArchetype(name, profile.archetypes[name]?.description), model: r.model, effort: r.effort, source };
-    } catch (err) {
-      return { name, description: describeArchetype(name, profile.archetypes[name]?.description), model: 'unresolvable', effort: null, source: (err as Error).message };
-    }
-  });
+  const { archetypes, profile } = describeArchetypes({ repoRoot, userPathOptions: opts.userPathOptions });
   const unclosed = unclosedDispatches(repoRoot);
   const limit = profile.unclosedLimit ?? DEFAULT_UNCLOSED_LIMIT;
   return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, now: opts.now }), archetypes };
@@ -513,6 +602,8 @@ export interface CleanResult {
   /** Worktrees left alone, and why. */
   kept: Array<{ path: string; reason: string }>;
   outputs: string | null;
+  /** Staged relay prompts removed, or that would be. */
+  relay: string | null;
 }
 
 /**
@@ -523,7 +614,7 @@ export interface CleanResult {
 export function runClean(opts: CommonOptions & { force?: boolean } = {}): CleanResult {
   const repoRoot = rootOf(opts);
   const dryRun = !opts.force;
-  const result: CleanResult = { dryRun, worktrees: [], kept: [], outputs: null };
+  const result: CleanResult = { dryRun, worktrees: [], kept: [], outputs: null, relay: null };
   for (const wt of runWorktrees({ repoRoot })) {
     if (wt.dispatch != null && wt.dispatch.state !== 'closed') {
       result.kept.push({ path: wt.path, reason: `dispatch ${wt.dispatch.name ?? wt.dispatch.id.slice(0, 8)} is ${wt.dispatch.state}; close it first` });
@@ -551,6 +642,11 @@ export function runClean(opts: CommonOptions & { force?: boolean } = {}): CleanR
     result.outputs = relative(repoRoot, outputs);
     if (!dryRun) rmSync(outputs, { recursive: true, force: true });
   }
+  const relay = join(repoRoot, RELAY_DIR);
+  if (existsSync(relay)) {
+    result.relay = relative(repoRoot, relay);
+    if (!dryRun) rmSync(relay, { recursive: true, force: true });
+  }
   return result;
 }
 
@@ -559,6 +655,7 @@ export function renderClean(result: CleanResult): string[] {
   const lines: string[] = [];
   for (const path of result.worktrees) lines.push(`${verb} worktree ${path} (branch kept)`);
   if (result.outputs != null) lines.push(`${verb} ${result.outputs}/ (command-lane transcripts)`);
+  if (result.relay != null) lines.push(`${verb} ${result.relay}/ (staged relay prompts)`);
   for (const k of result.kept) lines.push(`kept ${k.path}: ${k.reason}`);
   if (lines.length === 0) lines.push('Nothing to clean.');
   else if (result.dryRun) lines.push('Re-run with --force to remove. Prompts and the ledger are never touched.');

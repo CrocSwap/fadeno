@@ -1,328 +1,60 @@
 #!/usr/bin/env node
-// SubagentStop receipt for host-delivered work. One job: when a subagent stops
-// — finished, interrupted, killed, or cut off by a session 429 — leave a row in
-// `.fadeno/dispatches.jsonl` saying so, with a snapshot of what is sitting
-// uncommitted in the tree it was working in.
+// The stop hook (spec decision 32), on Claude Code and Codex alike: when a
+// subagent stops — finished, interrupted, killed, or cut off by a session
+// limit — hand the CLI the facts and let it write the stopped row.
 //
-// The gap it closes, from three field reports in two repos:
-//   - polymarket, 2026-09-05: a session 429 killed FIVE in-flight host agents.
-//     One died mid-edit leaving five partial files. Nothing recorded any of it;
-//     ~7 hours passed before the user came back and found out by hand.
-//   - polymarket, 2026-09-06: both live worker dispatches killed by a session
-//     429. No work was lost, but "a live experiment's uncommitted edits sat
-//     unverified in a shared tree for an hour with no owner" — and if the host
-//     had also been limited, nothing would have known the edits were partial.
-//   - basanos, same day: three dispatches killed by credit exhaustion.
-// In every one the only record of what the agent had been doing was its
-// transcript, which a host has to read by hand. This row is the half a
-// transcript cannot give cheaply: which files are dirty, right now.
+// A stop event names an agent, never a dispatch. The one thing that ties the
+// two is the contract Fadeno appended to the agent's prompt, whose header
+// carries the dispatch id; the prompt is the first record of the agent's
+// transcript, so `fadeno dispatch-stop --transcript <path>` reads it back.
+// An agent whose transcript carries no contract was not a dispatch, and the
+// CLI says so with exit 4; nothing is recorded and nothing is claimed.
 //
-// WHAT THIS ROW NEVER CLAIMS. A stop hook fires when the agent is already
-// gone, so it cannot ask whether the work was finished, and it must not
-// synthesize an answer:
-//   - `git: "clean"` means the tree carried no uncommitted change at the stop.
-//     It is NOT "the agent did nothing" and NOT "the agent finished".
-//   - `git: "unavailable"` means git could not answer. It is NOT "clean".
-//   - `last_message.present: false` means the harness handed this hook no
-//     final assistant message. It is NOT "the agent said nothing", and above
-//     all it is NOT "the agent did not finish". See the Claude note below:
-//     on the interrupted path the harness passes no messages at all, so the
-//     field is absent exactly when it would matter most.
-//   - Nothing here is a completeness verdict. The agent never gave one.
+// What the row can and cannot say is the CLI's business (see `dispatch-stop`):
+// the presence of a final message, never completeness; the paths dirty in
+// the assigned worktree; the model the transcript says it ran on. This hook
+// only carries the harness's facts across. Both harnesses spell every field
+// this reads the same way (`cwd`, `agent_transcript_path`,
+// `last_assistant_message`), so one file serves both.
 //
-// HARNESS FACTS, read out of Claude Code 2.1.263's own bundle rather than from
-// documentation (re-derive them the same way on an upgrade):
-//   - `SubagentStop` is built for every subagent, and the payload is
-//     `{...sessionBase, hook_event_name: "SubagentStop", stop_hook_active,
-//     agent_id, agent_transcript_path, agent_type, last_assistant_message,
-//     background_tasks, session_crons}` where the session base carries
-//     `session_id`, `transcript_path`, `cwd`, `permission_mode` and `effort`.
-//     Every key this hook reads is spelled the same on Codex — see the twin,
-//     `templates/codex/hooks/agent-stop.mjs`, which is the same script with a
-//     different `HOST` and one extra field. Change one, change both.
-//   - It DOES fire on the death path. `runAgent`'s cleanup stage runs
-//     SubagentStop explicitly, with a 5s budget, whenever the agent's stream
-//     did not reach its own stop — the branch whose failure it logs as
-//     "[runAgent] SubagentStop on interrupted query failed". That is the whole
-//     reason this hook can exist: a 429, an abort and a kill all pass through
-//     it. A SIGKILL of the harness process itself does not, and nothing in a
-//     hook can change that.
-//   - On that same death path the harness passes NO messages, so
-//     `last_assistant_message` is undefined there. It is populated on the
-//     ordinary turn-end path only. This is measured, not assumed, and it is
-//     why the row reports the field's PRESENCE as its own fact.
-//   - `agent_type` can be the empty string (`agent_type: E ?? ""`).
-//   - The 5s cleanup budget is why the git probe below is bounded and why this
-//     hook does no ledger reading: it must finish well inside it.
-//
-// Scope, stated because it is partial:
-//   - Fires for EVERY subagent, not only Fadeno's. That is deliberate and
-//     matches the spawn side: the steering hook records a generic spawn as
-//     `native_spawn` precisely so that an unsteered agent never reads as no
-//     agent, and a role agent spawned as a plain `claude` subagent — which is
-//     how this repo's own dogfood does it — carries no Fadeno agent type to
-//     filter on. Filtering here would miss the reported cases.
-//   - Writes only into a repo that already has a `.fadeno/` tree. A hook must
-//     never be the thing that creates one in a repo that opted out.
-//   - Shipped by the plugin. `fadeno init --claude` installs its own
-//     `PreToolUse` pair under `.fadeno/local/` and does NOT install this hook,
-//     so an init-only repo has no stop receipt. Stated, not silent.
-import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-import { dirname, join, relative, sep } from 'node:path';
+// Budget: the harness gives a stop hook a few seconds on the interrupted path.
+// One CLI call, bounded, and no decision — this is evidence, never a gate.
 
-// Which generation of this hook wrote a given row. Same contract, and the same
-// reason, as the steering hook's stamp: plugin hooks load once at session
-// start, so a live session keeps running the previous build after an upgrade.
-// Both emitters replace this literal with the package version; the template
-// keeps 'dev', so a row reading 'dev' means the template was executed directly
-// rather than an installed copy.
-const HOOK_VERSION = '0.6.1';
+import { finish, readEvent, resolveCli, runFadeno, str } from './hook-lib.mjs';
 
-/** The harness this copy of the hook runs inside. Its twin stamps the other. */
-const HOST = 'claude';
+const STOP_TIMEOUT_MS = 4_000;
 
-/** Where `hostWorktreePath` (src/lib/host-workspace.ts) puts an isolated tree. */
-const HOST_WORKTREES_REL = '.fadeno/local/host-worktrees';
-
-/** How far up to look for the repo a host worktree belongs to. */
-const WALK_UP_MAX = 8;
-
-/** Budget for the one subprocess this hook runs. Well inside the 5s cleanup. */
-const GIT_TIMEOUT_MS = 3_000;
-
-/** Status lines kept on the row. A floor is reported, never a silent trim. */
-const STATUS_ENTRIES_MAX = 200;
-
-/** Per-line bound, so one pathological path cannot blow up the row. */
-const STATUS_LINE_MAX = 240;
-
-/** Longest final-message excerpt written to the ledger. */
-const LAST_MESSAGE_MAX = 400;
-
-/** Longest writer prose (a git failure) written to the ledger. */
-const NOTE_MAX = 240;
-
-/**
- * Exit without answering. A `SubagentStop` hook that exits 0 with no stdout
- * changes nothing about the agent or the session, which is the only acceptable
- * failure mode: this hook is evidence, never a gate.
- */
-function finish() {
-  process.exit(0);
-}
-
-let event;
-try {
-  event = JSON.parse(readFileSync(0, 'utf8'));
-} catch {
-  finish();
-}
-if (event == null || typeof event !== 'object' || Array.isArray(event)) finish();
-// Registered on SubagentStop alone, but a manifest is editable and a harness
-// may add events; a payload that names a different one is not ours to record.
-// An ABSENT name still passes: the field is required by both harnesses' own
-// schemas, so absence means a caller that is not a harness at all — a test, or
-// a hand-run — and refusing those would make the hook untestable.
-if (typeof event.hook_event_name === 'string' && event.hook_event_name !== 'SubagentStop') finish();
-
-/** A non-empty string, or null. Every absent value is recorded as null. */
-function str(value) {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/** One line, bounded. Ledger rows are read back into single-line views. */
-function flat(text, max) {
-  const one = String(text).replace(/\s+/g, ' ').trim();
-  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
-}
-
-// No inferred cwd. This is a WRITE, and a caller that does not say which repo
-// it is in has not earned a guess — `process.cwd()` would be whatever
-// directory the harness happened to launch from. Same rule, and the same 22
-// stray marker rows behind it, as `markProxyDispatch` in
-// `dispatch-proxy-guard.mjs`. Both harnesses always send `cwd`.
+const event = readEvent();
+if (event == null) finish(null);
+if (typeof event.hook_event_name === 'string' && event.hook_event_name !== 'SubagentStop') finish(null);
+// A write needs to know which repo it belongs to; a caller that does not say
+// has not earned a guess. Both harnesses always send `cwd`.
 const cwd = str(event.cwd);
-if (cwd == null) finish();
+const transcript = str(event.agent_transcript_path);
+if (cwd == null || transcript == null) finish(null);
 
-/**
- * The repo whose ledger this row belongs in, and the isolated tree the agent
- * was working in when there is one.
- *
- * Two cases, and the second is load-bearing rather than a nicety. An ordinary
- * subagent runs in the repo root, where `.fadeno/` sits and every other hook's
- * "is this a Fadeno repo?" test already works. An agent on the runless host
- * lane runs in a git WORKTREE under `.fadeno/local/host-worktrees/<scope>/<id>`
- * — and `.fadeno/` is gitignored, so that worktree has no `.fadeno/` of its
- * own. The cwd-only test would therefore write nothing for exactly the
- * dispatches this hook exists to cover.
- *
- * The walk up is deliberately narrow: an ancestor is accepted ONLY when the
- * path from it down to the agent's tree is the host-worktree layout. Anything
- * else — a nested checkout, a repo that happens to sit under a Fadeno repo —
- * is refused rather than written into. Guessing which repo an agent belonged
- * to is the one mistake a row like this cannot afford.
- */
-function resolveRepo(from) {
-  if (existsSync(join(from, '.fadeno'))) return { root: from, tree: null, scope: null, dispatchId: null };
-  let dir = from;
-  for (let i = 0; i < WALK_UP_MAX; i += 1) {
-    const parent = dirname(dir);
-    if (parent === dir) return null; // filesystem root
-    dir = parent;
-    if (!existsSync(join(dir, '.fadeno'))) continue;
-    const rel = relative(dir, from).split(sep).join('/');
-    if (!rel.startsWith(`${HOST_WORKTREES_REL}/`)) return null; // not our layout: claim nothing
-    const rest = rel.slice(HOST_WORKTREES_REL.length + 1).split('/');
-    // `<scope>/<dispatch-id>` exactly. A deeper cwd means the agent moved
-    // inside the worktree, which is fine — but the id is then the second
-    // segment either way, so take the first two and no more.
-    return {
-      root: dir,
-      tree: rel,
-      scope: rest.length >= 2 ? rest[0] : null,
-      dispatchId: rest.length >= 2 ? rest[1] : null,
-    };
-  }
-  return null;
-}
+const cli = resolveCli(import.meta.url);
+const harness = typeof event.turn_id === 'string' ? 'codex' : 'claude';
+const lastMessage = typeof event.last_assistant_message === 'string' ? event.last_assistant_message : '';
+const run = runFadeno(cli, ['dispatch-stop', '--transcript', transcript, '--json'], {
+  cwd,
+  input: lastMessage,
+  harness,
+  timeoutMs: STOP_TIMEOUT_MS,
+});
+if (run.status !== 0 || run.json?.ok !== true) finish(null); // not a dispatch, or nothing this hook can fix
 
-const repo = resolveRepo(cwd);
-if (repo == null) finish(); // not a Fadeno repo, or one this hook may not claim
-
-/**
- * What is sitting uncommitted in the tree the agent was working in.
- *
- * This is the half the reporters asked for and the half a transcript cannot
- * give cheaply. It is a snapshot of the TREE, not an attribution to the agent:
- * a host, a user and other agents write here too, so the row says what is
- * there, never who put it there.
- */
-function workspaceSnapshot(dir) {
-  const unavailable = (note) => ({
-    git: 'unavailable',
-    entries: null,
-    entry_count: null,
-    truncated: false,
-    // Why, in git's own words. `unavailable` and `clean` must never be
-    // spelled the same way: "I could not tell" is not "there was nothing".
-    note: note == null ? null : flat(note, NOTE_MAX),
-  });
-  let result;
-  try {
-    result = spawnSync('git', ['status', '--short'], {
-      cwd: dir,
-      encoding: 'utf8',
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-  } catch (err) {
-    return unavailable(`git status could not be run: ${err}`);
-  }
-  if (result.error != null) {
-    return unavailable(
-      result.error.code === 'ETIMEDOUT'
-        ? `git status did not answer within ${GIT_TIMEOUT_MS}ms`
-        : `git status could not be run: ${result.error.message ?? result.error.code}`,
-    );
-  }
-  if (result.status !== 0) {
-    const stderr = (result.stderr ?? '').trim();
-    return unavailable(stderr.length > 0 ? stderr : `git status exited ${result.status}`);
-  }
-  const lines = (result.stdout ?? '')
-    .split('\n')
-    .map((line) => line.replace(/\s+$/, ''))
-    .filter((line) => line.length > 0);
-  const shown = lines
-    .slice(0, STATUS_ENTRIES_MAX)
-    .map((line) => (line.length > STATUS_LINE_MAX ? `${line.slice(0, STATUS_LINE_MAX - 1)}…` : line));
-  return {
-    // A closed vocabulary of three. `clean` is a real claim and is only ever
-    // made when git answered and listed nothing.
-    git: lines.length === 0 ? 'clean' : 'dirty',
-    entries: shown,
-    entry_count: lines.length,
-    truncated: shown.length < lines.length,
-    note: null,
-  };
-}
-
-const lastMessage = typeof event.last_assistant_message === 'string' ? event.last_assistant_message : null;
-
-try {
-  appendFileSync(
-    join(repo.root, '.fadeno', 'dispatches.jsonl'),
-    `${JSON.stringify({
-      // Evidence-row format version, duplicated as a literal from
-      // DISPATCHES_FORMAT in src/commands/dispatch.ts, exactly as the steering
-      // hook and both proxy guards do it: a standalone hook has no import path
-      // back into the CLI. ADDITIVE under 1.1 — readers tier on the MAJOR, so a
-      // new event name needs no bump, while a bump would make every older
-      // reader skip ALL rows as "newer format".
-      format: '1.1',
-      timestamp: new Date().toISOString(),
-      event: 'host_agent_stopped',
-      fadeno_version: HOOK_VERSION,
-      hook_version: HOOK_VERSION,
-      host: HOST,
-      // Identity as the harness gave it. `agent_type` is the RESOLVED type —
-      // what actually ran — which is not always what the director asked for: a
-      // steered `worker` spawn arrives here as `fadeno:worker`, and a rewritten
-      // one as `fadeno:dispatch-worker`. Claude spells an unknown type as the
-      // empty string, which `str` records as null.
-      agent_type: str(event.agent_type),
-      agent_id: str(event.agent_id),
-      // The PARENT session's id on both harnesses: this hook runs as the
-      // subagent concludes, inside the session that spawned it.
-      session_id: str(event.session_id),
-      // Where the transcript is, so a host that DOES want it has the path
-      // without hunting. Recording the path is the point; reading the file is
-      // not this hook's job and would not fit its budget.
-      agent_transcript_path: str(event.agent_transcript_path),
-      // Codex publishes the agent's model on this event; Claude does not.
-      // Null rather than omitted, so the two harnesses' rows diff field for
-      // field — the rule `recordHostRefusal` follows in the steering hook.
-      model: str(event.model),
-      stop_hook_active: typeof event.stop_hook_active === 'boolean' ? event.stop_hook_active : null,
-      // The agent's own last words, and the PRESENCE of them as a separate
-      // fact — because a harness may hand over none, and Claude's measurably
-      // does not on the interrupted path, so a reader must be able to tell
-      // "the agent signed off" from "the harness had nothing to hand over".
-      // Neither one is a completeness verdict and nothing downstream may
-      // render one: the agent was never asked.
-      last_message: {
-        present: lastMessage != null,
-        chars: lastMessage != null ? lastMessage.length : null,
-        excerpt: lastMessage != null ? flat(lastMessage, LAST_MESSAGE_MAX) : null,
-      },
-      // The tree, as it stood at the stop.
-      workspace: {
-        // Repo-relative, and null when the agent was in the repo root itself.
-        tree: repo.tree,
-        ...workspaceSnapshot(cwd),
-      },
-      // WHICH DISPATCH. A stop event names an agent, never a dispatch, so this
-      // is null far more often than not — and null is the honest answer.
-      //
-      // The one basis that is not a guess: an isolated host dispatch runs in
-      // `.fadeno/local/host-worktrees/<scope>/<dispatch-id>`, so when the
-      // agent's cwd resolved inside one the id is READ OUT OF THE PATH. That
-      // is an identification, not a correlation heuristic.
-      //
-      // Everything else is left to the reader, which can see the whole log and
-      // can say what was open without pretending to know which one was this
-      // agent's. A row that names the wrong dispatch is worse than one that
-      // names none.
-      dispatch_correlation: {
-        dispatch_id: repo.dispatchId,
-        scope: repo.scope,
-        basis: repo.dispatchId != null ? 'host_worktree_path' : 'unestablished',
-      },
-    })}\n`,
-  );
-} catch {
-  // best-effort, exactly like every other write in every other hook here: a
-  // failed append must never be the thing that breaks the host session.
-}
-finish();
+const stopped = run.json;
+const dirty = stopped.dirty === 'unavailable'
+  ? 'tree unreadable'
+  : stopped.dirty?.paths?.length > 0
+    ? `${stopped.dirty.paths.length}${stopped.dirty.truncated ? '+' : ''} uncommitted path(s)`
+    : 'tree clean';
+const model = str(stopped.modelObserved) != null && str(stopped.model) != null && stopped.model !== 'current-host' && stopped.model !== stopped.modelObserved
+  ? `; ran on ${stopped.modelObserved}, not the dialed ${stopped.model}`
+  : '';
+finish({
+  systemMessage:
+    `fadeno: dispatch ${stopped.name} stopped${stopped.replayed ? ' (already recorded)' : ''}; ${dirty}${model}. ` +
+    `Close it: fadeno dispatch-close ${stopped.name} --merged|--kept|--discarded|--failed`,
+});

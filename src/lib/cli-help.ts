@@ -64,12 +64,14 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     'The executor runs in a worktree cut from HEAD (`--from <ref>` cuts elsewhere; `--shared` works in the live tree on your explicit request), with the dispatch contract appended to the prompt. Its stdout is the report and is printed verbatim; its exit code is yours.',
     'Every dispatch must be closed afterwards: `fadeno dispatch-close <name> --merged|--kept|--discarded|--failed`. Fadeno performs no merge.',
   ]),
-  'dispatch-open': page('Open a host-lane dispatch: resolve, cut a worktree, record the row, print the contract.', 'fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--shared] [--from <ref>] [--session-id <id>] [--parent <id>] [--harness <id>] (--prompt-file <path> | stdin) [--json]', [
-    'The hook\'s entry point: the harness runs the agent, this records that it exists and hands back the prompt the agent should receive. `--json` carries the composed prompt, the worktree and the nag.',
+  'dispatch-open': page('The spawn wrapper for a spawn the host is about to make: open it on the host lane, or hand it to the command lane.', 'fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] (--prompt-file <path> | stdin) [--json]', [
+    'The spawn hook\'s entry point. With `--lane auto` (the default) the resolution decides: a model this session can deliver opens on the host lane — worktree cut, row written, and `--json` carries the contract-bearing prompt the agent should receive — while any other model is a relay: nothing is opened, the prompt is staged, and `relay.command` is the `fadeno dispatch` call the dispatch proxy runs.',
+    '`--lane host` opens on the host lane regardless, for a caller about to run the agent in-session itself; `--lane command` stages the relay regardless.',
     'Refused (exit 3) at the unclosed-dispatch limit; the refusal names what to close.',
   ]),
-  'dispatch-stop': page('Record that a host-lane dispatch\'s agent stopped, and what its tree holds.', 'fadeno dispatch-stop <name|id> [--message-file <path> | stdin] [--agent-cwd <dir>] [--json]', [
+  'dispatch-stop': page('Record that a host-lane dispatch\'s agent stopped, and what its tree holds.', 'fadeno dispatch-stop [<name|id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json]', [
     'The stop hook\'s entry point. Records presence of a final message, never completeness, and the uncommitted paths in the assigned worktree. A second stop for the same dispatch is a replay.',
+    '`--transcript` reads the agent\'s transcript: the contract header in its prompt names the dispatch (so the ref may be omitted), the last assistant turn supplies the final message when none was passed, and the model the agent ran on is recorded beside the one the dial asked for. A transcript with no contract is not a dispatch: exit 4, nothing recorded.',
   ]),
   'dispatch-close': page('Record the terminal decision for a dispatch.', 'fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>]', [
     'Exactly one verb. The same verb twice is a replay; a different verb for an already-closed dispatch is refused. Closing removes nothing: the branch stays, and the worktree stays until `fadeno clean`.',
@@ -167,6 +169,9 @@ const OPTION_HINTS: Record<string, string> = {
   '--scope': 'Installation scope',
   '--session': 'Local session scope',
   '--session-id': 'Host session the spawn came from',
+  '--lane': 'Which lane opens it: auto (the resolution decides), host, or command',
+  '--transcript': 'The agent\'s transcript, read for the dispatch id, final message and model',
+  '--parent-transcript': 'The spawning agent\'s transcript; its contract header names the parent dispatch',
   '--shadow': 'One-shot challenger reference',
   '--shared': 'Work in the live tree instead of a worktree',
   '--strict': 'Fail on an unreachable listing too',
@@ -179,7 +184,7 @@ const OPTION_HINTS: Record<string, string> = {
 const OPTION_FORMS: Record<string, string> = {
   '--format': '--format <format>', '--schema': '--schema <kind>',
   '--archetype': '--archetype <name>', '--model': '--model <ref>', '--harness': '--harness <id>',
-  '--prompt-file': '--prompt-file <path>', '--output': '--output <path>', '--bind': '--bind <role=executor>',
+  '--prompt-file': '--prompt-file <path>', '--output': '--output <path>', '--lane': '--lane <auto|host|command>', '--transcript': '--transcript <path>', '--parent-transcript': '--parent-transcript <path>', '--bind': '--bind <role=executor>',
   '--tool': '--tool <name>', '--input': '--input <name=path>',
   '--rate': '--rate <0..1>', '--n': '--n <count>', '--prompt-sha256': '--prompt-sha256 <hex>',
   '--host-executor': '--host-executor <name>', '--native-executor': '--native-executor <name>',
@@ -213,8 +218,8 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   shadow: withGlobals('--harness', '--rate', '--n', '--json'),
   clean: withGlobals('--force'),
   dispatch: withGlobals('--archetype', '--model', '--name', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--heartbeat'),
-  'dispatch-open': withGlobals('--archetype', '--model', '--name', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--harness', '--json'),
-  'dispatch-stop': withGlobals('--message-file', '--agent-cwd', '--json'),
+  'dispatch-open': withGlobals('--archetype', '--model', '--name', '--lane', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--parent-transcript', '--harness', '--json'),
+  'dispatch-stop': withGlobals('--transcript', '--message-file', '--agent-cwd', '--json'),
   'dispatch-close': withGlobals('--merged', '--kept', '--discarded', '--failed', '--note'),
   cancel: withGlobals(),
   dispatches: withGlobals('--all', '--tail', '--json', '--output'),

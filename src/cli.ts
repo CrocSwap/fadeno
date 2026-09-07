@@ -18,6 +18,8 @@ import {
   runDispatchStop,
   runDispatches,
   runWorktrees,
+  NotADispatchError,
+  type OpenLane,
 } from './commands/dispatches.ts';
 import {
   
@@ -524,6 +526,9 @@ async function main(argv: string[]): Promise<number> {
         'session-id': { type: 'string' },
         'message-file': { type: 'string' },
         'agent-cwd': { type: 'string' },
+        transcript: { type: 'string' },
+        'parent-transcript': { type: 'string' },
+        lane: { type: 'string' },
         merged: { type: 'boolean' },
         kept: { type: 'boolean' },
         discarded: { type: 'boolean' },
@@ -970,8 +975,8 @@ async function main(argv: string[]): Promise<number> {
     case 'dispatch-open': {
       if (!values.archetype) {
         throw new Error(
-          'Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--shared] [--from <ref>] ' +
-            '[--session-id <id>] [--parent <id>] [--harness <id>] (--prompt-file <path> | stdin) [--json]',
+          'Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] ' +
+            '[--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] (--prompt-file <path> | stdin) [--json]',
         );
       }
       const promptFile = values['prompt-file'];
@@ -986,6 +991,8 @@ async function main(argv: string[]): Promise<number> {
         session: values['session-id'] ?? null,
         parent: values.parent,
         harness: values.harness ?? null,
+        parentTranscript: values['parent-transcript'] ?? null,
+        lane: (values.lane ?? 'auto') as OpenLane,
       });
       if (!outcome.ok) {
         if (values.json) console.log(JSON.stringify({ ok: false, refused: outcome.refused }));
@@ -994,6 +1001,14 @@ async function main(argv: string[]): Promise<number> {
       }
       if (values.json) {
         console.log(JSON.stringify(outcome));
+        return 0;
+      }
+      if (!outcome.opened) {
+        console.log(
+          `${outcome.archetype} resolves to ${outcome.model}${outcome.effort ? `@${outcome.effort}` : ''}${outcome.harness ? ` on ${outcome.harness}` : ''}, a command lane: nothing opened here. The dispatch proxy runs:`,
+        );
+        console.log(`  ${outcome.relay.command}`);
+        console.log(outcome.nag);
         return 0;
       }
       console.log(
@@ -1007,23 +1022,43 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'dispatch-stop': {
       const [, ref] = positionals;
-      if (!ref) throw new Error('Usage: fadeno dispatch-stop <name|id> [--message-file <path> | stdin] [--agent-cwd <dir>] [--json]');
+      const transcript = values.transcript ?? null;
+      if (!ref && !transcript) {
+        throw new Error('Usage: fadeno dispatch-stop [<name|id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json] — a transcript can name the dispatch by its contract header.');
+      }
       const messageFile = values['message-file'];
-      const stopped = runDispatchStop({
-        ref,
-        messageFile,
-        message: messageFile == null && !process.stdin.isTTY ? readFileSync(0, 'utf8') : null,
-        agentCwd: values['agent-cwd'] ?? null,
-      });
+      let stopped;
+      try {
+        stopped = runDispatchStop({
+          ref: ref ?? null,
+          transcript,
+          messageFile,
+          message: messageFile == null && !process.stdin.isTTY ? readFileSync(0, 'utf8') : null,
+          agentCwd: values['agent-cwd'] ?? null,
+        });
+      } catch (err) {
+        // Not a dispatch: the stop hook fires for every subagent, and one that
+        // carried no contract has nothing to record. Exit 4 says so without noise.
+        if (err instanceof NotADispatchError) {
+          if (values.json) console.log(JSON.stringify({ ok: false, dispatch: null, reason: err.message }));
+          else console.error(err.message);
+          return 4;
+        }
+        throw err;
+      }
       const name = stopped.record.opened?.name ?? stopped.record.id;
       const dirty = stopped.row.dirty === 'unavailable' ? 'unreadable' : stopped.row.dirty.paths.length === 0 ? 'clean' : `${stopped.row.dirty.paths.length} dirty path(s)`;
       if (values.json) {
-        console.log(JSON.stringify({ id: stopped.record.id, name, replayed: stopped.replayed, dirty: stopped.row.dirty, mismatchedCwd: stopped.mismatchedCwd }));
+        console.log(JSON.stringify({ ok: true, id: stopped.record.id, name, replayed: stopped.replayed, dirty: stopped.row.dirty, mismatchedCwd: stopped.mismatchedCwd, modelObserved: stopped.row.model_observed ?? null, model: stopped.record.opened?.model ?? null }));
         return 0;
       }
+      const asked = stopped.record.opened?.model ?? null;
+      const ran = stopped.row.model_observed ?? null;
+      const modelNote = ran != null && asked != null && asked !== 'current-host' && asked !== ran ? `; WARNING: ran on ${ran}, the dial asked for ${asked}` : '';
       console.log(
         `${name} stopped${stopped.replayed ? ' (already recorded)' : ''}; tree ${dirty}` +
           (stopped.mismatchedCwd != null ? `; WARNING: the agent worked in ${stopped.mismatchedCwd}, not its assigned worktree` : '') +
+          modelNote +
           `. Close it: fadeno dispatch-close ${name} --merged|--kept|--discarded|--failed`,
       );
       return 0;

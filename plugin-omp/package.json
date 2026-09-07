@@ -14,7 +14,7 @@
   ],
   "omp": {
     "extensions": [
-      "./extensions/fadeno-steering.ts"
+      "./extensions/fadeno.ts"
     ]
   }
 }

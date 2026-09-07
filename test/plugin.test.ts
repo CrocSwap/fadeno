@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import test from 'node:test';
-import { runPlugin } from '../src/commands/plugin.ts';
+import { roleAgentDefinition, runPlugin, stampSurfaceVersion } from '../src/commands/plugin.ts';
+import { BUILTIN_ARCHETYPE_DESCRIPTIONS } from '../src/lib/contracts.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 // Escape hatch for parallel/work-in-progress edits: a template change makes the
@@ -48,23 +49,43 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
 
   const host = readFileSync(join(outDir, 'skills/host/SKILL.md'), 'utf8');
   assert.match(host, /^name: host$/m);
-  assert.match(host, /host coordinator/i);
+  assert.match(host, /Operate as the\nhost: decompose the task/);
 
   // slash-command entry points → /fadeno:host, /fadeno:setup
   assert.ok(exists(outDir, 'commands/host.md'));
   assert.ok(exists(outDir, 'commands/setup.md'));
 
-  // Claude plugins register the inert-native steering hook explicitly.
-  assert.ok(exists(outDir, 'hooks/dispatch-steering.mjs'));
-  assert.ok(exists(outDir, 'hooks/host-mode.mjs'));
+  // The hook family: the spawn wrapper, the Bash guard, the stop hook, host
+  // mode, and the library they share — every one registered in hooks.json.
+  for (const hook of ['hook-lib.mjs', 'spawn-claude.mjs', 'bash-guard.mjs', 'agent-stop.mjs', 'host-mode.mjs']) {
+    assert.ok(exists(outDir, `hooks/${hook}`), hook);
+    assert.equal(read(outDir, `hooks/${hook}`), readFileSync(join(templatesDir(), 'hooks', hook), 'utf8'), `${hook} is the template, byte for byte`);
+  }
   const hooks = JSON.parse(read(outDir, 'hooks/hooks.json'));
   assert.equal(hooks.hooks.UserPromptExpansion[0].matcher, '(^|:)host$');
   assert.equal(hooks.hooks.PreToolUse[0].matcher, 'Agent');
+  assert.match(hooks.hooks.PreToolUse[0].hooks[0].command, /\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/spawn-claude\.mjs/);
+  assert.equal(hooks.hooks.PreToolUse[1].matcher, 'Bash');
+  assert.match(hooks.hooks.PreToolUse[1].hooks[0].command, /bash-guard\.mjs/);
+  assert.match(hooks.hooks.SubagentStop[0].hooks[0].command, /agent-stop\.mjs/);
+  assert.ok(!exists(outDir, 'hooks/dispatch-steering.mjs'));
 
-  // subagents — namespaced as fadeno:worker / :reviewer / :judge
-  assert.ok(exists(outDir, 'agents/worker.md'));
-  assert.ok(exists(outDir, 'agents/reviewer.md'));
-  assert.ok(exists(outDir, 'agents/judge.md'));
+  // Agents: one per canonical archetype, generated from the vocabulary's
+  // descriptions, plus the single dispatch proxy on the catalog's relay model.
+  for (const archetype of ['director', 'judge', 'reviewer', 'scout', 'worker']) {
+    const md = read(outDir, `agents/${archetype}.md`);
+    assert.match(md, new RegExp(`^name: ${archetype}$`, 'm'));
+    assert.ok(md.includes(BUILTIN_ARCHETYPE_DESCRIPTIONS[archetype]!), `${archetype} carries the vocabulary's description`);
+    assert.match(md, new RegExp(`Spawn it as fadeno:${archetype};`));
+    assert.match(md, /\[fadeno \d+\.\d+\.\d+[^\]]*\]$/m, 'surface-version stamped');
+    assert.doesNotMatch(md, /^model: /m, 'role agents never pin a model; the dial owns it');
+    assert.equal(md, stampSurfaceVersion(roleAgentDefinition(archetype, 'claude')));
+  }
+  const proxy = read(outDir, 'agents/dispatch.md');
+  assert.match(proxy, /^name: dispatch$/m);
+  assert.match(proxy, /^tools: Bash$/m);
+  assert.match(proxy, /^model: sonnet$/m, 'the relay from the shipped catalog');
+  assert.ok(!exists(outDir, 'agents/dispatch-worker.md'), 'one proxy, not one per archetype');
 
   // the plugin carries no per-repo definitions
   assert.ok(!exists(outDir, 'skills/host/playbooks'));

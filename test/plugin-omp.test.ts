@@ -3,22 +3,14 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import test from 'node:test';
-import { runOmpPlugin } from '../src/commands/plugin.ts';
+import { roleAgentDefinition, runOmpPlugin } from '../src/commands/plugin.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const REPO = join(import.meta.dirname, '..');
 // `fadeno-setup` is deliberately absent: `<cli> setup` supports only
 // --codex/--claude, and that skill teaches using only the current host's line.
 const SKILLS = ['fadeno-host'] as const;
-const AGENTS = [
-  'worker.md',
-  'reviewer.md',
-  'judge.md',
-  'dispatch-worker.md',
-  'dispatch-reviewer.md',
-  'dispatch-judge.md',
-  'dispatch-director.md',
-] as const;
+const ARCHETYPES = ['director', 'judge', 'reviewer', 'scout', 'worker'] as const;
 
 // Same escape hatch as test/plugin.test.ts: `FADENO_SKIP_DRIFT=1` skips only the
 // committed-vs-fresh comparison so a work-in-progress template edit doesn't block
@@ -45,7 +37,7 @@ test('omp plugin: package.json manifest is loadable with a single-sourced versio
   // counts as loadable; without it an npm/link install is skipped wholesale.
   const manifest = JSON.parse(readFileSync(join(outDir, 'package.json'), 'utf8'));
   assert.equal(manifest.name, 'fadeno');
-  assert.deepEqual(manifest.omp, { extensions: ['./extensions/fadeno-steering.ts'] });
+  assert.deepEqual(manifest.omp, { extensions: ['./extensions/fadeno.ts'] });
   const pkgVersion = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
   assert.equal(manifest.version, pkgVersion);
 });
@@ -75,40 +67,37 @@ test('omp plugin: skills are full-named shared bodies with per-skill launchers',
   assert.ok(!exists(outDir, 'commands'));
 });
 
-test('omp plugin: agents satisfy the task-agent contract', (t) => {
+test('omp plugin: agents satisfy the task-agent contract — one role agent per archetype plus the dispatch proxy', (t) => {
   const root = tempRepo(t);
   const { outDir } = runOmpPlugin({ cwd: root, outDir: join(root, 'plugin-omp') });
 
-  for (const file of AGENTS) {
-    const md = readFileSync(join(REPO, 'templates', 'omp', 'omp-agents', file), 'utf8');
+  for (const archetype of ARCHETYPES) {
+    const md = read(outDir, `agents/${archetype}.md`);
     // omp parse contract: missing name or description invalidates the agent.
-    assert.match(md, /^---\nname: /, `${file} must open with a name field`);
-    assert.match(md, /^description: .+/m, `${file} must carry a description`);
+    assert.match(md, /^---\nname: /, `${archetype} must open with a name field`);
+    assert.match(md, /^description: .+/m, `${archetype} must carry a description`);
+    assert.match(md, new RegExp(`Spawn it as ${archetype};`), 'omp spawns by bare name');
+    assert.doesNotMatch(md, /\[fadeno \d/, 'omp keys upgrades off the manifest version; no surface stamp');
+    assert.equal(md, roleAgentDefinition(archetype, 'omp'));
   }
-  for (const proxy of ['dispatch-worker.md', 'dispatch-reviewer.md', 'dispatch-judge.md', 'dispatch-director.md']) {
-    const md = readFileSync(join(REPO, 'templates', 'omp', 'omp-agents', proxy), 'utf8');
-    // Proxies are bash-only relays; no Claude-specific surface may leak in.
-    assert.match(md, /^tools: bash$/m, `${proxy} must restrict itself to bash`);
-    assert.doesNotMatch(md, /^model: /m, `${proxy} must not pin a host model`);
-    assert.doesNotMatch(md, /CLAUDE_PLUGIN_ROOT|PreToolUse/, `${proxy} must not reference Claude-only machinery`);
-    assert.match(md, /FADENO_HARNESS=omp "\$\{FADENO_CLI:-fadeno\}" dispatch/, `${proxy} must retain the omp route family and bundled CLI`);
-  }
-  for (const file of AGENTS) {
-    assert.equal(
-      read(outDir, `agents/${file}`),
-      readFileSync(join(REPO, 'templates', 'omp', 'omp-agents', file), 'utf8'),
-      `agents/${file} drifted from templates/omp`,
-    );
-  }
+  const proxy = read(outDir, 'agents/dispatch.md');
+  assert.match(proxy, /^tools: bash$/m, 'the proxy restricts itself to bash');
+  assert.doesNotMatch(proxy, /^model: /m, 'the proxy must not pin a host model');
+  assert.doesNotMatch(proxy, /CLAUDE_PLUGIN_ROOT|PreToolUse/, 'no Claude-only machinery');
+  assert.equal(proxy, readFileSync(join(REPO, 'templates', 'omp', 'omp-agents', 'dispatch.md'), 'utf8'));
+  assert.ok(!exists(outDir, 'agents/dispatch-worker.md'), 'one proxy, and no steering aliases');
+  assert.ok(!exists(outDir, 'agents/fadeno-steering-host-worker.md'));
+  // The extension's proxy prompt runs the bundled CLI under the omp harness identity.
+  assert.match(read(outDir, 'extensions/fadeno.ts'), /FADENO_HARNESS=omp "\$\{FADENO_CLI:-fadeno\}" /);
 });
 
-test('omp plugin: bundles a self-contained CLI used by its steering extension', (t) => {
+test('omp plugin: bundles a self-contained CLI used by its spawn extension', (t) => {
   const root = tempRepo(t);
   const { outDir } = runOmpPlugin({ cwd: root, outDir: join(root, 'plugin-omp') });
 
   assert.ok(!exists(outDir, 'hooks'), 'omp steering ships as an extension, not a hooks directory');
   assert.ok(exists(outDir, 'bin/fadeno'), 'omp plugin must bundle a binary');
-  assert.match(read(outDir, 'extensions/fadeno-steering.ts'), /import\.meta\.dirname, '\.\.', 'bin', 'fadeno'/);
+  assert.match(read(outDir, 'extensions/fadeno.ts'), /import\.meta\.dirname, '\.\.', 'bin', 'fadeno'/);
   assert.ok(exists(outDir, 'bin/templates/common/fadeno/executors.yaml'));
   const binary = join(outDir, 'bin', 'fadeno');
   assert.notEqual(statSync(binary).mode & 0o111, 0, 'generated omp plugin CLI must be executable');

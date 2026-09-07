@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -62,8 +62,30 @@ export function templatesDir(): string {
  */
 export function findRepoRoot(startDir: string = process.cwd()): string {
   const gitPath = findUp('.git', startDir);
-  if (gitPath) return dirname(gitPath);
+  if (gitPath) return mainRepoRoot(gitPath);
   return resolve(startDir);
+}
+
+/**
+ * The repository a `.git` entry belongs to. A linked worktree carries a `.git`
+ * FILE (`gitdir: <main>/.git/worktrees/<name>`) rather than a directory, and a
+ * dispatch running inside one — a director in its worktree spawning workers —
+ * must still find the main repository: that is where `.fadeno/` and the ledger
+ * live, and a worktree is gitignored scratch that never holds either.
+ */
+function mainRepoRoot(gitPath: string): string {
+  try {
+    if (statSync(gitPath).isDirectory()) return dirname(gitPath);
+    const pointer = readFileSync(gitPath, 'utf8').match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
+    if (pointer) {
+      const gitDir = resolve(dirname(gitPath), pointer);
+      const common = gitDir.match(/^(.*)[\\/]worktrees[\\/][^\\/]+[\\/]?$/)?.[1];
+      if (common) return dirname(common);
+    }
+  } catch {
+    // unreadable: fall through to the directory that holds the entry
+  }
+  return dirname(gitPath);
 }
 
 /** Read this package's version from its own package.json. */
