@@ -1,0 +1,306 @@
+<title>Fadeno Specification</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root {
+  --ground: #F6F7F8; --panel: #FFFFFF; --ink: #15181C; --muted: #5C6672; --faint: #8B95A1;
+  --rule: #DDE2E7; --rule-soft: #EAEDF0;
+  --accent: #2C5A85; --accent-soft: #E7EEF5;
+  --cost: #9C5525; --cost-soft: #F6EBE2;
+  --keep: #35624A; --keep-soft: #E5EFE8;
+  --cut: #8C3A3A; --cut-soft: #F5E7E7;
+  --shadow: 0 1px 2px rgba(20,24,28,.05), 0 8px 24px -16px rgba(20,24,28,.25);
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --ground: #121519; --panel: #191D22; --ink: #E7EAED; --muted: #9BA5B1; --faint: #6E7883;
+  --rule: #2C333A; --rule-soft: #232930;
+  --accent: #7FB0DA; --accent-soft: #1C2A36;
+  --cost: #D69256; --cost-soft: #2E2318;
+  --keep: #7FBE9A; --keep-soft: #1A271F;
+  --cut: #D98080; --cut-soft: #2C1D1D;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+} }
+:root[data-theme="dark"] {
+  --ground: #121519; --panel: #191D22; --ink: #E7EAED; --muted: #9BA5B1; --faint: #6E7883;
+  --rule: #2C333A; --rule-soft: #232930;
+  --accent: #7FB0DA; --accent-soft: #1C2A36;
+  --cost: #D69256; --cost-soft: #2E2318;
+  --keep: #7FBE9A; --keep-soft: #1A271F;
+  --cut: #D98080; --cut-soft: #2C1D1D;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+* { box-sizing: border-box; }
+body { background: var(--ground); color: var(--ink); font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif; font-size: 15px; line-height: 1.58; -webkit-font-smoothing: antialiased; }
+.wrap { max-width: 1000px; margin: 0 auto; padding: 40px 28px 96px; }
+code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .9em; background: var(--rule-soft); padding: 1px 5px; border-radius: 2px; }
+p { max-width: 70ch; }
+
+.masthead { border-bottom: 2px solid var(--ink); padding-bottom: 22px; margin-bottom: 30px; }
+.eyebrow { font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 500; letter-spacing: .13em; text-transform: uppercase; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+h1 { font-size: clamp(32px,5vw,50px); line-height: 1.04; margin: 12px 0 12px; font-weight: 600; letter-spacing: -.024em; }
+.standfirst { color: var(--muted); max-width: 68ch; font-size: 16.5px; margin: 0; }
+
+h2 { font-size: 21px; font-weight: 600; letter-spacing: -.014em; margin: 46px 0 4px; padding-top: 20px; border-top: 1px solid var(--rule); }
+h2 .sn { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--accent); font-weight: 600; margin-right: 10px; }
+h3 { font-size: 15.5px; font-weight: 600; margin: 26px 0 5px; }
+.lede { color: var(--muted); margin: 0 0 18px; max-width: 70ch; }
+
+.def { display: grid; grid-template-columns: 148px 1fr; gap: 6px 18px; padding: 11px 0; border-bottom: 1px solid var(--rule-soft); align-items: baseline; }
+.def:last-of-type { border-bottom: 0; }
+.def dt { font-family: "IBM Plex Mono", monospace; font-weight: 600; font-size: 13.5px; color: var(--accent); }
+.def dd { margin: 0; color: var(--muted); font-size: 14px; }
+.def dd b { color: var(--ink); font-weight: 500; }
+
+.contract { border: 1px solid var(--rule); background: var(--panel); box-shadow: var(--shadow); padding: 18px 20px; margin: 16px 0; }
+.contract h4 { margin: 0 0 4px; font-size: 11px; font-family: "IBM Plex Mono", monospace; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+.contract ol { margin: 10px 0 0; padding-left: 20px; }
+.contract li { margin-bottom: 7px; color: var(--muted); }
+.contract li b { color: var(--ink); font-weight: 500; }
+.contract p { margin: 0; color: var(--muted); font-size: 14px; }
+
+.rule-list { margin: 0; padding: 0; list-style: none; }
+.rule-list li { padding: 9px 0 9px 26px; border-bottom: 1px solid var(--rule-soft); position: relative; color: var(--muted); }
+.rule-list li:last-child { border-bottom: 0; }
+.rule-list li::before { content: "→"; position: absolute; left: 0; color: var(--faint); font-family: "IBM Plex Mono", monospace; }
+.rule-list li b { color: var(--ink); font-weight: 500; }
+
+.flag { border-left: 3px solid var(--cost); background: var(--cost-soft); padding: 11px 15px; margin: 14px 0; font-size: 13.5px; }
+.flag b { font-weight: 600; }
+.flag .lbl { font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--cost); font-weight: 600; display: block; margin-bottom: 3px; }
+
+.scroll { overflow-x: auto; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th { text-align: left; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 0 14px 7px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.tbl td { padding: 8px 14px 8px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+.tbl td.m { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; white-space: nowrap; }
+.tbl td.cut { color: var(--cut); }
+
+.never { border: 1px solid var(--cut); background: var(--cut-soft); padding: 18px 20px; margin-top: 16px; }
+.never h4 { margin: 0 0 10px; font-size: 11px; font-family: "IBM Plex Mono", monospace; letter-spacing: .12em; text-transform: uppercase; color: var(--cut); font-weight: 600; }
+.never ul { margin: 0; padding-left: 20px; }
+.never li { margin-bottom: 6px; color: var(--muted); }
+.never li b { color: var(--ink); font-weight: 500; }
+
+pre { background: var(--panel); border: 1px solid var(--rule); padding: 14px 16px; overflow-x: auto; font-family: "IBM Plex Mono", monospace; font-size: 12.5px; line-height: 1.7; margin: 12px 0; }
+pre .c { color: var(--faint); }
+@media (max-width: 700px) { .def { grid-template-columns: 1fr; gap: 2px; } }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <div class="eyebrow"><span>Specification</span><span>Draft 1</span><span>2026-09-07</span><span>derives from decisions 01–33</span></div>
+  <h1>Fadeno</h1>
+  <p class="standfirst">A meta-harness for common subagent workflow patterns, neutral across harnesses and models. It routes work to models by role, wraps the spawn with deterministic scaffolding, and keeps a record nobody has to think about. Everything else is the intelligence's job.</p>
+</header>
+
+<p class="lede" style="margin-top:26px;">This document specifies behaviour, not implementation. Where a passage makes a call the decision log does not cover, it is marked <b>OPEN CALL</b> — those are the places worth arguing with; the rest is transcription.</p>
+
+<h2><span class="sn">01</span>What Fadeno is for</h2>
+<p>The user is someone constantly splitting and routing work between different models on different harnesses, who needs structure without ceremony. Fadeno gives them four things and deliberately nothing else:</p>
+<ul class="rule-list">
+  <li><b>Routing.</b> Name a model once; point roles at it; change the binding at user, repo or session scope with one command.</li>
+  <li><b>Spawning.</b> Launch subagents from inside a host session, on the right model, in a scaffolded environment.</li>
+  <li><b>Logging.</b> A durable record of what was delegated, on what, and how it ended — written without anyone asking for it.</li>
+  <li><b>Context.</b> The host knows how to use Fadeno; each subagent knows its own job.</li>
+</ul>
+<p style="margin-top:14px;">Complex environment setup, merge judgment, conflict resolution and workflow structure are <b>not</b> Fadeno's work. They belong to the intelligence, which has context Fadeno cannot have.</p>
+
+<h2><span class="sn">02</span>Ontology</h2>
+<dl>
+  <div class="def"><dt>archetype</dt><dd>A role you point at a model: <code>worker</code>, <code>reviewer</code>, <code>judge</code>, <code>scout</code>, <code>director</code> by default. <b>The set is open</b> — users define their own. Each carries a natural-language description that tells a director when to reach for it.</dd></div>
+  <div class="def"><dt>dial</dt><dd>The binding from an archetype to a model and effort, at user, repo or session scope. A dial may also point at <b>another archetype</b>, carrying its model and effort together.</dd></div>
+  <div class="def"><dt>harness</dt><dd>A coding agent Fadeno can work with. A <b>host harness</b> is one Fadeno can observe spawns inside; a <b>driver harness</b> is one Fadeno can launch as a process. A harness may be both.</dd></div>
+  <div class="def"><dt>lane</dt><dd>How a dispatch is delivered. <b>Host lane</b>: a subagent inside the caller's session. <b>Command lane</b>: a process Fadeno spawns. The lane is chosen by Fadeno and is <b>invisible to the host</b>.</dd></div>
+  <div class="def"><dt>dispatch</dt><dd>One unit of delegated work. Has a UUID, a semantic name, a worktree, and exactly one terminal decision.</dd></div>
+  <div class="def"><dt>worktree</dt><dd>A git worktree on its own branch, cut from HEAD or a named ref, where a dispatch does its work.</dd></div>
+  <div class="def"><dt>ledger</dt><dd>The append-only record at <code>.fadeno/dispatches.jsonl</code>. Three row types; nobody writes to it by hand.</dd></div>
+</dl>
+
+<h2><span class="sn">03</span>Routing</h2>
+
+<h3>Resolution</h3>
+<ul class="rule-list">
+  <li>An archetype resolves to a <b>model and an effort</b>, by walking the merged dial map across scopes — most specific scope wins per key.</li>
+  <li>A dial pointing at another archetype is followed to a terminal model. <b>An alias carries model and effort together.</b> Wanting the same model at a different effort means a separate route, not a partial alias.</li>
+  <li>Aliasing binds routing, never meaning: an aliased archetype <b>keeps its own description</b>.</li>
+  <li>Cycles are refused <b>at set time and at resolve time</b> — a cycle can be formed across scopes by two edits that are each individually valid.</li>
+  <li>An archetype with no dial resolves to <code>current-host</code>: the host session's own model. This has no edge case — no dial means no model, therefore no harness, therefore host lane.</li>
+</ul>
+
+<h3>Visibility</h3>
+<p>Routing is <b>invisible by default</b>. The host asks for an archetype; Fadeno resolves and applies model and effort without the host thinking about it. Two escape hatches exist and are not encouraged: <code>fadeno dial resolve</code> for inspection, and an explicit model override on a spawn — the real case being a director escalating a task that keeps failing.</p>
+
+<h3>Vocabulary is snapshotted; routing is live</h3>
+<p>This distinction governs when anything must be re-run, and it must not blur.</p>
+<ul class="rule-list">
+  <li><b>Descriptions</b> are injected when a host session activates, so adding an archetype or editing a description requires re-activation. The CLI says so on those changes — and only those.</li>
+  <li><b>Dials</b> are resolved at spawn time and are always current. Changing a dial requires nothing.</li>
+  <li>Fadeno stamps a catalog fingerprint at activation and reports staleness at the next spawn, so an ignored advisory or a teammate's edit still surfaces.</li>
+</ul>
+
+<h2><span class="sn">04</span>Spawning</h2>
+<p class="lede">Fadeno wraps every spawn with deterministic scaffolding. On the host lane the wrapper is a hook; on the command lane it is the CLI itself. Both do the same four things.</p>
+
+<div class="contract">
+  <h4>The spawn wrapper</h4>
+  <ol>
+    <li><b>Resolve</b> the archetype to a model and effort, and apply them to the spawn.</li>
+    <li><b>Choose the lane</b> — host if the resolved model can be delivered in-session, command otherwise. The host is not told which.</li>
+    <li><b>Cut a worktree</b> on a branch, from HEAD or a named ref, and record its path, branch and base.</li>
+    <li><b>Inject the worker's contract</b> into the prompt, and write the <code>opened</code> row.</li>
+  </ol>
+</div>
+
+<p>On the host lane the hook applies model and effort by rewriting the spawn. Where the resolved model can only be reached as a process, the hook instead redirects the spawn to a <b>dispatch proxy</b> — a minimal agent whose only job is to invoke the command lane. The host observes no difference.</p>
+
+<div class="flag"><span class="lbl">Open call</span>Whether the proxy is still needed on harnesses where the hook could invoke the command lane directly. Keeping it is the known-good path; removing it is an optimisation to consider after the rest works.</div>
+
+<h3>The worktree</h3>
+<ul class="rule-list">
+  <li>Cut from <b>HEAD or a named ref — never from dirty state</b>. Git cannot check out uncommitted work, and replaying it is complexity nobody needed: if a worker requires uncommitted work, the host commits first or requests a shared tree.</li>
+  <li><b>On a branch</b>, named <code>fadeno/&lt;semantic-name&gt;</code>, so the ledger and git agree on one identifier and a forgotten dispatch is findable by <code>git branch</code> alone.</li>
+  <li>The <b>command lane uses a worktree too</b>, under the same rules — and more easily, since Fadeno sets the process's working directory directly.</li>
+  <li>If <code>git worktree add</code> fails, <b>the spawn proceeds in the shared tree and the prompt says so</b>. An environment problem must not cost a turn.</li>
+  <li>A shared tree remains available on request. When one is requested while another shared dispatch is open, <b>say so</b> — that is the only collision git does not solve.</li>
+</ul>
+
+<div class="flag"><span class="lbl">Open call</span>Branch-name sanitization: what happens to a semantic name containing characters git rejects. Proposal — lowercase, replace runs of non-<code>[a-z0-9._-]</code> with <code>-</code>, trim to 60 characters, and let the duplicate counter handle any collision the trim creates.</div>
+
+<h2><span class="sn">05</span>The three contracts</h2>
+
+<div class="contract">
+  <h4>What the worker is told</h4>
+  <ol>
+    <li>Its <b>worktree path and branch</b>, and that it should work there.</li>
+    <li>That it <b>owns the work</b>: make the change, commit it, and before finalising, <b>merge from upstream and resolve conflicts in its own tree</b> — the responsibilities of a pull-request author.</li>
+    <li>That its return message must <b>state what is in the worktree, including anything untracked</b>, and recommend whether it should be merged or discarded.</li>
+  </ol>
+</div>
+
+<div class="contract">
+  <h4>What the host is told</h4>
+  <ol>
+    <li>The dispatch's <b>UUID and semantic name</b>, at spawn and again at stop where the harness allows.</li>
+    <li>That the worker's report is <b>a recommendation to weigh, not a finding to accept</b> — read it and reach an independent conclusion.</li>
+    <li>Every <b>unclosed dispatch in this repository</b>, at each spawn, with the insistence that they be reviewed and closed.</li>
+  </ol>
+</div>
+
+<div class="contract">
+  <h4>What closing requires</h4>
+  <p>Exactly one verb: <code>merged</code>, <code>kept</code>, <code>discarded</code>, or <code>failed</code>, with an optional note. Fadeno performs no merge — the host does, or delegates it. <b>The requirement is that the decision be made, not that Fadeno make it.</b></p>
+</div>
+
+<h3>The nag</h3>
+<ul class="rule-list">
+  <li>At every spawn, the host is reminded of all unclosed dispatches by <b>UUID and name</b>.</li>
+  <li>At <b>five</b> unclosed, the next spawn is <b>refused</b> until some are closed. Configurable; not exposed initially.</li>
+  <li>Scope is <b>repository-wide, not session-wide</b>. A director that spawns three workers and exits leaves dispatches with no owner; session scope would hide them permanently — exactly where nesting happens. <b>Grandparents inherit orphans.</b></li>
+  <li>Reporting targets the stop hook where a harness supports it, and <b>goes into the nag regardless</b>. The nag is load-bearing; stop-time reporting only makes the news arrive sooner.</li>
+  <li>When a worker's working directory did not match its assigned worktree, <b>say so</b> — at stop and in the nag.</li>
+</ul>
+
+<div class="flag"><span class="lbl">Open call</span>Where the threshold is configured. Proposal — <code>.fadeno/executors.yaml</code> alongside the dials, since it is repo-scoped policy and that file is already the repo's Fadeno config.</div>
+
+<h2><span class="sn">06</span>Context delivery</h2>
+<ul class="rule-list">
+  <li>A host session receives the archetype vocabulary and Fadeno's rules when it activates host mode.</li>
+  <li>A <b>spawned director receives the same content injected into its prompt</b>. A director never activates host mode, yet it is the archetype most needing the vocabulary — its job is choosing what to spawn next.</li>
+  <li>Both come from <b>one source</b>, so they cannot drift.</li>
+  <li>Injected content is the archetype list, routing behaviour, the worktree contract and the close obligation — <b>not</b> setup prose. General rule: <b>if an intelligence can spawn, it needs the vocabulary.</b></li>
+</ul>
+
+<h2><span class="sn">07</span>The ledger</h2>
+<p class="lede">Three row types, because "started", "the agent stopped" and "the host decided" are three facts, recorded by three parties, at three times. Nothing here is written by hand.</p>
+
+<pre><span class="c"># opened — by the wrapper</span>
+id · name · at · session · <b>parent</b> · archetype · model · effort
+explicit_model · lane · harness · workspace{path,branch,base} · task · prompt
+
+<span class="c"># stopped — by the stop hook, an outside observation</span>
+id · at · final_message · dirty
+
+<span class="c"># closed — when the host decides</span>
+id · at · verb · note</pre>
+
+<ul class="rule-list">
+  <li><code>parent</code> is <b>load-bearing</b>: without it, "which dispatches did this director open?" is unanswerable and orphan inheritance cannot be computed.</li>
+  <li><code>task</code> holds the first ~300 characters of <b>the caller's prompt</b>, flagged when truncated. <code>prompt</code> points at the full text at <code>.fadeno/prompts/&lt;id&gt;.md</code>.</li>
+  <li>Prompts live <b>outside <code>local/</code></b> so <code>clean</code> cannot orphan the rows that reference them. They are evidence of what was asked, not scratch. Unbounded by design.</li>
+  <li>The log records <b>what was asked, never what Fadeno injected</b> — injected text is identical every time, so storing it would make the log describe Fadeno instead of the work.</li>
+  <li><code>final_message</code> records <b>presence, never completeness</b>. On Claude's interrupted path the harness supplies no message at all, so its absence says nothing about whether work finished.</li>
+</ul>
+
+<h2><span class="sn">08</span>Command surface</h2>
+<div class="scroll">
+  <table class="tbl">
+    <thead><tr><th>Command</th><th>Does</th></tr></thead>
+    <tbody>
+      <tr><td class="m">dial</td><td>Show, set and resolve archetype bindings. With no arguments, lists archetypes with descriptions and resolved models — the director's reference.</td></tr>
+      <tr><td class="m">models</td><td>Inspect the registry; verify an alias actually resolves against its backend.</td></tr>
+      <tr><td class="m">dispatches</td><td>List dispatches; show one; find output by UUID or name.</td></tr>
+      <tr><td class="m">dispatch-close</td><td>Record the terminal decision for a dispatch.</td></tr>
+      <tr><td class="m">worktrees</td><td>Report worktrees holding unmerged work. The cross-session safety net.</td></tr>
+      <tr><td class="m">status</td><td>Effective routing, harness integration, and whether anything needs attention.</td></tr>
+      <tr><td class="m">clean</td><td>Remove machine-local scratch — worktrees and outputs, never prompts or the ledger.</td></tr>
+      <tr><td class="m">plugin</td><td>Generate the harness plugin from this checkout.</td></tr>
+      <tr><td class="m">setup</td><td>Link the CLI onto PATH. <b>A symlink, never a copy</b> — one copy makes version skew structurally impossible.</td></tr>
+      <tr><td class="m">completion</td><td>Shell completion.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="flag"><span class="lbl">Open call</span>Whether <code>worktrees</code> is its own verb or a section of <code>status</code>. Proposal — its own verb, because it is the one report someone runs deliberately when they suspect work was forgotten, and burying it in a status wall makes it easy to skim past.</div>
+
+<h2><span class="sn">09</span>Non-goals</h2>
+<p class="lede">Named explicitly, because each was in the product and was removed for a reason. Anything here must argue its way back in.</p>
+<div class="never">
+  <h4>Fadeno does not</h4>
+  <ul>
+    <li><b>Structure workflows.</b> Playbooks, gates, run ledgers and repair loops are gone. A workflow is a sequence of dispatches, which the intelligence composes. They may return as a plugin above this layer.</li>
+    <li><b>Adjudicate models.</b> No shadow pairs, no blinded judging, no bakeoff.</li>
+    <li><b>Enforce or attest.</b> No prompt digests, no relay attestation, no tamper detection, no <code>verify</code>. The ledger records; it does not police.</li>
+    <li><b>Materialize agent files.</b> Model and effort are set at spawn time. Nothing is written to <code>~/.codex/agents</code> or <code>.claude/agents</code>, so nothing goes stale and no <code>steering apply</code> exists. <b>Fadeno does report a hand-created agent file</b>, because such a file silently overrides what a spawn passes.</li>
+    <li><b>Police concurrent writes.</b> No window log, no overlap stamps, no lease, no lock. Worktrees and real merges remove the shared-tree world that machinery existed for.</li>
+    <li><b>Impose deadlines.</b> Nothing Fadeno launches is killed on a timer.</li>
+    <li><b>Decide what work is worth keeping.</b> It never destroys a worktree holding uncommitted work, and never judges whether output matters.</li>
+    <li><b>Diagnose itself.</b> No <code>doctor</code>. With nothing materialized, no second CLI copy and no run ledgers, there is nothing to diagnose.</li>
+  </ul>
+</div>
+
+<h2><span class="sn">10</span>Harness support</h2>
+<p>A harness is a <b>host harness</b> if Fadeno can observe spawns inside it — which in practice means Claude-or-Codex-compatible hooks. Everything else is a <b>driver harness</b>, reached through the command lane, which loses nothing: the command lane is where Fadeno controls the process outright.</p>
+<div class="scroll">
+  <table class="tbl">
+    <thead><tr><th>Harness</th><th>Host</th><th>Driver</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td class="m">claude</td><td>yes</td><td>yes</td><td>Ships Node; hooks work out of the box</td></tr>
+      <tr><td class="m">codex</td><td>yes</td><td>yes</td><td><b>Hook trust is a prerequisite</b> for host use, and users must know it</td></tr>
+      <tr><td class="m">omp</td><td>yes</td><td>—</td><td>Reuses Claude-style hook manifests</td></tr>
+      <tr><td class="m">grok, opencode, muse, agy</td><td>—</td><td>yes</td><td>Driver-only</td></tr>
+    </tbody>
+  </table>
+</div>
+<p style="margin-top:14px;">Fadeno remains an npm package. Six of seven harnesses ship no Node, so those users install a runtime their harness does not otherwise need — accepted for now, revisited if a real user objects.</p>
+
+<h2><span class="sn">11</span>Harness facts</h2>
+<p class="lede">Measured, not documented. Re-derive on a harness upgrade; the design depends on them.</p>
+<div class="scroll">
+  <table class="tbl">
+    <thead><tr><th>Fact</th><th>Why it matters</th></tr></thead>
+    <tbody>
+      <tr><td>Codex honours explicit <code>model</code> and <code>reasoning_effort</code> on a spawn with no agent file — parent astra/medium spawned luna/xhigh</td><td>Agent files are unnecessary</td></tr>
+      <tr><td>A Codex agent file <b>overrides</b> an explicit spawn value</td><td>A hand-created file silently defeats routing</td></tr>
+      <tr><td><code>collaboration.spawn_agent</code> takes only <code>fork_turns</code>, <code>message</code>, <code>model</code>, <code>reasoning_effort</code>, <code>task_name</code></td><td>No cwd; the prompt must carry the worktree contract</td></tr>
+      <tr><td>Codex's schema says <i>"inherited parent model is preferred"</i></td><td>A spawn with no explicit model drifts to the parent silently</td></tr>
+      <tr><td>Codex task names are hierarchical — <code>/root/task1/task_3</code> — and children spawn children</td><td>Nesting is real; orphan inheritance is not hypothetical</td></tr>
+      <tr><td>Claude runs <code>SubagentStop</code> on the interrupted path — 429, abort, kill — with a 5s budget and no <code>last_assistant_message</code></td><td>A stop receipt is buildable; a completeness verdict is not</td></tr>
+      <tr><td>Claude's Agent tool has no <code>cwd</code>, but has native <code>isolation: "worktree"</code></td><td>Elegant and Claude-only; not used, for uniformity</td></tr>
+      <tr><td><code>PreToolUse</code> can rewrite a spawn via <code>updatedInput</code>; its <code>systemMessage</code> reaches the <b>parent</b>, never the subagent</td><td>Why the worker's contract travels in its prompt</td></tr>
+      <tr><td><code>git ls-files --others --ignored --directory</code> collapses a wholly-ignored directory to one entry</td><td>A filename is not a reading of contents; never judge output by its name</td></tr>
+      <tr><td>Node resolves <code>node_modules</code> upward</td><td>Why missing build environments surface on Python and Rust repos and not on JS</td></tr>
+    </tbody>
+  </table>
+</div>
+
+</div>

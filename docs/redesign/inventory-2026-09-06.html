@@ -1,0 +1,448 @@
+<title>Fadeno Behaviour Inventory</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root {
+  --ground: #F6F7F8;
+  --panel: #FFFFFF;
+  --ink: #15181C;
+  --muted: #5C6672;
+  --faint: #8B95A1;
+  --rule: #DDE2E7;
+  --rule-soft: #EAEDF0;
+  --accent: #2C5A85;
+  --accent-soft: #E7EEF5;
+  --cost: #9C5525;
+  --cost-soft: #F6EBE2;
+  --keep: #35624A;
+  --keep-soft: #E5EFE8;
+  --cut: #8C3A3A;
+  --cut-soft: #F5E7E7;
+  --shadow: 0 1px 2px rgba(20,24,28,.05), 0 8px 24px -16px rgba(20,24,28,.25);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #121519;
+    --panel: #191D22;
+    --ink: #E7EAED;
+    --muted: #9BA5B1;
+    --faint: #6E7883;
+    --rule: #2C333A;
+    --rule-soft: #232930;
+    --accent: #7FB0DA;
+    --accent-soft: #1C2A36;
+    --cost: #D69256;
+    --cost-soft: #2E2318;
+    --keep: #7FBE9A;
+    --keep-soft: #1A271F;
+    --cut: #D98080;
+    --cut-soft: #2C1D1D;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #121519;
+  --panel: #191D22;
+  --ink: #E7EAED;
+  --muted: #9BA5B1;
+  --faint: #6E7883;
+  --rule: #2C333A;
+  --rule-soft: #232930;
+  --accent: #7FB0DA;
+  --accent-soft: #1C2A36;
+  --cost: #D69256;
+  --cost-soft: #2E2318;
+  --keep: #7FBE9A;
+  --keep-soft: #1A271F;
+  --cut: #D98080;
+  --cut-soft: #2C1D1D;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding: 40px 28px 96px; }
+code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+/* ---- masthead ---- */
+.masthead { border-bottom: 2px solid var(--ink); padding-bottom: 22px; margin-bottom: 30px; }
+.eyebrow {
+  font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 500;
+  letter-spacing: .13em; text-transform: uppercase; color: var(--muted);
+  display: flex; gap: 14px; flex-wrap: wrap; align-items: baseline;
+}
+h1 {
+  font-size: clamp(30px, 4.6vw, 46px); line-height: 1.06; margin: 12px 0 10px;
+  font-weight: 600; letter-spacing: -.022em; text-wrap: balance;
+}
+.standfirst { color: var(--muted); max-width: 66ch; font-size: 16px; margin: 0; }
+
+/* ---- headline figures ---- */
+.figures {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+  margin: 28px 0 40px;
+}
+.fig { background: var(--panel); padding: 14px 16px; }
+.fig .n {
+  font-family: "IBM Plex Mono", monospace; font-size: 25px; font-weight: 600;
+  letter-spacing: -.02em; font-variant-numeric: tabular-nums; display: block;
+}
+.fig .l { font-size: 11.5px; color: var(--muted); letter-spacing: .04em; margin-top: 3px; line-height: 1.35; }
+.fig.warn .n { color: var(--cost); }
+
+/* ---- sections ---- */
+section { margin-bottom: 44px; }
+h2 {
+  font-size: 12px; font-family: "IBM Plex Mono", monospace; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--accent);
+  margin: 0 0 4px; display: flex; align-items: baseline; gap: 10px;
+}
+h2 .weight {
+  font-size: 11px; color: var(--cost); background: var(--cost-soft);
+  padding: 2px 7px; letter-spacing: .04em; text-transform: none; border-radius: 2px;
+}
+.sec-note { color: var(--muted); font-size: 14px; margin: 0 0 16px; max-width: 68ch; }
+p { max-width: 68ch; }
+
+/* ---- promise rows ---- */
+.rows { border-top: 1px solid var(--rule); }
+.row {
+  display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: start;
+  padding: 11px 0 11px 34px; border-bottom: 1px solid var(--rule-soft); position: relative;
+}
+.row .promise { font-size: 14.5px; }
+.row .detail { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.row .surface {
+  font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--faint);
+  white-space: nowrap; padding-top: 3px;
+}
+.mark {
+  position: absolute; left: 0; top: 11px; width: 22px; height: 22px;
+  border: 1px solid var(--rule); background: var(--panel); cursor: pointer;
+  font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 600;
+  color: var(--faint); padding: 0; border-radius: 2px; line-height: 20px; text-align: center;
+}
+.mark:hover { border-color: var(--accent); color: var(--accent); }
+.mark:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.row[data-mark="keep"] .mark { background: var(--keep-soft); border-color: var(--keep); color: var(--keep); }
+.row[data-mark="cut"]  .mark { background: var(--cut-soft);  border-color: var(--cut);  color: var(--cut); }
+.row[data-mark="argue"].row .mark { background: var(--cost-soft); border-color: var(--cost); color: var(--cost); }
+.row[data-mark="cut"] .promise { text-decoration: line-through; text-decoration-color: var(--cut); opacity: .62; }
+
+/* ---- acid test ---- */
+.acid { border: 1px solid var(--rule); background: var(--panel); box-shadow: var(--shadow); }
+.acid-row { display: grid; grid-template-columns: 1.15fr 1fr auto; gap: 20px; padding: 14px 18px; border-bottom: 1px solid var(--rule-soft); align-items: start; }
+.acid-row:last-child { border-bottom: 0; }
+.acid-head { background: var(--accent-soft); font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+.incident { font-weight: 500; }
+.incident .where { color: var(--faint); font-family: "IBM Plex Mono", monospace; font-size: 11.5px; display: block; margin-top: 2px; font-weight: 400; }
+.answer { color: var(--muted); font-size: 13.5px; }
+.size { font-family: "IBM Plex Mono", monospace; font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.size.small { color: var(--keep); }
+.size.large { color: var(--cost); }
+
+/* ---- table ---- */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th {
+  text-align: left; font-family: "IBM Plex Mono", monospace; font-size: 10.5px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+  font-weight: 600; padding: 0 12px 7px 0; border-bottom: 1px solid var(--rule);
+}
+.tbl td { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+.tbl td.num { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.scroll { overflow-x: auto; }
+
+.callout {
+  border-left: 3px solid var(--cost); background: var(--cost-soft);
+  padding: 13px 16px; margin: 20px 0; font-size: 14px; color: var(--ink);
+}
+.callout strong { font-weight: 600; }
+
+.tally {
+  position: sticky; bottom: 16px; margin-top: 34px; background: var(--panel);
+  border: 1px solid var(--rule); box-shadow: var(--shadow); padding: 11px 16px;
+  display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+  font-family: "IBM Plex Mono", monospace; font-size: 12px;
+}
+.tally b { font-weight: 600; }
+.tally .k { color: var(--keep); }
+.tally .c { color: var(--cut); }
+.tally .a { color: var(--cost); }
+.tally button {
+  margin-left: auto; font-family: inherit; font-size: 11px; padding: 5px 11px;
+  background: transparent; border: 1px solid var(--rule); color: var(--muted);
+  cursor: pointer; border-radius: 2px;
+}
+.tally button:hover { border-color: var(--accent); color: var(--accent); }
+.hint { color: var(--faint); font-size: 12px; }
+@media (max-width: 720px) {
+  .row { grid-template-columns: 1fr; }
+  .acid-row { grid-template-columns: 1fr; gap: 6px; }
+  .acid-head { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <div class="eyebrow">
+    <span>Behaviour inventory</span><span>2026-09-06</span><span>main @ fdf3c08</span>
+  </div>
+  <h1>What Fadeno promises today</h1>
+  <p class="standfirst">Every user-visible promise the code currently makes, stated as behaviour rather than architecture, with what each area costs in lines. Material for writing the spec — not the spec.</p>
+</header>
+
+<div class="figures">
+  <div class="fig"><span class="n">40,921</span><div class="l">lines of code<br>(60,403 incl. 27% comments)</div></div>
+  <div class="fig"><span class="n">58,277</span><div class="l">lines of test<br>2,030 tests, ~400s</div></div>
+  <div class="fig"><span class="n">46</span><div class="l">CLI commands</div></div>
+  <div class="fig"><span class="n">7</span><div class="l">harness families<br>6 of 7 ship no Node</div></div>
+  <div class="fig warn"><span class="n">+9,816</span><div class="l">net src lines added<br>in one day (2026-09-06)</div></div>
+</div>
+
+<div class="callout">
+  <strong>How to use this.</strong> Mark each promise <span class="mono">K</span>eep / <span class="mono">C</span>ut / <span class="mono">A</span>rgue by clicking its box (marks are saved in this browser only). A promise that survives should be restatable as observable behaviour without naming a Fadeno subsystem — if you can't say it without saying "receipt" or "attestation", it may be a promise to the tool rather than to a user.
+</div>
+
+<section>
+  <h2>Routing <span class="weight">8,333 lines</span></h2>
+  <p class="sec-note">Archetypes and model aliases: naming a model once and pointing roles at it, changeable at three scopes.</p>
+  <div class="rows" data-group="routing">
+    <div class="row"><div><div class="promise">I can give a model a short name and use it everywhere</div><div class="detail">Alias maps to provider + model id + the harness that can run it</div></div><div class="surface">models, dial</div></div>
+    <div class="row"><div><div class="promise">I can point a role at a model without touching the call site</div><div class="detail">worker / reviewer / judge / director resolve through a dial</div></div><div class="surface">dial</div></div>
+    <div class="row"><div><div class="promise">I can override that per repo or per session without editing global config</div><div class="detail">builtin → user → project layering, session pins</div></div><div class="surface">dial, steering</div></div>
+    <div class="row"><div><div class="promise">I can ask what a role will actually resolve to, and why</div><div class="detail">Names the lane and the reason it chose it</div></div><div class="surface">dial resolve, steering resolve</div></div>
+    <div class="row"><div><div class="promise">I can add a harness I use without a code change</div><div class="detail">A catalog entry declares the argv; today 7 families ship</div></div><div class="surface">executors.yaml</div></div>
+    <div class="row"><div><div class="promise">I'm told when an alias names something no harness can deliver</div><div class="detail">Dropped from the effective catalog with a repair line, not a global failure</div></div><div class="surface">doctor, models</div></div>
+    <div class="row"><div><div class="promise">I can check a model alias actually works before relying on it</div><div class="detail">Probes the backend listing; caches the verification</div></div><div class="surface">models verify</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Orchestration &amp; environment <span class="weight">11,997 lines</span></h2>
+  <p class="sec-note">Launching subagents from inside a host session, and scaffolding the tree they work in.</p>
+  <div class="rows" data-group="orch">
+    <div class="row"><div><div class="promise">I can hand a task to a role and have it run on whatever model that role is dialled to</div><div class="detail">Either in my own session (host lane) or as a spawned process (command lane)</div></div><div class="surface">dispatch</div></div>
+    <div class="row"><div><div class="promise">Work I delegate can run in its own git worktree so it can't collide with mine</div><div class="detail">Cut from HEAD with uncommitted state replayed in</div></div><div class="surface">dispatch --isolate</div></div>
+    <div class="row"><div><div class="promise">When that work finishes, its diff comes back into my tree</div><div class="detail">Or is left for me to apply, and says which</div></div><div class="surface">dispatch-close</div></div>
+    <div class="row"><div><div class="promise">Two agents working at once get separate trees instead of fighting or queueing</div><div class="detail">Contention adds isolation rather than refusing anyone</div></div><div class="surface">kernel</div></div>
+    <div class="row"><div><div class="promise">I can do all of that without starting a playbook run</div><div class="detail">Runless host dispatch: a worktree, an id, a receipt</div></div><div class="surface">dispatch-open/close</div></div>
+    <div class="row"><div><div class="promise">Output my build wrote but git ignores isn't silently destroyed</div><div class="detail">The worktree is retained rather than removed, and says so</div></div><div class="surface">dispatch</div></div>
+    <div class="row"><div><div class="promise">I'm told when a worktree won't have the project's build environment</div><div class="detail">…and given the line that fixes it. Host lane does not yet carry it.</div></div><div class="surface">doctor</div></div>
+    <div class="row"><div><div class="promise">Nothing I delegate is killed on a timer</div><div class="detail">Deadlines and the writer lease were deleted outright</div></div><div class="surface">—</div></div>
+    <div class="row"><div><div class="promise">I can see what a running dispatch says it's doing, before it exits</div><div class="detail">Agent self-report, explicitly non-gating; knows silence is normal for print-at-exit</div></div><div class="surface">dispatches, show</div></div>
+    <div class="row"><div><div class="promise">I can stop, retire, or recover a dispatch that's stuck or dead</div><div class="detail">Cancel signals a process; withdraw records that it's over</div></div><div class="surface">cancel, dispatches</div></div>
+    <div class="row"><div><div class="promise">If an agent dies to a session limit, I can see what it left uncommitted</div><div class="detail">Without reading its transcript</div></div><div class="surface">dispatches</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Context delivery <span class="weight">6,090 lines</span></h2>
+  <p class="sec-note">Putting the right instructions in front of the host and in front of each subagent, per harness.</p>
+  <div class="rows" data-group="ctx">
+    <div class="row"><div><div class="promise">My host agent knows how to use Fadeno without me explaining it</div><div class="detail">Skills loaded at session start</div></div><div class="surface">plugin, skills</div></div>
+    <div class="row"><div><div class="promise">A subagent gets role instructions without me writing them each time</div><div class="detail">worker / reviewer / judge bodies, per harness</div></div><div class="surface">plugin, agents</div></div>
+    <div class="row"><div><div class="promise">Those files are generated for my harness, not hand-maintained</div><div class="detail">5 harness formats emitted from one source</div></div><div class="surface">steering apply</div></div>
+    <div class="row"><div><div class="promise">I'm told when the generated files no longer match what this build writes</div><div class="detail">stale / outdated / tampered / unmanaged verdicts</div></div><div class="surface">doctor, status</div></div>
+    <div class="row"><div><div class="promise">I can seed a repo with playbooks and schemas</div><div class="detail">Or use the plugin without seeding anything</div></div><div class="surface">init</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Playbooks <span class="weight">7,915 lines</span></h2>
+  <p class="sec-note">Multi-agent workflows as reusable, shareable artifacts.</p>
+  <div class="rows" data-group="pb">
+    <div class="row"><div><div class="promise">I can define a repeatable multi-step workflow in a file</div><div class="detail">5 ship bundled: code-change-review, pr-review, parallel-workstreams, research-synthesis, compositional-review</div></div><div class="surface">playbooks</div></div>
+    <div class="row"><div><div class="promise">I can run one and have it advance step by step</div><div class="detail">Steps route to roles, which route to models</div></div><div class="surface">new-run, drive</div></div>
+    <div class="row"><div><div class="promise">A workflow can stop and ask me to decide</div><div class="detail">Named human gates, resumable</div></div><div class="surface">decide, next</div></div>
+    <div class="row"><div><div class="promise">A step can gate on a structured judgment rather than a vibe</div><div class="detail">Gate evaluates an artifact against a schema</div></div><div class="surface">gate</div></div>
+    <div class="row"><div><div class="promise">I can check a playbook is well-formed before running it</div><div class="detail">And render it as a diagram</div></div><div class="surface">validate, diagram</div></div>
+    <div class="row"><div><div class="promise">A failed step can be retried without losing what came before</div><div class="detail">Repair loops, generation-scoped</div></div><div class="surface">drive</div></div>
+    <div class="row"><div><div class="promise">I can run workstreams in parallel</div><div class="detail">Each in its own worktree</div></div><div class="surface">drive --parallel</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Logging &amp; inspection <span class="weight">6,458 lines</span></h2>
+  <p class="sec-note">A record nobody has to think about, that can be read back later.</p>
+  <div class="rows" data-group="log">
+    <div class="row"><div><div class="promise">Every delegation is recorded without me doing anything</div><div class="detail">Append-only JSONL, machine-local</div></div><div class="surface">dispatches.jsonl</div></div>
+    <div class="row"><div><div class="promise">I can list what ran, on what model, and how it ended</div><div class="detail">Ordered, with a bounded tail</div></div><div class="surface">dispatches, runs</div></div>
+    <div class="row"><div><div class="promise">I can read back a past run step by step, with its artifacts</div><div class="detail">Projection over the run ledger</div></div><div class="surface">show</div></div>
+    <div class="row"><div><div class="promise">I can find the output of a dispatch after the fact, by tag</div><div class="detail">Survives the calling process being killed</div></div><div class="surface">dispatches --output</div></div>
+    <div class="row"><div><div class="promise">The record says when it doesn't know something</div><div class="detail">Truncated / unmeasured / unestablished rather than a confident empty answer</div></div><div class="surface">everywhere</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Audit &amp; enforcement <span class="weight">5,528 lines</span></h2>
+  <p class="sec-note">Beyond recording: checking the record, and refusing work when checks fail. This is the largest area not described by the five-pillar mission.</p>
+  <div class="rows" data-group="audit">
+    <div class="row"><div><div class="promise">I can re-audit a finished run's deterministic claims</div><div class="detail">15 checks: artifact digests, immutability, manifests, seq, vocabulary, provenance…</div></div><div class="surface">verify</div></div>
+    <div class="row"><div><div class="promise">A subagent records its own delivery as evidence</div><div class="detail">Digest of what it was asked and what it produced</div></div><div class="surface">attest</div></div>
+    <div class="row"><div><div class="promise">A proxy that alters a prompt instead of relaying it is caught</div><div class="detail">…and the dispatch is refused</div></div><div class="surface">hooks, dispatch</div></div>
+    <div class="row"><div><div class="promise">A role agent is stopped from running destructive git in a shared tree</div><div class="detail">checkout / reset / stash / clean refused by hook</div></div><div class="surface">hooks</div></div>
+    <div class="row"><div><div class="promise">Two deliveries that overlapped in time and files are stamped on both receipts</div><div class="detail">Per-file intersection, replaces the deleted lock</div></div><div class="surface">receipts</div></div>
+    <div class="row"><div><div class="promise">A hand-edited managed file is detectable</div><div class="detail">Body hashed against its stamped digest</div></div><div class="surface">doctor</div></div>
+    <div class="row"><div><div class="promise">A promoted receipt can be checked for tampering</div><div class="detail">Tamper matrix over the two receipts</div></div><div class="surface">evidence, verify</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Model bakeoff <span class="weight">2,593 lines</span></h2>
+  <p class="sec-note">Running two models on the same task and adjudicating. Shares the routing layer; serves no other pillar.</p>
+  <div class="rows" data-group="bake">
+    <div class="row"><div><div class="promise">A sampled share of dispatches also runs on a challenger model</div><div class="detail">Both arms forced onto the command lane for comparability</div></div><div class="surface">shadow</div></div>
+    <div class="row"><div><div class="promise">A blinded judge picks a winner between the two arms</div><div class="detail">Neither arm can tell which it is</div></div><div class="surface">bakeoff</div></div>
+    <div class="row"><div><div class="promise">I can apply the winning arm's diff</div><div class="detail">—</div></div><div class="surface">shadow-apply</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Promises to the tool, not to a user <span class="weight">~1,559 + doctor</span></h2>
+  <p class="sec-note">These exist because of how Fadeno is packaged and configured, not because anyone wanted them. Each would vanish if the thing causing it vanished.</p>
+  <div class="rows" data-group="self">
+    <div class="row"><div><div class="promise">Fadeno installs and manages its own runtime copy</div><div class="detail">…and diagnoses version skew between the CLI you ran and the one the plugin installed</div></div><div class="surface">setup, doctor</div></div>
+    <div class="row"><div><div class="promise">Fadeno detects when its own generated files are stale</div><div class="detail">4 verdicts × 5 harness formats</div></div><div class="surface">doctor</div></div>
+    <div class="row"><div><div class="promise">Fadeno detects rot in its own persisted state</div><div class="detail">20 doctor checks, ~15 about Fadeno's own files</div></div><div class="surface">doctor</div></div>
+    <div class="row"><div><div class="promise">Fadeno can vendor and unvendor itself into a repo</div><div class="detail">—</div></div><div class="surface">vendor, unvendor</div></div>
+    <div class="row"><div><div class="promise">Fadeno can uninstall itself</div><div class="detail">—</div></div><div class="surface">uninstall, clean</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>The acid test</h2>
+  <p class="sec-note">Six real incidents from directors running Fadeno in other repos. A spec is complete enough when it answers all six. The right-hand column is what the fix actually cost — the pattern is worth noticing.</p>
+  <div class="acid">
+    <div class="acid-row acid-head"><div>Incident</div><div>What answered it</div><div>Cost</div></div>
+    <div class="acid-row">
+      <div class="incident">Artifacts destroyed, twice<span class="where">polymarket · 2026-09-05/06</span></div>
+      <div class="answer">Retain the worktree instead of removing it when it holds gitignored output</div>
+      <div class="size small">~120 lines</div>
+    </div>
+    <div class="acid-row">
+      <div class="incident">ssh and curl blocked in every dispatch<span class="where">basanos · 2026-09-05</span></div>
+      <div class="answer">One flag added to the command template in the catalog</div>
+      <div class="size small">1 line</div>
+    </div>
+    <div class="acid-row">
+      <div class="incident">Five dispatches killed at a deadline, zero-byte reports<span class="where">basanos · 2026-09-06</span></div>
+      <div class="answer">Deleted executor deadlines and the writer lease outright</div>
+      <div class="size small">net deletion</div>
+    </div>
+    <div class="acid-row">
+      <div class="incident">Worktree had no venv; validation degraded to smoke and still reported ok<span class="where">polymarket + basanos</span></div>
+      <div class="answer">A doctor check naming the directories, plus the instruction in the agent bodies</div>
+      <div class="size small">~360 lines</div>
+    </div>
+    <div class="acid-row">
+      <div class="incident">Host blind for 40 minutes; <span class="mono">claude -p</span> prints only at exit<span class="where">both repos</span></div>
+      <div class="answer">Progress sidecar reaching the ad-hoc lane, not just engine runs</div>
+      <div class="size large">~900 lines</div>
+    </div>
+    <div class="acid-row">
+      <div class="incident">A 429 killed five in-flight agents, no record of any of them<span class="where">polymarket · ~7h lost</span></div>
+      <div class="answer">A stop hook writing one row with a <span class="mono">git status</span> snapshot</div>
+      <div class="size large">~1,100 lines</div>
+    </div>
+  </div>
+  <div class="callout">
+    Four of six were answered by small changes or by deletion. None of the six needed a digest, an attestation, a verify check, or a bakeoff.
+  </div>
+</section>
+
+<section>
+  <h2>Numbers to argue against</h2>
+  <div class="scroll">
+    <table class="tbl">
+      <thead><tr><th>Measure</th><th>Value</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>Source, total</td><td class="num">60,403</td><td>lines in <span class="mono">src/</span></td></tr>
+        <tr><td>Source, code only</td><td class="num">40,921</td><td>27% of the file total is comments (16,515 lines)</td></tr>
+        <tr><td>Tests</td><td class="num">58,277</td><td>2,030 tests, ~400s; near 1:1 with source</td></tr>
+        <tr><td>Fast test tier</td><td class="num">21s</td><td>685 tests, 64 files — <span class="mono">npm run test:fast</span></td></tr>
+        <tr><td>Slowest two tests</td><td class="num">111s</td><td>61s + 50s; the 61s one is also the flake</td></tr>
+        <tr><td>Added in one day</td><td class="num">+9,816</td><td>net src lines, 2026-09-06 — 5× the target size of the whole tool</td></tr>
+        <tr><td>Lib modules with no filesystem or process deps</td><td class="num">16 / 43</td><td>~5,500 lines that would run in a browser today</td></tr>
+        <tr><td>CLI startup</td><td class="num">210ms</td><td>70ms Node + 140ms loading a 2.1MB bundle</td></tr>
+        <tr><td>Hook overhead</td><td class="num">82ms</td><td>per shell call only; measured, not painful</td></tr>
+        <tr><td>Code existing only because this is an npm package</td><td class="num">~1,559</td><td>setup, installations, vendor, version skew</td></tr>
+        <tr><td>Harnesses that ship Node</td><td class="num">1 / 7</td><td>only Claude Code; the other six are native binaries</td></tr>
+        <tr><td>Times the codebase names "one fact, two readers" in its own comments</td><td class="num">47</td><td>across 22 files; nothing mechanically enforces it</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="tally" id="tally">
+  <span><b class="k" id="n-keep">0</b> keep</span>
+  <span><b class="c" id="n-cut">0</b> cut</span>
+  <span><b class="a" id="n-argue">0</b> argue</span>
+  <span class="hint" id="n-left">45 unmarked</span>
+  <button id="reset" type="button">Clear marks</button>
+</div>
+
+</div>
+
+<script>
+(function () {
+  var KEY = 'fadeno-inventory-marks-v1';
+  var CYCLE = { '': 'keep', keep: 'cut', cut: 'argue', argue: '' };
+  var GLYPH = { keep: 'K', cut: 'C', argue: 'A', '': '' };
+  var rows = Array.prototype.slice.call(document.querySelectorAll('.row'));
+
+  var saved = {};
+  try { saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { saved = {}; }
+
+  rows.forEach(function (row, i) {
+    var group = row.parentNode.getAttribute('data-group') || 'g';
+    var id = group + ':' + i;
+    row.dataset.id = id;
+    var btn = document.createElement('button');
+    btn.className = 'mark';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', 'Mark this promise keep, cut, or argue');
+    row.insertBefore(btn, row.firstChild);
+    apply(row, saved[id] || '');
+    btn.addEventListener('click', function () {
+      var next = CYCLE[row.getAttribute('data-mark') || ''];
+      apply(row, next);
+      if (next) { saved[id] = next; } else { delete saved[id]; }
+      try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {}
+      tally();
+    });
+  });
+
+  function apply(row, mark) {
+    if (mark) { row.setAttribute('data-mark', mark); } else { row.removeAttribute('data-mark'); }
+    row.querySelector('.mark').textContent = GLYPH[mark] || '';
+  }
+
+  function tally() {
+    var c = { keep: 0, cut: 0, argue: 0 };
+    rows.forEach(function (r) { var m = r.getAttribute('data-mark'); if (m) { c[m]++; } });
+    document.getElementById('n-keep').textContent = c.keep;
+    document.getElementById('n-cut').textContent = c.cut;
+    document.getElementById('n-argue').textContent = c.argue;
+    var left = rows.length - c.keep - c.cut - c.argue;
+    document.getElementById('n-left').textContent = left + ' unmarked';
+  }
+
+  document.getElementById('reset').addEventListener('click', function () {
+    rows.forEach(function (r) { apply(r, ''); });
+    saved = {};
+    try { localStorage.removeItem(KEY); } catch (e) {}
+    tally();
+  });
+
+  tally();
+})();
+</script>
