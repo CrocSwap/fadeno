@@ -106,6 +106,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--stage-prompt': NONE, '--reuse-open': NONE, '--json': NONE,
   }),
   'dispatch-stop': command({ '--transcript': PATH, '--message-file': PATH, '--agent-cwd': PATH, '--json': NONE }, ['free']),
+  'dispatch-wait': command({ '--wait-seconds': { kind: 'free' }, '--json': NONE }, ['free']),
   'dispatch-close': command({ '--merged': NONE, '--kept': NONE, '--discarded': NONE, '--failed': NONE, '--note': { kind: 'free' } }, ['free']),
   cancel: command({}, ['free']),
   dispatches: command({ '--all': NONE, '--tail': { kind: 'free' }, '--json': NONE, '--output': { kind: 'free' } }, ['free']),

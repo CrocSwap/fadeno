@@ -10240,6 +10240,34 @@ function runDispatchOutput(opts) {
   if (record.stopped?.final_message != null) return { record, text: record.stopped.final_message, source: "final_message" };
   return { record, text: null, source: null };
 }
+async function runDispatchWait(opts) {
+  const repoRoot = rootOf(opts);
+  const started = Date.now();
+  const deadline = started + Math.max(0, opts.waitSeconds ?? 540) * 1e3;
+  const pollMs = Math.max(50, opts.pollMs ?? 1e3);
+  const id = lookup(repoRoot, opts.ref).id;
+  const reread = () => {
+    const found = readDispatches(repoRoot).records.find((r) => r.id === id);
+    if (found == null) throw new DispatchesError(`dispatch ${id} vanished from the ledger while waiting.`);
+    return found;
+  };
+  for (; ; ) {
+    const record = reread();
+    if (record.stopped != null || record.closed != null) {
+      return { state: "stopped", record, text: runDispatchOutput({ repoRoot, ref: id }).text, waitedMs: Date.now() - started };
+    }
+    const pgid = record.opened?.process_group;
+    if (pgid != null && !groupAlive(pgid)) {
+      const settled = reread();
+      if (settled.stopped != null) {
+        return { state: "stopped", record: settled, text: runDispatchOutput({ repoRoot, ref: id }).text, waitedMs: Date.now() - started };
+      }
+      return { state: "abandoned", record: settled, stdoutPath: (0, import_node_path8.join)(repoRoot, outputPaths(id).stdout), waitedMs: Date.now() - started };
+    }
+    if (Date.now() >= deadline) return { state: "running", record, waitedMs: Date.now() - started };
+    await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(1, deadline - Date.now()))));
+  }
+}
 function runWorktrees(opts = {}) {
   const repoRoot = rootOf(opts);
   const byBranch = /* @__PURE__ */ new Map();
@@ -11782,6 +11810,7 @@ var COMMANDS = {
     "--json": NONE
   }),
   "dispatch-stop": command({ "--transcript": PATH, "--message-file": PATH, "--agent-cwd": PATH, "--json": NONE }, ["free"]),
+  "dispatch-wait": command({ "--wait-seconds": { kind: "free" }, "--json": NONE }, ["free"]),
   "dispatch-close": command({ "--merged": NONE, "--kept": NONE, "--discarded": NONE, "--failed": NONE, "--note": { kind: "free" } }, ["free"]),
   cancel: command({}, ["free"]),
   dispatches: command({ "--all": NONE, "--tail": { kind: "free" }, "--json": NONE, "--output": { kind: "free" } }, ["free"]),
@@ -12485,6 +12514,11 @@ var TOP_LEVEL = {
     "The stop hook's entry point. Records presence of a final message, never completeness, and the uncommitted paths in the assigned worktree. A second stop for the same dispatch is a replay.",
     "`--transcript` reads the agent's transcript: the contract header in its prompt names the dispatch (so the ref may be omitted), the last assistant turn supplies the final message when none was passed, and the model the agent ran on is recorded beside the one the dial asked for. A transcript with no contract is not a dispatch: exit 4, nothing recorded."
   ]),
+  "dispatch-wait": page("Block until a dispatch stops, then print its report.", "fadeno dispatch-wait <name|id> [--wait-seconds <n>] [--json]", [
+    "For a dispatch that outruns the caller's shell timeout. Wait in bites the harness allows: this returns `still running` (exit 2) after its bound rather than being killed mid-wait, and the caller runs it again.",
+    "The bound is on WAITING, never on the work: nothing here stops an executor or decides it is too slow.",
+    "Exit 0 when it stopped (the report is on stdout), 2 while it runs, 4 when its process group is gone and no stop was ever recorded \u2014 which means no report is coming and says how to record what the executor did write."
+  ]),
   "dispatch-close": page("Record the terminal decision for a dispatch.", "fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>]", [
     "Exactly one verb. The same verb twice is a replay; a different verb for an already-closed dispatch is refused. Closing removes nothing: the branch stays, and the worktree stays until `fadeno clean`."
   ]),
@@ -12557,6 +12591,7 @@ var OPTION_HINTS = {
   "--claude": "Target Claude Code",
   "--codex": "Target Codex",
   "--dispatch": "Dispatch this friction happened on",
+  "--wait-seconds": 'How long to block before answering "still running"',
   "--discarded": "Close: the work is not wanted",
   "--failed": "Close: the dispatch did not succeed",
   "--force": "Overwrite managed files",
@@ -12600,6 +12635,7 @@ var OPTION_FORMS = {
   "--model": "--model <ref>",
   "--harness": "--harness <id>",
   "--dispatch": "--dispatch <ref>",
+  "--wait-seconds": "--wait-seconds <n>",
   "--prompt-file": "--prompt-file <path>",
   "--output": "--output <path>",
   "--lane": "--lane <auto|host|command>",
@@ -12660,6 +12696,7 @@ var PAGE_OPTIONS = {
   dispatch: withGlobals("--archetype", "--model", "--name", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--heartbeat"),
   "dispatch-open": withGlobals("--archetype", "--model", "--name", "--lane", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--parent-transcript", "--harness", "--stage-prompt", "--reuse-open", "--json"),
   "dispatch-stop": withGlobals("--transcript", "--message-file", "--agent-cwd", "--json"),
+  "dispatch-wait": withGlobals("--wait-seconds", "--json"),
   "dispatch-close": withGlobals("--merged", "--kept", "--discarded", "--failed", "--note"),
   cancel: withGlobals(),
   dispatches: withGlobals("--all", "--tail", "--json", "--output"),
@@ -12741,7 +12778,7 @@ Routing
   feedback    Record friction with Fadeno itself
 
 Dispatches
-  dispatch, dispatch-close, cancel, dispatches, worktrees
+  dispatch, dispatch-wait, dispatch-close, cancel, dispatches, worktrees
   dispatch-open, dispatch-stop  (the hooks' entry points)
 
 Setup and maintenance
@@ -12778,6 +12815,12 @@ function renderFocusedHelp(path) {
 // src/cli.ts
 var import_meta2 = {};
 var KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
+function ageOf(record) {
+  const at = record.opened?.at;
+  if (at == null) return "?";
+  const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(at)) / 6e4));
+  return formatAge(Number.isFinite(minutes) ? minutes : null);
+}
 function printStaleDials(stale) {
   for (const item of stale) {
     console.error(
@@ -12966,6 +13009,8 @@ async function main(argv) {
         note: { type: "string" },
         // feedback
         dispatch: { type: "string" },
+        // dispatch-wait
+        "wait-seconds": { type: "string" },
         // dispatches
         all: { type: "boolean" },
         tail: { type: "string" },
@@ -13397,6 +13442,37 @@ async function main(argv) {
       if (values.json) console.log(JSON.stringify(context));
       else console.log(context.text);
       return 0;
+    }
+    case "dispatch-wait": {
+      const [, ref] = positionals;
+      if (ref == null) throw new Error("Usage: fadeno dispatch-wait <name|id> [--wait-seconds <n>] [--json]");
+      const seconds = values["wait-seconds"] == null ? void 0 : Number(values["wait-seconds"]);
+      if (seconds != null && (!Number.isFinite(seconds) || seconds < 0)) {
+        throw new Error("--wait-seconds takes a non-negative number of seconds.");
+      }
+      const outcome = await runDispatchWait({ ref, waitSeconds: seconds });
+      const name = outcome.record.opened?.name ?? outcome.record.id.slice(0, 8);
+      if (values.json) console.log(JSON.stringify(outcome, null, 2));
+      if (outcome.state === "stopped") {
+        if (!values.json) {
+          if (outcome.text == null) console.error(`${name} stopped and recorded no report.`);
+          else process.stdout.write(outcome.text.endsWith("\n") ? outcome.text : `${outcome.text}
+`);
+        }
+        return 0;
+      }
+      if (outcome.state === "running") {
+        if (!values.json) {
+          console.error(`${name} is still running (${ageOf(outcome.record)} in). Run this command again.`);
+        }
+        return 2;
+      }
+      if (!values.json) {
+        console.error(
+          `${name} is not running and never recorded a stop: its process group is gone, so no report is coming. What the executor wrote is at ${outcome.stdoutPath} \u2014 record it with \`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.`
+        );
+      }
+      return 4;
     }
     case "feedback": {
       const text = positionals.slice(1).join(" ").trim();

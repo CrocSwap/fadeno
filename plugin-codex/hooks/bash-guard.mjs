@@ -66,6 +66,10 @@ const DISPATCH_RE = new RegExp(
   String.raw`^(?:FADENO_HARNESS=\S+ )?${CLI} dispatch --archetype [a-z][a-z0-9_-]*(?: --name ${WORD})?(?: --model ${WORD})?(?: --shared)?(?: --from ${WORD})?(?: --parent ${WORD})? --prompt-file ${WORD}$`,
 );
 const RECOVER_RE = new RegExp(String.raw`^(?:FADENO_HARNESS=\S+ )?${CLI} dispatches --output ${WORD}$`);
+// The wait loop is part of the contract now: a dispatch that outruns the
+// harness's shell ceiling is ordinary, and the proxy's only way to finish
+// honestly is to ask again until the dispatch has actually stopped.
+const WAIT_RE = new RegExp(String.raw`^(?:FADENO_HARNESS=\S+ )?${CLI} dispatch-wait ${WORD}(?: --wait-seconds ${WORD})?(?: --json)?$`);
 
 if (agent.kind === 'proxy') {
   if (command == null || command.trim() === '') deny('dispatch proxy: the Bash call carries no command.');
@@ -79,10 +83,10 @@ if (agent.kind === 'proxy') {
       dispatches = true;
       continue;
     }
-    if (RECOVER_RE.test(statement)) continue;
+    if (RECOVER_RE.test(statement) || WAIT_RE.test(statement)) continue;
     const shown = statement.length > 80 ? `${statement.slice(0, 77)}...` : statement;
     deny(
-      `dispatch proxy: "${shown}" is outside the relay contract. The only commands a dispatch proxy runs are the \`fadeno dispatch --archetype … --prompt-file …\` line in its prompt and, after a killed call, \`fadeno dispatches --output <name>\`. Do not inspect the repository or attempt the task; run the command you were given and relay its output.`,
+      `dispatch proxy: "${shown}" is outside the relay contract. The only commands a dispatch proxy runs are the \`fadeno dispatch --archetype … --prompt-file …\` line in its prompt and, after a killed call, \`fadeno dispatch-wait <name>\` or \`fadeno dispatches --output <name>\`. Do not inspect the repository or attempt the task; run the command you were given and relay its output.`,
     );
   }
   const timeout = input.timeout;

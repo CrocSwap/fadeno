@@ -34,6 +34,7 @@ import {
   SpawnError,
   cancelDispatch,
   describeArchetypes,
+  groupAlive,
   outputPaths,
   prepareDispatch,
   recordOpened,
@@ -654,6 +655,79 @@ export function runDispatchOutput(opts: CommonOptions & { ref: string }): Dispat
   if (existsSync(transcript)) return { record, text: readFileSync(transcript, 'utf8'), source: 'transcript' };
   if (record.stopped?.final_message != null) return { record, text: record.stopped.final_message, source: 'final_message' };
   return { record, text: null, source: null };
+}
+
+// ---------------------------------------------------------------------------
+// dispatch-wait — the answer to a harness that caps how long a call may run
+// ---------------------------------------------------------------------------
+
+export type WaitOutcome =
+  /** The stop row landed (or was already there): `text` is the report. */
+  | { state: 'stopped'; record: DispatchRecord; text: string | null; waitedMs: number }
+  /** Still running when the bound elapsed. Ask again; nothing is wrong. */
+  | { state: 'running'; record: DispatchRecord; waitedMs: number }
+  /**
+   * The executor's process group is gone and no stop row was ever written, so
+   * no amount of waiting will produce one. Its output was still captured.
+   */
+  | { state: 'abandoned'; record: DispatchRecord; stdoutPath: string; waitedMs: number };
+
+export interface DispatchWaitOptions extends CommonOptions {
+  ref: string;
+  /**
+   * How long to block before answering `running`. The default sits under the
+   * ten-minute ceiling every harness shell tool imposes, so this command
+   * always returns on its own terms rather than being killed or backgrounded
+   * mid-wait — which is the entire failure it exists to end.
+   */
+  waitSeconds?: number;
+  pollMs?: number;
+}
+
+/**
+ * Block until a dispatch stops, then answer with its report.
+ *
+ * A dispatch that outruns the caller's shell timeout used to end as a lie: the
+ * harness backgrounded the call, the proxy returned whatever had been written
+ * so far, and the session was told the agent had finished. The work had not
+ * finished, and the process that would eventually record it was still running.
+ *
+ * The loop belongs on the caller's side, in bites the harness allows: wait,
+ * answer `running`, be asked again. Nothing here kills anything or decides
+ * anything is too slow — the bound is on WAITING, never on the work.
+ */
+export async function runDispatchWait(opts: DispatchWaitOptions): Promise<WaitOutcome> {
+  const repoRoot = rootOf(opts);
+  const started = Date.now();
+  const deadline = started + Math.max(0, (opts.waitSeconds ?? 540)) * 1000;
+  const pollMs = Math.max(50, opts.pollMs ?? 1000);
+  const id = lookup(repoRoot, opts.ref).id;
+  const reread = (): DispatchRecord => {
+    const found = readDispatches(repoRoot).records.find((r) => r.id === id);
+    if (found == null) throw new DispatchesError(`dispatch ${id} vanished from the ledger while waiting.`);
+    return found;
+  };
+
+  for (;;) {
+    const record = reread();
+    if (record.stopped != null || record.closed != null) {
+      return { state: 'stopped', record, text: runDispatchOutput({ repoRoot, ref: id }).text, waitedMs: Date.now() - started };
+    }
+    // Nobody left to write the stop row. Checked BEFORE the clock, because a
+    // caller waiting on a dispatch that cannot finish should hear it at once.
+    const pgid = record.opened?.process_group;
+    if (pgid != null && !groupAlive(pgid)) {
+      // One more read first: the launcher exits immediately after appending,
+      // so a dead group and a missing row can simply be that instant.
+      const settled = reread();
+      if (settled.stopped != null) {
+        return { state: 'stopped', record: settled, text: runDispatchOutput({ repoRoot, ref: id }).text, waitedMs: Date.now() - started };
+      }
+      return { state: 'abandoned', record: settled, stdoutPath: join(repoRoot, outputPaths(id).stdout), waitedMs: Date.now() - started };
+    }
+    if (Date.now() >= deadline) return { state: 'running', record, waitedMs: Date.now() - started };
+    await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(1, deadline - Date.now()))));
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -142,7 +142,7 @@ if (answer.opened === true) {
 const r = answer;
 const identity = `${r.model}${r.effort ? `@${r.effort}` : ''} on ${r.harness ?? '?'}`;
 const label = r.name ?? archetype;
-const updatedInput = { ...input, subagent_type: agentType('dispatch'), prompt: proxyPrompt(r.relay, `the ${archetype} task as ${identity}`) };
+const updatedInput = { ...input, subagent_type: agentType('dispatch'), prompt: proxyPrompt(r.relay, `the ${archetype} task as ${identity}`, label) };
 delete updatedInput.model;
 finish({
   systemMessage: `fadeno: ${archetype} → command lane (${identity}); the dispatch proxy runs it as ${label}`,

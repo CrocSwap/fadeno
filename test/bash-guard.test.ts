@@ -35,6 +35,11 @@ test('the dispatch proxy may run its relay command and the recovery read, gets t
     assert.deepEqual(updated(plugin.run(HOOK, bash(agent, RELAY))), { command: RELAY, timeout: 600000 }, agent);
     assert.equal(plugin.run(HOOK, bash(agent, RELAY, { timeout: 600000 })).out, null, 'an already-long timeout passes through');
     assert.equal(plugin.run(HOOK, bash(agent, 'fadeno dispatches --output fix-login')).out, null, 'the recovery read passes');
+    // The wait loop is contract, not inspection: a dispatch outrunning the
+    // harness's shell ceiling is ordinary, and asking again is how the proxy
+    // finishes honestly instead of relaying a half-written log.
+    assert.equal(plugin.run(HOOK, bash(agent, 'fadeno dispatch-wait fix-login')).out, null, 'the wait passes');
+    assert.equal(plugin.run(HOOK, bash(agent, "fadeno dispatch-wait 'Fix the login bug' --wait-seconds 540")).out, null, 'quoted name and bound');
   }
   for (const spelling of [
     '"$CLAUDE_PLUGIN_ROOT/bin/fadeno" dispatch --archetype reviewer --prompt-file /r/.fadeno/local/relay/x.md',

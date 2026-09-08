@@ -16,6 +16,7 @@ import {
   runDispatchOutput,
   runDispatchShow,
   runDispatchStop,
+  runDispatchWait,
   runDispatches,
   runWorktrees,
   NotADispatchError,
@@ -41,8 +42,17 @@ import { roleResolutionEchoLabel } from './lib/executors.ts';
 import { modelAgrees } from './lib/ledger.ts';
 import { packageVersion } from './lib/paths.ts';
 import { renderFocusedHelp, renderGlobalHelp, resolveHelpPath } from './lib/cli-help.ts';
+import { formatAge } from './lib/contracts.ts';
 
 export const KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
+
+/** How long a dispatch has been open, for a line that says "ask again". */
+function ageOf(record: { opened?: { at: string } | null }): string {
+  const at = record.opened?.at;
+  if (at == null) return '?';
+  const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(at)) / 60000));
+  return formatAge(Number.isFinite(minutes) ? minutes : null);
+}
 
 function printStaleDials(stale: Array<{ archetype: string; reason: string }>): void {
   for (const item of stale) {
@@ -299,6 +309,8 @@ async function main(argv: string[]): Promise<number> {
         note: { type: 'string' },
         // feedback
         dispatch: { type: 'string' },
+        // dispatch-wait
+        'wait-seconds': { type: 'string' },
         // dispatches
         all: { type: 'boolean' },
         tail: { type: 'string' },
@@ -791,6 +803,41 @@ async function main(argv: string[]): Promise<number> {
       if (values.json) console.log(JSON.stringify(context));
       else console.log(context.text);
       return 0;
+    }
+    case 'dispatch-wait': {
+      const [, ref] = positionals;
+      if (ref == null) throw new Error('Usage: fadeno dispatch-wait <name|id> [--wait-seconds <n>] [--json]');
+      const seconds = values['wait-seconds'] == null ? undefined : Number(values['wait-seconds']);
+      if (seconds != null && (!Number.isFinite(seconds) || seconds < 0)) {
+        throw new Error('--wait-seconds takes a non-negative number of seconds.');
+      }
+      const outcome = await runDispatchWait({ ref, waitSeconds: seconds });
+      const name = outcome.record.opened?.name ?? outcome.record.id.slice(0, 8);
+      if (values.json) console.log(JSON.stringify(outcome, null, 2));
+      if (outcome.state === 'stopped') {
+        if (!values.json) {
+          if (outcome.text == null) console.error(`${name} stopped and recorded no report.`);
+          else process.stdout.write(outcome.text.endsWith('\n') ? outcome.text : `${outcome.text}\n`);
+        }
+        return 0;
+      }
+      if (outcome.state === 'running') {
+        // Exit 2, the same code `dispatches --output` uses for "not finished".
+        // The message is one instruction, because the only thing a caller can
+        // usefully do is ask again.
+        if (!values.json) {
+          console.error(`${name} is still running (${ageOf(outcome.record)} in). Run this command again.`);
+        }
+        return 2;
+      }
+      if (!values.json) {
+        console.error(
+          `${name} is not running and never recorded a stop: its process group is gone, so no report is coming. ` +
+            `What the executor wrote is at ${outcome.stdoutPath} — record it with ` +
+            `\`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.`,
+        );
+      }
+      return 4;
     }
     case 'feedback': {
       const text = positionals.slice(1).join(' ').trim();

@@ -77,6 +77,11 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     'The stop hook\'s entry point. Records presence of a final message, never completeness, and the uncommitted paths in the assigned worktree. A second stop for the same dispatch is a replay.',
     '`--transcript` reads the agent\'s transcript: the contract header in its prompt names the dispatch (so the ref may be omitted), the last assistant turn supplies the final message when none was passed, and the model the agent ran on is recorded beside the one the dial asked for. A transcript with no contract is not a dispatch: exit 4, nothing recorded.',
   ]),
+  'dispatch-wait': page('Block until a dispatch stops, then print its report.', 'fadeno dispatch-wait <name|id> [--wait-seconds <n>] [--json]', [
+    'For a dispatch that outruns the caller\'s shell timeout. Wait in bites the harness allows: this returns `still running` (exit 2) after its bound rather than being killed mid-wait, and the caller runs it again.',
+    'The bound is on WAITING, never on the work: nothing here stops an executor or decides it is too slow.',
+    'Exit 0 when it stopped (the report is on stdout), 2 while it runs, 4 when its process group is gone and no stop was ever recorded — which means no report is coming and says how to record what the executor did write.',
+  ]),
   'dispatch-close': page('Record the terminal decision for a dispatch.', 'fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>]', [
     'Exactly one verb. The same verb twice is a replay; a different verb for an already-closed dispatch is refused. Closing removes nothing: the branch stays, and the worktree stays until `fadeno clean`.',
   ]),
@@ -151,6 +156,7 @@ const OPTION_HINTS: Record<string, string> = {
   '--claude': 'Target Claude Code',
   '--codex': 'Target Codex',
   '--dispatch': 'Dispatch this friction happened on',
+  '--wait-seconds': 'How long to block before answering "still running"',
   '--discarded': 'Close: the work is not wanted',
   '--failed': 'Close: the dispatch did not succeed',
   '--force': 'Overwrite managed files',
@@ -191,7 +197,7 @@ const OPTION_HINTS: Record<string, string> = {
 const OPTION_FORMS: Record<string, string> = {
   '--format': '--format <format>', '--schema': '--schema <kind>',
   '--archetype': '--archetype <name>', '--model': '--model <ref>', '--harness': '--harness <id>',
-  '--dispatch': '--dispatch <ref>', '--prompt-file': '--prompt-file <path>', '--output': '--output <path>', '--lane': '--lane <auto|host|command>', '--transcript': '--transcript <path>', '--parent-transcript': '--parent-transcript <path>', '--bind': '--bind <role=executor>',
+  '--dispatch': '--dispatch <ref>', '--wait-seconds': '--wait-seconds <n>', '--prompt-file': '--prompt-file <path>', '--output': '--output <path>', '--lane': '--lane <auto|host|command>', '--transcript': '--transcript <path>', '--parent-transcript': '--parent-transcript <path>', '--bind': '--bind <role=executor>',
   '--tool': '--tool <name>', '--input': '--input <name=path>',
   '--host-executor': '--host-executor <name>', '--native-executor': '--native-executor <name>',
   '--role': '--role <name>', '--run': '--run <id>', '--dispatch-id': '--dispatch-id <id>',
@@ -225,6 +231,7 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   dispatch: withGlobals('--archetype', '--model', '--name', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--heartbeat'),
   'dispatch-open': withGlobals('--archetype', '--model', '--name', '--lane', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--parent-transcript', '--harness', '--stage-prompt', '--reuse-open', '--json'),
   'dispatch-stop': withGlobals('--transcript', '--message-file', '--agent-cwd', '--json'),
+  'dispatch-wait': withGlobals('--wait-seconds', '--json'),
   'dispatch-close': withGlobals('--merged', '--kept', '--discarded', '--failed', '--note'),
   cancel: withGlobals(),
   dispatches: withGlobals('--all', '--tail', '--json', '--output'),
@@ -318,7 +325,7 @@ Routing
   feedback    Record friction with Fadeno itself
 
 Dispatches
-  dispatch, dispatch-close, cancel, dispatches, worktrees
+  dispatch, dispatch-wait, dispatch-close, cancel, dispatches, worktrees
   dispatch-open, dispatch-stop  (the hooks' entry points)
 
 Setup and maintenance

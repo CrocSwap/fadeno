@@ -166,7 +166,9 @@ if (answer.opened !== true) {
     `fadeno: this ${archetype} spawn goes through the command lane (${identity}) — that model runs as a process, not as a subagent of this session. ` +
       `The task is staged; run this, with a 600-second shell timeout, and read what it prints:\n\n` +
       `    ${answer.relay.command}\n\n` +
-      `It records the dispatch as \`${label}\`; when it returns, read the report and close it with \`fadeno dispatch-close ${label} --merged|--kept|--discarded|--failed\`. ` +
+      `It records the dispatch as \`${label}\`. If that call is killed or times out, the dispatch is still running and its report is still coming: ` +
+      `run \`fadeno dispatch-wait ${label}\` — it blocks until the dispatch stops and prints the report. It exits 2 with "still running" when it reaches its own bound first, which is not an error: run it again, as many times as it takes. ` +
+      `When you have the report, read it and close the dispatch with \`fadeno dispatch-close ${label} --merged|--kept|--discarded|--failed\`. ` +
       `${answer.nag}`,
   );
 }

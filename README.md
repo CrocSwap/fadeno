@@ -157,6 +157,7 @@ it. A tree it cannot read is reported as unreadable, never as clean.
 | `dial` | Show, set, clear and resolve archetype bindings. With no arguments, the reference to read before delegating. |
 | `models` | Inspect the model registry; verify an alias resolves against its backend. |
 | `dispatch` | Run one dispatch on the command lane, start to finish. |
+| `dispatch-wait` | Block until a dispatch stops, then print its report — for work that outruns the caller's shell timeout. |
 | `dispatches` | List dispatches, show one, print a report. |
 | `dispatch-close` | Record the terminal decision. |
 | `cancel` | Stop a running command-lane dispatch by signalling its process group. |
@@ -252,7 +253,9 @@ Each of these was in the product and was removed on purpose.
   and real merges remove the shared-tree world that machinery existed for.
 - **Impose deadlines.** Nothing Fadeno launches is killed on a timer. You may
   stop it — that is `cancel` — but Fadeno never decides to on its own. A clock
-  cannot tell slow from stuck.
+  cannot tell slow from stuck. `dispatch-wait` bounds how long a caller BLOCKS,
+  never how long the work runs; when it says "still running", asking again is
+  the whole answer.
 - **Decide what work is worth keeping.** It never destroys a worktree holding
   uncommitted work, and never judges whether output matters.
 

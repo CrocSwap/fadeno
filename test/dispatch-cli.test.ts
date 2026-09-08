@@ -154,6 +154,48 @@ test('dispatch-open refuses at the limit with exit 3 on both lanes, and --json c
   assert.ok(!existsSync(join(root, '.fadeno', 'local', 'relay')), 'nothing is staged for a refused relay');
 });
 
+test('dispatch-wait: answers with the report when the stop lands, and says "run it again" when it has not', (t) => {
+  const root = repo(t);
+  const opened = JSON.parse(cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', 'slow-one', '--json'], 'do it').stdout) as { id: string };
+
+  // Nothing has stopped and there is no process group to be gone (host lane),
+  // so a short wait answers "still running" — exit 2, the same code
+  // `dispatches --output` uses for "not finished".
+  const waiting = cli(root, ['dispatch-wait', 'slow-one', '--wait-seconds', '0']);
+  assert.equal(waiting.status, 2);
+  assert.match(waiting.stderr, /slow-one is still running \(\d+m in\)\. Run this command again\./);
+  assert.equal(waiting.stdout, '', 'nothing on stdout: only exit 0 carries a report');
+
+  // Once the stop row lands, the same command answers with the report.
+  cli(root, ['dispatch-stop', 'slow-one'], 'the tree holds the fix');
+  const done = cli(root, ['dispatch-wait', 'slow-one', '--wait-seconds', '0']);
+  assert.equal(done.status, 0);
+  assert.match(done.stdout, /the tree holds the fix/);
+
+  // A dispatch answers to the name it was GIVEN as well as the recorded slug,
+  // and to its id — the proxy is handed the former.
+  assert.equal(cli(root, ['dispatch-wait', opened.id, '--wait-seconds', '0']).status, 0);
+  assert.match(cli(root, ['dispatch-wait', 'no-such-dispatch']).stderr, /no dispatch "no-such-dispatch"/);
+});
+
+test('dispatch-wait: a dead process group with no stop row is answered, not waited on forever', (t) => {
+  const root = repo(t);
+  // A command-lane row whose launcher is gone: pid 2 is init's child on macOS
+  // and Linux alike and is never a Fadeno process group, so the liveness probe
+  // finds nothing. This is the shape a killed (rather than backgrounded) shell
+  // call leaves behind, and no report is ever coming for it.
+  const id = '3f3f3f3f-0000-4000-8000-000000000000';
+  writeFileSync(join(root, LEDGER_FILE), `${JSON.stringify({
+    row: 'opened', id, name: 'orphaned', at: new Date().toISOString(), session: null, parent: null, archetype: 'worker',
+    model: 'echo', effort: 'high', explicit_model: null, lane: 'command', harness: 'codex', workspace: null,
+    task: 'x', prompt: 'p', process_group: 999_999,
+  })}\n`);
+  const answer = cli(root, ['dispatch-wait', 'orphaned', '--wait-seconds', '600']);
+  assert.equal(answer.status, 4, 'not 2: asking again would never help');
+  assert.match(answer.stderr, /orphaned is not running and never recorded a stop/);
+  assert.match(answer.stderr, /fadeno dispatch-stop orphaned --message-file \S*outputs\S*\.md/);
+});
+
 test('worktrees and clean: a closed clean worktree is reclaimed, an open or dirty one is kept and the reason printed', (t) => {
   const root = repo(t);
   cli(root, ['dispatch', '--archetype', 'worker', '--name', 'done'], 'x');

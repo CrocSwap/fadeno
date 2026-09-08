@@ -194,7 +194,13 @@ export function nameFrom(...candidates) {
  * The prompt a dispatch proxy receives: the one command it runs and how to
  * report. The task itself is in the staged file; the proxy never sees it.
  */
-export function proxyPrompt(relay, detail) {
+export function proxyPrompt(relay, detail, name) {
+  // The name as a shell word: a dispatch is often named in prose ("Fix the
+  // row_base hazard"), and an unquoted one would send `dispatch-wait` looking
+  // for a dispatch called "Fix".
+  const waitFor = typeof name === 'string' && name.trim() !== ''
+    ? (/^[A-Za-z0-9_./:@=+,-]+$/.test(name) ? name : `'${name.replace(/'/g, `'\\''`)}'`)
+    : '<name>';
   return [
     'Run this command exactly once and relay its stdout verbatim as your final message.',
     // Not a deadline of Fadeno's — the opposite. The Bash tool kills its child
@@ -211,7 +217,15 @@ export function proxyPrompt(relay, detail) {
     `It dispatches ${detail}. The prompt is already in the file the command names; do not read it, describe it, or write any file.`,
     'If `fadeno` is not found, run the same command once more with `"$CLAUDE_PLUGIN_ROOT/bin/fadeno"` in place of `fadeno`.',
     'If the command exits non-zero, relay its stdout and stderr and say the dispatch failed; do not attempt the task yourself.',
-    'If the Bash call is killed or times out, the executor may still be running: report that, and try `fadeno dispatches --output <name>` with the `--name` above. That command says on stderr when the dispatch has not stopped — then what it printed is progress so far, not a report, and relaying it as one would hand your caller unfinished work as finished.',
+    // The dispatch outliving the harness's shell ceiling is ORDINARY, not a
+    // failure: the launcher keeps waiting in the background and still records
+    // the stop. What used to happen is that the proxy returned at that moment
+    // with whatever had been written so far, and the session was told the
+    // agent had finished. So: wait in bites the harness allows, and do not
+    // finish until the dispatch has.
+    `If that call is killed, times out, or is moved to the background, the dispatch is still running and its report is still coming. Do not report yet. Run \`fadeno dispatch-wait ${waitFor}\` — it blocks until the dispatch stops and then prints the report, which you relay verbatim.`,
+    '`dispatch-wait` exits 2 with "still running" when it reaches its own bound before the dispatch does. That is not an error and nothing is wrong: run the exact same command again, as many times as it takes. Only exit 0 carries the report.',
+    'If it exits 4, the executor is gone and no report is coming: relay what it says, including the path it names, and say the dispatch did not finish.',
     'Report only what the command printed. Nothing else is yours to claim.',
   ].join('\n');
 }
