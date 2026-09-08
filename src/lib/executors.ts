@@ -1425,13 +1425,21 @@ export function resolveRole(
  * every resolution echo read the same function, so no two surfaces can name
  * the same layer differently.
  */
-export function roleResolutionEchoLabel(source: RoleResolutionSource): string {
+/**
+ * The layer a resolution came from, in one word — the column is headed
+ * `source`, so `user dial` under it said `dial` twice.
+ *
+ * `null` for `base`, where no layer answered at all: a table renders that as
+ * an empty cell and prose as "no dial", and pushing the choice to the surface
+ * is what lets one list serve both.
+ */
+export function roleResolutionEchoLabel(source: RoleResolutionSource): string | null {
   switch (source) {
     case 'binding': return 'binding';
-    case 'session': return 'session dial';
-    case 'repo': return 'repo pin';
-    case 'user': return 'user dial';
-    case 'base': return 'no dial';
+    case 'session': return 'session';
+    case 'repo': return 'repo';
+    case 'user': return 'user';
+    case 'base': return null;
     default: return String(source);
   }
 }

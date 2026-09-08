@@ -62,6 +62,30 @@ function seed(t: TestContext): { root: string; user: UserPathOptions } {
   return { root, user: isolated(root) };
 }
 
+test('models: the catch-all is a row, not a footnote', (t) => {
+  const { root, user } = seed(t);
+  const out = execFileSync(process.execPath, [CLI, 'models'], {
+    cwd: root, env: { ...process.env, ...user.env, HOME: user.home! }, encoding: 'utf8',
+  });
+  // An unregistered name is dialed as written and delivered by
+  // `unregistered_model_harness`. That is the same question every other row
+  // answers, so it is answered in the same columns rather than in a sentence
+  // under the table that a reader scanning the harness column never reaches.
+  assert.match(out, /^\*\s+\*\s+\*\s+\*\s+opencode$/m);
+  assert.doesNotMatch(out, /any other name runs on/);
+  // The row follows the catalog: a repo that sets the key sees its own answer.
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), readFileSync(join(root, '.fadeno', 'executors.yaml'), 'utf8').replace('unregistered_model_harness: opencode', 'unregistered_model_harness: claude'));
+  const retargeted = execFileSync(process.execPath, [CLI, 'models'], {
+    cwd: root, env: { ...process.env, ...user.env, HOME: user.home! }, encoding: 'utf8',
+  });
+  assert.match(retargeted, /^\*\s+\*\s+\*\s+\*\s+claude$/m);
+  // One model is one question: the detail view answers about that name only.
+  const detail = execFileSync(process.execPath, [CLI, 'models', 'sol'], {
+    cwd: root, env: { ...process.env, ...user.env, HOME: user.home! }, encoding: 'utf8',
+  });
+  assert.doesNotMatch(detail, /^\*\s/m);
+});
+
 test('models: registry table — deliveries, lane marks, verification cache', (t) => {
   const { root, user } = seed(t);
   recordVerifiedModel(user, { harness: 'codex', model: 'gpt-5.6-sol', verified_at: '2026-08-16T00:00:00Z' });

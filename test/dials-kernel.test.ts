@@ -494,13 +494,15 @@ test('resolveRole: live resolution cascade+compile', () => {
   assert.equal(res.source, 'repo');
   assert.equal(res.delivery.model, 'sol');
   assert.equal(res.delivery.spec.adapter, 'command');
-  assert.match(roleResolutionEchoLabel(res.source), /repo pin/);
+  assert.equal(roleResolutionEchoLabel(res.source), 'repo');
 });
 
-test('roleResolutionEchoLabel vocabulary', () => {
+test('roleResolutionEchoLabel vocabulary: one word per layer, and null where none answered', () => {
   assert.equal(roleResolutionEchoLabel('binding'), 'binding');
-  assert.equal(roleResolutionEchoLabel('session'), 'session dial');
-  assert.equal(roleResolutionEchoLabel('repo'), 'repo pin');
-  assert.equal(roleResolutionEchoLabel('user'), 'user dial');
-  assert.equal(roleResolutionEchoLabel('base'), 'no dial');
+  assert.equal(roleResolutionEchoLabel('session'), 'session');
+  assert.equal(roleResolutionEchoLabel('repo'), 'repo');
+  assert.equal(roleResolutionEchoLabel('user'), 'user');
+  // `base` is the absence of a dial, not a layer. The word for that belongs to
+  // the surface: an empty cell in a table, "no dial" in prose.
+  assert.equal(roleResolutionEchoLabel('base'), null);
 });

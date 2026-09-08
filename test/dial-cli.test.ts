@@ -209,28 +209,39 @@ test('dial set/resolve JSON carries the pin separately from the resolved effort'
   assert.equal(resolvedPinned.effective_effort, 'low');
 });
 
-test('dial CLI: the effort column shows the pin, and `inherit` where there is none', (t) => {
+test('dial CLI: effort rides the model cell, and only when the pin is not the default', (t) => {
   const root = seedCatalog(t);
   const paths = isolated(root);
+  // `sol` declares `effort: high`.
   cliRun(root, paths, ['dial', 'worker', 'sol', '--session']);
   cliRun(root, paths, ['dial', 'reviewer', 'sol@low', '--session']);
+  cliRun(root, paths, ['dial', 'judge', 'sol@high', '--session']);
   const table = cliRun(root, paths, ['dial']);
   const rowFor = (archetype: string) => table.split('\n').find((line) => line.startsWith(archetype))!;
-  assert.match(rowFor('worker'), /sol\s+inherit\s/);
-  assert.match(rowFor('reviewer'), /sol\s+low\s/);
+  assert.match(rowFor('worker'), /\bsol\s/, 'no pin, no suffix');
+  assert.match(rowFor('reviewer'), /\bsol@low\s/, 'a pin the registry would not have given it');
+  // A pin that restates the model's own default changes nothing, so it is not
+  // shown: the column would otherwise carry a suffix on every row that said
+  // only what the registry already says.
+  assert.match(rowFor('judge'), /\bsol\s/);
+  assert.doesNotMatch(rowFor('judge'), /@high/);
+  // No column of its own, on any row.
+  assert.doesNotMatch(table.split('\n')[0]!, /\beffort\b/);
+  assert.doesNotMatch(table, /\binherit\b/);
   // The single-archetype view is the same renderer, so it must agree.
-  assert.match(cliRun(root, paths, ['dial', 'worker']), /sol\s+inherit\s/);
+  assert.match(cliRun(root, paths, ['dial', 'reviewer']), /\bsol@low\s/);
 });
 
-// --- The lane column ---
+// --- The lane, and where it is NOT ---
 //
-// The table prints model, effort, harness and source; the LANE is what those
-// columns decide together and none of them shows. A director's preflight is
-// where a wrong inference gets acted on — one put a five-lane campaign on the
-// command lane — so it is printed, from `laneOf`, the same one bit the spawn
-// wrapper routes on.
+// `laneOf` stays on the row because `status` reports it, and because the
+// resolver and the spawn wrapper must agree about one bit. The TABLE does not
+// print it: the lane is `harness == host`, so from a bare shell — where this
+// command is almost always run — it is a constant, and a column of constants
+// only invited the reading it could not survive, that a dial IS a command-lane
+// dial when the same dial file is a host dial read from inside that harness.
 
-test('dial CLI: the table prints the lane, one line per row, and names a row with no lane at all', (t) => {
+test('dial rows carry the lane for status, and the table prints archetype, model, harness, source', (t) => {
   const root = seedCatalog(t, {
     harnesses: {
       // The host: `sol` is deliverable in-session here, and has a command lane.
@@ -246,46 +257,40 @@ test('dial CLI: the table prints the lane, one line per row, and names a row wit
   assert.equal(row('worker').lane, 'host');
   assert.equal(row('reviewer').lane, 'command');
   // Undialed inside a host session: `current-host` IS the session, so it is a
-  // host candidate here — the same dial that had no lane from a bare shell.
+  // host candidate here — the same dial that has no lane from a bare shell.
   assert.equal(row('judge').model, 'current-host');
   assert.equal(row('judge').lane, 'host');
+  assert.equal(row('judge').deliverable, true);
 
   const table = cliRun(root, paths, ['dial']);
   const rowFor = (archetype: string) => table.split('\n').find((line) => line.startsWith(archetype))!;
-  assert.match(table.split('\n')[0]!, /harness\s+lane\s+source/);
-  assert.match(rowFor('worker'), /codex \(home\)\s+host\s+repo pin/);
-  assert.match(rowFor('reviewer'), /grok \(home\)\s+command\s+repo pin/);
-  // One line per archetype and nothing under it: a header and three rows.
+  assert.match(table.split('\n')[0]!, /^archetype\s+model\s+harness\s+source$/);
+  assert.doesNotMatch(table, /\blane\b/);
+  assert.match(rowFor('worker'), /\bsol\s+codex\s+repo$/);
+  assert.match(rowFor('reviewer'), /\bgrok\s+grok\s+repo$/);
+  // One line per archetype: a header and three rows.
   const printed = table.split('\n').filter((line) => line.length > 0 && !line.startsWith('note:'));
   assert.equal(printed.length, 4, table);
 
-  // The same catalog from a bare shell: the undialed row has no lane at all,
-  // and the table says `none` rather than naming a command lane that has
-  // nothing to invoke.
+  // The same catalog from a bare shell. Nothing is in-session, so `judge` has
+  // no harness to name and no lane at all — but the table says only what it
+  // knows (an empty harness cell), and `status` is where "cannot be dispatched
+  // from here" is reported to someone who has to act on it.
   const bare = cliRun(root, isolated(root), ['dial']);
-  assert.match(bare.split('\n').find((line) => line.startsWith('judge'))!, /current-host\s+inherit\s+—\s+none\s/);
-  assert.match(bare, /none: no lane from here/);
+  assert.match(bare.split('\n').find((line) => line.startsWith('judge'))!, /current-host\s+—\s+—$/);
+  assert.doesNotMatch(bare, /no lane/);
+  assert.equal(runDialShow({ repoRoot: root, userPathOptions: isolated(root) }).rows.find((r) => r.archetype === 'judge')!.deliverable, false);
 });
 
-test('the `none` legend names the condition, not one of the two causes that reach it', (t) => {
-  const root = seedCatalog(t, {
-    models: {
-      sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
-      stray: { provider: 'ompco', id: 'stray-1', harness: 'omp' },
-    },
-    harnesses: {
-      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: ['node', '-e', '0'] },
-      // A host Fadeno can run inside and cannot spawn. From a codex session a
-      // model living here has no lane either — and this is the second cause.
-      omp: { host: { effort_channel: 'none', identity: 'model' } },
-    },
-    dials: { worker: 'stray' },
-  });
-  const table = cliRun(root, inCodex(root), ['dial']);
-  assert.match(table.split('\n').find((line) => line.startsWith('worker'))!, /stray\s+inherit\s+omp \(home\)\s+none\s/);
-  assert.match(table, /the model is one this session can neither deliver in-session nor run as a process/);
-  // The row says `stray` and this IS a session, so a legend that gave the
-  // bare-shell cause as the reason would be telling the reader something
-  // false about the row in front of them.
-  assert.doesNotMatch(table, /^none: no lane from here — `current-host`/m);
+test('the source column says the layer in one word, and an empty cell where no layer answered', (t) => {
+  const root = seedCatalog(t, { dials: { worker: 'sol' } });
+  const paths = isolated(root);
+  cliRun(root, paths, ['dial', 'reviewer', 'grok', '--session']);
+  const table = cliRun(root, paths, ['dial']);
+  const rowFor = (archetype: string) => table.split('\n').find((line) => line.startsWith(archetype))!;
+  assert.match(rowFor('worker'), /\srepo$/);
+  assert.match(rowFor('reviewer'), /\ssession$/);
+  // No dial at any layer: the cell is empty rather than a sentence.
+  assert.match(rowFor('judge'), /\s—$/);
+  assert.doesNotMatch(table, /user dial|repo pin|session dial|no dial/);
 });

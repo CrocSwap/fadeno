@@ -8736,13 +8736,13 @@ function roleResolutionEchoLabel(source) {
     case "binding":
       return "binding";
     case "session":
-      return "session dial";
+      return "session";
     case "repo":
-      return "repo pin";
+      return "repo";
     case "user":
-      return "user dial";
+      return "user";
     case "base":
-      return "no dial";
+      return null;
     default:
       return String(source);
   }
@@ -9461,7 +9461,7 @@ function describeArchetypes(input) {
     const description = describeArchetype(name, profile.archetypes[name]?.description);
     try {
       const r = resolveArchetype({ repoRoot: input.repoRoot, archetype: name, userPathOptions: input.userPathOptions });
-      const source = r.source === "explicit" ? "explicit model" : roleResolutionEchoLabel(r.source);
+      const source = r.source === "explicit" ? "explicit model" : roleResolutionEchoLabel(r.source) ?? "no dial";
       return { name, description, model: r.model, effort: r.effort, source };
     } catch (err) {
       return { name, description, model: "unresolvable", effort: null, source: err.message };
@@ -10735,6 +10735,7 @@ function runDialShow(opts = {}) {
       model: delivery.model,
       model_id: delivery.modelId,
       pinned_effort: delivery.pinnedEffort,
+      default_effort: profile.models[delivery.model]?.effort ?? null,
       effective_effort: delivery.effectiveEffort,
       harness: delivery.harness,
       harness_explicit: delivery.ref.harness != null,
@@ -12647,7 +12648,7 @@ function printStaleDials(stale) {
     );
   }
 }
-function printModels(result) {
+function printModels(result, options = {}) {
   const header = `${"model".padEnd(12)}  ${"provider".padEnd(12)}  ${"id".padEnd(26)}  ${"effort".padEnd(8)}  harness`;
   console.log(header);
   for (const row of result.models) {
@@ -12655,13 +12656,14 @@ function printModels(result) {
       `${row.name.padEnd(12)}  ${(row.provider ?? "\u2014").padEnd(12)}  ${row.id.padEnd(26)}  ${row.effort.padEnd(8)}  ${row.home_harness}`
     );
   }
+  if (options.catchAll !== false) {
+    console.log(
+      `${"*".padEnd(12)}  ${"*".padEnd(12)}  ${"*".padEnd(26)}  ${"*".padEnd(8)}  ${result.unregistered_model_harness}`
+    );
+  }
   for (const row of result.models) {
     if (row.stale != null) console.error(`warning: ${row.name} \u2014 ${row.stale}`);
   }
-  console.log(
-    `
-any other name runs on ${result.unregistered_model_harness} \u2014 id passed verbatim, probed at dial time`
-  );
   if (result.listable_harnesses.length > 0) {
     console.log(`live backend listings: fadeno models --harness <${result.listable_harnesses.join("|")}>`);
   }
@@ -12674,7 +12676,7 @@ function printModelDetail(result, name) {
     );
     return;
   }
-  printModels({ ...result, models: [row] });
+  printModels({ ...result, models: [row] }, { catchAll: false });
   console.log(`  harness: ${row.home_harness}`);
   for (const delivery of row.deliveries) {
     console.log(`  alternate: --harness ${delivery.harness} \u2192 ${delivery.id}`);
@@ -12735,22 +12737,18 @@ ${result.counts.verified} verified, ${result.counts.not_listed} not listed, ${re
     console.log("cached verification rows for the not-listed models were deleted.");
   }
 }
+function modelCell(row) {
+  const pin = row.pinned_effort;
+  return pin != null && pin !== row.default_effort ? `${row.model}@${pin}` : row.model;
+}
 function printDialShow(result) {
   if (result.staleDials.length > 0) printStaleDials(result.staleDials);
-  const header = `${"archetype".padEnd(12)}  ${"model".padEnd(18)}  ${"effort".padEnd(8)}  ${"harness".padEnd(22)}  ${"lane".padEnd(8)}  source`;
-  console.log(header);
+  console.log(`${"archetype".padEnd(12)}  ${"model".padEnd(20)}  ${"harness".padEnd(12)}  source`);
   for (const row of result.rows) {
-    const arch = row.archetype.padEnd(12);
-    const model = row.model.padEnd(18);
-    const effort = (row.pinned_effort ?? "inherit").padEnd(8);
-    const harness = (row.harness == null ? "\u2014" : `${row.harness}${row.harness_explicit ? "" : " (home)"}`).padEnd(22);
+    const harness = (row.harness ?? "\u2014").padEnd(12);
     const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : "";
-    const lane = (row.deliverable ? row.lane : "none").padEnd(8);
-    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${lane}  ${roleResolutionEchoLabel(row.source)}${inherits}`);
-  }
-  if (result.rows.some((row) => !row.deliverable)) {
     console.log(
-      "none: no lane from here \u2014 the model is one this session can neither deliver in-session nor run as a process. Spawn it from a host that can deliver it, or dial it onto a model with a command lane. (`current-host` outside a session is the usual cause: it names the session's own model and there is no session.)"
+      `${row.archetype.padEnd(12)}  ${modelCell(row).padEnd(20)}  ${harness}  ${roleResolutionEchoLabel(row.source) ?? "\u2014"}${inherits}`
     );
   }
   if (result.note) console.log(result.note);
@@ -12913,9 +12911,8 @@ async function main(argv) {
       );
       console.log("routing:");
       for (const row of result.routing) {
-        const effort = row.pinned_effort != null ? `@${row.pinned_effort}` : "";
         const lane = row.deliverable ? row.lane : "no lane";
-        console.log(`  ${row.archetype.padEnd(12)} ${`${row.model}${effort}`.padEnd(20)} ${lane.padEnd(8)} ${roleResolutionEchoLabel(row.source)}`);
+        console.log(`  ${row.archetype.padEnd(12)} ${modelCell(row).padEnd(20)} ${lane.padEnd(8)} ${roleResolutionEchoLabel(row.source) ?? "\u2014"}`);
       }
       if (result.attention.length === 0) {
         console.log("attention: nothing");

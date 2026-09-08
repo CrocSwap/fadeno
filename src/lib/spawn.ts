@@ -214,7 +214,7 @@ export function describeArchetypes(input: { repoRoot: string; userPathOptions?: 
     const description = describeArchetype(name, profile.archetypes[name]?.description);
     try {
       const r = resolveArchetype({ repoRoot: input.repoRoot, archetype: name, userPathOptions: input.userPathOptions });
-      const source = r.source === 'explicit' ? 'explicit model' : roleResolutionEchoLabel(r.source);
+      const source = r.source === 'explicit' ? 'explicit model' : roleResolutionEchoLabel(r.source) ?? 'no dial';
       return { name, description, model: r.model, effort: r.effort, source };
     } catch (err) {
       return { name, description, model: 'unresolvable', effort: null, source: (err as Error).message };

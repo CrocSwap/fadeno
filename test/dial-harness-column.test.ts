@@ -7,7 +7,7 @@ import { stringify as stringifyYaml } from 'yaml';
 import { tempRepo } from './helpers.ts';
 
 /**
- * The fourth column of `fadeno dial` and the fifth of `fadeno models` say
+ * The third column of `fadeno dial` and the fifth of `fadeno models` say
  * `harness` — the flag that sets them — and nothing on either line says
  * `harness` meaning anything else.
  *
@@ -63,7 +63,10 @@ test('the dial table heads its executor column `harness`, and says `inherits` fo
 
   const worker = rows.find((r) => r.startsWith('worker'))!;
   assert.match(worker, /\bclaude\b/, "worker's dial runs on the claude harness");
-  assert.match(worker, /\(home\)/, 'an unpinned harness is marked as the model\'s home');
+  // The harness that will run it, and nothing else. Whether the dial named
+  // that harness or the model's provider claimed it is a question about the
+  // DIAL, answered by `fadeno dial resolve --archetype worker`.
+  assert.doesNotMatch(worker, /\(home\)/);
 
   const scout = rows.find((r) => r.startsWith('scout'))!;
   assert.match(scout, /\(inherits worker\)/, 'a borrowed dial names its lender as an inheritance');
@@ -90,10 +93,8 @@ test('`--harness <id>` round-trips into the column that reports it', (t) => {
   const out = execFileSync(process.execPath, [CLI, 'dial'], { cwd: root, env, encoding: 'utf8' });
   const worker = out.split('\n').find((r) => r.startsWith('worker'))!;
   // The point of naming the column after the flag: what you typed is what you
-  // read back. An explicit harness also loses the `(home)` mark, which is the
-  // only thing distinguishing "I chose this" from "the provider did".
+  // read back.
   assert.match(worker, /\bcodex\b/);
-  assert.doesNotMatch(worker, /\(home\)/);
 });
 
 test('the retired `--via` names its replacement instead of answering "unknown option"', (t) => {

@@ -28,6 +28,7 @@ import {
   runDialSetMany,
   runDialShow,
   type DialShowResult,
+  type EffectiveRow,
 } from './commands/dial.ts';
 import { runModels, runModelsAdd, runModelsHarness, runModelsRemove, type HarnessListingResult, type ModelAddResult, type ModelRemoveResult, type ModelsResult } from './commands/models.ts';
 import { runModelsVerify, type ModelsVerifyResult } from './commands/models-verify.ts';
@@ -51,7 +52,7 @@ function printStaleDials(stale: Array<{ archetype: string; reason: string }>): v
   }
 }
 
-function printModels(result: ModelsResult): void {
+function printModels(result: ModelsResult, options: { catchAll?: boolean } = {}): void {
   // `harness`: the model's home EXECUTOR harness. One harness table under v4,
   // so this column no longer varies with the host you are sitting inside.
   const header = `${'model'.padEnd(12)}  ${'provider'.padEnd(12)}  ${'id'.padEnd(26)}  ${'effort'.padEnd(8)}  harness`;
@@ -61,12 +62,21 @@ function printModels(result: ModelsResult): void {
       `${row.name.padEnd(12)}  ${(row.provider ?? '—').padEnd(12)}  ${row.id.padEnd(26)}  ${row.effort.padEnd(8)}  ${row.home_harness}`,
     );
   }
+  // The catch-all, as a ROW rather than a sentence underneath the table. A
+  // name the registry does not hold is not an error: it is dialed as written
+  // and delivered by `unregistered_model_harness`. That is the same question
+  // every row above answers, so it belongs in the same columns — `*` wherever
+  // the registry would have supplied a value, and the harness that will run
+  // it. Read from the profile, so a catalog that sets the key sees its own
+  // answer here.
+  if (options.catchAll !== false) {
+    console.log(
+      `${'*'.padEnd(12)}  ${'*'.padEnd(12)}  ${'*'.padEnd(26)}  ${'*'.padEnd(8)}  ${result.unregistered_model_harness}`,
+    );
+  }
   for (const row of result.models) {
     if (row.stale != null) console.error(`warning: ${row.name} — ${row.stale}`);
   }
-  console.log(
-    `\nany other name runs on ${result.unregistered_model_harness} — id passed verbatim, probed at dial time`,
-  );
   if (result.listable_harnesses.length > 0) {
     console.log(`live backend listings: fadeno models --harness <${result.listable_harnesses.join('|')}>`);
   }
@@ -81,7 +91,9 @@ function printModelDetail(result: ModelsResult, name: string): void {
     );
     return;
   }
-  printModels({ ...result, models: [row] });
+  // One model, so no catch-all row: the question here is what THIS name
+  // resolves to.
+  printModels({ ...result, models: [row] }, { catchAll: false });
   console.log(`  harness: ${row.home_harness}`);
   for (const delivery of row.deliveries) {
     console.log(`  alternate: --harness ${delivery.harness} → ${delivery.id}`);
@@ -150,57 +162,48 @@ function printModelsVerify(result: ModelsVerifyResult): void {
 }
 
 /**
+ * `model`, or `model@effort` when the dial pinned an effort the model's own
+ * registry entry would not have given it.
+ *
+ * One helper for both renderers below: `dial` and `status` describing the same
+ * dial two different ways is the failure this codebase keeps finding, and a
+ * shared cell is the only durable fix. A pin that merely restates the
+ * registry's default is not shown — it changes nothing, and a suffix on every
+ * row is a suffix nobody reads.
+ */
+function modelCell(row: EffectiveRow): string {
+  const pin = row.pinned_effort;
+  return pin != null && pin !== row.default_effort ? `${row.model}@${pin}` : row.model;
+}
+
+/**
  * The effective table: every archetype the catalog and the dials know, and
- * where each one currently goes.
+ * where each one currently routes.
  *
- * One line per archetype, because this table answers "where does it route" —
- * what each archetype is FOR belongs to `fadeno context`, which is what a host
- * session is actually given. A description repeated under every row here
- * doubled the table's height to restate text the reader already had.
+ * Three columns, because three is what a reader can act on — the archetype,
+ * the model it lands on, and the harness that will run it.
  *
- * `lane` is printed rather than left to be inferred: it is what the harness
- * column decides and does not show, and a reader who guesses it wrong routes a
- * whole campaign the wrong way.
+ * The LANE is deliberately absent. It is `harness == host`, evaluated for
+ * whoever asks, so from a shell — where this command is almost always run — it
+ * is a constant, and a column of constants invited the one wrong reading it
+ * could produce: that a dial IS a command-lane dial, when the same dial file
+ * is a host dial read from inside that harness. `fadeno status` carries the
+ * case a person must act on (an archetype with no lane from here), and
+ * `fadeno dial resolve --archetype <name>` answers it per row.
  */
 function printDialShow(result: DialShowResult): void {
   if (result.staleDials.length > 0) printStaleDials(result.staleDials);
-  const header = `${'archetype'.padEnd(12)}  ${'model'.padEnd(18)}  ${'effort'.padEnd(8)}  ${'harness'.padEnd(22)}  ${'lane'.padEnd(8)}  source`;
-  console.log(header);
+  console.log(`${'archetype'.padEnd(12)}  ${'model'.padEnd(20)}  ${'harness'.padEnd(12)}  source`);
   for (const row of result.rows) {
-    const arch = row.archetype.padEnd(12);
-    const model = row.model.padEnd(18);
-    // The PIN, never the resolved effort: every catalog model declares a
-    // default, so a column showing the effective value says the same thing for
-    // `dial worker opus` and `dial worker opus@xhigh` and hides which one the
-    // user actually asked for. `inherit` rather than `—`, because an unpinned
-    // dial is not effort-less — it takes the model's declared default on the
-    // command lane and the session's own on the host lane.
-    const effort = (row.pinned_effort ?? 'inherit').padEnd(8);
-    // `—` for a null harness, which is `current-host` with no host: the cell
-    // has no value rather than the value `null`.
-    // `(home)` marks a row whose DIAL named no harness — the registry
-    // answered, through the provider's home claim or a model-level `harness:`.
-    const harness = (row.harness == null ? '—' : `${row.harness}${row.harness_explicit ? '' : ' (home)'}`).padEnd(22);
+    // `—` for a null harness, which is `current-host` outside a session: the
+    // cell has no value rather than the value `null`.
+    const harness = (row.harness ?? '—').padEnd(12);
     // `inherits`, not `via`: `resolvedVia` is the ARCHETYPE this row borrowed
     // its dial from (`reviewer` with no dial of its own falling back to
     // `worker`), which has nothing to do with the harness column.
     const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : '';
-    // `none` is not a third lane; it is the command lane with nothing to
-    // invoke, which from a bare shell is every undialed archetype. Saying
-    // `command` there would name a dispatch that cannot start.
-    const lane = (row.deliverable ? row.lane : 'none').padEnd(8);
-    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${lane}  ${roleResolutionEchoLabel(row.source)}${inherits}`);
-  }
-  // The legend names the CONDITION, not one of its causes. Two dials reach
-  // `none`: `current-host` outside a session, and a named model whose harness
-  // hosts but cannot be spawned, seen from a different host. The footer used
-  // to state the first as the reason for both, which told a reader looking at
-  // a row that says `stray` that their session was not a session.
-  if (result.rows.some((row) => !row.deliverable)) {
     console.log(
-      'none: no lane from here — the model is one this session can neither deliver in-session nor run as a process. ' +
-        'Spawn it from a host that can deliver it, or dial it onto a model with a command lane. ' +
-        "(`current-host` outside a session is the usual cause: it names the session's own model and there is no session.)",
+      `${row.archetype.padEnd(12)}  ${modelCell(row).padEnd(20)}  ${harness}  ${roleResolutionEchoLabel(row.source) ?? '—'}${inherits}`,
     );
   }
   if (result.note) console.log(result.note);
@@ -406,9 +409,10 @@ async function main(argv: string[]): Promise<number> {
       );
       console.log('routing:');
       for (const row of result.routing) {
-        const effort = row.pinned_effort != null ? `@${row.pinned_effort}` : '';
+        // Status keeps the lane: this is the command whose job is what needs
+        // a person, and `no lane` is the one routing fact that does.
         const lane = row.deliverable ? row.lane : 'no lane';
-        console.log(`  ${row.archetype.padEnd(12)} ${`${row.model}${effort}`.padEnd(20)} ${lane.padEnd(8)} ${roleResolutionEchoLabel(row.source)}`);
+        console.log(`  ${row.archetype.padEnd(12)} ${modelCell(row).padEnd(20)} ${lane.padEnd(8)} ${roleResolutionEchoLabel(row.source) ?? '—'}`);
       }
       if (result.attention.length === 0) {
         console.log('attention: nothing');

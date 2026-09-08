@@ -60,11 +60,16 @@ export interface EffectiveRow {
   model_id: string;
   /**
    * The effort the user pinned on this dial (`opus@xhigh` → `'xhigh'`), or
-   * null when the dial stated no opinion (`opus`). The table prints this
-   * rather than the effective effort, because every catalog model declares a
-   * default and a column that shows it cannot tell a pin from a fall-through.
+   * null when the dial stated no opinion (`opus`).
    */
   pinned_effort: string | null;
+  /**
+   * What the model's registry entry declares, or null for a model with no
+   * entry (`current-host`). Paired with `pinned_effort` it is what tells a
+   * pin apart from a fall-through — the table shows an effort only when the
+   * dial asked for one the registry would not have given it.
+   */
+  default_effort: string | null;
   /** The effort this delivery runs at: the pin, else the registry default. */
   effective_effort: string;
   /** The EXECUTOR harness this row resolves onto — who runs it, not where you sit. */
@@ -779,6 +784,7 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
       model: delivery.model,
       model_id: delivery.modelId,
       pinned_effort: delivery.pinnedEffort,
+      default_effort: profile.models[delivery.model]?.effort ?? null,
       effective_effort: delivery.effectiveEffort,
       harness: delivery.harness,
       harness_explicit: delivery.ref.harness != null,

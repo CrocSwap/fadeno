@@ -177,7 +177,7 @@ test('context prints the vocabulary with live routing and the nag', (t) => {
   cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', 'pending'], 'x');
   const ctx = cli(root, ['context']);
   assert.equal(ctx.status, 0, ctx.stderr);
-  assert.match(ctx.stdout, /- \*\*worker\*\* — Implements .* _\(routes to echo@high; repo pin\)_/);
+  assert.match(ctx.stdout, /- \*\*worker\*\* — Implements .* _\(routes to echo@high; repo\)_/);
   assert.match(ctx.stdout, /- \*\*reviewer\*\* — Reviews .* _\(routes to this session's own model; no dial\)_/);
   assert.match(ctx.stdout, /## Unclosed dispatches \(1 of 5 allowed\)/);
   assert.match(ctx.stdout, /`pending`/);
@@ -285,7 +285,7 @@ test('a director\'s contract carries the host vocabulary, and a dispatch run fro
   const run = cli(root, ['dispatch', '--archetype', 'director', '--name', 'lead'], 'Coordinate the fix.');
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /\*\*You may spawn\.\*\* The dispatches you open are recorded under yours/);
-  assert.match(run.stdout, /## Archetypes\n\n[\s\S]*- \*\*director\*\* — Coordinates a whole task[\s\S]*_\(routes to echo@high; repo pin\)_/);
+  assert.match(run.stdout, /## Archetypes\n\n[\s\S]*- \*\*director\*\* — Coordinates a whole task[\s\S]*_\(routes to echo@high; repo\)_/);
   assert.match(run.stdout, /## Closing/);
   assert.ok(run.stdout.trimEnd().endsWith('## End of Fadeno dispatch contract'), 'the vocabulary sits inside the contract');
   const worktree = join(root, '.fadeno', 'local', 'worktrees', 'lead');
