@@ -109,7 +109,7 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     'fadeno dial clear [<archetype>] [--session|--user|--repo]',
     'fadeno dial resolve --archetype <name>',
   ], [
-    'With no arguments: every archetype, what it is for, and where it currently routes — the reference to read before delegating.',
+    'With no arguments: every archetype and where it currently routes. What each archetype is for is in `fadeno context`.',
     'Cascade: binding → session dial → repo pin → user dial → base. An archetype with no dial runs on the host session\'s own model.',
     'An unscoped set edits the highest layer that already holds a dial, and creates at the user default when none does.',
   ]),

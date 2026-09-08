@@ -64,7 +64,7 @@ An **archetype** is a role. Five ship, and the set is open:
 A **dial** binds an archetype to a model:
 
 ```bash
-fadeno dial                          # every archetype, what it is for, where it goes
+fadeno dial                          # every archetype, where it goes
 fadeno dial worker sol@high          # bind one
 fadeno dial reviewer opus --session  # this checkout only, until cleared
 fadeno dial worker+reviewer grok     # several at once, atomically

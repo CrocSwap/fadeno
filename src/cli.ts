@@ -150,14 +150,17 @@ function printModelsVerify(result: ModelsVerifyResult): void {
 }
 
 /**
- * The effective table: every archetype the catalog and the dials know, what it
- * is for, and where it currently goes.
+ * The effective table: every archetype the catalog and the dials know, and
+ * where each one currently goes.
  *
- * The description sits under each row because this table is the reference a
- * coordinator reads before delegating, and "which archetype" is the question
- * it answers first. `lane` is printed rather than left to be inferred: it is
- * what the harness column decides and does not show, and a reader who guesses
- * it wrong routes a whole campaign the wrong way.
+ * One line per archetype, because this table answers "where does it route" —
+ * what each archetype is FOR belongs to `fadeno context`, which is what a host
+ * session is actually given. A description repeated under every row here
+ * doubled the table's height to restate text the reader already had.
+ *
+ * `lane` is printed rather than left to be inferred: it is what the harness
+ * column decides and does not show, and a reader who guesses it wrong routes a
+ * whole campaign the wrong way.
  */
 function printDialShow(result: DialShowResult): void {
   if (result.staleDials.length > 0) printStaleDials(result.staleDials);
@@ -187,7 +190,6 @@ function printDialShow(result: DialShowResult): void {
     // `command` there would name a dispatch that cannot start.
     const lane = (row.deliverable ? row.lane : 'none').padEnd(8);
     console.log(`${arch}  ${model}  ${effort}  ${harness}  ${lane}  ${roleResolutionEchoLabel(row.source)}${inherits}`);
-    console.log(`  ${row.description}`);
   }
   if (result.rows.some((row) => !row.deliverable)) {
     console.log(

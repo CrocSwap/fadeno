@@ -152,7 +152,6 @@ test('status answers with the routing dial prints, and nothing needs attention o
   assert.equal(result.link.state, 'linked');
   assert.equal(result.link.target, source);
   assert.deepEqual(result.routing.map((row) => row.archetype), ['judge', 'reviewer', 'worker']);
-  assert.ok(result.routing.every((row) => row.description.length > 0));
   // From a bare shell the undialed base has no lane, and status says so
   // rather than reporting a command lane with nothing to invoke.
   assert.equal(result.attention.length, 3);

@@ -10732,7 +10732,6 @@ function runDialShow(opts = {}) {
     const delivery = resolved.delivery;
     rows.push({
       archetype,
-      description: describeArchetype(archetype, profile.archetypes[archetype]?.description),
       model: delivery.model,
       model_id: delivery.modelId,
       pinned_effort: delivery.pinnedEffort,
@@ -12393,7 +12392,7 @@ var TOP_LEVEL = {
     "fadeno dial clear [<archetype>] [--session|--user|--repo]",
     "fadeno dial resolve --archetype <name>"
   ], [
-    "With no arguments: every archetype, what it is for, and where it currently routes \u2014 the reference to read before delegating.",
+    "With no arguments: every archetype and where it currently routes. What each archetype is for is in `fadeno context`.",
     "Cascade: binding \u2192 session dial \u2192 repo pin \u2192 user dial \u2192 base. An archetype with no dial runs on the host session's own model.",
     "An unscoped set edits the highest layer that already holds a dial, and creates at the user default when none does."
   ]),
@@ -12748,7 +12747,6 @@ function printDialShow(result) {
     const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : "";
     const lane = (row.deliverable ? row.lane : "none").padEnd(8);
     console.log(`${arch}  ${model}  ${effort}  ${harness}  ${lane}  ${roleResolutionEchoLabel(row.source)}${inherits}`);
-    console.log(`  ${row.description}`);
   }
   if (result.rows.some((row) => !row.deliverable)) {
     console.log(

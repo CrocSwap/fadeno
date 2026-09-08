@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseDocument } from 'yaml';
 import { loadLayeredProfile, type LayeredProfile, type ModelFallbackOutcome } from '../lib/config-layers.ts';
-import { describeArchetype } from '../lib/contracts.ts';
 import {
   activeHarness,
   archetypeDisplaySort,
@@ -54,11 +53,9 @@ function assertArchetypeName(archetype: string): void {
   }
 }
 
-/** One row of the effective table: an archetype, what it does, and where it goes. */
+/** One row of the effective table: an archetype and where it goes. */
 export interface EffectiveRow {
   archetype: string;
-  /** Declared description, else the builtin one — the director's reference. */
-  description: string;
   model: string;
   model_id: string;
   /**
@@ -741,11 +738,10 @@ export function runDialClear(opts: DialClearOptions = {}): DialClearResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Every archetype the catalog and the dials know, with its description and
- * where it currently routes. This is the director's reference: the table says
- * what each archetype is FOR, not only where it goes, because a coordinator
- * choosing among them is answering the first question and only then the
- * second.
+ * Every archetype the catalog and the dials know, and where each currently
+ * routes. Routing only: what an archetype is FOR is `fadeno context`, the text
+ * a host session is given, and saying it in both places is one description
+ * with two owners.
  */
 export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
   const repoRoot = repoRootOf(opts);
@@ -780,7 +776,6 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
     const delivery = resolved.delivery;
     rows.push({
       archetype,
-      description: describeArchetype(archetype, profile.archetypes[archetype]?.description),
       model: delivery.model,
       model_id: delivery.modelId,
       pinned_effort: delivery.pinnedEffort,

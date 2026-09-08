@@ -60,7 +60,7 @@ function cliRun(root: string, paths: UserPathOptions, args: string[]): string {
   });
 }
 
-test('dial show: every archetype, what it is for, and where it goes', (t) => {
+test('dial show: every archetype, and where it goes', (t) => {
   const root = seedCatalog(t);
   const result = runDialShow({ repoRoot: root, userPathOptions: isolated(root) });
   assert.equal(result.host, 'standalone');
@@ -68,10 +68,9 @@ test('dial show: every archetype, what it is for, and where it goes', (t) => {
   assert.ok(worker);
   assert.equal(worker.source, 'base');
   assert.equal(worker.model, 'current-host');
-  // The description is part of the row, not decoration the renderer invents:
-  // this table is the reference a coordinator reads before delegating, and
-  // "which archetype" is the question it answers first.
-  assert.match(worker.description, /Implements a described change in its own worktree/);
+  // Routing only. What an archetype is FOR is `fadeno context`; a row that
+  // carried it too meant one description with two owners.
+  assert.ok(!('description' in worker));
   // From a bare shell the base dial names a session that is not there, so it
   // is off the host lane with nothing to invoke.
   assert.equal(worker.lane, 'command');
@@ -256,7 +255,9 @@ test('dial CLI: the table prints the lane, the description, and names a row with
   assert.match(table.split('\n')[0]!, /harness\s+lane\s+source/);
   assert.match(rowFor('worker'), /codex \(home\)\s+host\s+repo pin/);
   assert.match(rowFor('reviewer'), /grok \(home\)\s+command\s+repo pin/);
-  assert.match(table, /Implements a described change in its own worktree/);
+  // One line per archetype and nothing under it: a header and three rows.
+  const printed = table.split('\n').filter((line) => line.length > 0 && !line.startsWith('note:'));
+  assert.equal(printed.length, 4, table);
 
   // The same catalog from a bare shell: the undialed row has no lane at all,
   // and the table says `none` rather than naming a command lane that has
