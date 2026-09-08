@@ -47,6 +47,14 @@ import { formatAge } from './lib/contracts.ts';
 export const KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
 
 /** How long a dispatch has been open, for a line that says "ask again". */
+/** The last thing a process said before it stopped, for a one-line diagnosis. */
+function lastStderrLine(excerpt: string | null | undefined, max = 160): string | null {
+  if (excerpt == null) return null;
+  const line = excerpt.split('\n').map((l) => l.trim()).filter((l) => l !== '').at(-1);
+  if (line == null) return null;
+  return line.length <= max ? line : `${line.slice(0, max)}…`;
+}
+
 function ageOf(record: { opened?: { at: string } | null }): string {
   const at = record.opened?.at;
   if (at == null) return '?';
@@ -646,10 +654,17 @@ async function main(argv: string[]): Promise<number> {
       const ending = r.signal != null ? `killed by ${r.signal}` : `exit ${r.exitCode}`;
       const where = r.opened.workspace?.branch != null ? `branch ${r.opened.workspace.branch}` : 'shared tree';
       const empty = r.stdout.trim().length === 0;
+      // The reason a run failed is in its last words, and "stderr at <path>"
+      // is not the reason. Four workers died minutes apart on "Grok Build
+      // usage balance exhausted" and the host read `exit 1` five times before
+      // opening a file.
+      const bad = r.exitCode !== 0 || r.signal != null || empty;
+      const lastWords = bad ? lastStderrLine(r.stopped.stderr_excerpt) : null;
       console.error(
         `dispatch ${r.name} (${r.id}) stopped: ${ending}; ${where}` +
           (empty ? '; NO OUTPUT — the executor wrote nothing' : '') +
-          (r.stderrBytes > 0 ? `; stderr at ${r.stderrPath}` : '') +
+          (lastWords != null ? `; stderr ends: ${lastWords}` : '') +
+          (r.stderrBytes > 0 ? `; full stderr at ${r.stderrPath}` : '') +
           `. Close it: fadeno dispatch-close ${r.name} --merged|--kept|--discarded|--failed`,
       );
       if (r.exitCode === 0 && empty) return 1;
@@ -827,12 +842,26 @@ async function main(argv: string[]): Promise<number> {
       const stillWaiting = others.length === 0 ? '' : ` Still running: ${others.join(' ')} — \`fadeno dispatch-wait ${others.join(' ')}\`.`;
       if (values.json) console.log(JSON.stringify(outcome, null, 2));
       if (outcome.state === 'stopped') {
-        if (!values.json) {
-          if (outcome.text == null) console.error(`${name} stopped and recorded no report.${stillWaiting}`);
-          else {
-            if (refs.length > 1) console.error(`${name} stopped; its report follows.${stillWaiting}`);
-            process.stdout.write(outcome.text.endsWith('\n') ? outcome.text : `${outcome.text}\n`);
+        // Exit 0 means "here is the report". A dispatch that stopped and left
+        // nothing is a different ending needing a different action, and
+        // answering it with 0 and an empty stdout is how four disk-killed
+        // workers were relayed to their proxies as finished.
+        if (outcome.text == null) {
+          if (!values.json) {
+            const s = outcome.record.stopped;
+            const how = s?.exit == null ? '' : s.exit.signal != null ? ` (killed by ${s.exit.signal})` : ` (exit ${s.exit.code})`;
+            const why = lastStderrLine(s?.stderr_excerpt);
+            console.error(
+              `${name} stopped${how} and recorded NO REPORT.` +
+                (why != null ? ` Its stderr ends: ${why}` : '') +
+                ` Read \`fadeno dispatches ${name}\` for what its branch holds, then close it.${stillWaiting}`,
+            );
           }
+          return 5;
+        }
+        if (!values.json) {
+          if (refs.length > 1) console.error(`${name} stopped; its report follows.${stillWaiting}`);
+          process.stdout.write(outcome.text.endsWith('\n') ? outcome.text : `${outcome.text}\n`);
         }
         return 0;
       }
@@ -849,10 +878,24 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       if (!values.json) {
+        // Whether it FINISHED and whether anyone RECORDED it are two
+        // questions, and the answer to the first is on disk. A worker that ran
+        // an hour and committed five times was reported as lost because only
+        // the second was ever answered.
+        const { bytes, work } = outcome.captured;
+        const left = bytes === 0 ? 'It wrote nothing' : `It wrote ${bytes} byte(s) to ${outcome.stdoutPath}`;
+        const committed = work == null
+          ? ''
+          : work.commits === 0
+            ? ', and its branch holds no commits HEAD lacks'
+            : `, and its branch holds ${work.commits} commit(s) HEAD does not have (${work.files} file(s), +${work.insertions} -${work.deletions})`;
         console.error(
           `${name} is not running and never recorded a stop: its process group is gone, so no report is coming. ` +
-            `What the executor wrote is at ${outcome.stdoutPath} — record it with ` +
-            `\`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.${stillWaiting}`,
+            `${left}${committed}. ` +
+            (bytes > 0
+              ? `Record it with \`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.`
+              : `Record it with \`fadeno dispatch-stop ${name}\`, then close it.`) +
+            stillWaiting,
         );
       }
       return 4;

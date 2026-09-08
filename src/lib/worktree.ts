@@ -21,6 +21,8 @@ export const BRANCH_PREFIX = 'fadeno/';
 export const BRANCH_NAME_MAX = 60;
 export const GIT_TIMEOUT_MS = 20_000;
 export const DIRTY_PATH_LIMIT = 200;
+/** Ignored directories a stop row names before it stops listing them. */
+export const IGNORED_PATH_LIMIT = 20;
 
 export type GitResult = { ok: true; stdout: string } | { ok: false; error: string };
 
@@ -118,6 +120,32 @@ export function dirtyPaths(dir: string): { paths: string[]; truncated: boolean }
   return { paths: lines.slice(0, DIRTY_PATH_LIMIT).map((line) => line.slice(3)), truncated: lines.length > DIRTY_PATH_LIMIT };
 }
 
+/**
+ * Ignored paths in a tree, collapsed to directories.
+ *
+ * Not in `dirtyPaths`, and that is the bug this exists for: `git status
+ * --porcelain --untracked-files=all` does not list ignored paths at all, so a
+ * worker that wrote 5.4 MB of receipts into a gitignored `out/` stopped with a
+ * row saying **tree clean**, and `fadeno clean` was then free to delete them.
+ * It happened twice in one day in Basanos, and both times the host noticed
+ * only because the main checkout was missing the files.
+ *
+ * Deliberately the COLLAPSING form (`--untracked-files=normal`): a built
+ * worktree holds thousands of ignored files and about four ignored
+ * directories, and the four are the signal. A tree that cannot be read
+ * reports nothing rather than "none".
+ */
+export function ignoredPaths(dir: string): { paths: string[]; truncated: boolean } | 'unavailable' {
+  const status = git(dir, ['status', '--porcelain', '--ignored']);
+  if (!status.ok) return 'unavailable';
+  const lines = status.stdout
+    .split('\n')
+    .filter((line) => line.startsWith('!! '))
+    .map((line) => line.slice(3).trim())
+    .filter((line) => line !== '');
+  return { paths: lines.slice(0, IGNORED_PATH_LIMIT), truncated: lines.length > IGNORED_PATH_LIMIT };
+}
+
 /** The branch HEAD is on, or null when detached. */
 export function currentBranch(dir: string): string | null {
   const head = git(dir, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
@@ -203,6 +231,8 @@ export function isRegisteredWorktree(repoRoot: string, absolute: string): boolea
 
 export interface WorktreeReport extends RegisteredWorktree {
   dirty: { paths: string[]; truncated: boolean } | 'unavailable';
+  /** Ignored directories the tree holds — what `clean` would take with it. */
+  ignored: { paths: string[]; truncated: boolean } | 'unavailable';
   /** Commits on the branch that HEAD does not have — the work nobody merged. */
   unmerged: number | 'unavailable';
 }
@@ -216,12 +246,13 @@ export interface WorktreeReport extends RegisteredWorktree {
 export function reportWorktrees(repoRoot: string): WorktreeReport[] {
   return listRegisteredWorktrees(repoRoot).map((entry) => {
     const dirty = entry.exists ? dirtyPaths(entry.absolute) : 'unavailable';
+    const ignored = entry.exists ? ignoredPaths(entry.absolute) : 'unavailable';
     let unmerged: number | 'unavailable' = 'unavailable';
     if (entry.branch != null) {
       const count = git(repoRoot, ['rev-list', '--count', `HEAD..${entry.branch}`]);
       if (count.ok) unmerged = Number.parseInt(count.stdout.trim(), 10) || 0;
     }
-    return { ...entry, dirty, unmerged };
+    return { ...entry, dirty, ignored, unmerged };
   });
 }
 

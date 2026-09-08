@@ -53,6 +53,7 @@ import {
 import {
   appendRow,
   excerptFinalMessage,
+  excerptStderr,
   excerptTask,
   newDispatchId,
   nowIso,
@@ -67,7 +68,7 @@ import {
 } from './ledger.ts';
 import { readPreamble } from './preamble.ts';
 import { readUserDials, type UserPathOptions } from './user-paths.ts';
-import { cutWorktree, dirtyPaths, existingFadenoBranches, git, measureWork, sanitizeName, uniqueName } from './worktree.ts';
+import { cutWorktree, dirtyPaths, existingFadenoBranches, git, ignoredPaths, measureWork, sanitizeName, uniqueName } from './worktree.ts';
 
 export class SpawnError extends Error {}
 
@@ -394,7 +395,16 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
         now,
       })
     : null;
-  const contract = workerContract({ id, name, archetype: resolution.archetype, repoRoot, worktree: contractWorktree!, vocabulary, preamble: readPreamble(repoRoot) });
+  const contract = workerContract({
+    id,
+    name,
+    archetype: resolution.archetype,
+    repoRoot,
+    worktree: contractWorktree!,
+    vocabulary,
+    preamble: readPreamble(repoRoot),
+    archetypes: vocabulary != null ? undefined : knownArchetypeNames(repoRoot, input.userPathOptions),
+  });
   const composedPrompt = composeWorkerPrompt(prompt, contract);
   const promptRel = writePrompt(repoRoot, id, prompt);
   const env = input.env ?? process.env;
@@ -421,6 +431,17 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
       lane: input.lane,
     },
   };
+}
+
+/** Archetype names for a delegate's contract; the catalog's own, never a guess. */
+function knownArchetypeNames(repoRoot: string, userPathOptions?: UserPathOptions): string[] | undefined {
+  try {
+    return describeArchetypes({ repoRoot, userPathOptions }).archetypes.map((a) => a.name);
+  } catch {
+    // A catalog this cannot read is not a reason to fail a spawn; the contract
+    // falls back to the canonical five.
+    return undefined;
+  }
 }
 
 function headCommit(repoRoot: string): string | null {
@@ -466,15 +487,22 @@ export function recordStopped(
     branch?: string | null;
     exit?: { code: number | null; signal: string | null };
     modelObserved?: string | null;
+    /** Everything the executor wrote to stderr; the tail is recorded. */
+    stderr?: string | null;
     now?: Date;
   },
 ): StoppedRow {
-  const dirty = input.cwd != null && existsSync(input.cwd) ? dirtyPaths(input.cwd) : 'unavailable';
+  const readable = input.cwd != null && existsSync(input.cwd);
+  const dirty = readable ? dirtyPaths(input.cwd!) : 'unavailable';
+  // Ignored paths are invisible to `dirty` and are the ones `clean` removes,
+  // so a tree holding only ignored work must not stop as "clean".
+  const ignored = readable ? ignoredPaths(input.cwd!) : 'unavailable';
   // Measured here, beside `dirty`, and by the same reasoning: the stop row
   // records what an outside observer could see at the moment the agent
   // stopped. What the agent SAID about it arrives separately, in
   // `final_message`, and the two are never rendered as one thing.
   const work = measureWork({ repoRoot, branch: input.branch });
+  const stderrExcerpt = excerptStderr(input.stderr);
   const row: StoppedRow = {
     row: 'stopped',
     id,
@@ -482,8 +510,10 @@ export function recordStopped(
     final_message: excerptFinalMessage(input.finalMessage),
     dirty,
     cwd: input.cwd,
+    ...(ignored === 'unavailable' || ignored.paths.length > 0 ? { ignored } : {}),
     ...(input.exit != null ? { exit: input.exit } : {}),
     ...(input.modelObserved != null ? { model_observed: input.modelObserved } : {}),
+    ...(stderrExcerpt != null ? { stderr_excerpt: stderrExcerpt } : {}),
     ...(work != null ? { work } : {}),
   };
   appendRow(repoRoot, row);
@@ -616,18 +646,20 @@ export function runCommandDispatch(input: RunInput): Promise<RunResult> {
         closeSync(outFd);
         closeSync(errFd);
         const stdout = readFileSync(stdoutAbs, 'utf8');
-        const stderrBytes = (() => {
+        const stderrText = (() => {
           try {
-            return readFileSync(stderrAbs).length;
+            return readFileSync(stderrAbs, 'utf8');
           } catch {
-            return 0;
+            return '';
           }
         })();
+        const stderrBytes = Buffer.byteLength(stderrText);
         const stopped = recordStopped(repoRoot, prepared.id, {
           finalMessage: stdout.trim().length > 0 ? stdout : null,
           cwd: prepared.cwd,
           branch: prepared.workspace.branch,
           exit: { code, signal },
+          stderr: stderrText,
         });
         resolvePromise({
           id: prepared.id,

@@ -24,7 +24,7 @@ const WORKTREE = { kind: 'worktree', absolute: '/tmp/wt', branch: 'fadeno/x', ba
 function repo(t: TestContext, preamble?: string): string {
   const root = gitRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({ archetypes: { worker: {} }, dials: { worker: 'sol' } }));
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({ archetypes: { worker: {}, reviewer: {}, director: {} }, dials: { worker: 'sol', reviewer: 'sol', director: 'sol' } }));
   if (preamble != null) writeFileSync(join(root, PREAMBLE_FILE), preamble);
   git(root, ['add', '-A']);
   git(root, ['commit', '-q', '-m', 'catalog']);
@@ -109,4 +109,40 @@ test('a brief with one impossible clause is not a blocked brief: the contract sa
   assert.match(contract, /\*\*If part of it is impossible\.\*\*/);
   assert.match(contract, /Do every part that is not, and say in your report exactly which part you left out and why/);
   assert.match(contract, /Scaling the work down is your caller's decision/);
+});
+
+test('every delegate is told the archetype names, because one that decided to fan out guessed and was refused twice', (t) => {
+  const root = repo(t);
+  const outcome = prepareDispatch({ repoRoot: root, archetype: 'reviewer', prompt: 'audit it', lane: 'command' });
+  assert.ok(outcome.ok);
+  const contract = outcome.ok ? outcome.prepared.contract : '';
+  assert.match(contract, /\*\*If you delegate\.\*\*/);
+  assert.match(contract, /Name a Fadeno archetype as the agent type/);
+  assert.match(contract, /A generic subagent is refused/);
+  // The catalog's own names, not a hardcoded list that can drift from it.
+  assert.match(contract, /`reviewer`/);
+  assert.match(contract, /`worker`/);
+});
+
+test('a director gets the full vocabulary instead, not both', (t) => {
+  const root = repo(t);
+  const outcome = prepareDispatch({ repoRoot: root, archetype: 'director', prompt: 'run it', lane: 'command' });
+  assert.ok(outcome.ok);
+  const contract = outcome.ok ? outcome.prepared.contract : '';
+  assert.match(contract, /\*\*You may spawn\.\*\*/);
+  assert.doesNotMatch(contract, /\*\*If you delegate\.\*\*/, 'the short block would only repeat what the vocabulary says');
+});
+
+test('every delegate is told how to report friction, and that the file is not in its worktree', (t) => {
+  for (const archetype of ['worker', 'reviewer', 'director']) {
+    const outcome = prepareDispatch({ repoRoot: repo(t), archetype, prompt: 'x', lane: 'command' });
+    assert.ok(outcome.ok);
+    const contract = outcome.ok ? outcome.prepared.contract : '';
+    assert.match(contract, /\*\*If Fadeno itself gets in your way\.\*\*/, archetype);
+    assert.match(contract, /fadeno feedback "<what happened>" --dispatch /, archetype);
+    // A worker reported it "could not append to .fadeno/feedback.md because
+    // .fadeno/ is untracked in its worktree" — the command writes to the main
+    // checkout, and nothing had ever said so.
+    assert.match(contract, /in the main checkout — not your worktree/, archetype);
+  }
 });

@@ -9,7 +9,7 @@
  * reader for every surface.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { DEFAULT_UNCLOSED_LIMIT, formatAge, hostVocabulary, nagText, spawnRefusedByLimit, type ArchetypeLine } from '../lib/contracts.ts';
 import {
@@ -54,6 +54,7 @@ import type { UserPathOptions } from '../lib/user-paths.ts';
 import {
   WORKTREES_DIR,
   canonical,
+  measureWork,
   removeWorktree,
   reportWorktrees,
   sanitizeName,
@@ -701,6 +702,19 @@ export function renderDispatchDetail(d: DispatchDetail): string[] {
     // not, and the single most useful thing this view can do is make it
     // impossible to read one and think you read the other.
     lines.push('', '--- what Fadeno measured ---', ...renderWorkMeasured(s.work, d.record.opened?.workspace?.branch ?? null));
+    // Ignored paths belong here and not in `tree clean` above: git does not
+    // count them, `fadeno clean` deletes them, and a worker's receipts have
+    // twice been exactly this.
+    if (s.ignored === 'unavailable') lines.push('  ignored paths: unreadable');
+    else if (s.ignored != null && s.ignored.paths.length > 0) {
+      lines.push(`  ${s.ignored.paths.length}${s.ignored.truncated ? '+' : ''} ignored path(s) in the worktree — \`fadeno clean\` removes these: ${s.ignored.paths.join(', ')}`);
+    }
+    // The tail of stderr, when the ending needs explaining: a non-zero exit,
+    // a signal, or a dispatch that stopped and said nothing.
+    const needsStderr = s.exit != null && (s.exit.code !== 0 || s.exit.signal != null);
+    if (s.stderr_excerpt != null && (needsStderr || s.final_message == null)) {
+      lines.push('', '--- the executor\'s last words on stderr ---', s.stderr_excerpt.trimEnd());
+    }
     if (s.final_message != null) {
       lines.push('', '--- what the agent reported (a claim, not a finding) ---', s.final_message.trimEnd());
     } else lines.push('', '--- what the agent reported --- none recorded');
@@ -749,12 +763,26 @@ export interface DispatchOutput {
   source: 'transcript' | 'final_message' | null;
 }
 
-/** The dispatch's report: the full transcript when one exists, else what the stop row recorded. */
+/**
+ * The dispatch's report: the full transcript when one exists, else what the
+ * stop row recorded.
+ *
+ * An EMPTY transcript is not a report. The file exists from the moment the
+ * executor is launched, so `existsSync` alone said "here is the report" and
+ * handed back nothing — and because an empty string is not null, every caller
+ * downstream treated that as success. Four workers killed by a full disk were
+ * relayed to their proxies as finished with a blank report and exit 0. A file
+ * with nothing in it also lost to nothing: it out-ranked a `final_message` the
+ * stop row was holding.
+ */
 export function runDispatchOutput(opts: CommonOptions & { ref: string }): DispatchOutput {
   const repoRoot = rootOf(opts);
   const record = lookup(repoRoot, opts.ref);
   const transcript = join(repoRoot, outputPaths(record.id).stdout);
-  if (existsSync(transcript)) return { record, text: readFileSync(transcript, 'utf8'), source: 'transcript' };
+  if (existsSync(transcript)) {
+    const text = readFileSync(transcript, 'utf8');
+    if (text.trim() !== '') return { record, text, source: 'transcript' };
+  }
   if (record.stopped?.final_message != null) return { record, text: record.stopped.final_message, source: 'final_message' };
   return { record, text: null, source: null };
 }
@@ -770,9 +798,17 @@ export type WaitOutcome =
   | { state: 'running'; record: DispatchRecord; waitedMs: number; waiting: DispatchRecord[] }
   /**
    * One executor's process group is gone and no stop row was ever written, so
-   * no amount of waiting will produce one. Its output was still captured.
+   * no amount of waiting will produce one. `captured` is what it left behind,
+   * which is usually the whole answer to "did it actually finish".
    */
-  | { state: 'abandoned'; record: DispatchRecord; stdoutPath: string; waitedMs: number; waiting: DispatchRecord[] };
+  | {
+      state: 'abandoned';
+      record: DispatchRecord;
+      stdoutPath: string;
+      captured: { bytes: number; work: WorkMeasured | null };
+      waitedMs: number;
+      waiting: DispatchRecord[];
+    };
 
 export interface DispatchWaitOptions extends CommonOptions {
   /**
@@ -790,6 +826,31 @@ export interface DispatchWaitOptions extends CommonOptions {
    */
   waitSeconds?: number;
   pollMs?: number;
+  /**
+   * How long a dead process group is given to produce its stop row. Tests
+   * shorten it with `FADENO_ABANDON_SETTLE_MS`; a harness never sets it.
+   */
+  settleMs?: number;
+}
+
+/**
+ * How long "the group is gone" waits before it becomes "abandoned".
+ *
+ * Longer than `CANCEL_GRACE_MS`, and that is the whole point. `fadeno cancel`
+ * signals the group, waits up to five seconds for it to die, and only THEN
+ * writes the stop row nobody else will. A wait loop that saw the dead group
+ * and gave up after one immediate re-read landed inside that window: cancel
+ * printed "stop recorded" and the proxy, in the same minute, reported that no
+ * stop was ever recorded. The same window swallowed a worker that ran for an
+ * hour and finished normally — its launcher was mid-append.
+ *
+ * Waiting a few seconds costs nothing. Declaring work lost costs the work.
+ */
+export const ABANDON_SETTLE_MS = 8_000;
+
+function settleFromEnv(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = Number(env.FADENO_ABANDON_SETTLE_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : null;
 }
 
 /**
@@ -820,6 +881,15 @@ export async function runDispatchWait(opts: DispatchWaitOptions): Promise<WaitOu
     return found;
   };
   const report = (id: string): string | null => runDispatchOutput({ repoRoot, ref: id }).text;
+  /** Give a dead group's writer its window, then answer with whatever landed. */
+  const settle = async (id: string): Promise<DispatchRecord> => {
+    const until = Date.now() + Math.max(0, opts.settleMs ?? settleFromEnv(opts.env) ?? ABANDON_SETTLE_MS);
+    for (;;) {
+      const record = reread(id);
+      if (record.stopped != null || record.closed != null || Date.now() >= until) return record;
+      await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(1, until - Date.now()))));
+    }
+  };
 
   for (;;) {
     const records = ids.map(reread);
@@ -829,22 +899,30 @@ export async function runDispatchWait(opts: DispatchWaitOptions): Promise<WaitOu
       return { state: 'stopped', record: done, text: report(done.id), waitedMs: Date.now() - started, waiting: running };
     }
     // Nobody left to write the stop row. Checked BEFORE the clock, because a
-    // caller waiting on a dispatch that cannot finish should hear it at once.
+    // caller waiting on a dispatch that cannot finish should hear it at once —
+    // but only after giving whoever WOULD write it time to finish, because the
+    // writer is a separate process and a dead group is not a settled one.
     for (const record of records) {
       const pgid = record.opened?.process_group;
       if (pgid == null || groupAlive(pgid)) continue;
-      // One more read first: the launcher exits immediately after appending,
-      // so a dead group and a missing row can simply be that instant.
-      const settled = reread(record.id);
-      if (settled.stopped != null) {
-        const others = records.filter((r) => r.id !== settled.id && r.stopped == null && r.closed == null);
+      const settled = await settle(record.id);
+      const others = records.filter((r) => r.id !== settled.id && r.stopped == null && r.closed == null);
+      if (settled.stopped != null || settled.closed != null) {
         return { state: 'stopped', record: settled, text: report(settled.id), waitedMs: Date.now() - started, waiting: others };
       }
-      const others = records.filter((r) => r.id !== settled.id && r.stopped == null && r.closed == null);
+      const stdoutPath = join(repoRoot, outputPaths(settled.id).stdout);
       return {
         state: 'abandoned',
         record: settled,
-        stdoutPath: join(repoRoot, outputPaths(settled.id).stdout),
+        stdoutPath,
+        // What it left behind, because "no stop row" and "no work" are
+        // different things and the caller has to tell them apart: a worker
+        // that ran an hour, committed five times and died before its launcher
+        // could append is not a dispatch that produced nothing.
+        captured: {
+          bytes: existsSync(stdoutPath) ? statSync(stdoutPath).size : 0,
+          work: measureWork({ repoRoot, branch: settled.opened?.workspace?.branch ?? null }),
+        },
         waitedMs: Date.now() - started,
         waiting: others,
       };
@@ -883,11 +961,30 @@ export function renderWorktrees(entries: WorktreeEntry[]): string[] {
   for (const w of entries) {
     const dirty = w.dirty === 'unavailable' ? 'status unreadable' : w.dirty.paths.length === 0 ? 'clean' : `${w.dirty.paths.length}${w.dirty.truncated ? '+' : ''} uncommitted`;
     const unmerged = w.unmerged === 'unavailable' ? 'unmerged: ?' : `${w.unmerged} unmerged commit(s)`;
+    const ignored = w.ignored === 'unavailable' || w.ignored.paths.length === 0
+      ? ''
+      : `; ${w.ignored.paths.length}${w.ignored.truncated ? '+' : ''} ignored (${w.ignored.paths.slice(0, 4).join(', ')})`;
     const owner = w.dispatch == null ? 'no dispatch names it' : `${w.dispatch.name ?? w.dispatch.id.slice(0, 8)} (${w.dispatch.state})`;
-    lines.push(`${w.path}  ${w.branch ?? '(detached)'}  ${dirty}; ${unmerged}  — ${owner}${w.exists ? '' : '  [directory missing]'}`);
+    lines.push(`${w.path}  ${w.branch ?? '(detached)'}  ${dirty}; ${unmerged}${ignored}  — ${owner}${w.exists ? '' : '  [directory missing]'}`);
   }
-  const holding = entries.filter((w) => (w.dirty !== 'unavailable' && w.dirty.paths.length > 0) || (typeof w.unmerged === 'number' && w.unmerged > 0) || w.dirty === 'unavailable' || w.unmerged === 'unavailable');
-  lines.push('', holding.length === 0 ? 'Nothing here holds work that is not on HEAD.' : `${holding.length} worktree(s) hold work that is not on HEAD, or could not be read.`);
+  // Ignored paths count as holding. The summary line saying "nothing here
+  // holds work that is not on HEAD" while the row above it lists a gitignored
+  // `out/` full of receipts is the same blind spot in a shorter sentence.
+  const holding = entries.filter(
+    (w) =>
+      (w.dirty !== 'unavailable' && w.dirty.paths.length > 0) ||
+      (typeof w.unmerged === 'number' && w.unmerged > 0) ||
+      (w.ignored !== 'unavailable' && w.ignored.paths.length > 0) ||
+      w.dirty === 'unavailable' ||
+      w.ignored === 'unavailable' ||
+      w.unmerged === 'unavailable',
+  );
+  lines.push(
+    '',
+    holding.length === 0
+      ? 'Nothing here holds work: no uncommitted paths, no unmerged commits, no ignored files.'
+      : `${holding.length} worktree(s) hold work that is not on HEAD, hold ignored files, or could not be read.`,
+  );
   return lines;
 }
 
@@ -910,8 +1007,13 @@ export function runContext(opts: CommonOptions & { now?: Date } = {}): { text: s
 
 export interface CleanResult {
   dryRun: boolean;
-  /** Worktrees removed, or that would be. */
-  worktrees: string[];
+  /**
+   * Worktrees removed, or that would be — each with the ignored paths that go
+   * with it. A worker wrote 5.4 MB of receipts into a gitignored `out/` and
+   * the preview said only "would remove worktree …", which is true and tells
+   * the reader nothing about what they are about to lose.
+   */
+  worktrees: Array<{ path: string; ignored: string[]; truncated: boolean }>;
   /** Worktrees left alone, and why. */
   kept: Array<{ path: string; reason: string }>;
   outputs: string | null;
@@ -948,7 +1050,11 @@ export function runClean(opts: CommonOptions & { force?: boolean } = {}): CleanR
         continue;
       }
     }
-    result.worktrees.push(wt.path);
+    result.worktrees.push({
+      path: wt.path,
+      ignored: wt.ignored === 'unavailable' ? [] : wt.ignored.paths,
+      truncated: wt.ignored !== 'unavailable' && wt.ignored.truncated,
+    });
   }
   const outputs = join(repoRoot, OUTPUTS_DIR);
   if (existsSync(outputs)) {
@@ -966,7 +1072,12 @@ export function runClean(opts: CommonOptions & { force?: boolean } = {}): CleanR
 export function renderClean(result: CleanResult): string[] {
   const verb = result.dryRun ? 'would remove' : 'removed';
   const lines: string[] = [];
-  for (const path of result.worktrees) lines.push(`${verb} worktree ${path} (branch kept)`);
+  for (const w of result.worktrees) {
+    const carrying = w.ignored.length === 0
+      ? ''
+      : ` — and with it ${w.ignored.length}${w.truncated ? '+' : ''} ignored path(s): ${w.ignored.join(', ')}`;
+    lines.push(`${verb} worktree ${w.path} (branch kept)${carrying}`);
+  }
   if (result.outputs != null) lines.push(`${verb} ${result.outputs}/ (command-lane transcripts)`);
   if (result.relay != null) lines.push(`${verb} ${result.relay}/ (staged relay prompts)`);
   for (const k of result.kept) lines.push(`kept ${k.path}: ${k.reason}`);

@@ -32,6 +32,15 @@ export const TASK_EXCERPT_CHARS = 300;
 export const FINAL_MESSAGE_CHARS = 2000;
 /** Longest dirty-path listing a stopped row carries. */
 export const DIRTY_PATH_LIMIT = 200;
+/**
+ * Longest stderr excerpt a stopped row carries, taken from the END.
+ *
+ * The tail, because the reason a process died is its last words. Four workers
+ * died on "Grok Build usage balance exhausted" and the ledger recorded only
+ * `exit 1`; the sentence that would have told the host to stop spawning onto
+ * that provider sat in a file nobody had a reason to open.
+ */
+export const STDERR_EXCERPT_CHARS = 600;
 
 export type Lane = 'host' | 'command';
 export type CloseVerb = 'merged' | 'kept' | 'discarded' | 'failed';
@@ -99,6 +108,18 @@ export interface StoppedRow {
    * not apply is visible next to the model the opened row asked for.
    */
   model_observed?: string | null;
+  /**
+   * Ignored paths in the tree when the agent stopped, collapsed to
+   * directories. Separate from `dirty`, which never sees them: a worktree
+   * whose receipts went to a gitignored `out/` reported itself clean, and
+   * `fadeno clean` was then free to take them.
+   */
+  ignored?: DirtyPaths;
+  /**
+   * The tail of what the executor wrote to stderr, when it wrote anything.
+   * Command lane only — a host-lane agent has no stderr of its own.
+   */
+  stderr_excerpt?: string | null;
   /**
    * What the branch held, measured from git rather than reported by the agent
    * — see `WorkMeasured`. Absent for a shared-tree dispatch, which has no
@@ -288,6 +309,14 @@ export function excerptTask(prompt: string): { task: string; truncated: boolean 
 export function excerptFinalMessage(message: string | null | undefined): string | null {
   if (typeof message !== 'string') return null;
   return message.length <= FINAL_MESSAGE_CHARS ? message : `${message.slice(0, FINAL_MESSAGE_CHARS)}…`;
+}
+
+/** The LAST characters of stderr: a process explains itself on the way out. */
+export function excerptStderr(text: string | null | undefined): string | null {
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trimEnd();
+  if (trimmed === '') return null;
+  return trimmed.length <= STDERR_EXCERPT_CHARS ? trimmed : `…${trimmed.slice(-STDERR_EXCERPT_CHARS)}`;
 }
 
 /** Full prompt text lives outside `local/`, so `clean` can never orphan the rows that point at it. */

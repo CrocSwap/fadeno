@@ -61,6 +61,7 @@ const TOP_LEVEL: Record<string, PageSeed> = {
   models: MODELS_PAGE,
   clean: page('Remove machine-local scratch: worktrees of closed dispatches and command-lane transcripts.', 'fadeno clean [--force]', [
     'Previews by default. A worktree holding uncommitted work, or belonging to a dispatch that is not closed, is kept and the reason printed. Prompts and the ledger are never touched; branches are left behind.',
+    'The preview names the ignored paths that would go with each worktree, because those are invisible to git and are where a worker\'s receipts land when a prompt did not give it an absolute path.',
   ]),
   dispatch: page('Run one dispatch on the command lane: resolve the archetype, cut a worktree, run the executor, record it.', ['fadeno dispatch --archetype <name> [options]', 'fadeno dispatch --model <ref> [options]'], [
     'Reads the prompt from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted, and an explicit model is recorded as a one-dispatch override.',
@@ -81,7 +82,8 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     'For a dispatch that outruns the caller\'s shell timeout. Wait in bites the harness allows: this returns `still running` (exit 2) after its bound rather than being killed mid-wait, and the caller runs it again.',
     'Several names answer on the FIRST to stop, and the message names the ones still running so the next call can ask for those. A fan-out needs one call, not one poll per dispatch.',
     'The bound is on WAITING, never on the work: nothing here stops an executor or decides it is too slow.',
-    'Exit 0 when one stopped (the report is on stdout), 2 while they all run, 4 when a process group is gone and no stop was ever recorded — which means no report is coming and says how to record what the executor did write.',
+    'Exit 0 when one stopped and its report is on stdout; 2 while they all run; 4 when a process group is gone and no stop was ever recorded, which names what the executor left behind and how to record it; 5 when it stopped but recorded no report at all, which needs a look at its exit code and stderr rather than another wait.',
+    'A dead process group is given a few seconds to produce its stop row before it is called abandoned: the row is written by a separate process — `fadeno cancel` takes up to five seconds to get there — and a dead group is not a settled one.',
   ]),
   'dispatch-close': page('Record the terminal decision for a dispatch.', 'fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>] [--force]', [
     'Exactly one verb. The same verb twice is a replay; a different verb for an already-closed dispatch is refused. Closing removes nothing: the branch stays, and the worktree stays until `fadeno clean`.',
@@ -96,7 +98,8 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     '`--output` prints the command-lane transcript, or the final message the stop row recorded.',
   ]),
   worktrees: page('Report every Fadeno worktree holding work that is not on HEAD.', 'fadeno worktrees [--json]', [
-    'The cross-session safety net: uncommitted paths and unmerged commits per worktree, joined to the dispatch that owns it. A tree that cannot be read is reported as such, never as clean.',
+    'The cross-session safety net: uncommitted paths, unmerged commits and ignored paths per worktree, joined to the dispatch that owns it. A tree that cannot be read is reported as such, never as clean.',
+    'Ignored paths are listed because git does not count them and `fadeno clean` does remove them: a worker whose receipts went to a gitignored `out/` leaves a worktree that reports itself clean.',
   ]),
   context: page('Print what a host session is told: the archetypes, the rules, and every unclosed dispatch.', 'fadeno context [--json]', [
     'One source for the host-mode hook, a spawned director\'s prompt, and a human who wants to see it.',

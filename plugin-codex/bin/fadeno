@@ -7386,6 +7386,7 @@ var BRANCH_PREFIX = "fadeno/";
 var BRANCH_NAME_MAX = 60;
 var GIT_TIMEOUT_MS = 2e4;
 var DIRTY_PATH_LIMIT = 200;
+var IGNORED_PATH_LIMIT = 20;
 function canonical(path) {
   try {
     return (0, import_node_fs.realpathSync)(path);
@@ -7439,6 +7440,12 @@ function dirtyPaths(dir) {
   if (!status.ok) return "unavailable";
   const lines = status.stdout.split("\n").filter((line) => line.trim() !== "");
   return { paths: lines.slice(0, DIRTY_PATH_LIMIT).map((line) => line.slice(3)), truncated: lines.length > DIRTY_PATH_LIMIT };
+}
+function ignoredPaths(dir) {
+  const status = git(dir, ["status", "--porcelain", "--ignored"]);
+  if (!status.ok) return "unavailable";
+  const lines = status.stdout.split("\n").filter((line) => line.startsWith("!! ")).map((line) => line.slice(3).trim()).filter((line) => line !== "");
+  return { paths: lines.slice(0, IGNORED_PATH_LIMIT), truncated: lines.length > IGNORED_PATH_LIMIT };
 }
 function currentBranch(dir) {
   const head = git(dir, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
@@ -7507,12 +7514,13 @@ function isRegisteredWorktree(repoRoot, absolute) {
 function reportWorktrees(repoRoot) {
   return listRegisteredWorktrees(repoRoot).map((entry) => {
     const dirty = entry.exists ? dirtyPaths(entry.absolute) : "unavailable";
+    const ignored = entry.exists ? ignoredPaths(entry.absolute) : "unavailable";
     let unmerged = "unavailable";
     if (entry.branch != null) {
       const count = git(repoRoot, ["rev-list", "--count", `HEAD..${entry.branch}`]);
       if (count.ok) unmerged = Number.parseInt(count.stdout.trim(), 10) || 0;
     }
-    return { ...entry, dirty, unmerged };
+    return { ...entry, dirty, ignored, unmerged };
   });
 }
 function removeWorktree(opts) {
@@ -7604,6 +7612,7 @@ var LEDGER_FILE = (0, import_node_path2.join)(".fadeno", "dispatches.jsonl");
 var PROMPTS_DIR = (0, import_node_path2.join)(".fadeno", "prompts");
 var TASK_EXCERPT_CHARS = 300;
 var FINAL_MESSAGE_CHARS = 2e3;
+var STDERR_EXCERPT_CHARS = 600;
 var CLOSE_VERBS = ["merged", "kept", "discarded", "failed"];
 function newDispatchId() {
   return (0, import_node_crypto.randomUUID)();
@@ -7709,6 +7718,12 @@ function excerptFinalMessage(message) {
   if (typeof message !== "string") return null;
   return message.length <= FINAL_MESSAGE_CHARS ? message : `${message.slice(0, FINAL_MESSAGE_CHARS)}\u2026`;
 }
+function excerptStderr(text) {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trimEnd();
+  if (trimmed === "") return null;
+  return trimmed.length <= STDERR_EXCERPT_CHARS ? trimmed : `\u2026${trimmed.slice(-STDERR_EXCERPT_CHARS)}`;
+}
 function promptPath(id) {
   return (0, import_node_path2.join)(PROMPTS_DIR, `${id}.md`);
 }
@@ -7804,7 +7819,15 @@ function workerContract(input) {
   if (input.vocabulary != null && input.vocabulary.trim() !== "") {
     lines.push("**You may spawn.** The dispatches you open are recorded under yours; close every one before you finish, and report each by name. What follows is what a host session is told.", "");
     lines.push(input.vocabulary.trim(), "");
+  } else {
+    const names = (input.archetypes ?? Object.keys(BUILTIN_ARCHETYPE_DESCRIPTIONS).sort()).map((n) => `\`${n}\``).join(", ");
+    lines.push("**If you delegate.**");
+    lines.push(`- Name a Fadeno archetype as the agent type \u2014 ${names}. A generic subagent is refused; the name is the whole interface, and Fadeno routes it. \`fadeno context\` prints the rest.`);
+    lines.push("- Every dispatch you open is yours to close before you finish (`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed`), and to report by name.", "");
   }
+  lines.push("**If Fadeno itself gets in your way.**");
+  lines.push(`- A message that misled you, a refusal you could not act on, a step you had to guess at: \`fadeno feedback "<what happened>" --dispatch ${input.name}\`. It appends to \`.fadeno/feedback.md\` in the main checkout \u2014 not your worktree \u2014 with the harness and version attached, and that file is what whoever maintains Fadeno reads.`);
+  lines.push("- Report it to your caller as well. The file is for the maintainer; your caller needs to know what it cost you.", "");
   lines.push(CONTRACT_FOOTER);
   return lines.join("\n");
 }
@@ -9681,7 +9704,16 @@ function prepareDispatch(input) {
     unclosedLimit: resolution.unclosedLimit,
     now
   }) : null;
-  const contract = workerContract({ id, name, archetype: resolution.archetype, repoRoot, worktree: contractWorktree, vocabulary, preamble: readPreamble(repoRoot) });
+  const contract = workerContract({
+    id,
+    name,
+    archetype: resolution.archetype,
+    repoRoot,
+    worktree: contractWorktree,
+    vocabulary,
+    preamble: readPreamble(repoRoot),
+    archetypes: vocabulary != null ? void 0 : knownArchetypeNames(repoRoot, input.userPathOptions)
+  });
   const composedPrompt = composeWorkerPrompt(prompt, contract);
   const promptRel = writePrompt(repoRoot, id, prompt);
   const env = input.env ?? process.env;
@@ -9707,6 +9739,13 @@ function prepareDispatch(input) {
       lane: input.lane
     }
   };
+}
+function knownArchetypeNames(repoRoot, userPathOptions) {
+  try {
+    return describeArchetypes({ repoRoot, userPathOptions }).archetypes.map((a) => a.name);
+  } catch {
+    return void 0;
+  }
 }
 function headCommit(repoRoot) {
   const head = git(repoRoot, ["rev-parse", "HEAD"]);
@@ -9738,8 +9777,11 @@ function recordOpened(repoRoot, prepared, extra = {}) {
   return row;
 }
 function recordStopped(repoRoot, id, input) {
-  const dirty = input.cwd != null && (0, import_node_fs8.existsSync)(input.cwd) ? dirtyPaths(input.cwd) : "unavailable";
+  const readable = input.cwd != null && (0, import_node_fs8.existsSync)(input.cwd);
+  const dirty = readable ? dirtyPaths(input.cwd) : "unavailable";
+  const ignored = readable ? ignoredPaths(input.cwd) : "unavailable";
   const work = measureWork({ repoRoot, branch: input.branch });
+  const stderrExcerpt = excerptStderr(input.stderr);
   const row = {
     row: "stopped",
     id,
@@ -9747,8 +9789,10 @@ function recordStopped(repoRoot, id, input) {
     final_message: excerptFinalMessage(input.finalMessage),
     dirty,
     cwd: input.cwd,
+    ...ignored === "unavailable" || ignored.paths.length > 0 ? { ignored } : {},
     ...input.exit != null ? { exit: input.exit } : {},
     ...input.modelObserved != null ? { model_observed: input.modelObserved } : {},
+    ...stderrExcerpt != null ? { stderr_excerpt: stderrExcerpt } : {},
     ...work != null ? { work } : {}
   };
   appendRow(repoRoot, row);
@@ -9835,18 +9879,20 @@ function runCommandDispatch(input) {
         (0, import_node_fs8.closeSync)(outFd);
         (0, import_node_fs8.closeSync)(errFd);
         const stdout = (0, import_node_fs8.readFileSync)(stdoutAbs, "utf8");
-        const stderrBytes = (() => {
+        const stderrText = (() => {
           try {
-            return (0, import_node_fs8.readFileSync)(stderrAbs).length;
+            return (0, import_node_fs8.readFileSync)(stderrAbs, "utf8");
           } catch {
-            return 0;
+            return "";
           }
         })();
+        const stderrBytes = Buffer.byteLength(stderrText);
         const stopped = recordStopped(repoRoot, prepared.id, {
           finalMessage: stdout.trim().length > 0 ? stdout : null,
           cwd: prepared.cwd,
           branch: prepared.workspace.branch,
-          exit: { code, signal }
+          exit: { code, signal },
+          stderr: stderrText
         });
         resolvePromise({
           id: prepared.id,
@@ -10362,6 +10408,14 @@ function renderDispatchDetail(d) {
       lines.push(`  ran on:    ${s.model_observed}${modelAgrees(asked, s.model_observed, d.record.opened?.model_id) ? "" : `  (the dial asked for ${asked})`}`);
     }
     lines.push("", "--- what Fadeno measured ---", ...renderWorkMeasured(s.work, d.record.opened?.workspace?.branch ?? null));
+    if (s.ignored === "unavailable") lines.push("  ignored paths: unreadable");
+    else if (s.ignored != null && s.ignored.paths.length > 0) {
+      lines.push(`  ${s.ignored.paths.length}${s.ignored.truncated ? "+" : ""} ignored path(s) in the worktree \u2014 \`fadeno clean\` removes these: ${s.ignored.paths.join(", ")}`);
+    }
+    const needsStderr = s.exit != null && (s.exit.code !== 0 || s.exit.signal != null);
+    if (s.stderr_excerpt != null && (needsStderr || s.final_message == null)) {
+      lines.push("", "--- the executor's last words on stderr ---", s.stderr_excerpt.trimEnd());
+    }
     if (s.final_message != null) {
       lines.push("", "--- what the agent reported (a claim, not a finding) ---", s.final_message.trimEnd());
     } else lines.push("", "--- what the agent reported --- none recorded");
@@ -10390,9 +10444,17 @@ function runDispatchOutput(opts) {
   const repoRoot = rootOf(opts);
   const record = lookup(repoRoot, opts.ref);
   const transcript = (0, import_node_path9.join)(repoRoot, outputPaths(record.id).stdout);
-  if ((0, import_node_fs10.existsSync)(transcript)) return { record, text: (0, import_node_fs10.readFileSync)(transcript, "utf8"), source: "transcript" };
+  if ((0, import_node_fs10.existsSync)(transcript)) {
+    const text = (0, import_node_fs10.readFileSync)(transcript, "utf8");
+    if (text.trim() !== "") return { record, text, source: "transcript" };
+  }
   if (record.stopped?.final_message != null) return { record, text: record.stopped.final_message, source: "final_message" };
   return { record, text: null, source: null };
+}
+var ABANDON_SETTLE_MS = 8e3;
+function settleFromEnv(env = process.env) {
+  const raw = Number(env.FADENO_ABANDON_SETTLE_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : null;
 }
 async function runDispatchWait(opts) {
   const repoRoot = rootOf(opts);
@@ -10408,6 +10470,14 @@ async function runDispatchWait(opts) {
     return found;
   };
   const report = (id) => runDispatchOutput({ repoRoot, ref: id }).text;
+  const settle = async (id) => {
+    const until = Date.now() + Math.max(0, opts.settleMs ?? settleFromEnv(opts.env) ?? ABANDON_SETTLE_MS);
+    for (; ; ) {
+      const record = reread(id);
+      if (record.stopped != null || record.closed != null || Date.now() >= until) return record;
+      await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(1, until - Date.now()))));
+    }
+  };
   for (; ; ) {
     const records = ids.map(reread);
     const running = records.filter((r) => r.stopped == null && r.closed == null);
@@ -10418,16 +10488,24 @@ async function runDispatchWait(opts) {
     for (const record of records) {
       const pgid = record.opened?.process_group;
       if (pgid == null || groupAlive(pgid)) continue;
-      const settled = reread(record.id);
-      if (settled.stopped != null) {
-        const others2 = records.filter((r) => r.id !== settled.id && r.stopped == null && r.closed == null);
-        return { state: "stopped", record: settled, text: report(settled.id), waitedMs: Date.now() - started, waiting: others2 };
-      }
+      const settled = await settle(record.id);
       const others = records.filter((r) => r.id !== settled.id && r.stopped == null && r.closed == null);
+      if (settled.stopped != null || settled.closed != null) {
+        return { state: "stopped", record: settled, text: report(settled.id), waitedMs: Date.now() - started, waiting: others };
+      }
+      const stdoutPath = (0, import_node_path9.join)(repoRoot, outputPaths(settled.id).stdout);
       return {
         state: "abandoned",
         record: settled,
-        stdoutPath: (0, import_node_path9.join)(repoRoot, outputPaths(settled.id).stdout),
+        stdoutPath,
+        // What it left behind, because "no stop row" and "no work" are
+        // different things and the caller has to tell them apart: a worker
+        // that ran an hour, committed five times and died before its launcher
+        // could append is not a dispatch that produced nothing.
+        captured: {
+          bytes: (0, import_node_fs10.existsSync)(stdoutPath) ? (0, import_node_fs10.statSync)(stdoutPath).size : 0,
+          work: measureWork({ repoRoot, branch: settled.opened?.workspace?.branch ?? null })
+        },
         waitedMs: Date.now() - started,
         waiting: others
       };
@@ -10456,11 +10534,17 @@ function renderWorktrees(entries) {
   for (const w of entries) {
     const dirty = w.dirty === "unavailable" ? "status unreadable" : w.dirty.paths.length === 0 ? "clean" : `${w.dirty.paths.length}${w.dirty.truncated ? "+" : ""} uncommitted`;
     const unmerged = w.unmerged === "unavailable" ? "unmerged: ?" : `${w.unmerged} unmerged commit(s)`;
+    const ignored = w.ignored === "unavailable" || w.ignored.paths.length === 0 ? "" : `; ${w.ignored.paths.length}${w.ignored.truncated ? "+" : ""} ignored (${w.ignored.paths.slice(0, 4).join(", ")})`;
     const owner = w.dispatch == null ? "no dispatch names it" : `${w.dispatch.name ?? w.dispatch.id.slice(0, 8)} (${w.dispatch.state})`;
-    lines.push(`${w.path}  ${w.branch ?? "(detached)"}  ${dirty}; ${unmerged}  \u2014 ${owner}${w.exists ? "" : "  [directory missing]"}`);
+    lines.push(`${w.path}  ${w.branch ?? "(detached)"}  ${dirty}; ${unmerged}${ignored}  \u2014 ${owner}${w.exists ? "" : "  [directory missing]"}`);
   }
-  const holding = entries.filter((w) => w.dirty !== "unavailable" && w.dirty.paths.length > 0 || typeof w.unmerged === "number" && w.unmerged > 0 || w.dirty === "unavailable" || w.unmerged === "unavailable");
-  lines.push("", holding.length === 0 ? "Nothing here holds work that is not on HEAD." : `${holding.length} worktree(s) hold work that is not on HEAD, or could not be read.`);
+  const holding = entries.filter(
+    (w) => w.dirty !== "unavailable" && w.dirty.paths.length > 0 || typeof w.unmerged === "number" && w.unmerged > 0 || w.ignored !== "unavailable" && w.ignored.paths.length > 0 || w.dirty === "unavailable" || w.ignored === "unavailable" || w.unmerged === "unavailable"
+  );
+  lines.push(
+    "",
+    holding.length === 0 ? "Nothing here holds work: no uncommitted paths, no unmerged commits, no ignored files." : `${holding.length} worktree(s) hold work that is not on HEAD, hold ignored files, or could not be read.`
+  );
   return lines;
 }
 function runContext(opts = {}) {
@@ -10495,7 +10579,11 @@ function runClean(opts = {}) {
         continue;
       }
     }
-    result.worktrees.push(wt.path);
+    result.worktrees.push({
+      path: wt.path,
+      ignored: wt.ignored === "unavailable" ? [] : wt.ignored.paths,
+      truncated: wt.ignored !== "unavailable" && wt.ignored.truncated
+    });
   }
   const outputs = (0, import_node_path9.join)(repoRoot, OUTPUTS_DIR);
   if ((0, import_node_fs10.existsSync)(outputs)) {
@@ -10512,7 +10600,10 @@ function runClean(opts = {}) {
 function renderClean(result) {
   const verb = result.dryRun ? "would remove" : "removed";
   const lines = [];
-  for (const path of result.worktrees) lines.push(`${verb} worktree ${path} (branch kept)`);
+  for (const w of result.worktrees) {
+    const carrying = w.ignored.length === 0 ? "" : ` \u2014 and with it ${w.ignored.length}${w.truncated ? "+" : ""} ignored path(s): ${w.ignored.join(", ")}`;
+    lines.push(`${verb} worktree ${w.path} (branch kept)${carrying}`);
+  }
   if (result.outputs != null) lines.push(`${verb} ${result.outputs}/ (command-lane transcripts)`);
   if (result.relay != null) lines.push(`${verb} ${result.relay}/ (staged relay prompts)`);
   for (const k of result.kept) lines.push(`kept ${k.path}: ${k.reason}`);
@@ -12668,7 +12759,8 @@ var TOP_LEVEL = {
   ]),
   models: MODELS_PAGE,
   clean: page("Remove machine-local scratch: worktrees of closed dispatches and command-lane transcripts.", "fadeno clean [--force]", [
-    "Previews by default. A worktree holding uncommitted work, or belonging to a dispatch that is not closed, is kept and the reason printed. Prompts and the ledger are never touched; branches are left behind."
+    "Previews by default. A worktree holding uncommitted work, or belonging to a dispatch that is not closed, is kept and the reason printed. Prompts and the ledger are never touched; branches are left behind.",
+    "The preview names the ignored paths that would go with each worktree, because those are invisible to git and are where a worker's receipts land when a prompt did not give it an absolute path."
   ]),
   dispatch: page("Run one dispatch on the command lane: resolve the archetype, cut a worktree, run the executor, record it.", ["fadeno dispatch --archetype <name> [options]", "fadeno dispatch --model <ref> [options]"], [
     "Reads the prompt from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted, and an explicit model is recorded as a one-dispatch override.",
@@ -12689,7 +12781,8 @@ var TOP_LEVEL = {
     "For a dispatch that outruns the caller's shell timeout. Wait in bites the harness allows: this returns `still running` (exit 2) after its bound rather than being killed mid-wait, and the caller runs it again.",
     "Several names answer on the FIRST to stop, and the message names the ones still running so the next call can ask for those. A fan-out needs one call, not one poll per dispatch.",
     "The bound is on WAITING, never on the work: nothing here stops an executor or decides it is too slow.",
-    "Exit 0 when one stopped (the report is on stdout), 2 while they all run, 4 when a process group is gone and no stop was ever recorded \u2014 which means no report is coming and says how to record what the executor did write."
+    "Exit 0 when one stopped and its report is on stdout; 2 while they all run; 4 when a process group is gone and no stop was ever recorded, which names what the executor left behind and how to record it; 5 when it stopped but recorded no report at all, which needs a look at its exit code and stderr rather than another wait.",
+    "A dead process group is given a few seconds to produce its stop row before it is called abandoned: the row is written by a separate process \u2014 `fadeno cancel` takes up to five seconds to get there \u2014 and a dead group is not a settled one."
   ]),
   "dispatch-close": page("Record the terminal decision for a dispatch.", "fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>] [--force]", [
     "Exactly one verb. The same verb twice is a replay; a different verb for an already-closed dispatch is refused. Closing removes nothing: the branch stays, and the worktree stays until `fadeno clean`.",
@@ -12704,7 +12797,8 @@ var TOP_LEVEL = {
     "`--output` prints the command-lane transcript, or the final message the stop row recorded."
   ]),
   worktrees: page("Report every Fadeno worktree holding work that is not on HEAD.", "fadeno worktrees [--json]", [
-    "The cross-session safety net: uncommitted paths and unmerged commits per worktree, joined to the dispatch that owns it. A tree that cannot be read is reported as such, never as clean."
+    "The cross-session safety net: uncommitted paths, unmerged commits and ignored paths per worktree, joined to the dispatch that owns it. A tree that cannot be read is reported as such, never as clean.",
+    "Ignored paths are listed because git does not count them and `fadeno clean` does remove them: a worker whose receipts went to a gitignored `out/` leaves a worktree that reports itself clean."
   ]),
   context: page("Print what a host session is told: the archetypes, the rules, and every unclosed dispatch.", "fadeno context [--json]", [
     "One source for the host-mode hook, a spawned director's prompt, and a human who wants to see it.",
@@ -12992,6 +13086,12 @@ function renderFocusedHelp(path) {
 // src/cli.ts
 var import_meta2 = {};
 var KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
+function lastStderrLine(excerpt, max = 160) {
+  if (excerpt == null) return null;
+  const line = excerpt.split("\n").map((l) => l.trim()).filter((l) => l !== "").at(-1);
+  if (line == null) return null;
+  return line.length <= max ? line : `${line.slice(0, max)}\u2026`;
+}
 function ageOf(record) {
   const at = record.opened?.at;
   if (at == null) return "?";
@@ -13478,8 +13578,10 @@ async function main(argv) {
       const ending = r.signal != null ? `killed by ${r.signal}` : `exit ${r.exitCode}`;
       const where = r.opened.workspace?.branch != null ? `branch ${r.opened.workspace.branch}` : "shared tree";
       const empty = r.stdout.trim().length === 0;
+      const bad = r.exitCode !== 0 || r.signal != null || empty;
+      const lastWords = bad ? lastStderrLine(r.stopped.stderr_excerpt) : null;
       console.error(
-        `dispatch ${r.name} (${r.id}) stopped: ${ending}; ${where}` + (empty ? "; NO OUTPUT \u2014 the executor wrote nothing" : "") + (r.stderrBytes > 0 ? `; stderr at ${r.stderrPath}` : "") + `. Close it: fadeno dispatch-close ${r.name} --merged|--kept|--discarded|--failed`
+        `dispatch ${r.name} (${r.id}) stopped: ${ending}; ${where}` + (empty ? "; NO OUTPUT \u2014 the executor wrote nothing" : "") + (lastWords != null ? `; stderr ends: ${lastWords}` : "") + (r.stderrBytes > 0 ? `; full stderr at ${r.stderrPath}` : "") + `. Close it: fadeno dispatch-close ${r.name} --merged|--kept|--discarded|--failed`
       );
       if (r.exitCode === 0 && empty) return 1;
       return r.exitCode ?? 1;
@@ -13638,13 +13740,21 @@ async function main(argv) {
       const stillWaiting = others.length === 0 ? "" : ` Still running: ${others.join(" ")} \u2014 \`fadeno dispatch-wait ${others.join(" ")}\`.`;
       if (values.json) console.log(JSON.stringify(outcome, null, 2));
       if (outcome.state === "stopped") {
-        if (!values.json) {
-          if (outcome.text == null) console.error(`${name} stopped and recorded no report.${stillWaiting}`);
-          else {
-            if (refs.length > 1) console.error(`${name} stopped; its report follows.${stillWaiting}`);
-            process.stdout.write(outcome.text.endsWith("\n") ? outcome.text : `${outcome.text}
-`);
+        if (outcome.text == null) {
+          if (!values.json) {
+            const s = outcome.record.stopped;
+            const how = s?.exit == null ? "" : s.exit.signal != null ? ` (killed by ${s.exit.signal})` : ` (exit ${s.exit.code})`;
+            const why = lastStderrLine(s?.stderr_excerpt);
+            console.error(
+              `${name} stopped${how} and recorded NO REPORT.` + (why != null ? ` Its stderr ends: ${why}` : "") + ` Read \`fadeno dispatches ${name}\` for what its branch holds, then close it.${stillWaiting}`
+            );
           }
+          return 5;
+        }
+        if (!values.json) {
+          if (refs.length > 1) console.error(`${name} stopped; its report follows.${stillWaiting}`);
+          process.stdout.write(outcome.text.endsWith("\n") ? outcome.text : `${outcome.text}
+`);
         }
         return 0;
       }
@@ -13656,8 +13766,11 @@ async function main(argv) {
         return 2;
       }
       if (!values.json) {
+        const { bytes, work } = outcome.captured;
+        const left = bytes === 0 ? "It wrote nothing" : `It wrote ${bytes} byte(s) to ${outcome.stdoutPath}`;
+        const committed = work == null ? "" : work.commits === 0 ? ", and its branch holds no commits HEAD lacks" : `, and its branch holds ${work.commits} commit(s) HEAD does not have (${work.files} file(s), +${work.insertions} -${work.deletions})`;
         console.error(
-          `${name} is not running and never recorded a stop: its process group is gone, so no report is coming. What the executor wrote is at ${outcome.stdoutPath} \u2014 record it with \`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.${stillWaiting}`
+          `${name} is not running and never recorded a stop: its process group is gone, so no report is coming. ${left}${committed}. ` + (bytes > 0 ? `Record it with \`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.` : `Record it with \`fadeno dispatch-stop ${name}\`, then close it.`) + stillWaiting
         );
       }
       return 4;

@@ -3,10 +3,21 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { runDispatchClose, DispatchesError, renderWorkMeasured, runDispatchShow, renderDispatchDetail } from '../src/commands/dispatches.ts';
+import {
+  DispatchesError,
+  renderClean,
+  renderDispatchDetail,
+  renderWorkMeasured,
+  renderWorktrees,
+  runClean,
+  runDispatchClose,
+  runDispatchOutput,
+  runDispatchShow,
+  runWorktrees,
+} from '../src/commands/dispatches.ts';
 import { recordStopped } from '../src/lib/spawn.ts';
 import { appendRow, readDispatches } from '../src/lib/ledger.ts';
-import { cutWorktree, measureWork, verifyMerged } from '../src/lib/worktree.ts';
+import { cutWorktree, ignoredPaths, measureWork, trackedDirtyPaths, verifyMerged } from '../src/lib/worktree.ts';
 import { catalogV4, git, gitRepo } from './helpers.ts';
 
 /**
@@ -235,4 +246,69 @@ test('a shared-tree dispatch closes --merged unchecked, and the CLI says it was 
   const result = cli(root, ['dispatch-close', 'in-place', '--merged']);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /\(not verified: the dispatch worked in the shared tree, so it has no branch to look for\)/);
+});
+
+test('ignored paths are recorded and named: git does not count them and `fadeno clean` does remove them', (t) => {
+  const { root, worktree, branch } = dispatched(t);
+  // The shape that cost a host 5.4 MB twice in one day: the receipts a worker
+  // was asked for, written to a path the repository ignores.
+  writeFileSync(join(root, '.gitignore'), 'out/\n');
+  git(root, ['add', '-A']);
+  git(root, ['commit', '-q', '-m', 'ignore out']);
+  git(worktree, ['merge', '-q', '--no-edit', 'main']);
+  mkdirSync(join(worktree, 'out', 'runs'), { recursive: true });
+  writeFileSync(join(worktree, 'out', 'runs', 'receipts.json'), '{"sbf":1}');
+
+  assert.deepEqual(trackedDirtyPaths(worktree), [], 'git calls this tree clean');
+  assert.deepEqual(ignoredPaths(worktree), { paths: ['out/'], truncated: false }, 'and here is what it is holding');
+
+  recordStopped(root, ID, { finalMessage: 'Receipts are in out/runs/.', cwd: worktree, branch });
+  const row = readDispatches(root).records[0]!.stopped!;
+  assert.deepEqual(row.ignored, { paths: ['out/'], truncated: false });
+  const detail = renderDispatchDetail(runDispatchShow({ repoRoot: root, ref: 'fix-login' })).join('\n');
+  assert.match(detail, /1 ignored path\(s\) in the worktree — `fadeno clean` removes these: out\//);
+
+  // And `clean` names what goes with the worktree, before it goes.
+  runDispatchClose({ repoRoot: root, ref: 'fix-login', verb: 'discarded' });
+  const preview = runClean({ repoRoot: root });
+  assert.equal(preview.worktrees.length, 1);
+  assert.deepEqual(preview.worktrees[0]!.ignored, ['out/']);
+  assert.match(renderClean(preview).join('\n'), /would remove worktree .* — and with it 1 ignored path\(s\): out\//);
+  assert.match(renderWorktrees(runWorktrees({ repoRoot: root })).join('\n'), /1 ignored \(out\/\)/);
+});
+
+test('a clean worktree records no ignored paths at all, so the field means something when it is there', (t) => {
+  const { root, worktree, branch } = dispatched(t);
+  commitInWorktree(worktree, 'a.txt', 'one\n', 'add a');
+  recordStopped(root, ID, { finalMessage: 'done', cwd: worktree, branch });
+  assert.equal(readDispatches(root).records[0]!.stopped!.ignored, undefined);
+});
+
+test('the stop row carries the tail of stderr, because a process explains itself on the way out', (t) => {
+  const { root, worktree, branch } = dispatched(t);
+  recordStopped(root, ID, {
+    finalMessage: null,
+    cwd: worktree,
+    branch,
+    exit: { code: 1, signal: null },
+    stderr: 'building...\nAPI error (status 402 Payment Required): Grok Build usage balance exhausted\n',
+  });
+  const row = readDispatches(root).records[0]!.stopped!;
+  assert.match(row.stderr_excerpt!, /usage balance exhausted$/);
+  // Shown because the ending needs explaining — a non-zero exit, or no report.
+  const detail = renderDispatchDetail(runDispatchShow({ repoRoot: root, ref: 'fix-login' })).join('\n');
+  assert.match(detail, /--- the executor's last words on stderr ---/);
+  assert.match(detail, /402 Payment Required/);
+});
+
+test('an empty transcript is not a report, and never out-ranks the one the stop row holds', (t) => {
+  const { root, worktree, branch } = dispatched(t);
+  recordStopped(root, ID, { finalMessage: 'the real report', cwd: worktree, branch, exit: { code: 101, signal: null } });
+  // The file exists from the moment the executor launches; four disk-killed
+  // workers left empty ones and were relayed as finished.
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'local', 'outputs', `${ID}.md`), '   \n');
+  const out = runDispatchOutput({ repoRoot: root, ref: 'fix-login' });
+  assert.equal(out.source, 'final_message');
+  assert.equal(out.text, 'the real report');
 });

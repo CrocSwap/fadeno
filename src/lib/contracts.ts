@@ -55,6 +55,8 @@ export interface WorkerContractInput {
   vocabulary?: string | null;
   /** `.fadeno/preamble.md`: what this repository states for every dispatch. */
   preamble?: Preamble | null;
+  /** Archetype names, for a delegate that decides to delegate further. */
+  archetypes?: readonly string[];
 }
 
 /** Sentinel lines the reader and tests key on; keep them stable. */
@@ -103,7 +105,22 @@ export function workerContract(input: WorkerContractInput): string {
   if (input.vocabulary != null && input.vocabulary.trim() !== '') {
     lines.push('**You may spawn.** The dispatches you open are recorded under yours; close every one before you finish, and report each by name. What follows is what a host session is told.', '');
     lines.push(input.vocabulary.trim(), '');
+  } else {
+    // Everything a delegate needs that only a director was being told.
+    //
+    // An opus reviewer decided mid-audit to fan out, named `Explore`, and was
+    // refused twice inside a 28-minute review — its contract had never said
+    // that a delegated spawn must name an archetype, or what the archetypes
+    // are called. And a worker that hit friction reported it into the void
+    // because nothing it had been given named `fadeno feedback`.
+    const names = (input.archetypes ?? Object.keys(BUILTIN_ARCHETYPE_DESCRIPTIONS).sort()).map((n) => `\`${n}\``).join(', ');
+    lines.push('**If you delegate.**');
+    lines.push(`- Name a Fadeno archetype as the agent type — ${names}. A generic subagent is refused; the name is the whole interface, and Fadeno routes it. \`fadeno context\` prints the rest.`);
+    lines.push('- Every dispatch you open is yours to close before you finish (`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed`), and to report by name.', '');
   }
+  lines.push('**If Fadeno itself gets in your way.**');
+  lines.push(`- A message that misled you, a refusal you could not act on, a step you had to guess at: \`fadeno feedback "<what happened>" --dispatch ${input.name}\`. It appends to \`.fadeno/feedback.md\` in the main checkout — not your worktree — with the harness and version attached, and that file is what whoever maintains Fadeno reads.`);
+  lines.push('- Report it to your caller as well. The file is for the maintainer; your caller needs to know what it cost you.', '');
   lines.push(CONTRACT_FOOTER);
   return lines.join('\n');
 }

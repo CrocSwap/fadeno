@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -32,8 +32,8 @@ function repo(t: TestContext, cmd: string[] = ECHO): string {
   return root;
 }
 
-function cli(root: string, args: string[], stdin = ''): { status: number; stdout: string; stderr: string } {
-  const env: NodeJS.ProcessEnv = { ...process.env, FADENO_HARNESS: 'standalone' };
+function cli(root: string, args: string[], stdin = '', extraEnv: NodeJS.ProcessEnv = {}): { status: number; stdout: string; stderr: string } {
+  const env: NodeJS.ProcessEnv = { ...process.env, FADENO_HARNESS: 'standalone', ...extraEnv };
   const r = spawnSync(process.execPath, [CLI, ...args], { cwd: root, encoding: 'utf8', input: stdin, env });
   return { status: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
 }
@@ -87,7 +87,11 @@ test('dispatch: a failing executor propagates its exit code and names its stderr
   const failing = repo(t, EXIT_3);
   const run = cli(failing, ['dispatch', '--archetype', 'worker'], 'x');
   assert.equal(run.status, 3);
-  assert.match(run.stderr, /stopped: exit 3; branch fadeno\/worker-[0-9a-f]{4}.*; stderr at \.fadeno\/local\/outputs\/[0-9a-f-]{36}\.err/);
+  assert.match(run.stderr, /stopped: exit 3; branch fadeno\/worker-[0-9a-f]{4}.*; full stderr at \.fadeno\/local\/outputs\/[0-9a-f-]{36}\.err/);
+  // The REASON, not just where to find it: four workers died on "usage
+  // balance exhausted" and the host read `exit 1` five times before opening
+  // a file to learn why.
+  assert.match(run.stderr, /stderr ends: bad;/);
   const silent = repo(t, [process.execPath, '-e', "process.stdin.resume();process.stdin.on('end',()=>process.exit(0))"]);
   const quiet = cli(silent, ['dispatch', '--archetype', 'worker'], 'x');
   assert.equal(quiet.status, 1);
@@ -194,10 +198,82 @@ test('dispatch-wait: a dead process group with no stop row is answered, not wait
     model: 'echo', effort: 'high', explicit_model: null, lane: 'command', harness: 'codex', workspace: null,
     task: 'x', prompt: 'p', process_group: 999_999,
   })}\n`);
-  const answer = cli(root, ['dispatch-wait', 'orphaned', '--wait-seconds', '600']);
+  const answer = cli(root, ['dispatch-wait', 'orphaned', '--wait-seconds', '600'], '', { FADENO_ABANDON_SETTLE_MS: '0' });
   assert.equal(answer.status, 4, 'not 2: asking again would never help');
   assert.match(answer.stderr, /orphaned is not running and never recorded a stop/);
-  assert.match(answer.stderr, /fadeno dispatch-stop orphaned --message-file \S*outputs\S*\.md/);
+  assert.match(answer.stderr, /It wrote nothing\./, 'nothing was captured, and saying so is the answer');
+  assert.match(answer.stderr, /fadeno dispatch-stop orphaned`, then close it/);
+
+  // With output on disk, the message names it — because "no stop row" and
+  // "no work" are different, and a worker that ran an hour and committed five
+  // times was once reported as lost on the strength of the first.
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'local', 'outputs', `${id}.md`), 'the work is done and committed\n');
+  const withOutput = cli(root, ['dispatch-wait', 'orphaned', '--wait-seconds', '600'], '', { FADENO_ABANDON_SETTLE_MS: '0' });
+  assert.equal(withOutput.status, 4);
+  assert.match(withOutput.stderr, /It wrote 31 byte\(s\) to \S*outputs\S*\.md/);
+  assert.match(withOutput.stderr, /fadeno dispatch-stop orphaned --message-file \S*outputs\S*\.md/);
+});
+
+test('dispatch-wait: a dead group is given its writer a moment, because the writer is another process', (t) => {
+  const root = repo(t);
+  const id = '4f4f4f4f-0000-4000-8000-000000000000';
+  writeFileSync(join(root, LEDGER_FILE), `${JSON.stringify({
+    row: 'opened', id, name: 'racing', at: new Date().toISOString(), session: null, parent: null, archetype: 'worker',
+    model: 'echo', effort: 'high', explicit_model: null, lane: 'command', harness: 'codex', workspace: null,
+    task: 'x', prompt: 'p', process_group: 999_999,
+  })}\n`);
+  // `fadeno cancel` signals the group, waits up to five seconds for it to die,
+  // and only THEN writes the stop row. A wait loop that gave up on the first
+  // dead-group reading landed inside that window: cancel printed "stop
+  // recorded" while the proxy reported that no stop was ever recorded.
+  // From ANOTHER process, because `spawnSync` below blocks this one's event
+  // loop — and because the real writer is another process too.
+  const row = JSON.stringify({
+    row: 'stopped', id, at: new Date().toISOString(), final_message: 'cancelled, partial work on the branch',
+    dirty: { paths: [], truncated: false }, cwd: null, exit: { code: null, signal: 'SIGTERM' },
+  });
+  const late = spawn(process.execPath, [
+    '-e',
+    `setTimeout(()=>require('node:fs').appendFileSync(process.argv[1],process.argv[2]+'\\n'),700)`,
+    join(root, LEDGER_FILE),
+    row,
+  ], { detached: true, stdio: 'ignore' });
+  late.unref();
+  t.after(() => { try { late.kill(); } catch { /* already gone */ } });
+  const answer = cli(root, ['dispatch-wait', 'racing', '--wait-seconds', '600']);
+  assert.equal(answer.status, 0, 'the row landed inside the settling window, so this is a stop, not a loss');
+  assert.match(answer.stdout, /cancelled, partial work on the branch/);
+});
+
+test('dispatch-wait: a dispatch that stopped with no report at all is exit 5, not a silent success', (t) => {
+  const root = repo(t);
+  const id = '5f5f5f5f-0000-4000-8000-000000000000';
+  writeFileSync(join(root, LEDGER_FILE), [
+    JSON.stringify({
+      row: 'opened', id, name: 'starved', at: new Date().toISOString(), session: null, parent: null, archetype: 'worker',
+      model: 'echo', effort: 'high', explicit_model: null, lane: 'command', harness: 'codex', workspace: null,
+      task: 'x', prompt: 'p',
+    }),
+    JSON.stringify({
+      row: 'stopped', id, at: new Date().toISOString(), final_message: null, dirty: { paths: [], truncated: false },
+      cwd: null, exit: { code: 101, signal: null }, stderr_excerpt: 'error: No space left on device (os error 28)',
+    }),
+  ].join('\n') + '\n');
+  // The transcript file exists from the moment the executor launches. Four
+  // disk-killed workers left empty ones, and `existsSync` alone relayed them
+  // to their proxies as finished reports with exit 0.
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'local', 'outputs', `${id}.md`), '');
+
+  const answer = cli(root, ['dispatch-wait', 'starved', '--wait-seconds', '0']);
+  assert.equal(answer.status, 5, 'exit 0 would say "here is the report" about nothing');
+  assert.equal(answer.stdout, '');
+  assert.match(answer.stderr, /starved stopped \(exit 101\) and recorded NO REPORT/);
+  assert.match(answer.stderr, /Its stderr ends: error: No space left on device \(os error 28\)/);
+
+  // And the same empty file must not out-rank a report the stop row holds.
+  assert.equal(cli(root, ['dispatches', '--output', 'starved']).status, 1);
 });
 
 test('dispatch-wait: several names answer on the first to stop, and name the ones still running', (t) => {
