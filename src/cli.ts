@@ -55,7 +55,7 @@ function printStaleDials(stale: Array<{ archetype: string; reason: string }>): v
 function printModels(result: ModelsResult, options: { catchAll?: boolean } = {}): void {
   // `harness`: the model's home EXECUTOR harness. One harness table under v4,
   // so this column no longer varies with the host you are sitting inside.
-  const header = `${'model'.padEnd(12)}  ${'provider'.padEnd(12)}  ${'id'.padEnd(26)}  ${'effort'.padEnd(8)}  harness`;
+  const header = `${'MODEL'.padEnd(12)}  ${'PROVIDER'.padEnd(12)}  ${'ID'.padEnd(26)}  ${'EFFORT'.padEnd(8)}  HARNESS`;
   console.log(header);
   for (const row of result.models) {
     console.log(
@@ -140,7 +140,7 @@ function printModelsVerify(result: ModelsVerifyResult): void {
     console.log('no dialed models to verify — `fadeno dial` shows the effective table.');
     return;
   }
-  console.log(`${'model'.padEnd(12)}  ${'id'.padEnd(26)}  ${'harness'.padEnd(10)}  ${'outcome'.padEnd(12)}  archetypes`);
+  console.log(`${'MODEL'.padEnd(12)}  ${'ID'.padEnd(26)}  ${'HARNESS'.padEnd(10)}  ${'OUTCOME'.padEnd(12)}  ARCHETYPES`);
   for (const row of result.rows) {
     console.log(
       `${row.model.padEnd(12)}  ${row.model_id.padEnd(26)}  ${row.harness.padEnd(10)}  ${row.outcome.padEnd(12)}  ${row.archetypes.join(', ')}`,
@@ -193,7 +193,7 @@ function modelCell(row: EffectiveRow): string {
  */
 function printDialShow(result: DialShowResult): void {
   if (result.staleDials.length > 0) printStaleDials(result.staleDials);
-  console.log(`${'archetype'.padEnd(12)}  ${'model'.padEnd(20)}  ${'harness'.padEnd(12)}  source`);
+  console.log(`${'ARCHETYPE'.padEnd(12)}  ${'MODEL'.padEnd(20)}  ${'HARNESS'.padEnd(12)}  SOURCE`);
   for (const row of result.rows) {
     // `—` for a null harness, which is `current-host` outside a session: the
     // cell has no value rather than the value `null`.

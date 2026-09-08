@@ -58,8 +58,8 @@ test('the dial table heads its executor column `harness`, and says `inherits` fo
   const out = execFileSync(process.execPath, [CLI, 'dial'], { cwd: root, env, encoding: 'utf8' });
   const [header, ...rows] = out.trimEnd().split('\n');
 
-  assert.match(header!, /\bharness\b/, 'the executor column names the flag that sets it');
-  assert.doesNotMatch(header!, /\bvia\b/, 'and never uses the retired driver word');
+  assert.match(header!, /\bHARNESS\b/, 'the executor column names the flag that sets it');
+  assert.doesNotMatch(header!, /\bvia\b/i, 'and never uses the retired driver word');
 
   const worker = rows.find((r) => r.startsWith('worker'))!;
   assert.match(worker, /\bclaude\b/, "worker's dial runs on the claude harness");
@@ -80,8 +80,8 @@ test('the models table heads its home-harness column `harness` too', (t) => {
   const { root, env } = seed(t);
   const out = execFileSync(process.execPath, [CLI, 'models'], { cwd: root, env, encoding: 'utf8' });
   const header = out.split('\n')[0]!;
-  assert.match(header, /\bharness$/, 'last column, named for the flag');
-  assert.doesNotMatch(header, /\bvia\b/);
+  assert.match(header, /\bHARNESS$/, 'last column, named for the flag');
+  assert.doesNotMatch(header, /\bvia\b/i);
   assert.match(out, /^sonnet\s+anthropic\s+sonnet\s+high\s+claude$/m);
 });
 

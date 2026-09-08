@@ -264,8 +264,8 @@ test('dial rows carry the lane for status, and the table prints archetype, model
 
   const table = cliRun(root, paths, ['dial']);
   const rowFor = (archetype: string) => table.split('\n').find((line) => line.startsWith(archetype))!;
-  assert.match(table.split('\n')[0]!, /^archetype\s+model\s+harness\s+source$/);
-  assert.doesNotMatch(table, /\blane\b/);
+  assert.match(table.split('\n')[0]!, /^ARCHETYPE\s+MODEL\s+HARNESS\s+SOURCE$/);
+  assert.doesNotMatch(table, /\blane\b/i);
   assert.match(rowFor('worker'), /\bsol\s+codex\s+repo$/);
   assert.match(rowFor('reviewer'), /\bgrok\s+grok\s+repo$/);
   // One line per archetype: a header and three rows.

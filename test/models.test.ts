@@ -73,6 +73,8 @@ test('models: the catch-all is a row, not a footnote', (t) => {
   // under the table that a reader scanning the harness column never reaches.
   assert.match(out, /^\*\s+\*\s+\*\s+\*\s+opencode$/m);
   assert.doesNotMatch(out, /any other name runs on/);
+  // The header is the only uppercase line: column names, docker-style.
+  assert.match(out.split('\n')[0]!, /^MODEL\s+PROVIDER\s+ID\s+EFFORT\s+HARNESS$/);
   // The row follows the catalog: a repo that sets the key sees its own answer.
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), readFileSync(join(root, '.fadeno', 'executors.yaml'), 'utf8').replace('unregistered_model_harness: opencode', 'unregistered_model_harness: claude'));
   const retargeted = execFileSync(process.execPath, [CLI, 'models'], {
