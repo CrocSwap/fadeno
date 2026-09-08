@@ -121,9 +121,32 @@ if (carried != null) {
         `The dial decides which model does this work. Spawn it again with model="${wantModel}"${wantEffort ? ` and reasoning_effort="${wantEffort}"` : ''} and the same message.`,
     );
   }
-  // Everything the wrapper asked for is on this spawn. Say nothing: silence is
-  // how a Codex hook lets a call through.
-  finish(null);
+  // Everything the wrapper asked for is on this spawn. Let it through — and
+  // say, to the host, what it is about to be running.
+  //
+  // Verified on Codex 0.153.4: a PreToolUse hook that emits `hookEventName`
+  // and `additionalContext` and NO decision passes the call AND delivers that
+  // text to the model, on `shell` and on `spawn_agent` alike. Any
+  // `permissionDecision` other than deny — and a `permissionDecisionReason`
+  // without a decision — makes Codex mark the hook Failed, run the call
+  // anyway, and discard the context with the rest of the output. So this
+  // object carries exactly two keys, and every addition needs a probe.
+  //
+  // Until now a Codex host heard from Fadeno only when it was refused: the
+  // dispatch name, its worktree and the close command all arrived attached to
+  // a "no", and the spawn that actually worked said nothing at all.
+  const where = opened.workspace?.branch != null ? `branch \`${opened.workspace.branch}\`` : 'the shared tree';
+  finish({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      additionalContext:
+        `Fadeno opened dispatch \`${opened.name}\` (${carried.id}) for this ${archetype} spawn, per the ${archetype} dial: ` +
+        `${wantModel}${wantEffort ? `@${wantEffort}` : ''}, working on ${where}. ` +
+        `When it stops, read its report and close it: \`fadeno dispatch-close ${opened.name} --merged|--kept|--discarded|--failed\`.`,
+      // No nag here: pass 1 always precedes pass 2 and its refusal already
+      // carried one. Saying it twice per spawn is how a reminder stops being read.
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------

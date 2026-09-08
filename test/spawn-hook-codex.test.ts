@@ -79,12 +79,29 @@ test('the host lane is a handshake: the first spawn is refused with the correcte
   assert.equal(record.opened!.model_id, 'gpt-5.6-sol');
 
   // Pass 2. The corrected spawn carries the contract, the model and the
-  // effort — so the hook says nothing at all, which is how a Codex hook lets
-  // a call through.
+  // effort, so it passes — and says what it is running.
+  //
+  // A Codex PreToolUse hook that emits `hookEventName` + `additionalContext`
+  // and NO decision both passes the call and delivers that text (verified on
+  // Codex 0.153.4). Until this, a Codex host heard the dispatch name, its
+  // worktree and the close command only when it was REFUSED; the spawn that
+  // actually worked was silent.
   const corrected = plugin.run(HOOK, spawnEvent(root, {
     agent_type: 'worker', task_name: 'login-fix', message: composed, model: 'gpt-5.6-sol', reasoning_effort: 'high',
   }));
-  assert.equal(corrected.out, null, corrected.stdout);
+  const passed = corrected.out as { hookSpecificOutput?: Record<string, unknown> } | null;
+  assert.ok(passed != null, corrected.stdout);
+  const out = passed.hookSpecificOutput!;
+  // Exactly two keys: any permissionDecision but deny, or a reason without a
+  // decision, makes Codex mark the hook Failed and discard the context.
+  assert.deepEqual(Object.keys(out).sort(), ['additionalContext', 'hookEventName']);
+  assert.equal(out.hookEventName, 'PreToolUse');
+  const context = out.additionalContext as string;
+  assert.match(context, /Fadeno opened dispatch `login-fix` \([0-9a-f-]{36}\) for this worker spawn, per the worker dial: gpt-5\.6-sol@high/);
+  assert.match(context, /branch `fadeno\/login-fix`/);
+  assert.match(context, /fadeno dispatch-close login-fix --merged/);
+  // The nag is not repeated: pass 1's refusal already carried one.
+  assert.doesNotMatch(context, /Unclosed dispatches/);
   assert.equal(readDispatches(root).records.length, 1, 'letting a spawn through opens nothing new');
 });
 
