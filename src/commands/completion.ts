@@ -111,6 +111,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   dispatches: command({ '--all': NONE, '--tail': { kind: 'free' }, '--json': NONE, '--output': { kind: 'free' } }, ['free']),
   worktrees: command({ '--json': NONE }),
   context: command({ '--json': NONE }),
+  feedback: command({ '--dispatch': { kind: 'free' }, '--json': NONE }, ['free']),
   plugin: command({ '--codex': NONE, '--grok': NONE, '--opencode': NONE, '--omp': NONE, '--force': NONE }, ['path']),
   completion: command({}, [], {
     bash: command({}),

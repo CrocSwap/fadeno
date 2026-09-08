@@ -90,8 +90,17 @@ const TOP_LEVEL: Record<string, PageSeed> = {
   worktrees: page('Report every Fadeno worktree holding work that is not on HEAD.', 'fadeno worktrees [--json]', [
     'The cross-session safety net: uncommitted paths and unmerged commits per worktree, joined to the dispatch that owns it. A tree that cannot be read is reported as such, never as clean.',
   ]),
-  context: page('Print what a host session is told: archetypes with live routing, the rules, and every unclosed dispatch.', 'fadeno context [--json]', [
+  context: page('Print what a host session is told: the archetypes, the rules, and every unclosed dispatch.', 'fadeno context [--json]', [
     'One source for the host-mode hook, a spawned director\'s prompt, and a human who wants to see it.',
+    'It carries no routing table: that is `fadeno dial`, read fresh, because this text is injected once and outlives the dials it would have quoted.',
+  ]),
+  feedback: page('Record friction with Fadeno itself, or read what has been recorded.', [
+    'fadeno feedback',
+    'fadeno feedback "<what happened>" [--dispatch <ref>] [--json]',
+  ], [
+    'Appends to `.fadeno/feedback.md` with the harness, the Fadeno version, and the dispatch when you name one — the context a reader needs and a host would otherwise have to remember.',
+    'With no argument it prints the file, which is how whoever maintains Fadeno collects what the sessions using it hit.',
+    'It is not scratch: `fadeno clean` never touches it.',
   ]),
   model: aliasPage(MODELS_PAGE, [
     'fadeno model [<name>]',
@@ -141,6 +150,7 @@ const OPTION_HINTS: Record<string, string> = {
   '--archetype': 'Archetype name',
   '--claude': 'Target Claude Code',
   '--codex': 'Target Codex',
+  '--dispatch': 'Dispatch this friction happened on',
   '--discarded': 'Close: the work is not wanted',
   '--failed': 'Close: the dispatch did not succeed',
   '--force': 'Overwrite managed files',
@@ -181,7 +191,7 @@ const OPTION_HINTS: Record<string, string> = {
 const OPTION_FORMS: Record<string, string> = {
   '--format': '--format <format>', '--schema': '--schema <kind>',
   '--archetype': '--archetype <name>', '--model': '--model <ref>', '--harness': '--harness <id>',
-  '--prompt-file': '--prompt-file <path>', '--output': '--output <path>', '--lane': '--lane <auto|host|command>', '--transcript': '--transcript <path>', '--parent-transcript': '--parent-transcript <path>', '--bind': '--bind <role=executor>',
+  '--dispatch': '--dispatch <ref>', '--prompt-file': '--prompt-file <path>', '--output': '--output <path>', '--lane': '--lane <auto|host|command>', '--transcript': '--transcript <path>', '--parent-transcript': '--parent-transcript <path>', '--bind': '--bind <role=executor>',
   '--tool': '--tool <name>', '--input': '--input <name=path>',
   '--host-executor': '--host-executor <name>', '--native-executor': '--native-executor <name>',
   '--role': '--role <name>', '--run': '--run <id>', '--dispatch-id': '--dispatch-id <id>',
@@ -220,6 +230,7 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   dispatches: withGlobals('--all', '--tail', '--json', '--output'),
   worktrees: withGlobals('--json'),
   context: withGlobals('--json'),
+  feedback: withGlobals('--dispatch', '--json'),
   plugin: withGlobals('--codex', '--omp', '--force'),
   completion: withGlobals(),
   'models add': withGlobals('--json'),
@@ -304,6 +315,7 @@ Routing
   dial        Show, set and resolve archetype bindings
   models (model)  Inspect the model registry
   context     What a host session is told
+  feedback    Record friction with Fadeno itself
 
 Dispatches
   dispatch, dispatch-close, cancel, dispatches, worktrees

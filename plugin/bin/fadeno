@@ -7364,8 +7364,8 @@ __export(cli_exports, {
   KNOWN_CLI_COMMANDS: () => KNOWN_CLI_COMMANDS
 });
 module.exports = __toCommonJS(cli_exports);
-var import_node_fs17 = require("node:fs");
-var import_node_path16 = require("node:path");
+var import_node_fs18 = require("node:fs");
+var import_node_path17 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/commands/dispatches.ts
@@ -7779,6 +7779,10 @@ function hostVocabulary(input) {
   lines.push(`Fadeno reminds you of unclosed dispatches at every spawn and refuses a new one at ${input.unclosedLimit} unclosed. \`fadeno dispatches\` lists them, \`fadeno dispatches --output <name>\` shows a report, \`fadeno worktrees\` shows every worktree still holding unmerged work, and \`fadeno cancel <name>\` stops a running command-lane dispatch.`, "");
   lines.push("## When Fadeno fails", "");
   lines.push("A refused spawn, a dispatch that exits non-zero or returns nothing, or a resolver error is a user-facing event. Report it with the dispatch id and the error text, and do not substitute a generic subagent, another model, or your own hands for the delegated work without being told to.", "");
+  lines.push(
+    'Friction with Fadeno itself \u2014 a message that misled you, a refusal you could not act on, a step that needed guessing \u2014 is worth recording even when you worked around it: `fadeno feedback "<what happened>"`, plus `--dispatch <name>` when it happened on one. It appends to `.fadeno/feedback.md` with the harness and version attached, and that file is what whoever maintains Fadeno reads. Report the friction to your user as well; the file is for the maintainer, not for them.',
+    ""
+  );
   lines.push(nagText(input.unclosed, input.unclosedLimit, input.now));
   return lines.join("\n").replace(/\n{3,}/g, "\n\n");
 }
@@ -11783,6 +11787,7 @@ var COMMANDS = {
   dispatches: command({ "--all": NONE, "--tail": { kind: "free" }, "--json": NONE, "--output": { kind: "free" } }, ["free"]),
   worktrees: command({ "--json": NONE }),
   context: command({ "--json": NONE }),
+  feedback: command({ "--dispatch": { kind: "free" }, "--json": NONE }, ["free"]),
   plugin: command({ "--codex": NONE, "--grok": NONE, "--opencode": NONE, "--omp": NONE, "--force": NONE }, ["path"]),
   completion: command({}, [], {
     bash: command({})
@@ -12049,11 +12054,70 @@ function suggestFlag(command2, subcommand, flag) {
   return best != null && bestDistance <= 2 && bestDistance < flag.length ? best : null;
 }
 
+// src/commands/feedback.ts
+var import_node_fs15 = require("node:fs");
+var import_node_path14 = require("node:path");
+var FeedbackError = class extends Error {
+};
+var FEEDBACK_FILE = (0, import_node_path14.join)(".fadeno", "feedback.md");
+function repoRootOf3(opts) {
+  return opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+}
+function pathOf(repoRoot) {
+  return (0, import_node_path14.join)(repoRoot, FEEDBACK_FILE);
+}
+var HEADING = /^## /gm;
+function runFeedbackAdd(opts) {
+  const repoRoot = repoRootOf3(opts);
+  const text = opts.text.trim();
+  if (text.length === 0) {
+    throw new FeedbackError('nothing to record \u2014 pass the friction as one argument, e.g. `fadeno feedback "the nag counts running dispatches"`.');
+  }
+  let dispatch = null;
+  if (opts.dispatch != null && opts.dispatch.trim().length > 0) {
+    const found = findDispatch(readDispatches(repoRoot).records, opts.dispatch);
+    if (!found.ok) throw new FeedbackError(found.message);
+    dispatch = { id: found.record.id, name: found.record.opened?.name ?? null };
+  }
+  const entry = {
+    at: (opts.now ?? /* @__PURE__ */ new Date()).toISOString().replace(/\.\d{3}Z$/, "Z"),
+    harness: activeHarness(void 0, opts.userPathOptions) ?? "standalone",
+    version: packageVersion(),
+    dispatch,
+    text
+  };
+  const path = pathOf(repoRoot);
+  const existed = (0, import_node_fs15.existsSync)(path);
+  const header = existed ? "" : [
+    "# Fadeno feedback",
+    "",
+    "Friction with Fadeno itself, recorded by the sessions that hit it.",
+    'Append with `fadeno feedback "<what happened>"`; read with `fadeno feedback`.',
+    ""
+  ].join("\n");
+  const body = [
+    `## ${entry.at} \xB7 ${entry.harness} \xB7 fadeno ${entry.version}${dispatch != null ? ` \xB7 dispatch ${dispatch.name ?? dispatch.id.slice(0, 8)} (${dispatch.id})` : ""}`,
+    "",
+    entry.text,
+    "",
+    ""
+  ].join("\n");
+  (0, import_node_fs15.mkdirSync)((0, import_node_path14.dirname)(path), { recursive: true });
+  (0, import_node_fs15.appendFileSync)(path, `${header}${body}`, "utf8");
+  return { ...entry, path, total: ((0, import_node_fs15.readFileSync)(path, "utf8").match(HEADING) ?? []).length };
+}
+function runFeedbackRead(opts = {}) {
+  const path = pathOf(repoRootOf3(opts));
+  if (!(0, import_node_fs15.existsSync)(path)) return { path, exists: false, text: null, entries: 0 };
+  const text = (0, import_node_fs15.readFileSync)(path, "utf8");
+  return { path, exists: true, text, entries: (text.match(HEADING) ?? []).length };
+}
+
 // src/commands/setup.ts
 var import_node_child_process5 = require("node:child_process");
-var import_node_fs15 = require("node:fs");
+var import_node_fs16 = require("node:fs");
 var import_node_os2 = require("node:os");
-var import_node_path14 = require("node:path");
+var import_node_path15 = require("node:path");
 var SetupError = class extends Error {
 };
 var PROBES = [
@@ -12074,22 +12138,22 @@ function probe(command2) {
 var MANAGED_AGENT_MARKER = "# fadeno:managed";
 function sweepManagedAgents(repoRoot, options) {
   const removed = [];
-  for (const dir of [codexUserAgentDir(options), (0, import_node_path14.join)(repoRoot, ".codex", "agents")]) {
+  for (const dir of [codexUserAgentDir(options), (0, import_node_path15.join)(repoRoot, ".codex", "agents")]) {
     let entries;
     try {
-      entries = (0, import_node_fs15.readdirSync)(dir);
+      entries = (0, import_node_fs16.readdirSync)(dir);
     } catch {
       continue;
     }
     for (const entry of entries) {
       if (!entry.endsWith(".toml")) continue;
-      const path = (0, import_node_path14.join)(dir, entry);
+      const path = (0, import_node_path15.join)(dir, entry);
       try {
-        if (!(0, import_node_fs15.readFileSync)(path, "utf8").startsWith(MANAGED_AGENT_MARKER)) continue;
+        if (!(0, import_node_fs16.readFileSync)(path, "utf8").startsWith(MANAGED_AGENT_MARKER)) continue;
       } catch {
         continue;
       }
-      (0, import_node_fs15.rmSync)(path, { force: true });
+      (0, import_node_fs16.rmSync)(path, { force: true });
       removed.push(path);
     }
   }
@@ -12099,42 +12163,42 @@ function sweepRetiredState(paths) {
   const removed = [];
   for (const path of retiredStateFiles(paths)) {
     try {
-      if (!(0, import_node_fs15.lstatSync)(path).isFile()) continue;
+      if (!(0, import_node_fs16.lstatSync)(path).isFile()) continue;
     } catch {
       continue;
     }
-    (0, import_node_fs15.rmSync)(path, { force: true });
+    (0, import_node_fs16.rmSync)(path, { force: true });
     removed.push(path);
   }
   for (const dir of retiredStateDirs(paths)) {
     try {
-      if (!(0, import_node_fs15.lstatSync)(dir).isDirectory()) continue;
+      if (!(0, import_node_fs16.lstatSync)(dir).isDirectory()) continue;
     } catch {
       continue;
     }
-    (0, import_node_fs15.rmSync)(dir, { recursive: true, force: true });
+    (0, import_node_fs16.rmSync)(dir, { recursive: true, force: true });
     removed.push(dir);
   }
   return removed;
 }
 function runningCli(env) {
   const bundled = env.FADENO_BUNDLED_RUNTIME?.trim();
-  if (bundled && (0, import_node_fs15.existsSync)((0, import_node_path14.join)(bundled, "fadeno"))) return (0, import_node_path14.join)(bundled, "fadeno");
+  if (bundled && (0, import_node_fs16.existsSync)((0, import_node_path15.join)(bundled, "fadeno"))) return (0, import_node_path15.join)(bundled, "fadeno");
   const argv1 = process.argv[1];
   if (argv1 == null) return null;
   try {
-    return (0, import_node_fs15.realpathSync)((0, import_node_path14.resolve)(argv1));
+    return (0, import_node_fs16.realpathSync)((0, import_node_path15.resolve)(argv1));
   } catch {
-    return (0, import_node_path14.resolve)(argv1);
+    return (0, import_node_path15.resolve)(argv1);
   }
 }
 function onPath(dir, env) {
-  const entries = (env.PATH ?? "").split(import_node_path14.delimiter).filter((part) => part.length > 0);
+  const entries = (env.PATH ?? "").split(import_node_path15.delimiter).filter((part) => part.length > 0);
   return entries.some((entry) => {
     try {
-      return (0, import_node_fs15.realpathSync)(entry) === (0, import_node_fs15.realpathSync)(dir);
+      return (0, import_node_fs16.realpathSync)(entry) === (0, import_node_fs16.realpathSync)(dir);
     } catch {
-      return (0, import_node_path14.resolve)(entry) === (0, import_node_path14.resolve)(dir);
+      return (0, import_node_path15.resolve)(entry) === (0, import_node_path15.resolve)(dir);
     }
   });
 }
@@ -12144,14 +12208,14 @@ function windowsShim(target) {
 function linkCli(paths, target, options, force) {
   const windows = (options?.platform ?? process.platform) === "win32";
   const path = paths.linkPath;
-  (0, import_node_fs15.mkdirSync)(paths.binDir, { recursive: true });
+  (0, import_node_fs16.mkdirSync)(paths.binDir, { recursive: true });
   const env = options?.env ?? process.env;
   const FOREIGN = " foreign";
   const current = (() => {
     try {
-      const stat = (0, import_node_fs15.lstatSync)(path);
-      if (windows) return stat.isFile() ? (0, import_node_fs15.readFileSync)(path, "utf8") : FOREIGN;
-      return stat.isSymbolicLink() ? (0, import_node_fs15.readlinkSync)(path) : FOREIGN;
+      const stat = (0, import_node_fs16.lstatSync)(path);
+      if (windows) return stat.isFile() ? (0, import_node_fs16.readFileSync)(path, "utf8") : FOREIGN;
+      return stat.isSymbolicLink() ? (0, import_node_fs16.readlinkSync)(path) : FOREIGN;
     } catch {
       return null;
     }
@@ -12163,18 +12227,18 @@ function linkCli(paths, target, options, force) {
       `${path} exists and is not something Fadeno wrote. Remove it, choose another directory with FADENO_BIN_DIR, or rerun with --force to replace it.`
     );
   }
-  if (current != null) (0, import_node_fs15.rmSync)(path, { force: true });
-  if (windows) (0, import_node_fs15.writeFileSync)(path, want, "utf8");
-  else (0, import_node_fs15.symlinkSync)(target, path);
+  if (current != null) (0, import_node_fs16.rmSync)(path, { force: true });
+  if (windows) (0, import_node_fs16.writeFileSync)(path, want, "utf8");
+  else (0, import_node_fs16.symlinkSync)(target, path);
   return { path, target, action: current == null ? "created" : "retargeted", onPath: onPath(paths.binDir, env) };
 }
 function ensureClaudePermission(options, notices) {
   const env = options?.env ?? process.env;
-  const settingsPath = (0, import_node_path14.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path14.join)(options?.home ?? (0, import_node_os2.homedir)(), ".claude"), "settings.json");
+  const settingsPath = (0, import_node_path15.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path15.join)(options?.home ?? (0, import_node_os2.homedir)(), ".claude"), "settings.json");
   let data = {};
-  if ((0, import_node_fs15.existsSync)(settingsPath)) {
+  if ((0, import_node_fs16.existsSync)(settingsPath)) {
     try {
-      const parsed = JSON.parse((0, import_node_fs15.readFileSync)(settingsPath, "utf8"));
+      const parsed = JSON.parse((0, import_node_fs16.readFileSync)(settingsPath, "utf8"));
       if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
         notices.push(`Claude user settings ${settingsPath} are not an object; permission setup left them untouched.`);
         return null;
@@ -12196,8 +12260,8 @@ function ensureClaudePermission(options, notices) {
   allow.push(rule);
   permissions.allow = allow;
   data.permissions = permissions;
-  (0, import_node_fs15.mkdirSync)((0, import_node_path14.dirname)(settingsPath), { recursive: true });
-  (0, import_node_fs15.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
+  (0, import_node_fs16.mkdirSync)((0, import_node_path15.dirname)(settingsPath), { recursive: true });
+  (0, import_node_fs16.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   notices.push(`Claude user permission added so agents can run the CLI without a prompt each time: ${rule} in ${settingsPath}`);
   return { path: settingsPath, rule };
@@ -12215,7 +12279,7 @@ function runSetup(opts = {}) {
     throw new SetupError(err.message);
   }
   const source = opts.source !== void 0 ? opts.source : runningCli(env);
-  if (source == null || !(0, import_node_fs15.existsSync)(source)) {
+  if (source == null || !(0, import_node_fs16.existsSync)(source)) {
     throw new SetupError(
       `cannot find the CLI to link${source == null ? "" : ` at ${source}`} \u2014 run \`fadeno setup\` from the plugin's own CLI, or pass --from <bin-dir>.`
     );
@@ -12240,26 +12304,26 @@ function runSetup(opts = {}) {
 }
 
 // src/commands/status.ts
-var import_node_fs16 = require("node:fs");
+var import_node_fs17 = require("node:fs");
 var import_node_os3 = require("node:os");
-var import_node_path15 = require("node:path");
+var import_node_path16 = require("node:path");
 var StatusError = class extends Error {
 };
 function linkState(path) {
   try {
-    const stat = (0, import_node_fs16.lstatSync)(path);
+    const stat = (0, import_node_fs17.lstatSync)(path);
     if (!stat.isSymbolicLink()) return { path, target: null, state: "foreign" };
-    const target = (0, import_node_fs16.readlinkSync)(path);
-    return { path, target, state: (0, import_node_fs16.existsSync)(target) ? "linked" : "foreign" };
+    const target = (0, import_node_fs17.readlinkSync)(path);
+    return { path, target, state: (0, import_node_fs17.existsSync)(target) ? "linked" : "foreign" };
   } catch {
     return { path, target: null, state: "missing" };
   }
 }
 function declaredAgentName(path, ext) {
-  const fallback = (0, import_node_path15.basename)(path, ext);
+  const fallback = (0, import_node_path16.basename)(path, ext);
   let text;
   try {
-    text = (0, import_node_fs16.readFileSync)(path, "utf8").slice(0, 4096);
+    text = (0, import_node_fs17.readFileSync)(path, "utf8").slice(0, 4096);
   } catch {
     return fallback;
   }
@@ -12269,25 +12333,25 @@ function declaredAgentName(path, ext) {
 function shadowingAgentFiles(repoRoot, archetypes, options) {
   const home = options?.home ?? (0, import_node_os3.homedir)();
   const env = options?.env ?? process.env;
-  const claudeHome = env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path15.join)(home, ".claude");
+  const claudeHome = env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path16.join)(home, ".claude");
   const roots = [
-    { dir: (0, import_node_path15.join)(claudeHome, "agents"), harness: "claude", scope: "user", ext: ".md" },
-    { dir: (0, import_node_path15.join)(repoRoot, ".claude", "agents"), harness: "claude", scope: "project", ext: ".md" },
+    { dir: (0, import_node_path16.join)(claudeHome, "agents"), harness: "claude", scope: "user", ext: ".md" },
+    { dir: (0, import_node_path16.join)(repoRoot, ".claude", "agents"), harness: "claude", scope: "project", ext: ".md" },
     { dir: codexUserAgentDir(options), harness: "codex", scope: "user", ext: ".toml" },
-    { dir: (0, import_node_path15.join)(repoRoot, ".codex", "agents"), harness: "codex", scope: "project", ext: ".toml" }
+    { dir: (0, import_node_path16.join)(repoRoot, ".codex", "agents"), harness: "codex", scope: "project", ext: ".toml" }
   ];
   const routed = /* @__PURE__ */ new Set([...archetypes, "dispatch"]);
   const found = [];
   for (const root of roots) {
     let entries;
     try {
-      entries = (0, import_node_fs16.readdirSync)(root.dir).sort();
+      entries = (0, import_node_fs17.readdirSync)(root.dir).sort();
     } catch {
       continue;
     }
     for (const entry of entries) {
       if (!entry.endsWith(root.ext)) continue;
-      const path = (0, import_node_path15.join)(root.dir, entry);
+      const path = (0, import_node_path16.join)(root.dir, entry);
       const archetype = declaredAgentName(path, root.ext);
       if (!routed.has(archetype)) continue;
       found.push({ path, archetype, harness: root.harness, scope: root.scope });
@@ -12350,7 +12414,7 @@ function runStatus(opts = {}) {
     agentFiles,
     worktrees,
     unclosed,
-    projectCustomized: (0, import_node_fs16.existsSync)((0, import_node_path15.join)(repoRoot, ".fadeno")),
+    projectCustomized: (0, import_node_fs17.existsSync)((0, import_node_path16.join)(repoRoot, ".fadeno")),
     verbose: Boolean(opts.verbose),
     attention
   };
@@ -12434,8 +12498,17 @@ var TOP_LEVEL = {
   worktrees: page("Report every Fadeno worktree holding work that is not on HEAD.", "fadeno worktrees [--json]", [
     "The cross-session safety net: uncommitted paths and unmerged commits per worktree, joined to the dispatch that owns it. A tree that cannot be read is reported as such, never as clean."
   ]),
-  context: page("Print what a host session is told: archetypes with live routing, the rules, and every unclosed dispatch.", "fadeno context [--json]", [
-    "One source for the host-mode hook, a spawned director's prompt, and a human who wants to see it."
+  context: page("Print what a host session is told: the archetypes, the rules, and every unclosed dispatch.", "fadeno context [--json]", [
+    "One source for the host-mode hook, a spawned director's prompt, and a human who wants to see it.",
+    "It carries no routing table: that is `fadeno dial`, read fresh, because this text is injected once and outlives the dials it would have quoted."
+  ]),
+  feedback: page("Record friction with Fadeno itself, or read what has been recorded.", [
+    "fadeno feedback",
+    'fadeno feedback "<what happened>" [--dispatch <ref>] [--json]'
+  ], [
+    "Appends to `.fadeno/feedback.md` with the harness, the Fadeno version, and the dispatch when you name one \u2014 the context a reader needs and a host would otherwise have to remember.",
+    "With no argument it prints the file, which is how whoever maintains Fadeno collects what the sessions using it hit.",
+    "It is not scratch: `fadeno clean` never touches it."
   ]),
   model: aliasPage(MODELS_PAGE, [
     "fadeno model [<name>]",
@@ -12483,6 +12556,7 @@ var OPTION_HINTS = {
   "--archetype": "Archetype name",
   "--claude": "Target Claude Code",
   "--codex": "Target Codex",
+  "--dispatch": "Dispatch this friction happened on",
   "--discarded": "Close: the work is not wanted",
   "--failed": "Close: the dispatch did not succeed",
   "--force": "Overwrite managed files",
@@ -12525,6 +12599,7 @@ var OPTION_FORMS = {
   "--archetype": "--archetype <name>",
   "--model": "--model <ref>",
   "--harness": "--harness <id>",
+  "--dispatch": "--dispatch <ref>",
   "--prompt-file": "--prompt-file <path>",
   "--output": "--output <path>",
   "--lane": "--lane <auto|host|command>",
@@ -12590,6 +12665,7 @@ var PAGE_OPTIONS = {
   dispatches: withGlobals("--all", "--tail", "--json", "--output"),
   worktrees: withGlobals("--json"),
   context: withGlobals("--json"),
+  feedback: withGlobals("--dispatch", "--json"),
   plugin: withGlobals("--codex", "--omp", "--force"),
   completion: withGlobals(),
   "models add": withGlobals("--json"),
@@ -12662,6 +12738,7 @@ Routing
   dial        Show, set and resolve archetype bindings
   models (model)  Inspect the model registry
   context     What a host session is told
+  feedback    Record friction with Fadeno itself
 
 Dispatches
   dispatch, dispatch-close, cancel, dispatches, worktrees
@@ -12887,6 +12964,8 @@ async function main(argv) {
         discarded: { type: "boolean" },
         failed: { type: "boolean" },
         note: { type: "string" },
+        // feedback
+        dispatch: { type: "string" },
         // dispatches
         all: { type: "boolean" },
         tail: { type: "string" },
@@ -12940,7 +13019,7 @@ async function main(argv) {
       if (target === "grok" || target === "opencode" || target === "omp") {
         throw new Error("`fadeno setup` supports --codex or --claude; Grok, OpenCode, and omp have no user-scoped setup.");
       }
-      const from = values.from != null ? (0, import_node_path16.join)(String(values.from), "fadeno") : void 0;
+      const from = values.from != null ? (0, import_node_path17.join)(String(values.from), "fadeno") : void 0;
       const result = runSetup({ target: target ?? null, source: from, force: Boolean(values.force) });
       if (values.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -13007,7 +13086,7 @@ async function main(argv) {
       if (codex) {
         console.log("\nTest it: `codex plugin marketplace add . && codex plugin add fadeno@fadeno`");
       } else {
-        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path16.relative)(process.cwd(), outDir) + "`");
+        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path17.relative)(process.cwd(), outDir) + "`");
       }
       return 0;
     }
@@ -13161,7 +13240,7 @@ async function main(argv) {
         shared: Boolean(values.shared),
         from: values.from ?? null,
         promptFile,
-        prompt: promptFile == null ? (0, import_node_fs17.readFileSync)(0, "utf8") : void 0,
+        prompt: promptFile == null ? (0, import_node_fs18.readFileSync)(0, "utf8") : void 0,
         session: values["session-id"] ?? null,
         parent: values.parent,
         onEcho: (line) => console.error(line),
@@ -13197,7 +13276,7 @@ async function main(argv) {
         shared: Boolean(values.shared),
         from: values.from ?? null,
         promptFile,
-        prompt: promptFile == null ? (0, import_node_fs17.readFileSync)(0, "utf8") : void 0,
+        prompt: promptFile == null ? (0, import_node_fs18.readFileSync)(0, "utf8") : void 0,
         session: values["session-id"] ?? null,
         parent: values.parent,
         harness: values.harness ?? null,
@@ -13245,7 +13324,7 @@ async function main(argv) {
           ref: ref ?? null,
           transcript,
           messageFile,
-          message: messageFile == null && !process.stdin.isTTY ? (0, import_node_fs17.readFileSync)(0, "utf8") : null,
+          message: messageFile == null && !process.stdin.isTTY ? (0, import_node_fs18.readFileSync)(0, "utf8") : null,
           agentCwd: values["agent-cwd"] ?? null
         });
       } catch (err) {
@@ -13317,6 +13396,21 @@ async function main(argv) {
       const context = runContext();
       if (values.json) console.log(JSON.stringify(context));
       else console.log(context.text);
+      return 0;
+    }
+    case "feedback": {
+      const text = positionals.slice(1).join(" ").trim();
+      if (text.length === 0) {
+        const read = runFeedbackRead();
+        if (values.json) console.log(JSON.stringify(read, null, 2));
+        else if (!read.exists) console.log(`no feedback recorded \u2014 \`fadeno feedback "<what happened>"\` starts ${read.path}.`);
+        else process.stdout.write(read.text.endsWith("\n") ? read.text : `${read.text}
+`);
+        return 0;
+      }
+      const added = runFeedbackAdd({ text, dispatch: values.dispatch ?? null });
+      if (values.json) console.log(JSON.stringify(added, null, 2));
+      else console.log(`recorded in ${added.path} (${added.total} entr${added.total === 1 ? "y" : "ies"}).`);
       return 0;
     }
     case "dispatches": {

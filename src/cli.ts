@@ -34,6 +34,7 @@ import { runModels, runModelsAdd, runModelsHarness, runModelsRemove, type Harnes
 import { runModelsVerify, type ModelsVerifyResult } from './commands/models-verify.ts';
 import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
 import { knownFlagsFor, retiredFlagFor, runCompletion, runCompletionCandidates, suggestFlag, TOP_LEVEL_COMMANDS, unknownFlagsFor } from './commands/completion.ts';
+import { runFeedbackAdd, runFeedbackRead } from './commands/feedback.ts';
 import { runSetup } from './commands/setup.ts';
 import { runStatus } from './commands/status.ts';
 import { roleResolutionEchoLabel } from './lib/executors.ts';
@@ -296,6 +297,8 @@ async function main(argv: string[]): Promise<number> {
         discarded: { type: 'boolean' },
         failed: { type: 'boolean' },
         note: { type: 'string' },
+        // feedback
+        dispatch: { type: 'string' },
         // dispatches
         all: { type: 'boolean' },
         tail: { type: 'string' },
@@ -787,6 +790,20 @@ async function main(argv: string[]): Promise<number> {
       const context = runContext();
       if (values.json) console.log(JSON.stringify(context));
       else console.log(context.text);
+      return 0;
+    }
+    case 'feedback': {
+      const text = positionals.slice(1).join(' ').trim();
+      if (text.length === 0) {
+        const read = runFeedbackRead();
+        if (values.json) console.log(JSON.stringify(read, null, 2));
+        else if (!read.exists) console.log(`no feedback recorded — \`fadeno feedback "<what happened>"\` starts ${read.path}.`);
+        else process.stdout.write(read.text!.endsWith('\n') ? read.text! : `${read.text!}\n`);
+        return 0;
+      }
+      const added = runFeedbackAdd({ text, dispatch: values.dispatch ?? null });
+      if (values.json) console.log(JSON.stringify(added, null, 2));
+      else console.log(`recorded in ${added.path} (${added.total} entr${added.total === 1 ? 'y' : 'ies'}).`);
       return 0;
     }
     case 'dispatches': {

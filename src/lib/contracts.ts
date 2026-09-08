@@ -177,6 +177,15 @@ export function hostVocabulary(input: HostVocabularyInput): string {
   lines.push(`Fadeno reminds you of unclosed dispatches at every spawn and refuses a new one at ${input.unclosedLimit} unclosed. \`fadeno dispatches\` lists them, \`fadeno dispatches --output <name>\` shows a report, \`fadeno worktrees\` shows every worktree still holding unmerged work, and \`fadeno cancel <name>\` stops a running command-lane dispatch.`, '');
   lines.push('## When Fadeno fails', '');
   lines.push('A refused spawn, a dispatch that exits non-zero or returns nothing, or a resolver error is a user-facing event. Report it with the dispatch id and the error text, and do not substitute a generic subagent, another model, or your own hands for the delegated work without being told to.', '');
+  // The channel from the agents USING Fadeno to the people changing it. It
+  // existed as a convention in one repository's own docs, which is why a host
+  // that hit five frictions in an afternoon reported them only in chat: the
+  // text that tells it everything else about Fadeno never named the file.
+  lines.push(
+    'Friction with Fadeno itself — a message that misled you, a refusal you could not act on, a step that needed guessing — is worth recording even when you worked around it: `fadeno feedback "<what happened>"`, plus `--dispatch <name>` when it happened on one. ' +
+      'It appends to `.fadeno/feedback.md` with the harness and version attached, and that file is what whoever maintains Fadeno reads. Report the friction to your user as well; the file is for the maintainer, not for them.',
+    '',
+  );
   lines.push(nagText(input.unclosed, input.unclosedLimit, input.now));
   return lines.join('\n').replace(/\n{3,}/g, '\n\n');
 }

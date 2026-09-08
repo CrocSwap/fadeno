@@ -162,6 +162,7 @@ it. A tree it cannot read is reported as unreadable, never as clean.
 | `cancel` | Stop a running command-lane dispatch by signalling its process group. |
 | `worktrees` | Every worktree holding work that is not on HEAD. |
 | `context` | What a host session is told: archetypes, rules, open dispatches. |
+| `feedback` | Record friction with Fadeno itself, or read what has been recorded. |
 | `status` | Effective routing, harness integration, and whatever needs a person. |
 | `clean` | Remove machine-local scratch — never prompts, never the ledger. |
 | `setup` | Link the CLI onto PATH. A symlink, never a copy. |
