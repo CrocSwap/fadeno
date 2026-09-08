@@ -10135,13 +10135,33 @@ function renderDispatchLine(e) {
   const route = e.model == null ? "?" : `${e.model}${e.effort ? `@${e.effort}` : ""}${e.harness ? ` on ${e.harness}` : ""}`;
   const dirty = e.dirty == null ? "" : e.dirty === "unavailable" ? "; tree unreadable" : e.dirty > 0 ? `; ${e.dirty} dirty path(s)` : "";
   const exit = e.exit == null ? "" : e.exit.signal ? `; killed by ${e.exit.signal}` : e.exit.code === 0 ? "" : `; exit ${e.exit.code}`;
-  return `${e.id.slice(0, 8)}  ${(e.name ?? "?").padEnd(24)} ${(e.archetype ?? "?").padEnd(9)} ${e.lane ?? "?"}  ${route}  ${where}  ${state}${dirty}${exit}  ${e.age}`;
+  return [
+    e.id.slice(0, 8),
+    (e.name ?? "?").padEnd(24),
+    (e.archetype ?? "?").padEnd(9),
+    (e.lane ?? "?").padEnd(7),
+    route.padEnd(22),
+    where.padEnd(24),
+    `${state}${dirty}${exit}`.padEnd(26),
+    e.age
+  ].join("  ");
 }
+var DISPATCH_LINE_HEADER = [
+  "ID".padEnd(8),
+  "NAME".padEnd(24),
+  "ARCHETYPE".padEnd(9),
+  "LANE".padEnd(7),
+  "ROUTE".padEnd(22),
+  "WHERE".padEnd(24),
+  "STATE".padEnd(26),
+  "AGE"
+].join("  ");
 function renderDispatches(result) {
   const lines = [];
   if (result.entries.length === 0) {
     lines.push(result.total === 0 ? "No dispatches recorded in this repository." : `No unclosed dispatches (${result.total} recorded; --all shows them).`);
   } else {
+    lines.push(DISPATCH_LINE_HEADER);
     for (const e of result.entries) lines.push(renderDispatchLine(e));
     lines.push("", `${result.unclosed} unclosed of ${result.total} recorded.`);
   }
@@ -12275,8 +12295,10 @@ function runStatus(opts = {}) {
   for (const stale of shown.staleDials) {
     attention.push(`${stale.archetype} does not resolve \u2014 ${stale.reason}`);
   }
+  const standalone = shown.host === "standalone";
   for (const row of shown.rows) {
     if (row.deliverable) continue;
+    if (row.model === HOST_MODEL && standalone) continue;
     attention.push(
       `${row.archetype} has no lane from here: it routes to ${row.model}, which this session can neither deliver in-session nor run as a process.`
     );
@@ -12924,6 +12946,7 @@ async function main(argv) {
         `cli: ${result.link.state === "linked" ? `${result.link.path} -> ${result.link.target}` : `${result.link.state} at ${result.link.path}`}`
       );
       console.log("routing:");
+      console.log(`  ${"ARCHETYPE".padEnd(12)} ${"MODEL".padEnd(20)} ${"LANE".padEnd(8)} SOURCE`);
       for (const row of result.routing) {
         const lane = row.deliverable ? row.lane : "no lane";
         console.log(`  ${row.archetype.padEnd(12)} ${modelCell(row).padEnd(20)} ${lane.padEnd(8)} ${roleResolutionEchoLabel(row.source) ?? "\u2014"}`);

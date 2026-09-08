@@ -152,10 +152,28 @@ test('status answers with the routing dial prints, and nothing needs attention o
   assert.equal(result.link.state, 'linked');
   assert.equal(result.link.target, source);
   assert.deepEqual(result.routing.map((row) => row.archetype), ['judge', 'reviewer', 'worker']);
-  // From a bare shell the undialed base has no lane, and status says so
-  // rather than reporting a command lane with nothing to invoke.
-  assert.equal(result.attention.length, 3);
-  assert.ok(result.attention.every((item) => /has no lane from here/.test(item)), result.attention.join('\n'));
+  // Every row here is undialed, so every row routes to `host` and has no lane
+  // from a terminal. That is what a terminal IS, not a finding: reporting it
+  // put three items a person cannot act on above the ones they can.
+  assert.ok(result.routing.every((row) => row.model === 'host' && !row.deliverable));
+  assert.deepEqual(result.attention, []);
+});
+
+test('status still reports a NAMED model with no lane — the case a person can act on', (t) => {
+  // `stray` lives on `omp`, a harness Fadeno can run inside and cannot spawn.
+  // From a terminal it can be neither delivered nor run, and unlike `host`
+  // that is a dial someone chose and can change.
+  const { root, user, source } = seed(t, catalogV4({
+    models: { stray: { provider: 'ompco', id: 'stray-1', harness: 'omp' } },
+    harnesses: { omp: { host: { effort_channel: 'none', identity: 'model' } } },
+    archetypes: { worker: {} },
+    dials: { worker: 'stray' },
+  }));
+  runSetup({ repoRoot: root, userPathOptions: user, source });
+  const attention = runStatus({ repoRoot: root, userPathOptions: user }).attention;
+  assert.deepEqual(attention, [
+    'worker has no lane from here: it routes to stray, which this session can neither deliver in-session nor run as a process.',
+  ]);
 });
 
 test('status names an unlinked CLI, an agent file that answers an archetype, and open work', (t) => {

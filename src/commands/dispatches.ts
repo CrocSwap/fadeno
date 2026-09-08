@@ -553,14 +553,36 @@ export function renderDispatchLine(e: DispatchEntry): string {
   const route = e.model == null ? '?' : `${e.model}${e.effort ? `@${e.effort}` : ''}${e.harness ? ` on ${e.harness}` : ''}`;
   const dirty = e.dirty == null ? '' : e.dirty === 'unavailable' ? '; tree unreadable' : e.dirty > 0 ? `; ${e.dirty} dirty path(s)` : '';
   const exit = e.exit == null ? '' : e.exit.signal ? `; killed by ${e.exit.signal}` : e.exit.code === 0 ? '' : `; exit ${e.exit.code}`;
-  return `${e.id.slice(0, 8)}  ${(e.name ?? '?').padEnd(24)} ${(e.archetype ?? '?').padEnd(9)} ${e.lane ?? '?'}  ${route}  ${where}  ${state}${dirty}${exit}  ${e.age}`;
+  return [
+    e.id.slice(0, 8),
+    (e.name ?? '?').padEnd(24),
+    (e.archetype ?? '?').padEnd(9),
+    (e.lane ?? '?').padEnd(7),
+    route.padEnd(22),
+    where.padEnd(24),
+    `${state}${dirty}${exit}`.padEnd(26),
+    e.age,
+  ].join('  ');
 }
+
+/** The column names for `renderDispatchLine`, in the same widths. */
+export const DISPATCH_LINE_HEADER = [
+  'ID'.padEnd(8),
+  'NAME'.padEnd(24),
+  'ARCHETYPE'.padEnd(9),
+  'LANE'.padEnd(7),
+  'ROUTE'.padEnd(22),
+  'WHERE'.padEnd(24),
+  'STATE'.padEnd(26),
+  'AGE',
+].join('  ');
 
 export function renderDispatches(result: DispatchesResult): string[] {
   const lines: string[] = [];
   if (result.entries.length === 0) {
     lines.push(result.total === 0 ? 'No dispatches recorded in this repository.' : `No unclosed dispatches (${result.total} recorded; --all shows them).`);
   } else {
+    lines.push(DISPATCH_LINE_HEADER);
     for (const e of result.entries) lines.push(renderDispatchLine(e));
     lines.push('', `${result.unclosed} unclosed of ${result.total} recorded.`);
   }

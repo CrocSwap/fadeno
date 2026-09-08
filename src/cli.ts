@@ -405,6 +405,7 @@ async function main(argv: string[]): Promise<number> {
         `cli: ${result.link.state === 'linked' ? `${result.link.path} -> ${result.link.target}` : `${result.link.state} at ${result.link.path}`}`,
       );
       console.log('routing:');
+      console.log(`  ${'ARCHETYPE'.padEnd(12)} ${'MODEL'.padEnd(20)} ${'LANE'.padEnd(8)} SOURCE`);
       for (const row of result.routing) {
         // Status keeps the lane: this is the command whose job is what needs
         // a person, and `no lane` is the one routing fact that does.

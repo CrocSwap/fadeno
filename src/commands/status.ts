@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import { activeHarness } from '../lib/executors.ts';
+import { activeHarness, HOST_MODEL } from '../lib/executors.ts';
 import { unclosedDispatches } from '../lib/ledger.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { codexUserAgentDir, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
@@ -166,8 +166,15 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   for (const stale of shown.staleDials) {
     attention.push(`${stale.archetype} does not resolve — ${stale.reason}`);
   }
+  const standalone = shown.host === 'standalone';
   for (const row of shown.rows) {
     if (row.deliverable) continue;
+    // `host` from a bare shell is not a finding. It names the session's own
+    // model and a terminal is not a session, so every undialed archetype would
+    // report it on every run — noise that pushed the items a person can act on
+    // off the top. Inside a harness that cannot host, it still means something
+    // and is still reported.
+    if (row.model === HOST_MODEL && standalone) continue;
     attention.push(
       `${row.archetype} has no lane from here: it routes to ${row.model}, which this session can neither deliver in-session nor run as a process.`,
     );
