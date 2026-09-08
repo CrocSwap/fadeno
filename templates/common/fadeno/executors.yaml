@@ -66,9 +66,9 @@ models:
     # one. The google harness sets `effort_encoding: model-suffix`, so the
     # dial's effort is appended to the id — and Antigravity publishes only
     # `-high|-medium|-low`. A bare `fadeno dial judge gemini` therefore built
-    # `gemini-3.7-flash-xhigh`, which agy rejects with exit 1 after printing
+    # `gemini-3.8-flash-xhigh`, which agy rejects with exit 1 after printing
     # its model list. Found by dogfood 2026-08-21: the default was unusable.
-    id: gemini-3.7-flash
+    id: gemini-3.8-flash
     effort: high
   muse:
     provider: muse
