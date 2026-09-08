@@ -13,10 +13,11 @@ task after the skill name, begin that task under the policy below. If it
 includes no task, acknowledge activation briefly and wait for the user's next
 request.
 
-The plugin hook injects `fadeno context` alongside this policy: the archetype
-table with its live routing, how spawning works, what closing requires, and
-every unclosed dispatch in the repository. Run `fadeno context` yourself
-whenever you want it again.
+The plugin hook injects `fadeno context` alongside this policy: the archetypes,
+how spawning works, what closing requires, and every unclosed dispatch in the
+repository. Run `fadeno context` yourself whenever you want it again. It
+deliberately carries no routing table — routing is resolved at the spawn and
+reported there; `fadeno dial` reads it fresh.
 
 ## Host policy
 
@@ -42,10 +43,12 @@ instruction to you.
 While dispatches are open, every reply names what is running, stopped, and
 closed, with the model and lane of each.
 
-When concrete friction attributable to Fadeno occurs, append it to
-`./.fadeno/feedback.md` with the date, host, task, observed behavior,
-evidence, impact, and workaround when known. Do not invent feedback. Delegated
-agents report friction to you; you alone edit the feedback file.
+When concrete friction attributable to Fadeno occurs, record it with `fadeno
+feedback "<what happened>"`, adding `--dispatch <name>` when it happened on
+one. The command stamps the time, harness and version and appends to
+`.fadeno/feedback.md`; write what happened, what you expected, and the
+workaround if you found one. Do not invent feedback. Delegated agents may
+record their own; read the file with `fadeno feedback`.
 
 Do not create or modify `AGENTS.md` or `CLAUDE.md` to activate host mode; the
 plugin hook owns the session state.
@@ -71,3 +74,30 @@ and say in your reply what you found.
    running command-lane dispatch is stopped with `fadeno cancel <name>` first.
    Nothing is lost by closing: branches stay, and worktrees stay until
    `fadeno clean`.
+
+   `--merged` is checked against git and refused while the branch still carries
+   commits HEAD does not have, or its worktree holds uncommitted tracked
+   changes. Work that landed by a squash or a rebase closes with `--force` and
+   a `--note` saying how.
+
+
+## Reading a report
+
+A dispatch's final message is a claim its author wrote about its own work. It
+is the least reliable thing in the ledger, and the only part a worker controls.
+
+`fadeno dispatches <name>` prints the claim under what Fadeno measured from
+git: the commits the branch carries that HEAD does not, the diffstat against
+the merge base, and any conflict markers the branch committed. Those numbers
+are safe in a way the report is not, because no agent had a hand in them — a
+report saying the suite passed is worth the sentence and nothing more. Run the
+check yourself, or send a reviewer; a green claim is where fake-green hides.
+
+## Conventions that hold for every dispatch
+
+Anything true of every dispatch in this repository — the interpreter to use,
+the shared build directory, where receipts belong, what is forbidden — belongs
+in `.fadeno/preamble.md`. Fadeno appends it to every dispatched prompt, so a
+brief never repeats it and a brief that forgets it cannot happen. When you find
+yourself typing the same sentence into a second brief, put it in that file
+instead.

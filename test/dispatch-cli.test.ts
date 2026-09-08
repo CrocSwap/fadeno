@@ -63,7 +63,11 @@ test('dispatch: the report is stdout verbatim, the exit code is the executor\'s,
   const show = cli(root, ['dispatches', 'fix-login']);
   assert.match(show.stdout, /^fix-login \([0-9a-f-]{36}\)/);
   assert.match(show.stdout, /worktree:  .*\.fadeno\/local\/worktrees\/fix-login on fadeno\/fix-login/);
-  assert.match(show.stdout, /--- final message ---/);
+  // The two halves, labelled: git's measurement of the branch, and the claim
+  // the agent wrote about its own work.
+  assert.match(show.stdout, /--- what Fadeno measured ---/);
+  assert.match(show.stdout, /fadeno\/fix-login at [0-9a-f]{12}: \d+ commit\(s\) HEAD does not have/);
+  assert.match(show.stdout, /--- what the agent reported \(a claim, not a finding\) ---/);
 
   const close = cli(root, ['dispatch-close', 'fix-login', '--merged', '--note', 'landed']);
   assert.equal(close.status, 0, close.stderr);
@@ -196,6 +200,35 @@ test('dispatch-wait: a dead process group with no stop row is answered, not wait
   assert.match(answer.stderr, /fadeno dispatch-stop orphaned --message-file \S*outputs\S*\.md/);
 });
 
+test('dispatch-wait: several names answer on the first to stop, and name the ones still running', (t) => {
+  const root = repo(t);
+  const open = (name: string) =>
+    JSON.parse(cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', name, '--json'], 'do it').stdout) as { id: string };
+  open('alpha');
+  open('beta');
+  open('gamma');
+
+  // A director fanning out was polling each ledger by hand between turns. One
+  // call covers the fan-out; with none of them stopped it says how many.
+  const waiting = cli(root, ['dispatch-wait', 'alpha', 'beta', 'gamma', '--wait-seconds', '0']);
+  assert.equal(waiting.status, 2);
+  assert.match(waiting.stderr, /3 dispatches are still running \(alpha, beta, gamma\)\. Run this command again\./);
+
+  cli(root, ['dispatch-stop', 'beta'], 'beta is done');
+  const first = cli(root, ['dispatch-wait', 'alpha', 'beta', 'gamma', '--wait-seconds', '0']);
+  assert.equal(first.status, 0);
+  assert.match(first.stdout, /beta is done/, 'the report of the one that stopped');
+  // And the next call is spelled out, so the caller does not ask again for the
+  // one it just collected.
+  assert.match(first.stderr, /Still running: alpha gamma — `fadeno dispatch-wait alpha gamma`/);
+
+  // An unknown name is the caller's mistake and is said at once, not after
+  // nine minutes of waiting on the others.
+  const bad = cli(root, ['dispatch-wait', 'alpha', 'no-such-dispatch', '--wait-seconds', '600']);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /no dispatch "no-such-dispatch"/);
+});
+
 test('worktrees and clean: a closed clean worktree is reclaimed, an open or dirty one is kept and the reason printed', (t) => {
   const root = repo(t);
   cli(root, ['dispatch', '--archetype', 'worker', '--name', 'done'], 'x');
@@ -221,7 +254,7 @@ test('worktrees and clean: a closed clean worktree is reclaimed, an open or dirt
   assert.match(cli(root, ['clean', '--force']).stdout, /kept \.fadeno\/local\/worktrees\/busy: 1 uncommitted path\(s\)/);
 });
 
-test('context prints the vocabulary with live routing and the nag', (t) => {
+test('context prints the vocabulary and the nag, and no routing snapshot', (t) => {
   const root = repo(t);
   cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', 'pending'], 'x');
   const ctx = cli(root, ['context']);

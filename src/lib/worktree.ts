@@ -257,3 +257,151 @@ export function removeWorktree(opts: { repoRoot: string; absolute: string; force
   git(opts.repoRoot, ['worktree', 'prune']);
   return { ok: true };
 }
+
+// ---------------------------------------------------------------------------
+// Measuring the work, and checking the one close verb that can be checked
+// ---------------------------------------------------------------------------
+
+/** Conflict-marker paths a measurement carries before it stops listing them. */
+export const CONFLICT_PATH_LIMIT = 20;
+
+/**
+ * What a dispatch's branch holds, measured rather than asked.
+ *
+ * A worker's report is a claim. In one Basanos session three green reports
+ * described a canary that could not fail, a feature that had never compiled
+ * into the image, and an artifact built with the wrong toolchain; a director
+ * asked afterwards for "structured dispatch results" so it could verify
+ * without reading. A schema the agent fills in would not have caught any of
+ * the three — `tests: 316 passed` is exactly as trustworthy as the sentence
+ * saying so. These are the facts git already knows and no agent supplies.
+ *
+ * Everything here is relative to the repository's HEAD at the moment of
+ * measurement, which makes it the same diff a reviewer would open: commits the
+ * branch carries that HEAD does not, and the merge-base diff between them.
+ */
+export interface WorkMeasured {
+  /** The branch's own tip. */
+  head: string;
+  /** Commits on the branch that the repository's HEAD does not have. */
+  commits: number;
+  files: number;
+  insertions: number;
+  deletions: number;
+  /** Binary files in the diff, which have no line counts to add. */
+  binary: number;
+  /**
+   * Paths the branch changed that still carry conflict markers. Only changed
+   * paths are searched: a file this dispatch never touched cannot hold markers
+   * it introduced, and a repository whose own documentation shows markers
+   * would otherwise report itself as broken.
+   */
+  conflicts: string[];
+  conflicts_truncated?: true;
+}
+
+const CONFLICT_MARKER = '^(<<<<<<<|>>>>>>>) ';
+
+/**
+ * Measure a dispatch branch against the repository's HEAD. Returns null when
+ * there is nothing to measure — a shared-tree dispatch has no branch of its
+ * own, and work committed onto the current branch is indistinguishable from
+ * everyone else's, which is a reason to report nothing rather than a guess.
+ */
+export function measureWork(opts: { repoRoot: string; branch: string | null | undefined }): WorkMeasured | null {
+  const { repoRoot } = opts;
+  const branch = opts.branch?.trim();
+  if (branch == null || branch === '') return null;
+  const head = git(repoRoot, ['rev-parse', '--verify', '--quiet', `${branch}^{commit}`]);
+  if (!head.ok) return null;
+
+  const counted = git(repoRoot, ['rev-list', '--count', `HEAD..${branch}`]);
+  const measured: WorkMeasured = {
+    head: head.stdout.trim(),
+    commits: counted.ok ? Number.parseInt(counted.stdout.trim(), 10) || 0 : 0,
+    files: 0,
+    insertions: 0,
+    deletions: 0,
+    binary: 0,
+    conflicts: [],
+  };
+
+  // Three dots: the diff from where the branch and HEAD diverged, so a worker
+  // that did as its contract asked and merged upstream in before finishing is
+  // not credited with everyone else's changes.
+  const stat = git(repoRoot, ['diff', '--numstat', `HEAD...${branch}`]);
+  const changed: string[] = [];
+  if (stat.ok) {
+    for (const line of stat.stdout.split('\n')) {
+      if (line.trim() === '') continue;
+      const [ins, del, ...rest] = line.split('\t');
+      const path = rest.join('\t');
+      if (path === '') continue;
+      measured.files += 1;
+      changed.push(path);
+      if (ins === '-' || del === '-') measured.binary += 1;
+      else {
+        measured.insertions += Number.parseInt(ins ?? '0', 10) || 0;
+        measured.deletions += Number.parseInt(del ?? '0', 10) || 0;
+      }
+    }
+  }
+
+  if (changed.length > 0) {
+    // `git grep` against the branch searches what was COMMITTED, which is the
+    // failure worth catching: a conflict resolved badly in the working tree is
+    // the author's problem until they commit it, and then it is everyone's.
+    const found = git(repoRoot, ['grep', '-l', '-E', CONFLICT_MARKER, branch, '--', ...changed]);
+    if (found.ok) {
+      const paths = found.stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '')
+        .map((line) => (line.startsWith(`${branch}:`) ? line.slice(branch.length + 1) : line));
+      measured.conflicts = paths.slice(0, CONFLICT_PATH_LIMIT);
+      if (paths.length > CONFLICT_PATH_LIMIT) measured.conflicts_truncated = true;
+    }
+  }
+  return measured;
+}
+
+/**
+ * Whether a `--merged` claim is true, as far as git can say.
+ *
+ * `--merged` is the only close verb that asserts something about the world
+ * rather than about the host's intent, and so the only one Fadeno can check.
+ * A director that ran a day of dispatches closed two before checking the merge
+ * result and committed conflict markers once, and named the fifteen seconds
+ * between merging and closing as where its mistakes lived. The check is that
+ * tripwire: cheap, mechanical, and overridable, because a squash or a rebase
+ * lands the work without leaving the branch reachable and Fadeno must not call
+ * that a lie.
+ */
+export interface MergeCheck {
+  /** False when there was nothing to check against; then nothing is claimed. */
+  checked: boolean;
+  /** Why the claim could not be checked. */
+  reason: string | null;
+  /** Commits on the branch that HEAD does not have. */
+  unmerged: number;
+  /** Tracked, uncommitted paths in the worktree: work no merge could have taken. */
+  uncommitted: string[];
+}
+
+export function verifyMerged(opts: { repoRoot: string; branch: string | null | undefined; worktree?: string | null }): MergeCheck {
+  const unchecked = (reason: string): MergeCheck => ({ checked: false, reason, unmerged: 0, uncommitted: [] });
+  const branch = opts.branch?.trim();
+  if (branch == null || branch === '') return unchecked('the dispatch worked in the shared tree, so it has no branch to look for');
+  const exists = git(opts.repoRoot, ['rev-parse', '--verify', '--quiet', `${branch}^{commit}`]);
+  if (!exists.ok) return unchecked(`branch ${branch} no longer exists`);
+  const counted = git(opts.repoRoot, ['rev-list', '--count', `HEAD..${branch}`]);
+  if (!counted.ok) return unchecked(`git could not compare ${branch} with HEAD: ${counted.error}`);
+
+  let uncommitted: string[] = [];
+  if (opts.worktree != null && existsSync(opts.worktree)) {
+    // Tracked only: an unbuilt `node_modules` in a worktree is not lost work.
+    const dirty = trackedDirtyPaths(opts.worktree);
+    if (dirty !== 'unavailable') uncommitted = dirty;
+  }
+  return { checked: true, reason: null, unmerged: Number.parseInt(counted.stdout.trim(), 10) || 0, uncommitted };
+}

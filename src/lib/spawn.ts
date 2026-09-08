@@ -65,8 +65,9 @@ import {
   type StoppedRow,
   type Workspace,
 } from './ledger.ts';
+import { readPreamble } from './preamble.ts';
 import { readUserDials, type UserPathOptions } from './user-paths.ts';
-import { cutWorktree, dirtyPaths, existingFadenoBranches, git, sanitizeName, uniqueName } from './worktree.ts';
+import { cutWorktree, dirtyPaths, existingFadenoBranches, git, measureWork, sanitizeName, uniqueName } from './worktree.ts';
 
 export class SpawnError extends Error {}
 
@@ -91,12 +92,12 @@ export const CANCEL_GRACE_MS = 5_000;
 
 export interface Resolution {
   archetype: string;
-  /** Registry alias, or `current-host`. */
+  /** Registry alias, or `host`. */
   model: string;
   /** Provider id the harness is handed. */
   modelId: string;
   effort: string | null;
-  /** Executor harness the model resolves onto; null for current-host from a bare shell. */
+  /** Executor harness the model resolves onto; null for `host` from a bare shell. */
   harness: string | null;
   /** Where this would be delivered from inside a host session. */
   lane: Lane;
@@ -201,10 +202,9 @@ export function requireCommand(resolution: Resolution): string[] {
 }
 
 /**
- * Every archetype the catalog and the dials know, each with its description
- * and live routing — the list a host or a spawned director reads. One
- * function, because `fadeno context` and the director's contract must show
- * the same table.
+ * Every archetype the catalog and the dials know, each with its description:
+ * the list a host or a spawned director reads. One function, because
+ * `fadeno context` and the director's contract must show the same table.
  */
 export function describeArchetypes(input: { repoRoot: string; userPathOptions?: UserPathOptions }): { archetypes: ArchetypeLine[]; profile: ExecutorProfile } {
   const profile = loadProfile(input.repoRoot, input.userPathOptions);
@@ -384,7 +384,7 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
   }
 
   // A director is the archetype whose job is spawning, so its contract carries
-  // the host vocabulary (spec §06): the archetype table with live routing, the
+  // the host vocabulary (spec §06): the archetype table, the
   // spawn rules, the close obligation and every unclosed dispatch.
   const vocabulary = resolution.archetype === 'director'
     ? hostVocabulary({
@@ -394,7 +394,7 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
         now,
       })
     : null;
-  const contract = workerContract({ id, name, archetype: resolution.archetype, repoRoot, worktree: contractWorktree!, vocabulary });
+  const contract = workerContract({ id, name, archetype: resolution.archetype, repoRoot, worktree: contractWorktree!, vocabulary, preamble: readPreamble(repoRoot) });
   const composedPrompt = composeWorkerPrompt(prompt, contract);
   const promptRel = writePrompt(repoRoot, id, prompt);
   const env = input.env ?? process.env;
@@ -462,12 +462,19 @@ export function recordStopped(
   input: {
     finalMessage: string | null;
     cwd: string | null;
+    /** The dispatch's branch, so the stop row can carry what git measured. */
+    branch?: string | null;
     exit?: { code: number | null; signal: string | null };
     modelObserved?: string | null;
     now?: Date;
   },
 ): StoppedRow {
   const dirty = input.cwd != null && existsSync(input.cwd) ? dirtyPaths(input.cwd) : 'unavailable';
+  // Measured here, beside `dirty`, and by the same reasoning: the stop row
+  // records what an outside observer could see at the moment the agent
+  // stopped. What the agent SAID about it arrives separately, in
+  // `final_message`, and the two are never rendered as one thing.
+  const work = measureWork({ repoRoot, branch: input.branch });
   const row: StoppedRow = {
     row: 'stopped',
     id,
@@ -477,6 +484,7 @@ export function recordStopped(
     cwd: input.cwd,
     ...(input.exit != null ? { exit: input.exit } : {}),
     ...(input.modelObserved != null ? { model_observed: input.modelObserved } : {}),
+    ...(work != null ? { work } : {}),
   };
   appendRow(repoRoot, row);
   return row;
@@ -548,7 +556,7 @@ export function runCommandDispatch(input: RunInput): Promise<RunResult> {
   mkdirSync(dirname(stdoutAbs), { recursive: true });
   writeFileSync(promptAbs, prepared.composedPrompt);
   const argv = substitutePromptFile(command, promptAbs);
-  const readsFile = argv.join(' ') !== command.join(' ');
+  const readsFile = argv.join('\0') !== command.join('\0');
 
   const env: NodeJS.ProcessEnv = {
     ...withoutHarnessIdentity(input.env ?? process.env),
@@ -618,6 +626,7 @@ export function runCommandDispatch(input: RunInput): Promise<RunResult> {
         const stopped = recordStopped(repoRoot, prepared.id, {
           finalMessage: stdout.trim().length > 0 ? stdout : null,
           cwd: prepared.cwd,
+          branch: prepared.workspace.branch,
           exit: { code, signal },
         });
         resolvePromise({
@@ -711,6 +720,7 @@ export async function cancelDispatch(
     recordStopped(repoRoot, record.id, {
       finalMessage: null,
       cwd,
+      branch: opened.workspace?.branch ?? null,
       exit: { code: null, signal: opts.signal ?? 'SIGTERM' },
       now: opts.now,
     });

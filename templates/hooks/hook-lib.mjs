@@ -101,6 +101,11 @@ export function runFadeno(cli, args, options) {
   });
   const timedOut = result.status == null && (result.error?.code === 'ETIMEDOUT' || result.signal != null);
   const missing = result.error?.code === 'ENOENT';
+  // An exit status means the process RAN. An `error` alongside one is about
+  // the pipe, not about starting — EPIPE when the CLI exits before reading all
+  // of the prompt is the common case — and reporting it as "could not be
+  // started" throws away the answer the process actually gave.
+  const ran = result.status != null;
   let json = null;
   const stdout = result.stdout ?? '';
   try {
@@ -114,7 +119,7 @@ export function runFadeno(cli, args, options) {
     stdout,
     stderr: (result.stderr ?? '').trim(),
     json,
-    failure: timedOut ? 'timeout' : missing ? 'missing' : result.error != null ? 'error' : null,
+    failure: timedOut ? 'timeout' : missing ? 'missing' : result.error != null && !ran ? 'error' : null,
     error: result.error?.message ?? null,
     timeoutMs,
   };

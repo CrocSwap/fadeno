@@ -7364,13 +7364,13 @@ __export(cli_exports, {
   KNOWN_CLI_COMMANDS: () => KNOWN_CLI_COMMANDS
 });
 module.exports = __toCommonJS(cli_exports);
-var import_node_fs18 = require("node:fs");
-var import_node_path17 = require("node:path");
+var import_node_fs19 = require("node:fs");
+var import_node_path18 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/commands/dispatches.ts
-var import_node_fs9 = require("node:fs");
-var import_node_path8 = require("node:path");
+var import_node_fs10 = require("node:fs");
+var import_node_path9 = require("node:path");
 
 // src/lib/ledger.ts
 var import_node_crypto = require("node:crypto");
@@ -7428,6 +7428,11 @@ function existingFadenoBranches(repoRoot) {
     if (trimmed.startsWith(BRANCH_PREFIX)) names.add(trimmed.slice(BRANCH_PREFIX.length));
   }
   return names;
+}
+function trackedDirtyPaths(dir) {
+  const status = git(dir, ["status", "--porcelain", "--untracked-files=no"]);
+  if (!status.ok) return "unavailable";
+  return status.stdout.split("\n").filter((line) => line.trim() !== "").map((line) => line.slice(3));
 }
 function dirtyPaths(dir) {
   const status = git(dir, ["status", "--porcelain", "--untracked-files=all"]);
@@ -7532,6 +7537,66 @@ function removeWorktree(opts) {
   if (!removed.ok) return { ok: false, reason: removed.error };
   git(opts.repoRoot, ["worktree", "prune"]);
   return { ok: true };
+}
+var CONFLICT_PATH_LIMIT = 20;
+var CONFLICT_MARKER = "^(<<<<<<<|>>>>>>>) ";
+function measureWork(opts) {
+  const { repoRoot } = opts;
+  const branch = opts.branch?.trim();
+  if (branch == null || branch === "") return null;
+  const head = git(repoRoot, ["rev-parse", "--verify", "--quiet", `${branch}^{commit}`]);
+  if (!head.ok) return null;
+  const counted = git(repoRoot, ["rev-list", "--count", `HEAD..${branch}`]);
+  const measured = {
+    head: head.stdout.trim(),
+    commits: counted.ok ? Number.parseInt(counted.stdout.trim(), 10) || 0 : 0,
+    files: 0,
+    insertions: 0,
+    deletions: 0,
+    binary: 0,
+    conflicts: []
+  };
+  const stat = git(repoRoot, ["diff", "--numstat", `HEAD...${branch}`]);
+  const changed = [];
+  if (stat.ok) {
+    for (const line of stat.stdout.split("\n")) {
+      if (line.trim() === "") continue;
+      const [ins, del, ...rest] = line.split("	");
+      const path = rest.join("	");
+      if (path === "") continue;
+      measured.files += 1;
+      changed.push(path);
+      if (ins === "-" || del === "-") measured.binary += 1;
+      else {
+        measured.insertions += Number.parseInt(ins ?? "0", 10) || 0;
+        measured.deletions += Number.parseInt(del ?? "0", 10) || 0;
+      }
+    }
+  }
+  if (changed.length > 0) {
+    const found = git(repoRoot, ["grep", "-l", "-E", CONFLICT_MARKER, branch, "--", ...changed]);
+    if (found.ok) {
+      const paths = found.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== "").map((line) => line.startsWith(`${branch}:`) ? line.slice(branch.length + 1) : line);
+      measured.conflicts = paths.slice(0, CONFLICT_PATH_LIMIT);
+      if (paths.length > CONFLICT_PATH_LIMIT) measured.conflicts_truncated = true;
+    }
+  }
+  return measured;
+}
+function verifyMerged(opts) {
+  const unchecked = (reason) => ({ checked: false, reason, unmerged: 0, uncommitted: [] });
+  const branch = opts.branch?.trim();
+  if (branch == null || branch === "") return unchecked("the dispatch worked in the shared tree, so it has no branch to look for");
+  const exists = git(opts.repoRoot, ["rev-parse", "--verify", "--quiet", `${branch}^{commit}`]);
+  if (!exists.ok) return unchecked(`branch ${branch} no longer exists`);
+  const counted = git(opts.repoRoot, ["rev-list", "--count", `HEAD..${branch}`]);
+  if (!counted.ok) return unchecked(`git could not compare ${branch} with HEAD: ${counted.error}`);
+  let uncommitted = [];
+  if (opts.worktree != null && (0, import_node_fs.existsSync)(opts.worktree)) {
+    const dirty = trackedDirtyPaths(opts.worktree);
+    if (dirty !== "unavailable") uncommitted = dirty;
+  }
+  return { checked: true, reason: null, unmerged: Number.parseInt(counted.stdout.trim(), 10) || 0, uncommitted };
 }
 
 // src/lib/ledger.ts
@@ -7727,6 +7792,10 @@ function workerContract(input) {
     lines.push("**You own the work.**");
     lines.push("- Make the change and commit it, with a message that says what and why.", "");
   }
+  lines.push(...preambleSection(input.preamble, input.repoRoot));
+  lines.push("**If part of it is impossible.**");
+  lines.push("- Do every part that is not, and say in your report exactly which part you left out and why. A brief with one blocked clause is not a blocked brief.");
+  lines.push("- If proceeding needs an assumption, state the assumption and proceed. Scaling the work down is your caller's decision, not yours to make silently.", "");
   lines.push("**Your final message.**");
   lines.push("- State what is in the tree: every file you changed, added or deleted, and anything untracked you left behind on purpose.");
   lines.push("- Say what you verified and how, and what you could not verify.");
@@ -7738,6 +7807,17 @@ function workerContract(input) {
   }
   lines.push(CONTRACT_FOOTER);
   return lines.join("\n");
+}
+function preambleSection(preamble, repoRoot) {
+  if (preamble == null || !preamble.exists || preamble.text == null) return [];
+  const lines = ["**This repository.**", "", preamble.text, ""];
+  if (preamble.truncated) {
+    lines.push(
+      `(Cut at ${preamble.text.length} of ${preamble.chars} characters. The rest is at \`${repoRoot}/${preamble.path}\`; read it if the part above leaves something open.)`,
+      ""
+    );
+  }
+  return lines;
 }
 function composeWorkerPrompt(callerPrompt, contract) {
   const body = callerPrompt.replace(/\s+$/, "");
@@ -7762,6 +7842,9 @@ function hostVocabulary(input) {
   lines.push("## Spawning", "");
   lines.push("- Spawn through your harness's subagent tool with the archetype as the agent type (`fadeno:worker` on Claude Code; `worker` on Codex). Where no Fadeno hook can observe a spawn, run `fadeno dispatch --archetype <name> --prompt-file <file>` instead; it does the same thing as a process.");
   lines.push("- Write the prompt as the task itself, addressed to the agent that will do it. Fadeno appends the dispatch contract; do not describe Fadeno to the worker.");
+  lines.push(
+    input.preamble?.exists ? "- This repository states conventions for every dispatch in `.fadeno/preamble.md`, and Fadeno appends them to every prompt you dispatch. Do not repeat them in a brief; read the file if you need to know what your workers were already told, and add to it rather than to a prompt when something turns out to hold for all of them." : "- Conventions that hold for EVERY dispatch here \u2014 the interpreter, the shared build directory, where receipts belong, what is forbidden \u2014 belong in `.fadeno/preamble.md`, which Fadeno appends to every dispatched prompt when it exists. Putting one there beats retyping it into each brief, and makes a brief that forgets it impossible."
+  );
   lines.push("- Every dispatch gets a worktree cut from HEAD on a branch named `fadeno/<name>`. If the work needs uncommitted changes, commit them first, or ask for the shared tree by saying so in the spawn (`--shared` on the command lane). Two agents must never share one tree.");
   lines.push(
     "- **To escalate one task to a different model**, pass the model explicitly on the spawn \u2014 an override for that dispatch, not a change to the dial.",
@@ -7774,9 +7857,11 @@ function hostVocabulary(input) {
   );
   lines.push("## What the worker was promised", "");
   lines.push("It owns the change: it commits on its branch, merges from upstream before finishing, and its final message states what is in the tree and recommends merge or discard. That recommendation is a claim, not a finding: read the diff, run what you can, and reach your own conclusion.", "");
+  lines.push("`fadeno dispatches <name>` prints the two apart: what Fadeno measured from git \u2014 commits the branch carries that HEAD does not, the diffstat, and any conflict markers it committed \u2014 and, below it, what the agent said. The measured half is safe to trust because no agent had a hand in it. A report claiming a test suite passed is worth exactly as much as the sentence; run it yourself, or send a reviewer.", "");
   lines.push("## Closing", "");
   lines.push("Every dispatch must be closed with exactly one decision: `fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>]`. Fadeno performs no merge; you do (`git merge fadeno/<name>`), or you delegate it. `--kept` means the branch stays for later; `--discarded` and `--failed` leave the branch too, so nothing is lost by closing.", "");
-  lines.push(`Fadeno reminds you of unclosed dispatches at every spawn and refuses a new one at ${input.unclosedLimit} unclosed. \`fadeno dispatches\` lists them, \`fadeno dispatches --output <name>\` shows a report, \`fadeno worktrees\` shows every worktree still holding unmerged work, and \`fadeno cancel <name>\` stops a running command-lane dispatch.`, "");
+  lines.push("`--merged` is checked. It is the only verb that asserts something about the repository rather than about your intent, so Fadeno refuses it while the branch still carries commits HEAD does not have, or while its worktree holds uncommitted tracked changes. If the work landed another way \u2014 a squash, a rebase, a reimplementation \u2014 close with `--force` and say how in `--note`.", "");
+  lines.push(`Fadeno reminds you of unclosed dispatches at every spawn and refuses a new one at ${input.unclosedLimit} unclosed. \`fadeno dispatches\` lists them, \`fadeno dispatches --output <name>\` shows a report, \`fadeno worktrees\` shows every worktree still holding unmerged work, \`fadeno dispatch-wait <name>...\` blocks until one of them stops (several names answer on the first, so a fan-out needs one call rather than a poll per dispatch), and \`fadeno cancel <name>\` stops a running command-lane dispatch.`, "");
   lines.push("## When Fadeno fails", "");
   lines.push("A refused spawn, a dispatch that exits non-zero or returns nothing, or a resolver error is a user-facing event. Report it with the dispatch id and the error text, and do not substitute a generic subagent, another model, or your own hands for the delegated work without being told to.", "");
   lines.push(
@@ -7889,39 +7974,62 @@ function packageVersion() {
   }
 }
 
+// src/lib/preamble.ts
+var import_node_fs4 = require("node:fs");
+var import_node_path4 = require("node:path");
+var PREAMBLE_FILE = (0, import_node_path4.join)(".fadeno", "preamble.md");
+var PREAMBLE_MAX_CHARS = 4e3;
+function readPreamble(repoRoot) {
+  const path = PREAMBLE_FILE;
+  const file = (0, import_node_path4.join)(repoRoot, path);
+  if (!(0, import_node_fs4.existsSync)(file)) return { path, exists: false, text: null, chars: 0, truncated: false };
+  let raw;
+  try {
+    raw = (0, import_node_fs4.readFileSync)(file, "utf8");
+  } catch {
+    return { path, exists: false, text: null, chars: 0, truncated: false };
+  }
+  const trimmed = raw.trim();
+  if (trimmed === "") return { path, exists: false, text: null, chars: 0, truncated: false };
+  if (trimmed.length <= PREAMBLE_MAX_CHARS) {
+    return { path, exists: true, text: trimmed, chars: trimmed.length, truncated: false };
+  }
+  return { path, exists: true, text: trimmed.slice(0, PREAMBLE_MAX_CHARS).trimEnd(), chars: trimmed.length, truncated: true };
+}
+
 // src/lib/spawn.ts
 var import_node_crypto3 = require("node:crypto");
 var import_node_child_process2 = require("node:child_process");
-var import_node_fs7 = require("node:fs");
-var import_node_path7 = require("node:path");
+var import_node_fs8 = require("node:fs");
+var import_node_path8 = require("node:path");
 
 // src/lib/config-layers.ts
-var import_node_fs6 = require("node:fs");
-var import_node_path6 = require("node:path");
+var import_node_fs7 = require("node:fs");
+var import_node_path7 = require("node:path");
 var import_yaml2 = __toESM(require_dist(), 1);
 
 // src/lib/executors.ts
 var import_node_crypto2 = require("node:crypto");
-var import_node_fs5 = require("node:fs");
-var import_node_path5 = require("node:path");
+var import_node_fs6 = require("node:fs");
+var import_node_path6 = require("node:path");
 var import_yaml = __toESM(require_dist(), 1);
 
 // src/lib/user-paths.ts
-var import_node_fs4 = require("node:fs");
+var import_node_fs5 = require("node:fs");
 var import_node_os = require("node:os");
-var import_node_path4 = require("node:path");
+var import_node_path5 = require("node:path");
 function userPaths(options = {}) {
   const env = options.env ?? process.env;
   const home = options.home ?? (0, import_node_os.homedir)();
   const os = options.platform ?? (0, import_node_os.platform)();
   const windows = os === "win32";
-  const configHome = env.FADENO_CONFIG_HOME ?? (windows ? env.APPDATA : env.XDG_CONFIG_HOME) ?? (0, import_node_path4.join)(home, windows ? "AppData" : ".config");
-  const stateHome = env.FADENO_STATE_HOME ?? (windows ? env.LOCALAPPDATA : env.XDG_STATE_HOME) ?? (windows ? (0, import_node_path4.join)(home, "AppData", "Local") : (0, import_node_path4.join)(home, ".local", "state"));
-  const dataHome = env.FADENO_DATA_HOME ?? (windows ? env.LOCALAPPDATA : env.XDG_DATA_HOME) ?? (windows ? (0, import_node_path4.join)(home, "AppData", "Local") : (0, import_node_path4.join)(home, ".local", "share"));
-  const configDir = (0, import_node_path4.join)(configHome, "fadeno");
-  const stateDir = (0, import_node_path4.join)(stateHome, "fadeno");
-  const dataDir = (0, import_node_path4.join)(dataHome, "fadeno");
-  const binDir = env.FADENO_BIN_DIR?.trim() || (windows ? (0, import_node_path4.join)(dataDir, "bin") : (0, import_node_path4.join)(home, ".local", "bin"));
+  const configHome = env.FADENO_CONFIG_HOME ?? (windows ? env.APPDATA : env.XDG_CONFIG_HOME) ?? (0, import_node_path5.join)(home, windows ? "AppData" : ".config");
+  const stateHome = env.FADENO_STATE_HOME ?? (windows ? env.LOCALAPPDATA : env.XDG_STATE_HOME) ?? (windows ? (0, import_node_path5.join)(home, "AppData", "Local") : (0, import_node_path5.join)(home, ".local", "state"));
+  const dataHome = env.FADENO_DATA_HOME ?? (windows ? env.LOCALAPPDATA : env.XDG_DATA_HOME) ?? (windows ? (0, import_node_path5.join)(home, "AppData", "Local") : (0, import_node_path5.join)(home, ".local", "share"));
+  const configDir = (0, import_node_path5.join)(configHome, "fadeno");
+  const stateDir = (0, import_node_path5.join)(stateHome, "fadeno");
+  const dataDir = (0, import_node_path5.join)(dataHome, "fadeno");
+  const binDir = env.FADENO_BIN_DIR?.trim() || (windows ? (0, import_node_path5.join)(dataDir, "bin") : (0, import_node_path5.join)(home, ".local", "bin"));
   return {
     configHome,
     stateHome,
@@ -7929,36 +8037,36 @@ function userPaths(options = {}) {
     configDir,
     stateDir,
     dataDir,
-    executorsFile: (0, import_node_path4.join)(configDir, "executors.yaml"),
-    configFile: (0, import_node_path4.join)(configDir, "config.yaml"),
+    executorsFile: (0, import_node_path5.join)(configDir, "executors.yaml"),
+    configFile: (0, import_node_path5.join)(configDir, "config.yaml"),
     binDir,
-    linkPath: (0, import_node_path4.join)(binDir, windows ? "fadeno.cmd" : "fadeno"),
-    dialsFile: (0, import_node_path4.join)(stateDir, "dials.json"),
-    modelVerificationsFile: (0, import_node_path4.join)(stateDir, "model-verifications.json")
+    linkPath: (0, import_node_path5.join)(binDir, windows ? "fadeno.cmd" : "fadeno"),
+    dialsFile: (0, import_node_path5.join)(stateDir, "dials.json"),
+    modelVerificationsFile: (0, import_node_path5.join)(stateDir, "model-verifications.json")
   };
 }
 function retiredStateFiles(paths) {
   return [
-    (0, import_node_path4.join)(paths.stateDir, "harness"),
-    (0, import_node_path4.join)(paths.stateDir, "loadout"),
+    (0, import_node_path5.join)(paths.stateDir, "harness"),
+    (0, import_node_path5.join)(paths.stateDir, "loadout"),
     // The installation manifest: it recorded which files a managed-runtime
     // COPY had installed and at what version. `setup` links now, so there is
     // no copy to reconcile and nothing left to record.
-    (0, import_node_path4.join)(paths.stateDir, "installations.json")
+    (0, import_node_path5.join)(paths.stateDir, "installations.json")
   ];
 }
 function retiredStateDirs(paths) {
-  return [(0, import_node_path4.join)(paths.dataDir, "runtime")];
+  return [(0, import_node_path5.join)(paths.dataDir, "runtime")];
 }
 function writeUserFileAtomic(path, text) {
-  (0, import_node_fs4.mkdirSync)((0, import_node_path4.join)(path, ".."), { recursive: true });
+  (0, import_node_fs5.mkdirSync)((0, import_node_path5.join)(path, ".."), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  (0, import_node_fs4.writeFileSync)(tmp, text, "utf8");
+  (0, import_node_fs5.writeFileSync)(tmp, text, "utf8");
   try {
-    (0, import_node_fs4.renameSync)(tmp, path);
+    (0, import_node_fs5.renameSync)(tmp, path);
   } catch (err) {
     try {
-      (0, import_node_fs4.rmSync)(tmp, { force: true });
+      (0, import_node_fs5.rmSync)(tmp, { force: true });
     } catch {
     }
     throw err;
@@ -8030,8 +8138,8 @@ function interpretUserDials(doc, path) {
 }
 function readUserDials(options = {}) {
   const path = userPaths(options).dialsFile;
-  if (!(0, import_node_fs4.existsSync)(path)) return {};
-  const text = (0, import_node_fs4.readFileSync)(path, "utf8").trim();
+  if (!(0, import_node_fs5.existsSync)(path)) return {};
+  const text = (0, import_node_fs5.readFileSync)(path, "utf8").trim();
   if (text.length === 0) return {};
   let doc;
   try {
@@ -8048,7 +8156,7 @@ function writeUserDials(options, dials) {
   const path = userPaths(options).dialsFile;
   const keys = Object.keys(dials).sort();
   if (keys.length === 0) {
-    if ((0, import_node_fs4.existsSync)(path)) (0, import_node_fs4.unlinkSync)(path);
+    if ((0, import_node_fs5.existsSync)(path)) (0, import_node_fs5.unlinkSync)(path);
     return path;
   }
   const sorted = {};
@@ -8089,8 +8197,8 @@ function verificationRow(entry) {
   return { harness, model: map.model, verified_at: map.verified_at };
 }
 function readVerificationDocument(path) {
-  if (!(0, import_node_fs4.existsSync)(path)) return { rows: [], understood: true };
-  const text = (0, import_node_fs4.readFileSync)(path, "utf8").trim();
+  if (!(0, import_node_fs5.existsSync)(path)) return { rows: [], understood: true };
+  const text = (0, import_node_fs5.readFileSync)(path, "utf8").trim();
   if (text.length === 0) return { rows: [], understood: true };
   let parsed;
   try {
@@ -8151,7 +8259,7 @@ function removeVerifiedModels(options, predicate) {
 function codexUserAgentDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.home ?? (0, import_node_os.homedir)();
-  return (0, import_node_path4.join)(env.CODEX_HOME?.trim() || (0, import_node_path4.join)(home, ".codex"), "agents");
+  return (0, import_node_path5.join)(env.CODEX_HOME?.trim() || (0, import_node_path5.join)(home, ".codex"), "agents");
 }
 
 // src/lib/executors.ts
@@ -8364,7 +8472,7 @@ function withoutHarnessIdentity(env) {
   }
   return next;
 }
-var EXECUTORS_FILE = (0, import_node_path5.join)(".fadeno", "executors.yaml");
+var EXECUTORS_FILE = (0, import_node_path6.join)(".fadeno", "executors.yaml");
 var CATALOG_TOP_LEVEL_KEYS = [
   "schema_version",
   "models",
@@ -8807,7 +8915,7 @@ function loadExecutorProfile(repoRoot, options = {}, harness) {
     throw new ExecutorProfileError(err.message);
   }
 }
-var DIALS_LOCAL_FILE = (0, import_node_path5.join)(".fadeno", "local", "dials");
+var DIALS_LOCAL_FILE = (0, import_node_path6.join)(".fadeno", "local", "dials");
 var LOCAL_DIALS_SCHEMA_VERSION = 1;
 function localDialPinError(detail) {
   return new ExecutorProfileError(
@@ -8815,9 +8923,9 @@ function localDialPinError(detail) {
   );
 }
 function readLocalDialState(repoRoot) {
-  const path = (0, import_node_path5.join)(repoRoot, DIALS_LOCAL_FILE);
-  if (!(0, import_node_fs5.existsSync)(path)) return { dials: {} };
-  const text = (0, import_node_fs5.readFileSync)(path, "utf8");
+  const path = (0, import_node_path6.join)(repoRoot, DIALS_LOCAL_FILE);
+  if (!(0, import_node_fs6.existsSync)(path)) return { dials: {} };
+  const text = (0, import_node_fs6.readFileSync)(path, "utf8");
   if (text.trim().length === 0) return { dials: {} };
   let doc;
   try {
@@ -8855,26 +8963,26 @@ function readLocalDialState(repoRoot) {
   return { dials };
 }
 function writeLocalDialState(repoRoot, state) {
-  const path = (0, import_node_path5.join)(repoRoot, DIALS_LOCAL_FILE);
+  const path = (0, import_node_path6.join)(repoRoot, DIALS_LOCAL_FILE);
   const keys = Object.keys(state.dials).sort();
   if (keys.length === 0) {
-    if ((0, import_node_fs5.existsSync)(path)) (0, import_node_fs5.unlinkSync)(path);
+    if ((0, import_node_fs6.existsSync)(path)) (0, import_node_fs6.unlinkSync)(path);
     return path;
   }
-  (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(path), { recursive: true });
+  (0, import_node_fs6.mkdirSync)((0, import_node_path6.dirname)(path), { recursive: true });
   const dials = {};
   for (const key of keys) {
     if (!BARE_IDENTIFIER_RE.test(key)) throw new ExecutorProfileError(`dial key "${key}" is not a bare identifier.`);
     dials[key] = serializeDialRef(state.dials[key]);
   }
   const tmp = `${path}.tmp-${process.pid}-${(0, import_node_crypto2.randomUUID)()}`;
-  (0, import_node_fs5.writeFileSync)(tmp, `${JSON.stringify({ schema_version: LOCAL_DIALS_SCHEMA_VERSION, dials })}
+  (0, import_node_fs6.writeFileSync)(tmp, `${JSON.stringify({ schema_version: LOCAL_DIALS_SCHEMA_VERSION, dials })}
 `, "utf8");
   try {
-    (0, import_node_fs5.renameSync)(tmp, path);
+    (0, import_node_fs6.renameSync)(tmp, path);
   } catch (err) {
     try {
-      (0, import_node_fs5.rmSync)(tmp, { force: true });
+      (0, import_node_fs6.rmSync)(tmp, { force: true });
     } catch {
     }
     throw err;
@@ -9037,7 +9145,7 @@ function mapping(value) {
 function parseLayer(path) {
   let parsed;
   try {
-    parsed = (0, import_yaml2.parse)((0, import_node_fs6.readFileSync)(path, "utf8"));
+    parsed = (0, import_yaml2.parse)((0, import_node_fs7.readFileSync)(path, "utf8"));
   } catch (err) {
     throw new ExecutorProfileError(`${path} did not parse: ${err.message}`);
   }
@@ -9339,9 +9447,9 @@ function loadLayeredProfile(repoRoot, options = {}, host) {
   const layers = [
     { layer: "builtin", path: `${templatesDir()}/common/fadeno/executors.yaml` },
     { layer: "user", path: paths.executorsFile },
-    { layer: "project", path: (0, import_node_path6.join)(repoRoot, ".fadeno", "executors.yaml") }
+    { layer: "project", path: (0, import_node_path7.join)(repoRoot, ".fadeno", "executors.yaml") }
   ];
-  const present = layers.filter((entry) => (0, import_node_fs6.existsSync)(entry.path));
+  const present = layers.filter((entry) => (0, import_node_fs7.existsSync)(entry.path));
   if (present.length === 0) throw new ExecutorProfileError("No executor catalog is available.");
   const repairs = [];
   const parsedLayers = new Map(present.map((entry) => {
@@ -9376,7 +9484,7 @@ function loadGlobalProfile(options = {}, host) {
     { layer: "builtin", path: `${templatesDir()}/common/fadeno/executors.yaml` },
     { layer: "user", path: paths.executorsFile }
   ];
-  const present = layers.filter((entry) => (0, import_node_fs6.existsSync)(entry.path));
+  const present = layers.filter((entry) => (0, import_node_fs7.existsSync)(entry.path));
   if (present.length === 0) throw new ExecutorProfileError("No executor catalog is available.");
   const document = {};
   const provenance = { bindings: {} };
@@ -9414,8 +9522,8 @@ function normalizeSchemaVersion(document) {
 var SpawnError = class extends Error {
 };
 var DISPATCH_ID_ENV = "FADENO_DISPATCH_ID";
-var OUTPUTS_DIR = (0, import_node_path7.join)(".fadeno", "local", "outputs");
-var RELAY_DIR = (0, import_node_path7.join)(".fadeno", "local", "relay");
+var OUTPUTS_DIR = (0, import_node_path8.join)(".fadeno", "local", "outputs");
+var RELAY_DIR = (0, import_node_path8.join)(".fadeno", "local", "relay");
 var CANCEL_GRACE_MS = 5e3;
 function laneOf(delivery) {
   return delivery.hostCandidate ? "host" : "command";
@@ -9501,12 +9609,12 @@ function shellQuote(word) {
   return /^[A-Za-z0-9_./:@=+,-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 function stageRelay(repoRoot, input) {
-  const dir = (0, import_node_path7.join)(repoRoot, RELAY_DIR);
-  (0, import_node_fs7.mkdirSync)(dir, { recursive: true });
+  const dir = (0, import_node_path8.join)(repoRoot, RELAY_DIR);
+  (0, import_node_fs8.mkdirSync)(dir, { recursive: true });
   const stamp = (input.now ?? /* @__PURE__ */ new Date()).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
   const label = sanitizeName(input.name?.trim() || input.archetype);
-  const promptFile = (0, import_node_path7.join)(dir, `${stamp}-${label}-${shortHex()}.md`);
-  (0, import_node_fs7.writeFileSync)(promptFile, input.prompt);
+  const promptFile = (0, import_node_path8.join)(dir, `${stamp}-${label}-${shortHex()}.md`);
+  (0, import_node_fs8.writeFileSync)(promptFile, input.prompt);
   const args = ["dispatch", "--archetype", input.archetype];
   if (input.name?.trim()) args.push("--name", input.name.trim());
   if (input.explicitModel?.trim()) args.push("--model", input.explicitModel.trim());
@@ -9527,7 +9635,7 @@ function takenNames(repoRoot) {
   return taken;
 }
 function prepareDispatch(input) {
-  const repoRoot = (0, import_node_path7.resolve)(input.repoRoot);
+  const repoRoot = (0, import_node_path8.resolve)(input.repoRoot);
   const prompt = input.prompt;
   if (prompt.trim().length === 0) throw new SpawnError("empty prompt: nothing to dispatch.");
   const resolution = input.resolution ?? resolveArchetype({
@@ -9573,7 +9681,7 @@ function prepareDispatch(input) {
     unclosedLimit: resolution.unclosedLimit,
     now
   }) : null;
-  const contract = workerContract({ id, name, archetype: resolution.archetype, repoRoot, worktree: contractWorktree, vocabulary });
+  const contract = workerContract({ id, name, archetype: resolution.archetype, repoRoot, worktree: contractWorktree, vocabulary, preamble: readPreamble(repoRoot) });
   const composedPrompt = composeWorkerPrompt(prompt, contract);
   const promptRel = writePrompt(repoRoot, id, prompt);
   const env = input.env ?? process.env;
@@ -9605,7 +9713,7 @@ function headCommit(repoRoot) {
   return head.ok ? head.stdout.trim() : null;
 }
 function recordOpened(repoRoot, prepared, extra = {}) {
-  const { task, truncated } = excerptTask((0, import_node_fs7.readFileSync)((0, import_node_path7.join)(repoRoot, prepared.promptPath), "utf8"));
+  const { task, truncated } = excerptTask((0, import_node_fs8.readFileSync)((0, import_node_path8.join)(repoRoot, prepared.promptPath), "utf8"));
   const row = {
     row: "opened",
     id: prepared.id,
@@ -9630,7 +9738,8 @@ function recordOpened(repoRoot, prepared, extra = {}) {
   return row;
 }
 function recordStopped(repoRoot, id, input) {
-  const dirty = input.cwd != null && (0, import_node_fs7.existsSync)(input.cwd) ? dirtyPaths(input.cwd) : "unavailable";
+  const dirty = input.cwd != null && (0, import_node_fs8.existsSync)(input.cwd) ? dirtyPaths(input.cwd) : "unavailable";
+  const work = measureWork({ repoRoot, branch: input.branch });
   const row = {
     row: "stopped",
     id,
@@ -9639,16 +9748,17 @@ function recordStopped(repoRoot, id, input) {
     dirty,
     cwd: input.cwd,
     ...input.exit != null ? { exit: input.exit } : {},
-    ...input.modelObserved != null ? { model_observed: input.modelObserved } : {}
+    ...input.modelObserved != null ? { model_observed: input.modelObserved } : {},
+    ...work != null ? { work } : {}
   };
   appendRow(repoRoot, row);
   return row;
 }
 function outputPaths(id) {
   return {
-    stdout: (0, import_node_path7.join)(OUTPUTS_DIR, `${id}.md`),
-    stderr: (0, import_node_path7.join)(OUTPUTS_DIR, `${id}.err`),
-    prompt: (0, import_node_path7.join)(OUTPUTS_DIR, `${id}.prompt.md`)
+    stdout: (0, import_node_path8.join)(OUTPUTS_DIR, `${id}.md`),
+    stderr: (0, import_node_path8.join)(OUTPUTS_DIR, `${id}.err`),
+    prompt: (0, import_node_path8.join)(OUTPUTS_DIR, `${id}.prompt.md`)
   };
 }
 function formatElapsed(ms) {
@@ -9665,11 +9775,11 @@ function runCommandDispatch(input) {
     throw new SpawnError(`dispatch ${prepared.name} was prepared for the host lane; it has no command to run.`);
   }
   const paths = outputPaths(prepared.id);
-  const stdoutAbs = (0, import_node_path7.join)(repoRoot, paths.stdout);
-  const stderrAbs = (0, import_node_path7.join)(repoRoot, paths.stderr);
-  const promptAbs = (0, import_node_path7.join)(repoRoot, paths.prompt);
-  (0, import_node_fs7.mkdirSync)((0, import_node_path7.dirname)(stdoutAbs), { recursive: true });
-  (0, import_node_fs7.writeFileSync)(promptAbs, prepared.composedPrompt);
+  const stdoutAbs = (0, import_node_path8.join)(repoRoot, paths.stdout);
+  const stderrAbs = (0, import_node_path8.join)(repoRoot, paths.stderr);
+  const promptAbs = (0, import_node_path8.join)(repoRoot, paths.prompt);
+  (0, import_node_fs8.mkdirSync)((0, import_node_path8.dirname)(stdoutAbs), { recursive: true });
+  (0, import_node_fs8.writeFileSync)(promptAbs, prepared.composedPrompt);
   const argv = substitutePromptFile(command2, promptAbs);
   const readsFile = argv.join("\0") !== command2.join("\0");
   const env = {
@@ -9677,8 +9787,8 @@ function runCommandDispatch(input) {
     PWD: prepared.cwd,
     [DISPATCH_ID_ENV]: prepared.id
   };
-  const outFd = (0, import_node_fs7.openSync)(stdoutAbs, "w");
-  const errFd = (0, import_node_fs7.openSync)(stderrAbs, "w");
+  const outFd = (0, import_node_fs8.openSync)(stdoutAbs, "w");
+  const errFd = (0, import_node_fs8.openSync)(stderrAbs, "w");
   const startedAt = Date.now();
   return new Promise((resolvePromise, rejectPromise) => {
     let child;
@@ -9690,8 +9800,8 @@ function runCommandDispatch(input) {
         stdio: [readsFile ? "ignore" : "pipe", outFd, errFd]
       });
     } catch (err) {
-      (0, import_node_fs7.closeSync)(outFd);
-      (0, import_node_fs7.closeSync)(errFd);
+      (0, import_node_fs8.closeSync)(outFd);
+      (0, import_node_fs8.closeSync)(errFd);
       rejectPromise(new SpawnError(`could not start ${argv[0]}: ${err.message}`));
       return;
     }
@@ -9722,12 +9832,12 @@ function runCommandDispatch(input) {
         if (heartbeat != null) clearInterval(heartbeat);
         process.off("SIGTERM", onTerm);
         process.off("SIGINT", onTerm);
-        (0, import_node_fs7.closeSync)(outFd);
-        (0, import_node_fs7.closeSync)(errFd);
-        const stdout = (0, import_node_fs7.readFileSync)(stdoutAbs, "utf8");
+        (0, import_node_fs8.closeSync)(outFd);
+        (0, import_node_fs8.closeSync)(errFd);
+        const stdout = (0, import_node_fs8.readFileSync)(stdoutAbs, "utf8");
         const stderrBytes = (() => {
           try {
-            return (0, import_node_fs7.readFileSync)(stderrAbs).length;
+            return (0, import_node_fs8.readFileSync)(stderrAbs).length;
           } catch {
             return 0;
           }
@@ -9735,6 +9845,7 @@ function runCommandDispatch(input) {
         const stopped = recordStopped(repoRoot, prepared.id, {
           finalMessage: stdout.trim().length > 0 ? stdout : null,
           cwd: prepared.cwd,
+          branch: prepared.workspace.branch,
           exit: { code, signal }
         });
         resolvePromise({
@@ -9754,8 +9865,8 @@ function runCommandDispatch(input) {
     });
     setImmediate(() => {
       if (spawnFailure != null && child.pid == null) {
-        (0, import_node_fs7.closeSync)(outFd);
-        (0, import_node_fs7.closeSync)(errFd);
+        (0, import_node_fs8.closeSync)(outFd);
+        (0, import_node_fs8.closeSync)(errFd);
         rejectPromise(new SpawnError(`could not start ${argv[0]}: ${spawnFailure.message}`));
       }
     });
@@ -9801,10 +9912,11 @@ async function cancelDispatch(repoRoot, record, opts = {}) {
   const fresh = readDispatches(repoRoot).records.find((r) => r.id === record.id);
   let stoppedRecorded = false;
   if (fresh?.stopped == null) {
-    const cwd = opened.workspace != null ? opened.workspace.path === "." ? repoRoot : (0, import_node_path7.join)(repoRoot, opened.workspace.path) : null;
+    const cwd = opened.workspace != null ? opened.workspace.path === "." ? repoRoot : (0, import_node_path8.join)(repoRoot, opened.workspace.path) : null;
     recordStopped(repoRoot, record.id, {
       finalMessage: null,
       cwd,
+      branch: opened.workspace?.branch ?? null,
       exit: { code: null, signal: opts.signal ?? "SIGTERM" },
       now: opts.now
     });
@@ -9815,30 +9927,30 @@ async function cancelDispatch(repoRoot, record, opts = {}) {
 function workspaceDir(repoRoot, opened) {
   if (opened.workspace == null) return null;
   const path = opened.workspace.path;
-  return path === "." ? (0, import_node_path7.resolve)(repoRoot) : (0, import_node_path7.isAbsolute)(path) ? path : (0, import_node_path7.join)(repoRoot, path);
+  return path === "." ? (0, import_node_path8.resolve)(repoRoot) : (0, import_node_path8.isAbsolute)(path) ? path : (0, import_node_path8.join)(repoRoot, path);
 }
 
 // src/lib/transcript.ts
-var import_node_fs8 = require("node:fs");
+var import_node_fs9 = require("node:fs");
 var TRANSCRIPT_HEAD_BYTES = 1024 * 1024;
 var TRANSCRIPT_TAIL_BYTES = 512 * 1024;
 var HEADER_RE = new RegExp(`${CONTRACT_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} ([0-9a-f-]{36}) \\(([^)\\n]+)\\)`);
 function readSlice(path, offset, length) {
-  const fd = (0, import_node_fs8.openSync)(path, "r");
+  const fd = (0, import_node_fs9.openSync)(path, "r");
   try {
     const buffer = Buffer.alloc(length);
-    const read = (0, import_node_fs8.readSync)(fd, buffer, 0, length, offset);
+    const read = (0, import_node_fs9.readSync)(fd, buffer, 0, length, offset);
     return buffer.subarray(0, read).toString("utf8");
   } finally {
-    (0, import_node_fs8.closeSync)(fd);
+    (0, import_node_fs9.closeSync)(fd);
   }
 }
 function fileSize(path) {
-  const fd = (0, import_node_fs8.openSync)(path, "r");
+  const fd = (0, import_node_fs9.openSync)(path, "r");
   try {
-    return (0, import_node_fs8.fstatSync)(fd).size;
+    return (0, import_node_fs9.fstatSync)(fd).size;
   } finally {
-    (0, import_node_fs8.closeSync)(fd);
+    (0, import_node_fs9.closeSync)(fd);
   }
 }
 function textOf(content) {
@@ -9895,13 +10007,13 @@ function readTranscriptFacts(path) {
 var DispatchesError = class extends Error {
 };
 function rootOf(opts) {
-  return (0, import_node_path8.resolve)(opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd()));
+  return (0, import_node_path9.resolve)(opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd()));
 }
 function readPromptInput(opts, cwd) {
   if (opts.promptFile != null && opts.promptFile.trim() !== "") {
-    const path = (0, import_node_path8.resolve)(cwd, opts.promptFile);
-    if (!(0, import_node_fs9.existsSync)(path)) throw new DispatchesError(`--prompt-file ${opts.promptFile}: no such file.`);
-    return (0, import_node_fs9.readFileSync)(path, "utf8");
+    const path = (0, import_node_path9.resolve)(cwd, opts.promptFile);
+    if (!(0, import_node_fs10.existsSync)(path)) throw new DispatchesError(`--prompt-file ${opts.promptFile}: no such file.`);
+    return (0, import_node_fs10.readFileSync)(path, "utf8");
   }
   if (typeof opts.prompt === "string") return opts.prompt;
   throw new DispatchesError("no prompt: pass --prompt-file <path> or pipe the prompt on stdin.");
@@ -9949,8 +10061,8 @@ function runDispatchOpen(opts) {
   const wanted = opts.lane ?? "auto";
   if (!OPEN_LANES.includes(wanted)) throw new DispatchesError(`--lane ${String(wanted)}: expected one of ${OPEN_LANES.join(", ")}.`);
   const lane = wanted === "auto" ? resolution.lane : wanted;
-  const parentTranscript = opts.parentTranscript?.trim() ? (0, import_node_path8.resolve)(opts.cwd ?? process.cwd(), opts.parentTranscript.trim()) : null;
-  const parent = opts.parent !== void 0 && opts.parent !== null ? opts.parent : parentTranscript != null && (0, import_node_fs9.existsSync)(parentTranscript) ? readTranscriptFacts(parentTranscript).dispatchId ?? void 0 : opts.parent;
+  const parentTranscript = opts.parentTranscript?.trim() ? (0, import_node_path9.resolve)(opts.cwd ?? process.cwd(), opts.parentTranscript.trim()) : null;
+  const parent = opts.parent !== void 0 && opts.parent !== null ? opts.parent : parentTranscript != null && (0, import_node_fs10.existsSync)(parentTranscript) ? readTranscriptFacts(parentTranscript).dispatchId ?? void 0 : opts.parent;
   if (lane === "command") {
     requireCommand(resolution);
     const unclosed = unclosedDispatches(repoRoot);
@@ -10023,12 +10135,12 @@ function runDispatchOpen(opts) {
   };
 }
 function hostPromptPath(repoRoot, id) {
-  return (0, import_node_path8.join)(repoRoot, RELAY_DIR, `${id}.md`);
+  return (0, import_node_path9.join)(repoRoot, RELAY_DIR, `${id}.md`);
 }
 function stageHostPrompt(repoRoot, id, composed) {
   const path = hostPromptPath(repoRoot, id);
-  (0, import_node_fs9.mkdirSync)((0, import_node_path8.dirname)(path), { recursive: true });
-  (0, import_node_fs9.writeFileSync)(path, composed.endsWith("\n") ? composed : `${composed}
+  (0, import_node_fs10.mkdirSync)((0, import_node_path9.dirname)(path), { recursive: true });
+  (0, import_node_fs10.writeFileSync)(path, composed.endsWith("\n") ? composed : `${composed}
 `, "utf8");
   return path;
 }
@@ -10041,7 +10153,7 @@ function reusableOpen(repoRoot, archetype, name, session) {
     if (o.archetype !== archetype || o.name !== wanted || o.lane !== "host") continue;
     if (session != null && o.session !== session) continue;
     const staged = hostPromptPath(repoRoot, o.id);
-    if (!(0, import_node_fs9.existsSync)(staged)) continue;
+    if (!(0, import_node_fs10.existsSync)(staged)) continue;
     return {
       ok: true,
       opened: true,
@@ -10054,11 +10166,11 @@ function reusableOpen(repoRoot, archetype, name, session) {
       effort: o.effort,
       harness: o.harness,
       lane: "host",
-      cwd: o.workspace != null ? (0, import_node_path8.resolve)(repoRoot, o.workspace.path) : repoRoot,
+      cwd: o.workspace != null ? (0, import_node_path9.resolve)(repoRoot, o.workspace.path) : repoRoot,
       workspace: o.workspace ?? { path: ".", branch: null, base: "unknown" },
       shared: o.workspace == null || o.workspace.path === ".",
       sharedReason: null,
-      prompt: (0, import_node_fs9.readFileSync)(staged, "utf8"),
+      prompt: (0, import_node_fs10.readFileSync)(staged, "utf8"),
       promptFile: staged,
       contract: "",
       nag: nagText(unclosedDispatches(repoRoot), DEFAULT_UNCLOSED_LIMIT)
@@ -10070,7 +10182,7 @@ var NotADispatchError = class extends DispatchesError {
 };
 function runDispatchStop(opts) {
   const repoRoot = rootOf(opts);
-  const transcriptPath = opts.transcript?.trim() ? (0, import_node_path8.resolve)(opts.cwd ?? process.cwd(), opts.transcript.trim()) : null;
+  const transcriptPath = opts.transcript?.trim() ? (0, import_node_path9.resolve)(opts.cwd ?? process.cwd(), opts.transcript.trim()) : null;
   const facts = transcriptPath != null ? readTranscriptFacts(transcriptPath) : null;
   const ref = opts.ref?.trim() || facts?.dispatchId || null;
   if (ref == null) {
@@ -10084,31 +10196,55 @@ function runDispatchStop(opts) {
   if (record.stopped != null) return { record, row: record.stopped, replayed: true, mismatchedCwd };
   let message = null;
   if (opts.messageFile != null && opts.messageFile.trim() !== "") {
-    const path = (0, import_node_path8.resolve)(opts.cwd ?? process.cwd(), opts.messageFile);
-    message = (0, import_node_fs9.existsSync)(path) ? (0, import_node_fs9.readFileSync)(path, "utf8") : null;
+    const path = (0, import_node_path9.resolve)(opts.cwd ?? process.cwd(), opts.messageFile);
+    message = (0, import_node_fs10.existsSync)(path) ? (0, import_node_fs10.readFileSync)(path, "utf8") : null;
   } else if (typeof opts.message === "string") message = opts.message;
   if ((message == null || message.trim().length === 0) && facts?.lastAssistantText != null) message = facts.lastAssistantText;
   const row = recordStopped(repoRoot, record.id, {
     finalMessage: message != null && message.trim().length > 0 ? message : null,
     cwd: assigned,
+    branch: record.opened.workspace?.branch ?? null,
     modelObserved: facts?.model ?? null
   });
   return { record: { ...record, stopped: row, state: record.closed ? "closed" : "stopped" }, row, replayed: false, mismatchedCwd };
+}
+function mergeRefusal(name, branch, check) {
+  const problems = [];
+  if (check.unmerged > 0) {
+    problems.push(`${branch} has ${check.unmerged} commit(s) that HEAD does not have`);
+  }
+  if (check.uncommitted.length > 0) {
+    const sample = check.uncommitted.slice(0, 5).join(", ");
+    problems.push(
+      `its worktree holds ${check.uncommitted.length} uncommitted tracked path(s) (${sample}${check.uncommitted.length > 5 ? ", \u2026" : ""}), which no merge could have taken`
+    );
+  }
+  if (problems.length === 0) return null;
+  return `refusing to close ${name} as "merged": ${problems.join("; and ")}. Merge it (\`git merge ${branch}\`) and close again \u2014 or, if the work landed another way (a squash, a rebase, a reimplementation), close with \`--force\` and record how in \`--note\`. \`--kept\` is the verb for a branch you are leaving for later.`;
 }
 function runDispatchClose(opts) {
   const repoRoot = rootOf(opts);
   if (!isCloseVerb(opts.verb)) throw new DispatchesError(`close needs exactly one of --merged, --kept, --discarded, --failed; got "${opts.verb}".`);
   const record = lookup(repoRoot, opts.ref);
+  const opened = record.opened;
+  const branch = opened?.workspace?.branch ?? null;
+  const worktree = opened?.workspace != null && opened.workspace.path !== "." ? opened.workspace.path : null;
+  const name = opened?.name ?? record.id.slice(0, 8);
+  let merge = null;
+  let forced = null;
+  if (opts.verb === "merged" && record.closed == null) {
+    merge = verifyMerged({ repoRoot, branch, worktree: worktree == null ? null : (0, import_node_path9.join)(repoRoot, worktree) });
+    if (merge.checked && branch != null) {
+      const refusal = mergeRefusal(name, branch, merge);
+      if (refusal != null) {
+        if (!opts.force) throw new DispatchesError(refusal);
+        forced = refusal;
+      }
+    }
+  }
   const outcome = closeDispatch(repoRoot, record, opts.verb, opts.note ?? null);
   if (!outcome.ok) throw new DispatchesError(outcome.message);
-  const opened = record.opened;
-  return {
-    record,
-    verb: opts.verb,
-    replayed: outcome.replayed,
-    worktree: opened?.workspace != null && opened.workspace.path !== "." ? opened.workspace.path : null,
-    branch: opened?.workspace?.branch ?? null
-  };
+  return { record, verb: opts.verb, replayed: outcome.replayed, worktree, branch, merge, forced };
 }
 async function runCancel(opts) {
   const repoRoot = rootOf(opts);
@@ -10204,8 +10340,8 @@ function runDispatchShow(opts) {
     entry: entryOf(record),
     worktree,
     prompt: readPrompt(repoRoot, record),
-    transcript: (0, import_node_fs9.existsSync)((0, import_node_path8.join)(repoRoot, paths.stdout)) ? paths.stdout : null,
-    stderr: (0, import_node_fs9.existsSync)((0, import_node_path8.join)(repoRoot, paths.stderr)) ? paths.stderr : null
+    transcript: (0, import_node_fs10.existsSync)((0, import_node_path9.join)(repoRoot, paths.stdout)) ? paths.stdout : null,
+    stderr: (0, import_node_fs10.existsSync)((0, import_node_path9.join)(repoRoot, paths.stderr)) ? paths.stderr : null
   };
 }
 function renderDispatchDetail(d) {
@@ -10225,18 +10361,36 @@ function renderDispatchDetail(d) {
       const asked = d.record.opened?.model ?? null;
       lines.push(`  ran on:    ${s.model_observed}${modelAgrees(asked, s.model_observed, d.record.opened?.model_id) ? "" : `  (the dial asked for ${asked})`}`);
     }
-    if (s.final_message != null) lines.push("", "--- final message ---", s.final_message.trimEnd());
-    else lines.push("  final message: none recorded");
+    lines.push("", "--- what Fadeno measured ---", ...renderWorkMeasured(s.work, d.record.opened?.workspace?.branch ?? null));
+    if (s.final_message != null) {
+      lines.push("", "--- what the agent reported (a claim, not a finding) ---", s.final_message.trimEnd());
+    } else lines.push("", "--- what the agent reported --- none recorded");
   }
   if (d.record.opened != null) lines.push("", `  prompt: ${d.record.opened.prompt}${d.transcript ? `   transcript: ${d.transcript}` : ""}${d.stderr ? `   stderr: ${d.stderr}` : ""}`);
   if (e.task) lines.push(`  task: ${e.task.split("\n")[0]}${d.record.opened?.task_truncated ? " \u2026" : ""}`);
   return lines;
 }
+function renderWorkMeasured(work, branch) {
+  if (work == null) {
+    return branch == null ? ["  no branch of its own (shared tree): there is nothing git can attribute to this dispatch."] : [`  ${branch}: not measured \u2014 the branch was unreadable when it stopped, or an older Fadeno wrote this row.`];
+  }
+  const churn = work.files === 0 ? "no file changes" : `${work.files} file(s), +${work.insertions} -${work.deletions}${work.binary > 0 ? `, ${work.binary} binary` : ""}`;
+  const lines = [
+    `  ${branch ?? "branch"} at ${work.head.slice(0, 12)}: ${work.commits} commit(s) HEAD does not have; ${churn}`
+  ];
+  if (work.conflicts.length > 0) {
+    lines.push(
+      `  CONFLICT MARKERS committed in ${work.conflicts.length}${work.conflicts_truncated ? "+" : ""} path(s): ${work.conflicts.join(", ")}`
+    );
+  }
+  if (work.commits === 0) lines.push("  Nothing is on this branch that HEAD lacks \u2014 either it was already merged, or no work was committed.");
+  return lines;
+}
 function runDispatchOutput(opts) {
   const repoRoot = rootOf(opts);
   const record = lookup(repoRoot, opts.ref);
-  const transcript = (0, import_node_path8.join)(repoRoot, outputPaths(record.id).stdout);
-  if ((0, import_node_fs9.existsSync)(transcript)) return { record, text: (0, import_node_fs9.readFileSync)(transcript, "utf8"), source: "transcript" };
+  const transcript = (0, import_node_path9.join)(repoRoot, outputPaths(record.id).stdout);
+  if ((0, import_node_fs10.existsSync)(transcript)) return { record, text: (0, import_node_fs10.readFileSync)(transcript, "utf8"), source: "transcript" };
   if (record.stopped?.final_message != null) return { record, text: record.stopped.final_message, source: "final_message" };
   return { record, text: null, source: null };
 }
@@ -10245,26 +10399,42 @@ async function runDispatchWait(opts) {
   const started = Date.now();
   const deadline = started + Math.max(0, opts.waitSeconds ?? 540) * 1e3;
   const pollMs = Math.max(50, opts.pollMs ?? 1e3);
-  const id = lookup(repoRoot, opts.ref).id;
-  const reread = () => {
+  const refs = opts.refs.map((ref) => ref.trim()).filter((ref) => ref !== "");
+  if (refs.length === 0) throw new DispatchesError("name at least one dispatch to wait on.");
+  const ids = [...new Set(refs.map((ref) => lookup(repoRoot, ref).id))];
+  const reread = (id) => {
     const found = readDispatches(repoRoot).records.find((r) => r.id === id);
     if (found == null) throw new DispatchesError(`dispatch ${id} vanished from the ledger while waiting.`);
     return found;
   };
+  const report = (id) => runDispatchOutput({ repoRoot, ref: id }).text;
   for (; ; ) {
-    const record = reread();
-    if (record.stopped != null || record.closed != null) {
-      return { state: "stopped", record, text: runDispatchOutput({ repoRoot, ref: id }).text, waitedMs: Date.now() - started };
+    const records = ids.map(reread);
+    const running = records.filter((r) => r.stopped == null && r.closed == null);
+    const done = records.find((r) => r.stopped != null || r.closed != null);
+    if (done != null) {
+      return { state: "stopped", record: done, text: report(done.id), waitedMs: Date.now() - started, waiting: running };
     }
-    const pgid = record.opened?.process_group;
-    if (pgid != null && !groupAlive(pgid)) {
-      const settled = reread();
+    for (const record of records) {
+      const pgid = record.opened?.process_group;
+      if (pgid == null || groupAlive(pgid)) continue;
+      const settled = reread(record.id);
       if (settled.stopped != null) {
-        return { state: "stopped", record: settled, text: runDispatchOutput({ repoRoot, ref: id }).text, waitedMs: Date.now() - started };
+        const others2 = records.filter((r) => r.id !== settled.id && r.stopped == null && r.closed == null);
+        return { state: "stopped", record: settled, text: report(settled.id), waitedMs: Date.now() - started, waiting: others2 };
       }
-      return { state: "abandoned", record: settled, stdoutPath: (0, import_node_path8.join)(repoRoot, outputPaths(id).stdout), waitedMs: Date.now() - started };
+      const others = records.filter((r) => r.id !== settled.id && r.stopped == null && r.closed == null);
+      return {
+        state: "abandoned",
+        record: settled,
+        stdoutPath: (0, import_node_path9.join)(repoRoot, outputPaths(settled.id).stdout),
+        waitedMs: Date.now() - started,
+        waiting: others
+      };
     }
-    if (Date.now() >= deadline) return { state: "running", record, waitedMs: Date.now() - started };
+    if (Date.now() >= deadline) {
+      return { state: "running", record: records[0], waitedMs: Date.now() - started, waiting: running };
+    }
     await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(1, deadline - Date.now()))));
   }
 }
@@ -10298,7 +10468,8 @@ function runContext(opts = {}) {
   const { archetypes, profile } = describeArchetypes({ repoRoot, userPathOptions: opts.userPathOptions });
   const unclosed = unclosedDispatches(repoRoot);
   const limit = profile.unclosedLimit ?? DEFAULT_UNCLOSED_LIMIT;
-  return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, now: opts.now }), archetypes };
+  const preamble = readPreamble(repoRoot);
+  return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, preamble, now: opts.now }), archetypes, preamble };
 }
 function runClean(opts = {}) {
   const repoRoot = rootOf(opts);
@@ -10326,15 +10497,15 @@ function runClean(opts = {}) {
     }
     result.worktrees.push(wt.path);
   }
-  const outputs = (0, import_node_path8.join)(repoRoot, OUTPUTS_DIR);
-  if ((0, import_node_fs9.existsSync)(outputs)) {
-    result.outputs = (0, import_node_path8.relative)(repoRoot, outputs);
-    if (!dryRun) (0, import_node_fs9.rmSync)(outputs, { recursive: true, force: true });
+  const outputs = (0, import_node_path9.join)(repoRoot, OUTPUTS_DIR);
+  if ((0, import_node_fs10.existsSync)(outputs)) {
+    result.outputs = (0, import_node_path9.relative)(repoRoot, outputs);
+    if (!dryRun) (0, import_node_fs10.rmSync)(outputs, { recursive: true, force: true });
   }
-  const relay = (0, import_node_path8.join)(repoRoot, RELAY_DIR);
-  if ((0, import_node_fs9.existsSync)(relay)) {
-    result.relay = (0, import_node_path8.relative)(repoRoot, relay);
-    if (!dryRun) (0, import_node_fs9.rmSync)(relay, { recursive: true, force: true });
+  const relay = (0, import_node_path9.join)(repoRoot, RELAY_DIR);
+  if ((0, import_node_fs10.existsSync)(relay)) {
+    result.relay = (0, import_node_path9.relative)(repoRoot, relay);
+    if (!dryRun) (0, import_node_fs10.rmSync)(relay, { recursive: true, force: true });
   }
   return result;
 }
@@ -10352,8 +10523,8 @@ function renderClean(result) {
 
 // src/commands/dial.ts
 var import_node_child_process3 = require("node:child_process");
-var import_node_fs10 = require("node:fs");
-var import_node_path9 = require("node:path");
+var import_node_fs11 = require("node:fs");
+var import_node_path10 = require("node:path");
 var import_yaml3 = __toESM(require_dist(), 1);
 var DialError = class extends Error {
 };
@@ -10659,13 +10830,13 @@ function runDialSet(opts) {
   } else if (layer === "user") {
     writeUserDials(opts.userPathOptions ?? {}, { ...userDials, [archetype]: dial });
   } else {
-    const executorsPath = (0, import_node_path9.join)(repoRoot, ".fadeno", "executors.yaml");
-    const doc = (0, import_node_fs10.existsSync)(executorsPath) ? (0, import_yaml3.parseDocument)((0, import_node_fs10.readFileSync)(executorsPath, "utf8")) : (0, import_yaml3.parseDocument)("");
+    const executorsPath = (0, import_node_path10.join)(repoRoot, ".fadeno", "executors.yaml");
+    const doc = (0, import_node_fs11.existsSync)(executorsPath) ? (0, import_yaml3.parseDocument)((0, import_node_fs11.readFileSync)(executorsPath, "utf8")) : (0, import_yaml3.parseDocument)("");
     if (!doc.has("dials")) doc.set("dials", doc.createNode({}));
     doc.setIn(["dials", archetype], serializeDialRef(dial));
     if (!doc.has("schema_version")) doc.set("schema_version", 3);
-    (0, import_node_fs10.mkdirSync)((0, import_node_path9.join)(repoRoot, ".fadeno"), { recursive: true });
-    (0, import_node_fs10.writeFileSync)(executorsPath, String(doc), "utf8");
+    (0, import_node_fs11.mkdirSync)((0, import_node_path10.join)(repoRoot, ".fadeno"), { recursive: true });
+    (0, import_node_fs11.writeFileSync)(executorsPath, String(doc), "utf8");
   }
   return {
     archetype,
@@ -10746,14 +10917,14 @@ function runDialClear(opts = {}) {
     return { cleared: formatDialRef(prev2), removed: true, archetype, layer: "session", remaining: nextDials2 };
   }
   if (opts.repo) {
-    const executorsPath = (0, import_node_path9.join)(repoRoot, ".fadeno", "executors.yaml");
-    if (!(0, import_node_fs10.existsSync)(executorsPath)) throw new DialError(`no repo pin for "${archetype}" to clear`);
-    const doc = (0, import_yaml3.parseDocument)((0, import_node_fs10.readFileSync)(executorsPath, "utf8"));
+    const executorsPath = (0, import_node_path10.join)(repoRoot, ".fadeno", "executors.yaml");
+    if (!(0, import_node_fs11.existsSync)(executorsPath)) throw new DialError(`no repo pin for "${archetype}" to clear`);
+    const doc = (0, import_yaml3.parseDocument)((0, import_node_fs11.readFileSync)(executorsPath, "utf8"));
     if (!doc.hasIn(["dials", archetype])) throw new DialError(`no repo pin for "${archetype}" to clear`);
     doc.deleteIn(["dials", archetype]);
     const dialsNode = doc.get("dials", true);
     if (dialsNode != null && Array.isArray(dialsNode.items) && dialsNode.items.length === 0) doc.delete("dials");
-    (0, import_node_fs10.writeFileSync)(executorsPath, String(doc), "utf8");
+    (0, import_node_fs11.writeFileSync)(executorsPath, String(doc), "utf8");
     return { cleared: archetype, removed: true, archetype, layer: "repo", remaining: {} };
   }
   if (opts.user) {
@@ -10889,8 +11060,8 @@ function runDialResolve(opts) {
 
 // src/commands/models.ts
 var import_node_child_process4 = require("node:child_process");
-var import_node_fs11 = require("node:fs");
-var import_node_path10 = require("node:path");
+var import_node_fs12 = require("node:fs");
+var import_node_path11 = require("node:path");
 var import_yaml4 = __toESM(require_dist(), 1);
 
 // src/lib/model-listing.ts
@@ -11125,7 +11296,7 @@ function splitDiscoveryId(raw) {
   return { provider, id };
 }
 function readUserCatalog(path) {
-  const text = (0, import_node_fs11.existsSync)(path) ? (0, import_node_fs11.readFileSync)(path, "utf8") : "schema_version: 4\nmodels: {}\n";
+  const text = (0, import_node_fs12.existsSync)(path) ? (0, import_node_fs12.readFileSync)(path, "utf8") : "schema_version: 4\nmodels: {}\n";
   const doc = (0, import_yaml4.parseDocument)(text);
   if (doc.errors.length > 0) throw new ModelsError(`${path} did not parse: ${doc.errors[0].message}`);
   const value = doc.toJS();
@@ -11142,14 +11313,14 @@ function readUserCatalog(path) {
   return { doc, value: map };
 }
 function atomicWrite(path, text) {
-  (0, import_node_fs11.mkdirSync)((0, import_node_path10.dirname)(path), { recursive: true });
-  const temporary = (0, import_node_path10.join)((0, import_node_path10.dirname)(path), `.${(0, import_node_path10.basename)(path)}.fadeno-${process.pid}-${Date.now()}.tmp`);
+  (0, import_node_fs12.mkdirSync)((0, import_node_path11.dirname)(path), { recursive: true });
+  const temporary = (0, import_node_path11.join)((0, import_node_path11.dirname)(path), `.${(0, import_node_path11.basename)(path)}.fadeno-${process.pid}-${Date.now()}.tmp`);
   try {
-    (0, import_node_fs11.writeFileSync)(temporary, text, "utf8");
-    (0, import_node_fs11.renameSync)(temporary, path);
+    (0, import_node_fs12.writeFileSync)(temporary, text, "utf8");
+    (0, import_node_fs12.renameSync)(temporary, path);
   } catch (err) {
     try {
-      if ((0, import_node_fs11.existsSync)(temporary)) (0, import_node_fs11.unlinkSync)(temporary);
+      if ((0, import_node_fs12.existsSync)(temporary)) (0, import_node_fs12.unlinkSync)(temporary);
     } catch {
     }
     throw new ModelsError(`could not write ${path}: ${err.message}`);
@@ -11245,8 +11416,8 @@ function userModelEntry(raw) {
 }
 function catalogLayerPath(layer, repoRoot, paths) {
   if (layer === "user") return paths.executorsFile;
-  if (layer === "project") return (0, import_node_path10.join)(repoRoot, ".fadeno", "executors.yaml");
-  return (0, import_node_path10.join)(templatesDir(), "common", "fadeno", "executors.yaml");
+  if (layer === "project") return (0, import_node_path11.join)(repoRoot, ".fadeno", "executors.yaml");
+  return (0, import_node_path11.join)(templatesDir(), "common", "fadeno", "executors.yaml");
 }
 function runModelsRemove(opts) {
   const alias = opts.alias.trim();
@@ -11522,28 +11693,28 @@ function runModelsVerify(opts = {}) {
 }
 
 // src/commands/plugin.ts
-var import_node_fs13 = require("node:fs");
-var import_node_path12 = require("node:path");
+var import_node_fs14 = require("node:fs");
+var import_node_path13 = require("node:path");
 
 // src/lib/fsutil.ts
-var import_node_fs12 = require("node:fs");
-var import_node_path11 = require("node:path");
+var import_node_fs13 = require("node:fs");
+var import_node_path12 = require("node:path");
 function emitFile(absPath, content, force) {
-  const exists = (0, import_node_fs12.existsSync)(absPath);
+  const exists = (0, import_node_fs13.existsSync)(absPath);
   if (exists && !force) return "skipped";
-  (0, import_node_fs12.mkdirSync)((0, import_node_path11.dirname)(absPath), { recursive: true });
-  (0, import_node_fs12.writeFileSync)(absPath, content, "utf8");
+  (0, import_node_fs13.mkdirSync)((0, import_node_path12.dirname)(absPath), { recursive: true });
+  (0, import_node_fs13.writeFileSync)(absPath, content, "utf8");
   return exists ? "overwritten" : "created";
 }
 function copyTree(srcDir, destDir, force, results) {
-  for (const entry of (0, import_node_fs12.readdirSync)(srcDir, { withFileTypes: true })) {
-    const srcPath = (0, import_node_path11.join)(srcDir, entry.name);
+  for (const entry of (0, import_node_fs13.readdirSync)(srcDir, { withFileTypes: true })) {
+    const srcPath = (0, import_node_path12.join)(srcDir, entry.name);
     const destName = entry.name === "gitkeep" ? ".gitkeep" : entry.name;
-    const destPath = (0, import_node_path11.join)(destDir, destName);
+    const destPath = (0, import_node_path12.join)(destDir, destName);
     if (entry.isDirectory()) {
       copyTree(srcPath, destPath, force, results);
     } else {
-      const content = (0, import_node_fs12.readFileSync)(srcPath, "utf8");
+      const content = (0, import_node_fs13.readFileSync)(srcPath, "utf8");
       results.push({ path: destPath, status: emitFile(destPath, content, force) });
     }
   }
@@ -11560,9 +11731,9 @@ function stampSurfaceVersion(md) {
   return md.replace(/^(description:.*?)\s*$/m, `$1 [fadeno ${packageVersion()}]`);
 }
 function relayModelForClaude(catalogPath) {
-  if (!(0, import_node_fs13.existsSync)(catalogPath)) return null;
+  if (!(0, import_node_fs14.existsSync)(catalogPath)) return null;
   try {
-    const profile = parseExecutorProfile((0, import_node_fs13.readFileSync)(catalogPath, "utf8"), catalogPath, "claude");
+    const profile = parseExecutorProfile((0, import_node_fs14.readFileSync)(catalogPath, "utf8"), catalogPath, "claude");
     return resolveRelay(profile, "claude")?.modelId ?? null;
   } catch {
     return null;
@@ -11599,31 +11770,31 @@ function emit(results, path, content, force) {
 }
 function emitHooks(results, outDir, tpl, spawnHook, manifest, force) {
   for (const file of [...COMMON_HOOKS, spawnHook]) {
-    emit(results, (0, import_node_path12.join)(outDir, "hooks", file), (0, import_node_fs13.readFileSync)((0, import_node_path12.join)(tpl, "hooks", file), "utf8"), force);
+    emit(results, (0, import_node_path13.join)(outDir, "hooks", file), (0, import_node_fs14.readFileSync)((0, import_node_path13.join)(tpl, "hooks", file), "utf8"), force);
   }
-  emit(results, (0, import_node_path12.join)(outDir, "hooks", "hooks.json"), (0, import_node_fs13.readFileSync)((0, import_node_path12.join)(tpl, "hooks", manifest), "utf8"), force);
+  emit(results, (0, import_node_path13.join)(outDir, "hooks", "hooks.json"), (0, import_node_fs14.readFileSync)((0, import_node_path13.join)(tpl, "hooks", manifest), "utf8"), force);
 }
 function emitBundledBin(results, outDir, tpl, committedDirName, force) {
-  const repoBundle = (0, import_node_path12.join)(tpl, "..", committedDirName, "bin");
-  const adjacentBundle = (0, import_node_path12.dirname)(tpl);
-  const bundledBin = (0, import_node_fs13.existsSync)((0, import_node_path12.join)(repoBundle, "fadeno")) ? repoBundle : (0, import_node_fs13.existsSync)((0, import_node_path12.join)(adjacentBundle, "fadeno")) ? adjacentBundle : null;
-  const destinationBin = (0, import_node_path12.join)(outDir, "bin");
-  if (bundledBin != null && (0, import_node_path12.resolve)(bundledBin) !== (0, import_node_path12.resolve)(destinationBin)) {
+  const repoBundle = (0, import_node_path13.join)(tpl, "..", committedDirName, "bin");
+  const adjacentBundle = (0, import_node_path13.dirname)(tpl);
+  const bundledBin = (0, import_node_fs14.existsSync)((0, import_node_path13.join)(repoBundle, "fadeno")) ? repoBundle : (0, import_node_fs14.existsSync)((0, import_node_path13.join)(adjacentBundle, "fadeno")) ? adjacentBundle : null;
+  const destinationBin = (0, import_node_path13.join)(outDir, "bin");
+  if (bundledBin != null && (0, import_node_path13.resolve)(bundledBin) !== (0, import_node_path13.resolve)(destinationBin)) {
     copyTree(bundledBin, destinationBin, force, results);
   }
-  const destinationCli = (0, import_node_path12.join)(destinationBin, "fadeno");
-  if ((0, import_node_fs13.existsSync)(destinationCli)) (0, import_node_fs13.chmodSync)(destinationCli, 493);
+  const destinationCli = (0, import_node_path13.join)(destinationBin, "fadeno");
+  if ((0, import_node_fs14.existsSync)(destinationCli)) (0, import_node_fs14.chmodSync)(destinationCli, 493);
 }
 function emitLauncher(results, skillDir, tpl, harness, force) {
-  const launcherPath = (0, import_node_path12.join)(skillDir, "scripts", "fadeno.cjs");
-  emit(results, launcherPath, (0, import_node_fs13.readFileSync)((0, import_node_path12.join)(tpl, "common", "plugin", "fadeno.cjs"), "utf8").replace("__FADENO_HARNESS__", harness), force);
-  (0, import_node_fs13.chmodSync)(launcherPath, 493);
+  const launcherPath = (0, import_node_path13.join)(skillDir, "scripts", "fadeno.cjs");
+  emit(results, launcherPath, (0, import_node_fs14.readFileSync)((0, import_node_path13.join)(tpl, "common", "plugin", "fadeno.cjs"), "utf8").replace("__FADENO_HARNESS__", harness), force);
+  (0, import_node_fs14.chmodSync)(launcherPath, 493);
 }
 function runPlugin(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const tpl = templatesDir();
   const ref = opts.outDir ?? "plugin";
-  const outDir = (0, import_node_path12.isAbsolute)(ref) ? ref : (0, import_node_path12.resolve)(cwd, ref);
+  const outDir = (0, import_node_path13.isAbsolute)(ref) ? ref : (0, import_node_path13.resolve)(cwd, ref);
   const force = opts.force ?? false;
   const results = [];
   const manifest = JSON.stringify(
@@ -11637,29 +11808,29 @@ function runPlugin(opts = {}) {
     null,
     2
   ) + "\n";
-  emit(results, (0, import_node_path12.join)(outDir, ".claude-plugin", "plugin.json"), manifest, force);
+  emit(results, (0, import_node_path13.join)(outDir, ".claude-plugin", "plugin.json"), manifest, force);
   for (const { src, dst } of SKILLS) {
-    let md = (0, import_node_fs13.readFileSync)((0, import_node_path12.join)(tpl, "common", "skills", src, "SKILL.md"), "utf8");
+    let md = (0, import_node_fs14.readFileSync)((0, import_node_path13.join)(tpl, "common", "skills", src, "SKILL.md"), "utf8");
     if (!md.includes(`name: ${src}`)) {
       throw new Error(
         `templates/common/skills/${src}/SKILL.md must declare \`name: ${src}\` in its frontmatter \u2014 the emitted skill name is derived from it, so a mismatch renames nothing and ships silently.`
       );
     }
     md = stampSurfaceVersion(md.replace(`name: ${src}`, `name: ${dst}`));
-    emit(results, (0, import_node_path12.join)(outDir, "skills", dst, "SKILL.md"), md, force);
-    const references = (0, import_node_path12.join)(tpl, "common", "skills", src, "references");
-    if ((0, import_node_fs13.existsSync)(references)) copyTree(references, (0, import_node_path12.join)(outDir, "skills", dst, "references"), force, results);
-    emitLauncher(results, (0, import_node_path12.join)(outDir, "skills", dst), tpl, "claude", force);
+    emit(results, (0, import_node_path13.join)(outDir, "skills", dst, "SKILL.md"), md, force);
+    const references = (0, import_node_path13.join)(tpl, "common", "skills", src, "references");
+    if ((0, import_node_fs14.existsSync)(references)) copyTree(references, (0, import_node_path13.join)(outDir, "skills", dst, "references"), force, results);
+    emitLauncher(results, (0, import_node_path13.join)(outDir, "skills", dst), tpl, "claude", force);
   }
-  copyTree((0, import_node_path12.join)(tpl, "common", "commands"), (0, import_node_path12.join)(outDir, "commands"), force, results);
+  copyTree((0, import_node_path13.join)(tpl, "common", "commands"), (0, import_node_path13.join)(outDir, "commands"), force, results);
   for (const archetype of ARCHETYPE_DISPLAY_ORDER) {
-    emit(results, (0, import_node_path12.join)(outDir, "agents", `${archetype}.md`), stampSurfaceVersion(roleAgentDefinition(archetype, "claude")), force);
+    emit(results, (0, import_node_path13.join)(outDir, "agents", `${archetype}.md`), stampSurfaceVersion(roleAgentDefinition(archetype, "claude")), force);
   }
-  const relayModel = relayModelForClaude((0, import_node_path12.join)(tpl, "common", "fadeno", "executors.yaml"));
+  const relayModel = relayModelForClaude((0, import_node_path13.join)(tpl, "common", "fadeno", "executors.yaml"));
   emit(
     results,
-    (0, import_node_path12.join)(outDir, "agents", "dispatch.md"),
-    stampRelayModel(stampSurfaceVersion((0, import_node_fs13.readFileSync)((0, import_node_path12.join)(tpl, "claude", "claude-agents", "dispatch.md"), "utf8")), relayModel),
+    (0, import_node_path13.join)(outDir, "agents", "dispatch.md"),
+    stampRelayModel(stampSurfaceVersion((0, import_node_fs14.readFileSync)((0, import_node_path13.join)(tpl, "claude", "claude-agents", "dispatch.md"), "utf8")), relayModel),
     force
   );
   emitHooks(results, outDir, tpl, "spawn-claude.mjs", "hooks-claude.json", force);
@@ -11670,7 +11841,7 @@ function runCodexPlugin(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const tpl = templatesDir();
   const ref = opts.outDir ?? "plugin-codex";
-  const outDir = (0, import_node_path12.isAbsolute)(ref) ? ref : (0, import_node_path12.resolve)(cwd, ref);
+  const outDir = (0, import_node_path13.isAbsolute)(ref) ? ref : (0, import_node_path13.resolve)(cwd, ref);
   const force = opts.force ?? false;
   const results = [];
   const manifest = JSON.stringify(
@@ -11692,13 +11863,13 @@ function runCodexPlugin(opts = {}) {
     null,
     2
   ) + "\n";
-  emit(results, (0, import_node_path12.join)(outDir, ".codex-plugin", "plugin.json"), manifest, force);
+  emit(results, (0, import_node_path13.join)(outDir, ".codex-plugin", "plugin.json"), manifest, force);
   for (const skill of CODEX_SKILLS) {
-    emit(results, (0, import_node_path12.join)(outDir, "skills", skill, "SKILL.md"), (0, import_node_fs13.readFileSync)((0, import_node_path12.join)(tpl, "common", "skills", skill, "SKILL.md"), "utf8"), force);
-    const references = (0, import_node_path12.join)(tpl, "common", "skills", skill, "references");
-    if ((0, import_node_fs13.existsSync)(references)) copyTree(references, (0, import_node_path12.join)(outDir, "skills", skill, "references"), force, results);
-    emit(results, (0, import_node_path12.join)(outDir, "skills", skill, "agents", "openai.yaml"), (0, import_node_fs13.readFileSync)((0, import_node_path12.join)(tpl, "codex", "openai", `${skill}.yaml`), "utf8"), force);
-    emitLauncher(results, (0, import_node_path12.join)(outDir, "skills", skill), tpl, "codex", force);
+    emit(results, (0, import_node_path13.join)(outDir, "skills", skill, "SKILL.md"), (0, import_node_fs14.readFileSync)((0, import_node_path13.join)(tpl, "common", "skills", skill, "SKILL.md"), "utf8"), force);
+    const references = (0, import_node_path13.join)(tpl, "common", "skills", skill, "references");
+    if ((0, import_node_fs14.existsSync)(references)) copyTree(references, (0, import_node_path13.join)(outDir, "skills", skill, "references"), force, results);
+    emit(results, (0, import_node_path13.join)(outDir, "skills", skill, "agents", "openai.yaml"), (0, import_node_fs14.readFileSync)((0, import_node_path13.join)(tpl, "codex", "openai", `${skill}.yaml`), "utf8"), force);
+    emitLauncher(results, (0, import_node_path13.join)(outDir, "skills", skill), tpl, "codex", force);
   }
   emitBundledBin(results, outDir, tpl, "plugin-codex", force);
   emitHooks(results, outDir, tpl, "spawn-codex.mjs", "hooks-codex.json", force);
@@ -11709,7 +11880,7 @@ function runOmpPlugin(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const tpl = templatesDir();
   const ref = opts.outDir ?? "plugin-omp";
-  const outDir = (0, import_node_path12.isAbsolute)(ref) ? ref : (0, import_node_path12.resolve)(cwd, ref);
+  const outDir = (0, import_node_path13.isAbsolute)(ref) ? ref : (0, import_node_path13.resolve)(cwd, ref);
   const force = opts.force ?? false;
   const results = [];
   const manifest = JSON.stringify(
@@ -11725,25 +11896,25 @@ function runOmpPlugin(opts = {}) {
     null,
     2
   ) + "\n";
-  emit(results, (0, import_node_path12.join)(outDir, "package.json"), manifest, force);
+  emit(results, (0, import_node_path13.join)(outDir, "package.json"), manifest, force);
   for (const skill of OMP_SKILLS) {
-    emit(results, (0, import_node_path12.join)(outDir, "skills", skill, "SKILL.md"), (0, import_node_fs13.readFileSync)((0, import_node_path12.join)(tpl, "common", "skills", skill, "SKILL.md"), "utf8"), force);
-    const references = (0, import_node_path12.join)(tpl, "common", "skills", skill, "references");
-    if ((0, import_node_fs13.existsSync)(references)) copyTree(references, (0, import_node_path12.join)(outDir, "skills", skill, "references"), force, results);
-    emitLauncher(results, (0, import_node_path12.join)(outDir, "skills", skill), tpl, "omp", force);
+    emit(results, (0, import_node_path13.join)(outDir, "skills", skill, "SKILL.md"), (0, import_node_fs14.readFileSync)((0, import_node_path13.join)(tpl, "common", "skills", skill, "SKILL.md"), "utf8"), force);
+    const references = (0, import_node_path13.join)(tpl, "common", "skills", skill, "references");
+    if ((0, import_node_fs14.existsSync)(references)) copyTree(references, (0, import_node_path13.join)(outDir, "skills", skill, "references"), force, results);
+    emitLauncher(results, (0, import_node_path13.join)(outDir, "skills", skill), tpl, "omp", force);
   }
-  emit(results, (0, import_node_path12.join)(outDir, "extensions", "fadeno.ts"), (0, import_node_fs13.readFileSync)((0, import_node_path12.join)(tpl, "omp", "extensions", "fadeno.ts"), "utf8"), force);
+  emit(results, (0, import_node_path13.join)(outDir, "extensions", "fadeno.ts"), (0, import_node_fs14.readFileSync)((0, import_node_path13.join)(tpl, "omp", "extensions", "fadeno.ts"), "utf8"), force);
   for (const archetype of ARCHETYPE_DISPLAY_ORDER) {
-    emit(results, (0, import_node_path12.join)(outDir, "agents", `${archetype}.md`), roleAgentDefinition(archetype, "omp"), force);
+    emit(results, (0, import_node_path13.join)(outDir, "agents", `${archetype}.md`), roleAgentDefinition(archetype, "omp"), force);
   }
-  emit(results, (0, import_node_path12.join)(outDir, "agents", "dispatch.md"), (0, import_node_fs13.readFileSync)((0, import_node_path12.join)(tpl, "omp", "omp-agents", "dispatch.md"), "utf8"), force);
+  emit(results, (0, import_node_path13.join)(outDir, "agents", "dispatch.md"), (0, import_node_fs14.readFileSync)((0, import_node_path13.join)(tpl, "omp", "omp-agents", "dispatch.md"), "utf8"), force);
   emitBundledBin(results, outDir, tpl, "plugin-omp", force);
   return { outDir, results };
 }
 
 // src/commands/completion.ts
-var import_node_fs14 = require("node:fs");
-var import_node_path13 = require("node:path");
+var import_node_fs15 = require("node:fs");
+var import_node_path14 = require("node:path");
 var import_yaml5 = __toESM(require_dist(), 1);
 var CompletionError = class extends Error {
 };
@@ -11810,8 +11981,8 @@ var COMMANDS = {
     "--json": NONE
   }),
   "dispatch-stop": command({ "--transcript": PATH, "--message-file": PATH, "--agent-cwd": PATH, "--json": NONE }, ["free"]),
-  "dispatch-wait": command({ "--wait-seconds": { kind: "free" }, "--json": NONE }, ["free"]),
-  "dispatch-close": command({ "--merged": NONE, "--kept": NONE, "--discarded": NONE, "--failed": NONE, "--note": { kind: "free" } }, ["free"]),
+  "dispatch-wait": command({ "--wait-seconds": { kind: "free" }, "--json": NONE }, ["free", "free", "free", "free"]),
+  "dispatch-close": command({ "--merged": NONE, "--kept": NONE, "--discarded": NONE, "--failed": NONE, "--note": { kind: "free" }, "--force": NONE }, ["free"]),
   cancel: command({}, ["free"]),
   dispatches: command({ "--all": NONE, "--tail": { kind: "free" }, "--json": NONE, "--output": { kind: "free" } }, ["free"]),
   worktrees: command({ "--json": NONE }),
@@ -11853,7 +12024,7 @@ function runCompletion() {
 }
 function isExecutableWord(word) {
   if (word == null) return false;
-  const name = (0, import_node_path13.basename)(word);
+  const name = (0, import_node_path14.basename)(word);
   return name === "fadeno" || name === "fadeno.js";
 }
 function commandStart(words) {
@@ -11912,16 +12083,16 @@ function commandContext(words, cword) {
 }
 function readDirEntries(dir) {
   try {
-    return (0, import_node_fs14.readdirSync)(dir, { withFileTypes: true });
+    return (0, import_node_fs15.readdirSync)(dir, { withFileTypes: true });
   } catch {
     return [];
   }
 }
 function pathCandidates(prefix, cwd) {
   const slash = prefix.endsWith("/") || prefix.endsWith("\\");
-  const dirPart = slash ? prefix : (0, import_node_path13.dirname)(prefix);
-  const base = slash ? "" : (0, import_node_path13.basename)(prefix);
-  const lookup2 = (0, import_node_path13.resolve)(cwd, dirPart === "." ? "." : dirPart);
+  const dirPart = slash ? prefix : (0, import_node_path14.dirname)(prefix);
+  const base = slash ? "" : (0, import_node_path14.basename)(prefix);
+  const lookup2 = (0, import_node_path14.resolve)(cwd, dirPart === "." ? "." : dirPart);
   const entries = readDirEntries(lookup2);
   const out = [];
   for (const entry of entries) {
@@ -11941,7 +12112,7 @@ function readProfile(repoRoot) {
 }
 function userCatalogModels() {
   try {
-    const parsed = (0, import_yaml5.parse)((0, import_node_fs14.readFileSync)(userPaths().executorsFile, "utf8"));
+    const parsed = (0, import_yaml5.parse)((0, import_node_fs15.readFileSync)(userPaths().executorsFile, "utf8"));
     const models = parsed?.models;
     if (models == null || typeof models !== "object" || Array.isArray(models)) return [];
     return uniqueSorted(Object.keys(models).filter((name) => name !== "host"));
@@ -12084,16 +12255,16 @@ function suggestFlag(command2, subcommand, flag) {
 }
 
 // src/commands/feedback.ts
-var import_node_fs15 = require("node:fs");
-var import_node_path14 = require("node:path");
+var import_node_fs16 = require("node:fs");
+var import_node_path15 = require("node:path");
 var FeedbackError = class extends Error {
 };
-var FEEDBACK_FILE = (0, import_node_path14.join)(".fadeno", "feedback.md");
+var FEEDBACK_FILE = (0, import_node_path15.join)(".fadeno", "feedback.md");
 function repoRootOf3(opts) {
   return opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
 }
 function pathOf(repoRoot) {
-  return (0, import_node_path14.join)(repoRoot, FEEDBACK_FILE);
+  return (0, import_node_path15.join)(repoRoot, FEEDBACK_FILE);
 }
 var HEADING = /^## /gm;
 function runFeedbackAdd(opts) {
@@ -12116,7 +12287,7 @@ function runFeedbackAdd(opts) {
     text
   };
   const path = pathOf(repoRoot);
-  const existed = (0, import_node_fs15.existsSync)(path);
+  const existed = (0, import_node_fs16.existsSync)(path);
   const header = existed ? "" : [
     "# Fadeno feedback",
     "",
@@ -12131,22 +12302,22 @@ function runFeedbackAdd(opts) {
     "",
     ""
   ].join("\n");
-  (0, import_node_fs15.mkdirSync)((0, import_node_path14.dirname)(path), { recursive: true });
-  (0, import_node_fs15.appendFileSync)(path, `${header}${body}`, "utf8");
-  return { ...entry, path, total: ((0, import_node_fs15.readFileSync)(path, "utf8").match(HEADING) ?? []).length };
+  (0, import_node_fs16.mkdirSync)((0, import_node_path15.dirname)(path), { recursive: true });
+  (0, import_node_fs16.appendFileSync)(path, `${header}${body}`, "utf8");
+  return { ...entry, path, total: ((0, import_node_fs16.readFileSync)(path, "utf8").match(HEADING) ?? []).length };
 }
 function runFeedbackRead(opts = {}) {
   const path = pathOf(repoRootOf3(opts));
-  if (!(0, import_node_fs15.existsSync)(path)) return { path, exists: false, text: null, entries: 0 };
-  const text = (0, import_node_fs15.readFileSync)(path, "utf8");
+  if (!(0, import_node_fs16.existsSync)(path)) return { path, exists: false, text: null, entries: 0 };
+  const text = (0, import_node_fs16.readFileSync)(path, "utf8");
   return { path, exists: true, text, entries: (text.match(HEADING) ?? []).length };
 }
 
 // src/commands/setup.ts
 var import_node_child_process5 = require("node:child_process");
-var import_node_fs16 = require("node:fs");
+var import_node_fs17 = require("node:fs");
 var import_node_os2 = require("node:os");
-var import_node_path15 = require("node:path");
+var import_node_path16 = require("node:path");
 var SetupError = class extends Error {
 };
 var PROBES = [
@@ -12167,22 +12338,22 @@ function probe(command2) {
 var MANAGED_AGENT_MARKER = "# fadeno:managed";
 function sweepManagedAgents(repoRoot, options) {
   const removed = [];
-  for (const dir of [codexUserAgentDir(options), (0, import_node_path15.join)(repoRoot, ".codex", "agents")]) {
+  for (const dir of [codexUserAgentDir(options), (0, import_node_path16.join)(repoRoot, ".codex", "agents")]) {
     let entries;
     try {
-      entries = (0, import_node_fs16.readdirSync)(dir);
+      entries = (0, import_node_fs17.readdirSync)(dir);
     } catch {
       continue;
     }
     for (const entry of entries) {
       if (!entry.endsWith(".toml")) continue;
-      const path = (0, import_node_path15.join)(dir, entry);
+      const path = (0, import_node_path16.join)(dir, entry);
       try {
-        if (!(0, import_node_fs16.readFileSync)(path, "utf8").startsWith(MANAGED_AGENT_MARKER)) continue;
+        if (!(0, import_node_fs17.readFileSync)(path, "utf8").startsWith(MANAGED_AGENT_MARKER)) continue;
       } catch {
         continue;
       }
-      (0, import_node_fs16.rmSync)(path, { force: true });
+      (0, import_node_fs17.rmSync)(path, { force: true });
       removed.push(path);
     }
   }
@@ -12192,42 +12363,42 @@ function sweepRetiredState(paths) {
   const removed = [];
   for (const path of retiredStateFiles(paths)) {
     try {
-      if (!(0, import_node_fs16.lstatSync)(path).isFile()) continue;
+      if (!(0, import_node_fs17.lstatSync)(path).isFile()) continue;
     } catch {
       continue;
     }
-    (0, import_node_fs16.rmSync)(path, { force: true });
+    (0, import_node_fs17.rmSync)(path, { force: true });
     removed.push(path);
   }
   for (const dir of retiredStateDirs(paths)) {
     try {
-      if (!(0, import_node_fs16.lstatSync)(dir).isDirectory()) continue;
+      if (!(0, import_node_fs17.lstatSync)(dir).isDirectory()) continue;
     } catch {
       continue;
     }
-    (0, import_node_fs16.rmSync)(dir, { recursive: true, force: true });
+    (0, import_node_fs17.rmSync)(dir, { recursive: true, force: true });
     removed.push(dir);
   }
   return removed;
 }
 function runningCli(env) {
   const bundled = env.FADENO_BUNDLED_RUNTIME?.trim();
-  if (bundled && (0, import_node_fs16.existsSync)((0, import_node_path15.join)(bundled, "fadeno"))) return (0, import_node_path15.join)(bundled, "fadeno");
+  if (bundled && (0, import_node_fs17.existsSync)((0, import_node_path16.join)(bundled, "fadeno"))) return (0, import_node_path16.join)(bundled, "fadeno");
   const argv1 = process.argv[1];
   if (argv1 == null) return null;
   try {
-    return (0, import_node_fs16.realpathSync)((0, import_node_path15.resolve)(argv1));
+    return (0, import_node_fs17.realpathSync)((0, import_node_path16.resolve)(argv1));
   } catch {
-    return (0, import_node_path15.resolve)(argv1);
+    return (0, import_node_path16.resolve)(argv1);
   }
 }
 function onPath(dir, env) {
-  const entries = (env.PATH ?? "").split(import_node_path15.delimiter).filter((part) => part.length > 0);
+  const entries = (env.PATH ?? "").split(import_node_path16.delimiter).filter((part) => part.length > 0);
   return entries.some((entry) => {
     try {
-      return (0, import_node_fs16.realpathSync)(entry) === (0, import_node_fs16.realpathSync)(dir);
+      return (0, import_node_fs17.realpathSync)(entry) === (0, import_node_fs17.realpathSync)(dir);
     } catch {
-      return (0, import_node_path15.resolve)(entry) === (0, import_node_path15.resolve)(dir);
+      return (0, import_node_path16.resolve)(entry) === (0, import_node_path16.resolve)(dir);
     }
   });
 }
@@ -12237,14 +12408,14 @@ function windowsShim(target) {
 function linkCli(paths, target, options, force) {
   const windows = (options?.platform ?? process.platform) === "win32";
   const path = paths.linkPath;
-  (0, import_node_fs16.mkdirSync)(paths.binDir, { recursive: true });
+  (0, import_node_fs17.mkdirSync)(paths.binDir, { recursive: true });
   const env = options?.env ?? process.env;
   const FOREIGN = " foreign";
   const current = (() => {
     try {
-      const stat = (0, import_node_fs16.lstatSync)(path);
-      if (windows) return stat.isFile() ? (0, import_node_fs16.readFileSync)(path, "utf8") : FOREIGN;
-      return stat.isSymbolicLink() ? (0, import_node_fs16.readlinkSync)(path) : FOREIGN;
+      const stat = (0, import_node_fs17.lstatSync)(path);
+      if (windows) return stat.isFile() ? (0, import_node_fs17.readFileSync)(path, "utf8") : FOREIGN;
+      return stat.isSymbolicLink() ? (0, import_node_fs17.readlinkSync)(path) : FOREIGN;
     } catch {
       return null;
     }
@@ -12256,18 +12427,18 @@ function linkCli(paths, target, options, force) {
       `${path} exists and is not something Fadeno wrote. Remove it, choose another directory with FADENO_BIN_DIR, or rerun with --force to replace it.`
     );
   }
-  if (current != null) (0, import_node_fs16.rmSync)(path, { force: true });
-  if (windows) (0, import_node_fs16.writeFileSync)(path, want, "utf8");
-  else (0, import_node_fs16.symlinkSync)(target, path);
+  if (current != null) (0, import_node_fs17.rmSync)(path, { force: true });
+  if (windows) (0, import_node_fs17.writeFileSync)(path, want, "utf8");
+  else (0, import_node_fs17.symlinkSync)(target, path);
   return { path, target, action: current == null ? "created" : "retargeted", onPath: onPath(paths.binDir, env) };
 }
 function ensureClaudePermission(options, notices) {
   const env = options?.env ?? process.env;
-  const settingsPath = (0, import_node_path15.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path15.join)(options?.home ?? (0, import_node_os2.homedir)(), ".claude"), "settings.json");
+  const settingsPath = (0, import_node_path16.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path16.join)(options?.home ?? (0, import_node_os2.homedir)(), ".claude"), "settings.json");
   let data = {};
-  if ((0, import_node_fs16.existsSync)(settingsPath)) {
+  if ((0, import_node_fs17.existsSync)(settingsPath)) {
     try {
-      const parsed = JSON.parse((0, import_node_fs16.readFileSync)(settingsPath, "utf8"));
+      const parsed = JSON.parse((0, import_node_fs17.readFileSync)(settingsPath, "utf8"));
       if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
         notices.push(`Claude user settings ${settingsPath} are not an object; permission setup left them untouched.`);
         return null;
@@ -12289,8 +12460,8 @@ function ensureClaudePermission(options, notices) {
   allow.push(rule);
   permissions.allow = allow;
   data.permissions = permissions;
-  (0, import_node_fs16.mkdirSync)((0, import_node_path15.dirname)(settingsPath), { recursive: true });
-  (0, import_node_fs16.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
+  (0, import_node_fs17.mkdirSync)((0, import_node_path16.dirname)(settingsPath), { recursive: true });
+  (0, import_node_fs17.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   notices.push(`Claude user permission added so agents can run the CLI without a prompt each time: ${rule} in ${settingsPath}`);
   return { path: settingsPath, rule };
@@ -12308,7 +12479,7 @@ function runSetup(opts = {}) {
     throw new SetupError(err.message);
   }
   const source = opts.source !== void 0 ? opts.source : runningCli(env);
-  if (source == null || !(0, import_node_fs16.existsSync)(source)) {
+  if (source == null || !(0, import_node_fs17.existsSync)(source)) {
     throw new SetupError(
       `cannot find the CLI to link${source == null ? "" : ` at ${source}`} \u2014 run \`fadeno setup\` from the plugin's own CLI, or pass --from <bin-dir>.`
     );
@@ -12333,26 +12504,26 @@ function runSetup(opts = {}) {
 }
 
 // src/commands/status.ts
-var import_node_fs17 = require("node:fs");
+var import_node_fs18 = require("node:fs");
 var import_node_os3 = require("node:os");
-var import_node_path16 = require("node:path");
+var import_node_path17 = require("node:path");
 var StatusError = class extends Error {
 };
 function linkState(path) {
   try {
-    const stat = (0, import_node_fs17.lstatSync)(path);
+    const stat = (0, import_node_fs18.lstatSync)(path);
     if (!stat.isSymbolicLink()) return { path, target: null, state: "foreign" };
-    const target = (0, import_node_fs17.readlinkSync)(path);
-    return { path, target, state: (0, import_node_fs17.existsSync)(target) ? "linked" : "foreign" };
+    const target = (0, import_node_fs18.readlinkSync)(path);
+    return { path, target, state: (0, import_node_fs18.existsSync)(target) ? "linked" : "foreign" };
   } catch {
     return { path, target: null, state: "missing" };
   }
 }
 function declaredAgentName(path, ext) {
-  const fallback = (0, import_node_path16.basename)(path, ext);
+  const fallback = (0, import_node_path17.basename)(path, ext);
   let text;
   try {
-    text = (0, import_node_fs17.readFileSync)(path, "utf8").slice(0, 4096);
+    text = (0, import_node_fs18.readFileSync)(path, "utf8").slice(0, 4096);
   } catch {
     return fallback;
   }
@@ -12362,25 +12533,25 @@ function declaredAgentName(path, ext) {
 function shadowingAgentFiles(repoRoot, archetypes, options) {
   const home = options?.home ?? (0, import_node_os3.homedir)();
   const env = options?.env ?? process.env;
-  const claudeHome = env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path16.join)(home, ".claude");
+  const claudeHome = env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path17.join)(home, ".claude");
   const roots = [
-    { dir: (0, import_node_path16.join)(claudeHome, "agents"), harness: "claude", scope: "user", ext: ".md" },
-    { dir: (0, import_node_path16.join)(repoRoot, ".claude", "agents"), harness: "claude", scope: "project", ext: ".md" },
+    { dir: (0, import_node_path17.join)(claudeHome, "agents"), harness: "claude", scope: "user", ext: ".md" },
+    { dir: (0, import_node_path17.join)(repoRoot, ".claude", "agents"), harness: "claude", scope: "project", ext: ".md" },
     { dir: codexUserAgentDir(options), harness: "codex", scope: "user", ext: ".toml" },
-    { dir: (0, import_node_path16.join)(repoRoot, ".codex", "agents"), harness: "codex", scope: "project", ext: ".toml" }
+    { dir: (0, import_node_path17.join)(repoRoot, ".codex", "agents"), harness: "codex", scope: "project", ext: ".toml" }
   ];
   const routed = /* @__PURE__ */ new Set([...archetypes, "dispatch"]);
   const found = [];
   for (const root of roots) {
     let entries;
     try {
-      entries = (0, import_node_fs17.readdirSync)(root.dir).sort();
+      entries = (0, import_node_fs18.readdirSync)(root.dir).sort();
     } catch {
       continue;
     }
     for (const entry of entries) {
       if (!entry.endsWith(root.ext)) continue;
-      const path = (0, import_node_path16.join)(root.dir, entry);
+      const path = (0, import_node_path17.join)(root.dir, entry);
       const archetype = declaredAgentName(path, root.ext);
       if (!routed.has(archetype)) continue;
       found.push({ path, archetype, harness: root.harness, scope: root.scope });
@@ -12443,7 +12614,7 @@ function runStatus(opts = {}) {
     agentFiles,
     worktrees,
     unclosed,
-    projectCustomized: (0, import_node_fs17.existsSync)((0, import_node_path16.join)(repoRoot, ".fadeno")),
+    projectCustomized: (0, import_node_fs18.existsSync)((0, import_node_path17.join)(repoRoot, ".fadeno")),
     verbose: Boolean(opts.verbose),
     attention
   };
@@ -12514,13 +12685,16 @@ var TOP_LEVEL = {
     "The stop hook's entry point. Records presence of a final message, never completeness, and the uncommitted paths in the assigned worktree. A second stop for the same dispatch is a replay.",
     "`--transcript` reads the agent's transcript: the contract header in its prompt names the dispatch (so the ref may be omitted), the last assistant turn supplies the final message when none was passed, and the model the agent ran on is recorded beside the one the dial asked for. A transcript with no contract is not a dispatch: exit 4, nothing recorded."
   ]),
-  "dispatch-wait": page("Block until a dispatch stops, then print its report.", "fadeno dispatch-wait <name|id> [--wait-seconds <n>] [--json]", [
+  "dispatch-wait": page("Block until a dispatch stops, then print its report.", "fadeno dispatch-wait <name|id>... [--wait-seconds <n>] [--json]", [
     "For a dispatch that outruns the caller's shell timeout. Wait in bites the harness allows: this returns `still running` (exit 2) after its bound rather than being killed mid-wait, and the caller runs it again.",
+    "Several names answer on the FIRST to stop, and the message names the ones still running so the next call can ask for those. A fan-out needs one call, not one poll per dispatch.",
     "The bound is on WAITING, never on the work: nothing here stops an executor or decides it is too slow.",
-    "Exit 0 when it stopped (the report is on stdout), 2 while it runs, 4 when its process group is gone and no stop was ever recorded \u2014 which means no report is coming and says how to record what the executor did write."
+    "Exit 0 when one stopped (the report is on stdout), 2 while they all run, 4 when a process group is gone and no stop was ever recorded \u2014 which means no report is coming and says how to record what the executor did write."
   ]),
-  "dispatch-close": page("Record the terminal decision for a dispatch.", "fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>]", [
-    "Exactly one verb. The same verb twice is a replay; a different verb for an already-closed dispatch is refused. Closing removes nothing: the branch stays, and the worktree stays until `fadeno clean`."
+  "dispatch-close": page("Record the terminal decision for a dispatch.", "fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>] [--force]", [
+    "Exactly one verb. The same verb twice is a replay; a different verb for an already-closed dispatch is refused. Closing removes nothing: the branch stays, and the worktree stays until `fadeno clean`.",
+    "`--merged` is the only verb that claims something about the repository rather than about your intent, so it is the only one checked: it is refused while the branch carries commits HEAD does not have, or while its worktree holds uncommitted tracked changes.",
+    "A squash, a rebase or a reimplementation lands the work without leaving the branch reachable. Close those with `--force`, and record how in `--note`."
   ]),
   cancel: page("Stop a running command-lane dispatch by signalling its process group.", "fadeno cancel <name|id>", [
     "Refuses a host-lane dispatch (the subagent is the harness's to stop) and a dispatch that is not running. Writes the stop row if the launcher did not. The dispatch still needs closing."
@@ -12534,7 +12708,8 @@ var TOP_LEVEL = {
   ]),
   context: page("Print what a host session is told: the archetypes, the rules, and every unclosed dispatch.", "fadeno context [--json]", [
     "One source for the host-mode hook, a spawned director's prompt, and a human who wants to see it.",
-    "It carries no routing table: that is `fadeno dial`, read fresh, because this text is injected once and outlives the dials it would have quoted."
+    "It carries no routing table: that is `fadeno dial`, read fresh, because this text is injected once and outlives the dials it would have quoted.",
+    "It reports whether `.fadeno/preamble.md` exists \u2014 the repository conventions Fadeno appends to every dispatched prompt, so a brief never has to repeat them."
   ]),
   feedback: page("Record friction with Fadeno itself, or read what has been recorded.", [
     "fadeno feedback",
@@ -12697,7 +12872,7 @@ var PAGE_OPTIONS = {
   "dispatch-open": withGlobals("--archetype", "--model", "--name", "--lane", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--parent-transcript", "--harness", "--stage-prompt", "--reuse-open", "--json"),
   "dispatch-stop": withGlobals("--transcript", "--message-file", "--agent-cwd", "--json"),
   "dispatch-wait": withGlobals("--wait-seconds", "--json"),
-  "dispatch-close": withGlobals("--merged", "--kept", "--discarded", "--failed", "--note"),
+  "dispatch-close": withGlobals("--merged", "--kept", "--discarded", "--failed", "--note", "--force"),
   cancel: withGlobals(),
   dispatches: withGlobals("--all", "--tail", "--json", "--output"),
   worktrees: withGlobals("--json"),
@@ -12720,14 +12895,16 @@ var PATH_OPTION_HINTS = {
   setup: { "--force": "Replace a `fadeno` Fadeno did not write", "--from": "Directory holding the CLI to link" },
   plugin: { "--force": "Overwrite generated plugin files" },
   "models remove": { "--force": "Remove despite live dials, naming each stranded" },
-  "model remove": { "--force": "Remove despite live dials, naming each stranded" }
+  "model remove": { "--force": "Remove despite live dials, naming each stranded" },
+  "dispatch-close": { "--force": "Close --merged despite what git found; say how in --note" }
 };
 var PATH_OPTION_FORMS = {
   dispatches: { "--output": "--output <name|id>", "--tail": "--tail <count>" },
   dispatch: { "--name": "--name <name>", "--from": "--from <ref>", "--heartbeat": "--heartbeat <seconds>" },
   "dispatch-open": { "--name": "--name <name>", "--from": "--from <ref>", "--session-id": "--session-id <id>", "--parent": "--parent <id>" },
   "dispatch-stop": { "--message-file": "--message-file <path>", "--agent-cwd": "--agent-cwd <dir>" },
-  "dispatch-close": { "--note": "--note <text>" }
+  "dispatch-close": { "--note": "--note <text>" },
+  "dispatch-wait": { "--wait-seconds": "--wait-seconds <n>" }
 };
 var HELP_PATHS = Object.freeze([...Object.keys(TOP_LEVEL), ...Object.keys(NESTED)].sort());
 var HELP_LINE_WIDTH = 100;
@@ -13064,7 +13241,7 @@ async function main(argv) {
       if (target === "grok" || target === "opencode" || target === "omp") {
         throw new Error("`fadeno setup` supports --codex or --claude; Grok, OpenCode, and omp have no user-scoped setup.");
       }
-      const from = values.from != null ? (0, import_node_path17.join)(String(values.from), "fadeno") : void 0;
+      const from = values.from != null ? (0, import_node_path18.join)(String(values.from), "fadeno") : void 0;
       const result = runSetup({ target: target ?? null, source: from, force: Boolean(values.force) });
       if (values.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -13131,7 +13308,7 @@ async function main(argv) {
       if (codex) {
         console.log("\nTest it: `codex plugin marketplace add . && codex plugin add fadeno@fadeno`");
       } else {
-        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path17.relative)(process.cwd(), outDir) + "`");
+        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path18.relative)(process.cwd(), outDir) + "`");
       }
       return 0;
     }
@@ -13285,7 +13462,7 @@ async function main(argv) {
         shared: Boolean(values.shared),
         from: values.from ?? null,
         promptFile,
-        prompt: promptFile == null ? (0, import_node_fs18.readFileSync)(0, "utf8") : void 0,
+        prompt: promptFile == null ? (0, import_node_fs19.readFileSync)(0, "utf8") : void 0,
         session: values["session-id"] ?? null,
         parent: values.parent,
         onEcho: (line) => console.error(line),
@@ -13321,7 +13498,7 @@ async function main(argv) {
         shared: Boolean(values.shared),
         from: values.from ?? null,
         promptFile,
-        prompt: promptFile == null ? (0, import_node_fs18.readFileSync)(0, "utf8") : void 0,
+        prompt: promptFile == null ? (0, import_node_fs19.readFileSync)(0, "utf8") : void 0,
         session: values["session-id"] ?? null,
         parent: values.parent,
         harness: values.harness ?? null,
@@ -13369,7 +13546,7 @@ async function main(argv) {
           ref: ref ?? null,
           transcript,
           messageFile,
-          message: messageFile == null && !process.stdin.isTTY ? (0, import_node_fs18.readFileSync)(0, "utf8") : null,
+          message: messageFile == null && !process.stdin.isTTY ? (0, import_node_fs19.readFileSync)(0, "utf8") : null,
           agentCwd: values["agent-cwd"] ?? null
         });
       } catch (err) {
@@ -13410,11 +13587,15 @@ async function main(argv) {
       if (!ref || verbs.length !== 1) {
         throw new Error("Usage: fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>] \u2014 exactly one verb.");
       }
-      const closed = runDispatchClose({ ref, verb: verbs[0], note: values.note ?? null });
+      const closed = runDispatchClose({ ref, verb: verbs[0], note: values.note ?? null, force: Boolean(values.force) });
       const name = closed.record.opened?.name ?? closed.record.id;
+      if (closed.forced != null) console.error(`--force: closed anyway over the check. ${closed.forced}`);
       console.log(
         `${name} closed: ${closed.verb}${closed.replayed ? " (already recorded)" : ""}` + (closed.branch != null ? `; branch ${closed.branch} kept${closed.worktree != null ? `, worktree ${closed.worktree} stays until fadeno clean` : ""}` : "")
       );
+      if (closed.verb === "merged" && closed.merge != null && !closed.merge.checked && closed.merge.reason != null) {
+        console.error(`(not verified: ${closed.merge.reason})`);
+      }
       return 0;
     }
     case "cancel": {
@@ -13444,32 +13625,39 @@ async function main(argv) {
       return 0;
     }
     case "dispatch-wait": {
-      const [, ref] = positionals;
-      if (ref == null) throw new Error("Usage: fadeno dispatch-wait <name|id> [--wait-seconds <n>] [--json]");
+      const refs = positionals.slice(1);
+      if (refs.length === 0) throw new Error("Usage: fadeno dispatch-wait <name|id>... [--wait-seconds <n>] [--json]");
       const seconds = values["wait-seconds"] == null ? void 0 : Number(values["wait-seconds"]);
       if (seconds != null && (!Number.isFinite(seconds) || seconds < 0)) {
         throw new Error("--wait-seconds takes a non-negative number of seconds.");
       }
-      const outcome = await runDispatchWait({ ref, waitSeconds: seconds });
-      const name = outcome.record.opened?.name ?? outcome.record.id.slice(0, 8);
+      const outcome = await runDispatchWait({ refs, waitSeconds: seconds });
+      const nameOf = (r) => r.opened?.name ?? r.id.slice(0, 8);
+      const name = nameOf(outcome.record);
+      const others = outcome.waiting.map(nameOf);
+      const stillWaiting = others.length === 0 ? "" : ` Still running: ${others.join(" ")} \u2014 \`fadeno dispatch-wait ${others.join(" ")}\`.`;
       if (values.json) console.log(JSON.stringify(outcome, null, 2));
       if (outcome.state === "stopped") {
         if (!values.json) {
-          if (outcome.text == null) console.error(`${name} stopped and recorded no report.`);
-          else process.stdout.write(outcome.text.endsWith("\n") ? outcome.text : `${outcome.text}
+          if (outcome.text == null) console.error(`${name} stopped and recorded no report.${stillWaiting}`);
+          else {
+            if (refs.length > 1) console.error(`${name} stopped; its report follows.${stillWaiting}`);
+            process.stdout.write(outcome.text.endsWith("\n") ? outcome.text : `${outcome.text}
 `);
+          }
         }
         return 0;
       }
       if (outcome.state === "running") {
         if (!values.json) {
-          console.error(`${name} is still running (${ageOf(outcome.record)} in). Run this command again.`);
+          const which = outcome.waiting.length > 1 ? `${outcome.waiting.length} dispatches are still running (${others.join(", ")})` : `${name} is still running (${ageOf(outcome.record)} in)`;
+          console.error(`${which}. Run this command again.`);
         }
         return 2;
       }
       if (!values.json) {
         console.error(
-          `${name} is not running and never recorded a stop: its process group is gone, so no report is coming. What the executor wrote is at ${outcome.stdoutPath} \u2014 record it with \`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.`
+          `${name} is not running and never recorded a stop: its process group is gone, so no report is coming. What the executor wrote is at ${outcome.stdoutPath} \u2014 record it with \`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.${stillWaiting}`
         );
       }
       return 4;

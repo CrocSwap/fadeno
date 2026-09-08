@@ -6,9 +6,9 @@
 // to be written into a repository instruction file.
 //
 // What the session is told (spec §06): the host policy below, and the output
-// of `fadeno context` — the archetype table with live routing, the spawn
-// rules, the close obligation, and every unclosed dispatch. Both come from
-// one source: the policy is mirrored sentence for sentence in the host skill
+// of `fadeno context` — the archetypes, the spawn rules, the close obligation,
+// and every unclosed dispatch. Both come from one source: the policy is
+// mirrored sentence for sentence in the host skill
 // (a test holds them together), and the vocabulary is the CLI's. The full
 // text goes in at activation and again whenever the session starts or is
 // compacted; an ordinary turn gets a one-line reminder, because the nag
@@ -29,7 +29,7 @@ Fadeno failing is a user-facing event, not a routing problem to solve quietly. A
 
 While dispatches are open, every reply names what is running, stopped, and closed, with the model and lane of each.
 
-When concrete friction attributable to Fadeno occurs, append it to ./.fadeno/feedback.md with the date, host, task, observed behavior, evidence, impact, and workaround when known. Do not invent feedback. Delegated agents report friction to you; you alone edit the feedback file.`;
+When concrete friction attributable to Fadeno occurs, record it with \`fadeno feedback "<what happened>"\`, adding --dispatch <name> when it happened on one. The command stamps the time, harness and version and appends to .fadeno/feedback.md; write what happened, what you expected, and the workaround if you found one. Do not invent feedback. Delegated agents may record their own; read the file with \`fadeno feedback\`.`;
 
 const REMINDER = 'Fadeno host mode is on for this session: delegate through archetypes, report Fadeno failures to the user, close every dispatch. `fadeno context` prints the vocabulary and every unclosed dispatch.';
 

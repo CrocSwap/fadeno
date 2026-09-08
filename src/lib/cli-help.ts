@@ -77,13 +77,16 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     'The stop hook\'s entry point. Records presence of a final message, never completeness, and the uncommitted paths in the assigned worktree. A second stop for the same dispatch is a replay.',
     '`--transcript` reads the agent\'s transcript: the contract header in its prompt names the dispatch (so the ref may be omitted), the last assistant turn supplies the final message when none was passed, and the model the agent ran on is recorded beside the one the dial asked for. A transcript with no contract is not a dispatch: exit 4, nothing recorded.',
   ]),
-  'dispatch-wait': page('Block until a dispatch stops, then print its report.', 'fadeno dispatch-wait <name|id> [--wait-seconds <n>] [--json]', [
+  'dispatch-wait': page('Block until a dispatch stops, then print its report.', 'fadeno dispatch-wait <name|id>... [--wait-seconds <n>] [--json]', [
     'For a dispatch that outruns the caller\'s shell timeout. Wait in bites the harness allows: this returns `still running` (exit 2) after its bound rather than being killed mid-wait, and the caller runs it again.',
+    'Several names answer on the FIRST to stop, and the message names the ones still running so the next call can ask for those. A fan-out needs one call, not one poll per dispatch.',
     'The bound is on WAITING, never on the work: nothing here stops an executor or decides it is too slow.',
-    'Exit 0 when it stopped (the report is on stdout), 2 while it runs, 4 when its process group is gone and no stop was ever recorded — which means no report is coming and says how to record what the executor did write.',
+    'Exit 0 when one stopped (the report is on stdout), 2 while they all run, 4 when a process group is gone and no stop was ever recorded — which means no report is coming and says how to record what the executor did write.',
   ]),
-  'dispatch-close': page('Record the terminal decision for a dispatch.', 'fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>]', [
+  'dispatch-close': page('Record the terminal decision for a dispatch.', 'fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>] [--force]', [
     'Exactly one verb. The same verb twice is a replay; a different verb for an already-closed dispatch is refused. Closing removes nothing: the branch stays, and the worktree stays until `fadeno clean`.',
+    '`--merged` is the only verb that claims something about the repository rather than about your intent, so it is the only one checked: it is refused while the branch carries commits HEAD does not have, or while its worktree holds uncommitted tracked changes.',
+    'A squash, a rebase or a reimplementation lands the work without leaving the branch reachable. Close those with `--force`, and record how in `--note`.',
   ]),
   cancel: page('Stop a running command-lane dispatch by signalling its process group.', 'fadeno cancel <name|id>', [
     'Refuses a host-lane dispatch (the subagent is the harness\'s to stop) and a dispatch that is not running. Writes the stop row if the launcher did not. The dispatch still needs closing.',
@@ -98,6 +101,7 @@ const TOP_LEVEL: Record<string, PageSeed> = {
   context: page('Print what a host session is told: the archetypes, the rules, and every unclosed dispatch.', 'fadeno context [--json]', [
     'One source for the host-mode hook, a spawned director\'s prompt, and a human who wants to see it.',
     'It carries no routing table: that is `fadeno dial`, read fresh, because this text is injected once and outlives the dials it would have quoted.',
+    'It reports whether `.fadeno/preamble.md` exists — the repository conventions Fadeno appends to every dispatched prompt, so a brief never has to repeat them.',
   ]),
   feedback: page('Record friction with Fadeno itself, or read what has been recorded.', [
     'fadeno feedback',
@@ -232,7 +236,7 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   'dispatch-open': withGlobals('--archetype', '--model', '--name', '--lane', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--parent-transcript', '--harness', '--stage-prompt', '--reuse-open', '--json'),
   'dispatch-stop': withGlobals('--transcript', '--message-file', '--agent-cwd', '--json'),
   'dispatch-wait': withGlobals('--wait-seconds', '--json'),
-  'dispatch-close': withGlobals('--merged', '--kept', '--discarded', '--failed', '--note'),
+  'dispatch-close': withGlobals('--merged', '--kept', '--discarded', '--failed', '--note', '--force'),
   cancel: withGlobals(),
   dispatches: withGlobals('--all', '--tail', '--json', '--output'),
   worktrees: withGlobals('--json'),
@@ -257,6 +261,7 @@ const PATH_OPTION_HINTS: Record<string, Record<string, string>> = {
   plugin: { '--force': 'Overwrite generated plugin files' },
   'models remove': { '--force': 'Remove despite live dials, naming each stranded' },
   'model remove': { '--force': 'Remove despite live dials, naming each stranded' },
+  'dispatch-close': { '--force': 'Close --merged despite what git found; say how in --note' },
 };
 
 const PATH_OPTION_FORMS: Record<string, Record<string, string>> = {
@@ -265,6 +270,7 @@ const PATH_OPTION_FORMS: Record<string, Record<string, string>> = {
   'dispatch-open': { '--name': '--name <name>', '--from': '--from <ref>', '--session-id': '--session-id <id>', '--parent': '--parent <id>' },
   'dispatch-stop': { '--message-file': '--message-file <path>', '--agent-cwd': '--agent-cwd <dir>' },
   'dispatch-close': { '--note': '--note <text>' },
+  'dispatch-wait': { '--wait-seconds': '--wait-seconds <n>' },
 };
 
 export const HELP_PATHS: readonly string[] = Object.freeze([...Object.keys(TOP_LEVEL), ...Object.keys(NESTED)].sort());

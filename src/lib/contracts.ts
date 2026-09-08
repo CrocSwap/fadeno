@@ -14,6 +14,7 @@
 
 import type { DispatchRecord } from './ledger.ts';
 import { ageMinutes } from './ledger.ts';
+import type { Preamble } from './preamble.ts';
 
 /** Refused at this many unclosed dispatches unless the catalog says otherwise. */
 export const DEFAULT_UNCLOSED_LIMIT = 5;
@@ -52,6 +53,8 @@ export interface WorkerContractInput {
     | { kind: 'shared'; reason: string | null };
   /** The host vocabulary, for an archetype that will itself spawn (a director). */
   vocabulary?: string | null;
+  /** `.fadeno/preamble.md`: what this repository states for every dispatch. */
+  preamble?: Preamble | null;
 }
 
 /** Sentinel lines the reader and tests key on; keep them stable. */
@@ -84,6 +87,14 @@ export function workerContract(input: WorkerContractInput): string {
     lines.push('**You own the work.**');
     lines.push('- Make the change and commit it, with a message that says what and why.', '');
   }
+  lines.push(...preambleSection(input.preamble, input.repoRoot));
+  // A worker handed "do BPW1 and BPA1" refused both because one of them was
+  // impossible, and the dispatch produced nothing. Deciding how much of a task
+  // is worth doing belongs to whoever wrote the brief; the worker's job is to
+  // come back with the parts that were possible and a plain account of the rest.
+  lines.push('**If part of it is impossible.**');
+  lines.push('- Do every part that is not, and say in your report exactly which part you left out and why. A brief with one blocked clause is not a blocked brief.');
+  lines.push('- If proceeding needs an assumption, state the assumption and proceed. Scaling the work down is your caller\'s decision, not yours to make silently.', '');
   lines.push('**Your final message.**');
   lines.push('- State what is in the tree: every file you changed, added or deleted, and anything untracked you left behind on purpose.');
   lines.push('- Say what you verified and how, and what you could not verify.');
@@ -95,6 +106,22 @@ export function workerContract(input: WorkerContractInput): string {
   }
   lines.push(CONTRACT_FOOTER);
   return lines.join('\n');
+}
+
+/**
+ * The repository's own conventions, carried into every dispatch so a brief
+ * does not have to repeat them — and so forgetting one stops being possible.
+ */
+function preambleSection(preamble: Preamble | null | undefined, repoRoot: string): string[] {
+  if (preamble == null || !preamble.exists || preamble.text == null) return [];
+  const lines = ['**This repository.**', '', preamble.text, ''];
+  if (preamble.truncated) {
+    lines.push(
+      `(Cut at ${preamble.text.length} of ${preamble.chars} characters. The rest is at \`${repoRoot}/${preamble.path}\`; read it if the part above leaves something open.)`,
+      '',
+    );
+  }
+  return lines;
 }
 
 /** Caller prompt plus contract, in the order the worker reads them. */
@@ -120,6 +147,8 @@ export interface HostVocabularyInput {
   archetypes: ArchetypeLine[];
   unclosed: DispatchRecord[];
   unclosedLimit: number;
+  /** `.fadeno/preamble.md`, so the host knows what its dispatches already carry. */
+  preamble?: Preamble | null;
   now?: Date;
 }
 
@@ -156,6 +185,11 @@ export function hostVocabulary(input: HostVocabularyInput): string {
   lines.push('## Spawning', '');
   lines.push('- Spawn through your harness\'s subagent tool with the archetype as the agent type (`fadeno:worker` on Claude Code; `worker` on Codex). Where no Fadeno hook can observe a spawn, run `fadeno dispatch --archetype <name> --prompt-file <file>` instead; it does the same thing as a process.');
   lines.push('- Write the prompt as the task itself, addressed to the agent that will do it. Fadeno appends the dispatch contract; do not describe Fadeno to the worker.');
+  lines.push(
+    input.preamble?.exists
+      ? '- This repository states conventions for every dispatch in `.fadeno/preamble.md`, and Fadeno appends them to every prompt you dispatch. Do not repeat them in a brief; read the file if you need to know what your workers were already told, and add to it rather than to a prompt when something turns out to hold for all of them.'
+      : '- Conventions that hold for EVERY dispatch here — the interpreter, the shared build directory, where receipts belong, what is forbidden — belong in `.fadeno/preamble.md`, which Fadeno appends to every dispatched prompt when it exists. Putting one there beats retyping it into each brief, and makes a brief that forgets it impossible.',
+  );
   lines.push('- Every dispatch gets a worktree cut from HEAD on a branch named `fadeno/<name>`. If the work needs uncommitted changes, commit them first, or ask for the shared tree by saying so in the spawn (`--shared` on the command lane). Two agents must never share one tree.');
   // Escalation had one sentence of policy and no mechanics, and a host that
   // wanted to use it had to guess three things: where the model goes, what a
@@ -172,9 +206,11 @@ export function hostVocabulary(input: HostVocabularyInput): string {
   );
   lines.push('## What the worker was promised', '');
   lines.push('It owns the change: it commits on its branch, merges from upstream before finishing, and its final message states what is in the tree and recommends merge or discard. That recommendation is a claim, not a finding: read the diff, run what you can, and reach your own conclusion.', '');
+  lines.push('`fadeno dispatches <name>` prints the two apart: what Fadeno measured from git — commits the branch carries that HEAD does not, the diffstat, and any conflict markers it committed — and, below it, what the agent said. The measured half is safe to trust because no agent had a hand in it. A report claiming a test suite passed is worth exactly as much as the sentence; run it yourself, or send a reviewer.', '');
   lines.push('## Closing', '');
   lines.push('Every dispatch must be closed with exactly one decision: `fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>]`. Fadeno performs no merge; you do (`git merge fadeno/<name>`), or you delegate it. `--kept` means the branch stays for later; `--discarded` and `--failed` leave the branch too, so nothing is lost by closing.', '');
-  lines.push(`Fadeno reminds you of unclosed dispatches at every spawn and refuses a new one at ${input.unclosedLimit} unclosed. \`fadeno dispatches\` lists them, \`fadeno dispatches --output <name>\` shows a report, \`fadeno worktrees\` shows every worktree still holding unmerged work, and \`fadeno cancel <name>\` stops a running command-lane dispatch.`, '');
+  lines.push('`--merged` is checked. It is the only verb that asserts something about the repository rather than about your intent, so Fadeno refuses it while the branch still carries commits HEAD does not have, or while its worktree holds uncommitted tracked changes. If the work landed another way — a squash, a rebase, a reimplementation — close with `--force` and say how in `--note`.', '');
+  lines.push(`Fadeno reminds you of unclosed dispatches at every spawn and refuses a new one at ${input.unclosedLimit} unclosed. \`fadeno dispatches\` lists them, \`fadeno dispatches --output <name>\` shows a report, \`fadeno worktrees\` shows every worktree still holding unmerged work, \`fadeno dispatch-wait <name>...\` blocks until one of them stops (several names answer on the first, so a fan-out needs one call rather than a poll per dispatch), and \`fadeno cancel <name>\` stops a running command-lane dispatch.`, '');
   lines.push('## When Fadeno fails', '');
   lines.push('A refused spawn, a dispatch that exits non-zero or returns nothing, or a resolver error is a user-facing event. Report it with the dispatch id and the error text, and do not substitute a generic subagent, another model, or your own hands for the delegated work without being told to.', '');
   // The channel from the agents USING Fadeno to the people changing it. It

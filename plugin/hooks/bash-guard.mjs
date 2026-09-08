@@ -69,7 +69,7 @@ const RECOVER_RE = new RegExp(String.raw`^(?:FADENO_HARNESS=\S+ )?${CLI} dispatc
 // The wait loop is part of the contract now: a dispatch that outruns the
 // harness's shell ceiling is ordinary, and the proxy's only way to finish
 // honestly is to ask again until the dispatch has actually stopped.
-const WAIT_RE = new RegExp(String.raw`^(?:FADENO_HARNESS=\S+ )?${CLI} dispatch-wait ${WORD}(?: --wait-seconds ${WORD})?(?: --json)?$`);
+const WAIT_RE = new RegExp(String.raw`^(?:FADENO_HARNESS=\S+ )?${CLI} dispatch-wait ${WORD}(?: ${WORD})*(?: --wait-seconds ${WORD})?(?: --json)?$`);
 
 if (agent.kind === 'proxy') {
   if (command == null || command.trim() === '') deny('dispatch proxy: the Bash call carries no command.');

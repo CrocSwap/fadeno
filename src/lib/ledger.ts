@@ -22,7 +22,7 @@
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { sanitizeName } from './worktree.ts';
+import { sanitizeName, type WorkMeasured } from './worktree.ts';
 
 export const LEDGER_FILE = join('.fadeno', 'dispatches.jsonl');
 export const PROMPTS_DIR = join('.fadeno', 'prompts');
@@ -99,6 +99,17 @@ export interface StoppedRow {
    * not apply is visible next to the model the opened row asked for.
    */
   model_observed?: string | null;
+  /**
+   * What the branch held, measured from git rather than reported by the agent
+   * — see `WorkMeasured`. Absent for a shared-tree dispatch, which has no
+   * branch of its own to measure, and on rows an older Fadeno wrote.
+   *
+   * It sits on the stop row rather than being computed on read because it is
+   * an observation at a moment, like `dirty` beside it: HEAD moves afterwards,
+   * and a number that silently changes meaning between two readings is worse
+   * than one that is dated.
+   */
+  work?: WorkMeasured;
 }
 
 export interface ClosedRow {

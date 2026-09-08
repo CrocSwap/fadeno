@@ -28,6 +28,7 @@ import {
   type StoppedRow,
 } from '../lib/ledger.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { readPreamble, type Preamble } from '../lib/preamble.ts';
 import {
   OUTPUTS_DIR,
   RELAY_DIR,
@@ -50,7 +51,17 @@ import {
 } from '../lib/spawn.ts';
 import { readTranscriptFacts } from '../lib/transcript.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
-import { WORKTREES_DIR, canonical, removeWorktree, reportWorktrees, sanitizeName, type WorktreeReport } from '../lib/worktree.ts';
+import {
+  WORKTREES_DIR,
+  canonical,
+  removeWorktree,
+  reportWorktrees,
+  sanitizeName,
+  verifyMerged,
+  type MergeCheck,
+  type WorkMeasured,
+  type WorktreeReport,
+} from '../lib/worktree.ts';
 
 export class DispatchesError extends Error {}
 
@@ -429,6 +440,7 @@ export function runDispatchStop(opts: DispatchStopOptions): DispatchStopped {
   const row = recordStopped(repoRoot, record.id, {
     finalMessage: message != null && message.trim().length > 0 ? message : null,
     cwd: assigned,
+    branch: record.opened.workspace?.branch ?? null,
     modelObserved: facts?.model ?? null,
   });
   return { record: { ...record, stopped: row, state: record.closed ? 'closed' : 'stopped' }, row, replayed: false, mismatchedCwd };
@@ -442,6 +454,8 @@ export interface DispatchCloseOptions extends CommonOptions {
   ref: string;
   verb: string;
   note?: string | null;
+  /** Close `--merged` anyway when git cannot see the branch in HEAD. */
+  force?: boolean;
 }
 
 export interface DispatchClosed {
@@ -450,22 +464,72 @@ export interface DispatchClosed {
   replayed: boolean;
   worktree: string | null;
   branch: string | null;
+  /** The `--merged` check, when one was made; null for the other three verbs. */
+  merge: MergeCheck | null;
+  /** What `--force` closed over, when it did. */
+  forced: string | null;
+}
+
+/**
+ * Why `--merged` alone is checked.
+ *
+ * `--kept`, `--discarded` and `--failed` state the host's intent, and an
+ * intent cannot be false. `--merged` states something about the repository,
+ * which git can confirm or contradict — so it is the one close verb Fadeno is
+ * able to check, and therefore the one it must.
+ *
+ * The check is a tripwire, not a wall: it fires on the accident (closing before
+ * looking, which one director did twice in a day and named as where its
+ * mistakes lived) and steps aside for the legitimate case, because a squash or
+ * a rebase lands the work without leaving the branch reachable from HEAD and
+ * Fadeno must not call that a lie.
+ */
+function mergeRefusal(name: string, branch: string, check: MergeCheck): string | null {
+  const problems: string[] = [];
+  if (check.unmerged > 0) {
+    problems.push(`${branch} has ${check.unmerged} commit(s) that HEAD does not have`);
+  }
+  if (check.uncommitted.length > 0) {
+    const sample = check.uncommitted.slice(0, 5).join(', ');
+    problems.push(
+      `its worktree holds ${check.uncommitted.length} uncommitted tracked path(s) (${sample}${check.uncommitted.length > 5 ? ', …' : ''}), which no merge could have taken`,
+    );
+  }
+  if (problems.length === 0) return null;
+  return (
+    `refusing to close ${name} as "merged": ${problems.join('; and ')}. ` +
+    `Merge it (\`git merge ${branch}\`) and close again — or, if the work landed another way (a squash, a rebase, a reimplementation), ` +
+    'close with `--force` and record how in `--note`. `--kept` is the verb for a branch you are leaving for later.'
+  );
 }
 
 export function runDispatchClose(opts: DispatchCloseOptions): DispatchClosed {
   const repoRoot = rootOf(opts);
   if (!isCloseVerb(opts.verb)) throw new DispatchesError(`close needs exactly one of --merged, --kept, --discarded, --failed; got "${opts.verb}".`);
   const record = lookup(repoRoot, opts.ref);
+  const opened = record.opened;
+  const branch = opened?.workspace?.branch ?? null;
+  const worktree = opened?.workspace != null && opened.workspace.path !== '.' ? opened.workspace.path : null;
+  const name = opened?.name ?? record.id.slice(0, 8);
+
+  // Not on a replay: the decision was already recorded, and re-litigating it
+  // now would make an idempotent command fail on its second run.
+  let merge: MergeCheck | null = null;
+  let forced: string | null = null;
+  if (opts.verb === 'merged' && record.closed == null) {
+    merge = verifyMerged({ repoRoot, branch, worktree: worktree == null ? null : join(repoRoot, worktree) });
+    if (merge.checked && branch != null) {
+      const refusal = mergeRefusal(name, branch, merge);
+      if (refusal != null) {
+        if (!opts.force) throw new DispatchesError(refusal);
+        forced = refusal;
+      }
+    }
+  }
+
   const outcome = closeDispatch(repoRoot, record, opts.verb, opts.note ?? null);
   if (!outcome.ok) throw new DispatchesError(outcome.message);
-  const opened = record.opened;
-  return {
-    record,
-    verb: opts.verb,
-    replayed: outcome.replayed,
-    worktree: opened?.workspace != null && opened.workspace.path !== '.' ? opened.workspace.path : null,
-    branch: opened?.workspace?.branch ?? null,
-  };
+  return { record, verb: opts.verb, replayed: outcome.replayed, worktree, branch, merge, forced };
 }
 
 export async function runCancel(opts: CommonOptions & { ref: string; graceMs?: number }): Promise<CancelOutcome & { record: DispatchRecord }> {
@@ -633,11 +697,49 @@ export function renderDispatchDetail(d: DispatchDetail): string[] {
       const asked = d.record.opened?.model ?? null;
       lines.push(`  ran on:    ${s.model_observed}${modelAgrees(asked, s.model_observed, d.record.opened?.model_id) ? '' : `  (the dial asked for ${asked})`}`);
     }
-    if (s.final_message != null) lines.push('', '--- final message ---', s.final_message.trimEnd());
-    else lines.push('  final message: none recorded');
+    // The two halves, labelled. A report is a claim and the measurement is
+    // not, and the single most useful thing this view can do is make it
+    // impossible to read one and think you read the other.
+    lines.push('', '--- what Fadeno measured ---', ...renderWorkMeasured(s.work, d.record.opened?.workspace?.branch ?? null));
+    if (s.final_message != null) {
+      lines.push('', '--- what the agent reported (a claim, not a finding) ---', s.final_message.trimEnd());
+    } else lines.push('', '--- what the agent reported --- none recorded');
   }
   if (d.record.opened != null) lines.push('', `  prompt: ${d.record.opened.prompt}${d.transcript ? `   transcript: ${d.transcript}` : ''}${d.stderr ? `   stderr: ${d.stderr}` : ''}`);
   if (e.task) lines.push(`  task: ${e.task.split('\n')[0]}${d.record.opened?.task_truncated ? ' …' : ''}`);
+  return lines;
+}
+
+/**
+ * The measured half of a stopped dispatch: what git says the branch holds.
+ *
+ * Rendered apart from the agent's report on purpose. A director asked for
+ * machine-readable dispatch results so it could stop reading reports to verify
+ * them — but a field the agent fills in is the same claim in a smaller box,
+ * and the three fake-green results that prompted the ask (a canary that could
+ * not fail, a feature never compiled in, an artifact from the wrong toolchain)
+ * would each have arrived as a tidy `tests: passed`. These lines are the ones
+ * nobody wrote down: they are safe to trust precisely because no agent had a
+ * hand in them.
+ */
+export function renderWorkMeasured(work: WorkMeasured | undefined, branch: string | null): string[] {
+  if (work == null) {
+    return branch == null
+      ? ['  no branch of its own (shared tree): there is nothing git can attribute to this dispatch.']
+      : [`  ${branch}: not measured — the branch was unreadable when it stopped, or an older Fadeno wrote this row.`];
+  }
+  const churn = work.files === 0
+    ? 'no file changes'
+    : `${work.files} file(s), +${work.insertions} -${work.deletions}${work.binary > 0 ? `, ${work.binary} binary` : ''}`;
+  const lines = [
+    `  ${branch ?? 'branch'} at ${work.head.slice(0, 12)}: ${work.commits} commit(s) HEAD does not have; ${churn}`,
+  ];
+  if (work.conflicts.length > 0) {
+    lines.push(
+      `  CONFLICT MARKERS committed in ${work.conflicts.length}${work.conflicts_truncated ? '+' : ''} path(s): ${work.conflicts.join(', ')}`,
+    );
+  }
+  if (work.commits === 0) lines.push('  Nothing is on this branch that HEAD lacks — either it was already merged, or no work was committed.');
   return lines;
 }
 
@@ -662,18 +764,24 @@ export function runDispatchOutput(opts: CommonOptions & { ref: string }): Dispat
 // ---------------------------------------------------------------------------
 
 export type WaitOutcome =
-  /** The stop row landed (or was already there): `text` is the report. */
-  | { state: 'stopped'; record: DispatchRecord; text: string | null; waitedMs: number }
-  /** Still running when the bound elapsed. Ask again; nothing is wrong. */
-  | { state: 'running'; record: DispatchRecord; waitedMs: number }
+  /** One of them stopped (or was already stopped): `text` is its report. */
+  | { state: 'stopped'; record: DispatchRecord; text: string | null; waitedMs: number; waiting: DispatchRecord[] }
+  /** All still running when the bound elapsed. Ask again; nothing is wrong. */
+  | { state: 'running'; record: DispatchRecord; waitedMs: number; waiting: DispatchRecord[] }
   /**
-   * The executor's process group is gone and no stop row was ever written, so
+   * One executor's process group is gone and no stop row was ever written, so
    * no amount of waiting will produce one. Its output was still captured.
    */
-  | { state: 'abandoned'; record: DispatchRecord; stdoutPath: string; waitedMs: number };
+  | { state: 'abandoned'; record: DispatchRecord; stdoutPath: string; waitedMs: number; waiting: DispatchRecord[] };
 
 export interface DispatchWaitOptions extends CommonOptions {
-  ref: string;
+  /**
+   * The dispatches to wait on. Several answer on the FIRST to stop, which is
+   * the shape a director fanning out actually needs: it was polling four
+   * ledgers by hand between turns, and a wait that took one name at a time
+   * would have made it choose which of the four to be blind to.
+   */
+  refs: readonly string[];
   /**
    * How long to block before answering `running`. The default sits under the
    * ten-minute ceiling every harness shell tool imposes, so this command
@@ -685,7 +793,7 @@ export interface DispatchWaitOptions extends CommonOptions {
 }
 
 /**
- * Block until a dispatch stops, then answer with its report.
+ * Block until one of these dispatches stops, then answer with its report.
  *
  * A dispatch that outruns the caller's shell timeout used to end as a lie: the
  * harness backgrounded the call, the proxy returned whatever had been written
@@ -701,31 +809,49 @@ export async function runDispatchWait(opts: DispatchWaitOptions): Promise<WaitOu
   const started = Date.now();
   const deadline = started + Math.max(0, (opts.waitSeconds ?? 540)) * 1000;
   const pollMs = Math.max(50, opts.pollMs ?? 1000);
-  const id = lookup(repoRoot, opts.ref).id;
-  const reread = (): DispatchRecord => {
+  const refs = opts.refs.map((ref) => ref.trim()).filter((ref) => ref !== '');
+  if (refs.length === 0) throw new DispatchesError('name at least one dispatch to wait on.');
+  // Resolved once, up front: an unknown name is the caller's mistake and must
+  // be said immediately, not after nine minutes of waiting on the others.
+  const ids = [...new Set(refs.map((ref) => lookup(repoRoot, ref).id))];
+  const reread = (id: string): DispatchRecord => {
     const found = readDispatches(repoRoot).records.find((r) => r.id === id);
     if (found == null) throw new DispatchesError(`dispatch ${id} vanished from the ledger while waiting.`);
     return found;
   };
+  const report = (id: string): string | null => runDispatchOutput({ repoRoot, ref: id }).text;
 
   for (;;) {
-    const record = reread();
-    if (record.stopped != null || record.closed != null) {
-      return { state: 'stopped', record, text: runDispatchOutput({ repoRoot, ref: id }).text, waitedMs: Date.now() - started };
+    const records = ids.map(reread);
+    const running = records.filter((r) => r.stopped == null && r.closed == null);
+    const done = records.find((r) => r.stopped != null || r.closed != null);
+    if (done != null) {
+      return { state: 'stopped', record: done, text: report(done.id), waitedMs: Date.now() - started, waiting: running };
     }
     // Nobody left to write the stop row. Checked BEFORE the clock, because a
     // caller waiting on a dispatch that cannot finish should hear it at once.
-    const pgid = record.opened?.process_group;
-    if (pgid != null && !groupAlive(pgid)) {
+    for (const record of records) {
+      const pgid = record.opened?.process_group;
+      if (pgid == null || groupAlive(pgid)) continue;
       // One more read first: the launcher exits immediately after appending,
       // so a dead group and a missing row can simply be that instant.
-      const settled = reread();
+      const settled = reread(record.id);
       if (settled.stopped != null) {
-        return { state: 'stopped', record: settled, text: runDispatchOutput({ repoRoot, ref: id }).text, waitedMs: Date.now() - started };
+        const others = records.filter((r) => r.id !== settled.id && r.stopped == null && r.closed == null);
+        return { state: 'stopped', record: settled, text: report(settled.id), waitedMs: Date.now() - started, waiting: others };
       }
-      return { state: 'abandoned', record: settled, stdoutPath: join(repoRoot, outputPaths(id).stdout), waitedMs: Date.now() - started };
+      const others = records.filter((r) => r.id !== settled.id && r.stopped == null && r.closed == null);
+      return {
+        state: 'abandoned',
+        record: settled,
+        stdoutPath: join(repoRoot, outputPaths(settled.id).stdout),
+        waitedMs: Date.now() - started,
+        waiting: others,
+      };
     }
-    if (Date.now() >= deadline) return { state: 'running', record, waitedMs: Date.now() - started };
+    if (Date.now() >= deadline) {
+      return { state: 'running', record: records[0]!, waitedMs: Date.now() - started, waiting: running };
+    }
     await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(1, deadline - Date.now()))));
   }
 }
@@ -769,12 +895,13 @@ export function renderWorktrees(entries: WorktreeEntry[]): string[] {
 // context — what a host or a spawned director is told
 // ---------------------------------------------------------------------------
 
-export function runContext(opts: CommonOptions & { now?: Date } = {}): { text: string; archetypes: ArchetypeLine[] } {
+export function runContext(opts: CommonOptions & { now?: Date } = {}): { text: string; archetypes: ArchetypeLine[]; preamble: Preamble } {
   const repoRoot = rootOf(opts);
   const { archetypes, profile } = describeArchetypes({ repoRoot, userPathOptions: opts.userPathOptions });
   const unclosed = unclosedDispatches(repoRoot);
   const limit = profile.unclosedLimit ?? DEFAULT_UNCLOSED_LIMIT;
-  return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, now: opts.now }), archetypes };
+  const preamble = readPreamble(repoRoot);
+  return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, preamble, now: opts.now }), archetypes, preamble };
 }
 
 // ---------------------------------------------------------------------------

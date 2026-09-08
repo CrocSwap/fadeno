@@ -766,14 +766,21 @@ async function main(argv: string[]): Promise<number> {
       if (!ref || verbs.length !== 1) {
         throw new Error('Usage: fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>] — exactly one verb.');
       }
-      const closed = runDispatchClose({ ref, verb: verbs[0]!, note: values.note ?? null });
+      const closed = runDispatchClose({ ref, verb: verbs[0]!, note: values.note ?? null, force: Boolean(values.force) });
       const name = closed.record.opened?.name ?? closed.record.id;
+      // A forced close is stated plainly. It is a legitimate move — the work
+      // may well have landed by a squash — but a record that does not show the
+      // check was overridden is a record that cannot be audited later.
+      if (closed.forced != null) console.error(`--force: closed anyway over the check. ${closed.forced}`);
       console.log(
         `${name} closed: ${closed.verb}${closed.replayed ? ' (already recorded)' : ''}` +
           (closed.branch != null
             ? `; branch ${closed.branch} kept${closed.worktree != null ? `, worktree ${closed.worktree} stays until fadeno clean` : ''}`
             : ''),
       );
+      if (closed.verb === 'merged' && closed.merge != null && !closed.merge.checked && closed.merge.reason != null) {
+        console.error(`(not verified: ${closed.merge.reason})`);
+      }
       return 0;
     }
     case 'cancel': {
@@ -805,19 +812,27 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'dispatch-wait': {
-      const [, ref] = positionals;
-      if (ref == null) throw new Error('Usage: fadeno dispatch-wait <name|id> [--wait-seconds <n>] [--json]');
+      const refs = positionals.slice(1);
+      if (refs.length === 0) throw new Error('Usage: fadeno dispatch-wait <name|id>... [--wait-seconds <n>] [--json]');
       const seconds = values['wait-seconds'] == null ? undefined : Number(values['wait-seconds']);
       if (seconds != null && (!Number.isFinite(seconds) || seconds < 0)) {
         throw new Error('--wait-seconds takes a non-negative number of seconds.');
       }
-      const outcome = await runDispatchWait({ ref, waitSeconds: seconds });
-      const name = outcome.record.opened?.name ?? outcome.record.id.slice(0, 8);
+      const outcome = await runDispatchWait({ refs, waitSeconds: seconds });
+      const nameOf = (r: { id: string; opened?: { name: string } | null }) => r.opened?.name ?? r.id.slice(0, 8);
+      const name = nameOf(outcome.record);
+      // What is STILL running, when several were named: the caller's next call
+      // should ask for those and not for the one it just collected.
+      const others = outcome.waiting.map(nameOf);
+      const stillWaiting = others.length === 0 ? '' : ` Still running: ${others.join(' ')} — \`fadeno dispatch-wait ${others.join(' ')}\`.`;
       if (values.json) console.log(JSON.stringify(outcome, null, 2));
       if (outcome.state === 'stopped') {
         if (!values.json) {
-          if (outcome.text == null) console.error(`${name} stopped and recorded no report.`);
-          else process.stdout.write(outcome.text.endsWith('\n') ? outcome.text : `${outcome.text}\n`);
+          if (outcome.text == null) console.error(`${name} stopped and recorded no report.${stillWaiting}`);
+          else {
+            if (refs.length > 1) console.error(`${name} stopped; its report follows.${stillWaiting}`);
+            process.stdout.write(outcome.text.endsWith('\n') ? outcome.text : `${outcome.text}\n`);
+          }
         }
         return 0;
       }
@@ -826,7 +841,10 @@ async function main(argv: string[]): Promise<number> {
         // The message is one instruction, because the only thing a caller can
         // usefully do is ask again.
         if (!values.json) {
-          console.error(`${name} is still running (${ageOf(outcome.record)} in). Run this command again.`);
+          const which = outcome.waiting.length > 1
+            ? `${outcome.waiting.length} dispatches are still running (${others.join(', ')})`
+            : `${name} is still running (${ageOf(outcome.record)} in)`;
+          console.error(`${which}. Run this command again.`);
         }
         return 2;
       }
@@ -834,7 +852,7 @@ async function main(argv: string[]): Promise<number> {
         console.error(
           `${name} is not running and never recorded a stop: its process group is gone, so no report is coming. ` +
             `What the executor wrote is at ${outcome.stdoutPath} — record it with ` +
-            `\`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.`,
+            `\`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.${stillWaiting}`,
         );
       }
       return 4;
