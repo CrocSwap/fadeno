@@ -10497,6 +10497,11 @@ function runDialSet(opts) {
   }
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
+  if (!Object.hasOwn(profile.models, dial.model) && Object.hasOwn(profile.archetypes, dial.model)) {
+    throw new DialError(
+      `"${dial.model}" is an archetype, not a model \u2014 this would dial ${archetype} to a model of that name, and the registry has none. To route both to one model, name them together: \`fadeno dial ${archetype} ${dial.model} <model>\`. To make ${archetype} follow ${dial.model}'s dial wherever it goes, declare the chain in the project catalog: \`archetypes.${archetype}.fallback: ${dial.model}\` in .fadeno/executors.yaml.`
+    );
+  }
   assertHarnessDeclared(profile, dial);
   let compiled;
   try {

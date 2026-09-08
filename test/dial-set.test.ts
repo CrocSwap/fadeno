@@ -49,6 +49,24 @@ function isolatedUser(root: string): UserPathOptions {
   };
 }
 
+test('set: an archetype where a model goes is named as one, not probed as a model', (t) => {
+  const root = seedCatalog(t);
+  // `fadeno dial scout worker` reads as "make scout follow worker" and is not
+  // that: the last argument is a model. It used to fall through to the
+  // unregistered-model harness and come back with backend suggestions for a
+  // name that was never a model.
+  assert.throws(
+    () => runDialSet({ repoRoot: root, userPathOptions: isolatedUser(root), archetype: 'reviewer', model: 'worker', session: true }),
+    (err: unknown) => err instanceof DialError
+      && /"worker" is an archetype, not a model/.test((err as Error).message)
+      // Both real ways to get what was meant, named in full.
+      && /fadeno dial reviewer worker <model>/.test((err as Error).message)
+      && /archetypes\.reviewer\.fallback: worker/.test((err as Error).message),
+  );
+  // Nothing was written.
+  assert.equal(runDialShow({ repoRoot: root, userPathOptions: isolatedUser(root) }).dials.session.reviewer, undefined);
+});
+
 test('set: dial round-trip through pin file (user default)', (t) => {
   const root = seedCatalog(t);
   const user = isolatedUser(root);

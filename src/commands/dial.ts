@@ -467,6 +467,23 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
   }
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
+  // An ARCHETYPE where a model goes, answered before anything downstream can
+  // mistake it for a model. Fadeno knows both vocabularies, so it can say
+  // which one was typed instead of resolving a name that was never a model:
+  // `dial scout worker` reached the unregistered-model harness and came back
+  // "unknown model \"worker\" — did you mean openrouter/openai/o1?", which
+  // answers a question nobody asked.
+  //
+  // Only when the registry does NOT hold that name: a real model called
+  // `worker` is a legitimate dial, and this argument fills the model column.
+  if (!Object.hasOwn(profile.models, dial.model) && Object.hasOwn(profile.archetypes, dial.model)) {
+    throw new DialError(
+      `"${dial.model}" is an archetype, not a model — this would dial ${archetype} to a model of that name, and the registry has none. ` +
+        `To route both to one model, name them together: \`fadeno dial ${archetype} ${dial.model} <model>\`. ` +
+        `To make ${archetype} follow ${dial.model}'s dial wherever it goes, declare the chain in the project catalog: ` +
+        `\`archetypes.${archetype}.fallback: ${dial.model}\` in .fadeno/executors.yaml.`,
+    );
+  }
   assertHarnessDeclared(profile, dial);
   // Compile before any state touch
   let compiled: CompiledDelivery;
