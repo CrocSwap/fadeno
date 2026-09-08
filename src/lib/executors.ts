@@ -257,6 +257,27 @@ const ON_SEPARATOR = ' on ';
 /** The legacy ` via <driver>` separator, accepted on read only. */
 const VIA_SEPARATOR = ' via ';
 
+/** The reserved model that names the session's own model. */
+export const HOST_MODEL = 'host';
+
+/** What it was called before 0.7. Read, translated, and never written back. */
+export const LEGACY_HOST_MODEL = 'current-host';
+
+/**
+ * The current name for a model a dial names.
+ *
+ * `current-host` became `host` in 0.7 — one word for one referent, matching
+ * host mode, the host lane and the `host:` block, and a bare identifier at
+ * last, so the reserved name stopped being the one model name the grammar
+ * forbade. Every dial ref is read through here — a catalog, a user or session
+ * dial file, a CLI argument — so a 0.6 config keeps resolving instead of
+ * failing on a word that no longer exists. Nothing writes the old spelling
+ * back: the first `fadeno dial` that rewrites a layer canonicalizes it.
+ */
+export function canonicalModelName(name: string): string {
+  return name === LEGACY_HOST_MODEL ? HOST_MODEL : name;
+}
+
 export function parseDialRef(raw: unknown, label: string): DialRef {
   if (typeof raw === 'string') {
     const trimmed = raw.trim();
@@ -302,7 +323,7 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
       if (effort.includes('@') || effort.includes(' ')) {
         throw new ExecutorProfileError(`${label} "${raw}" has invalid effort "${effort}".`);
       }
-      const out: DialRef = { model };
+      const out: DialRef = { model: canonicalModelName(model) };
       if (effort) out.effort = effort;
       if (harness) out.harness = harness;
       return out;
@@ -310,7 +331,7 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
     if (core.includes(' ') || core.includes('@')) {
       throw new ExecutorProfileError(`${label} "${raw}" is not a valid dial ref.`);
     }
-    const out: DialRef = { model: core };
+    const out: DialRef = { model: canonicalModelName(core) };
     if (harness) out.harness = harness;
     return out;
   }
@@ -324,7 +345,7 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
     if (trimmedModel.includes(' ')) {
       throw new ExecutorProfileError(`${label} model "${trimmedModel}" contains whitespace.`);
     }
-    const out: DialRef = { model: trimmedModel };
+    const out: DialRef = { model: canonicalModelName(trimmedModel) };
     if (map.effort !== undefined) {
       if (typeof map.effort !== 'string' || map.effort.trim().length === 0) {
         throw new ExecutorProfileError(`${label} "effort" must be a non-empty string.`);
@@ -419,10 +440,10 @@ export interface HarnessHostRaw {
    * else. OpenCode's plugin and omp's extension rewrite only the agent name
    * (`applyRewrite` sets `subagent_type`; the omp extension sets `agent`), so
    * a dialed model handed to a host spawn there is silently ignored. Under
-   * `session` only `current-host` — which IS the session's identity — takes
+   * `session` only `host` — which IS the session's identity — takes
    * the host lane; a named model on this harness is a command delivery, which
    * is what v3's `routes.opencode` / `routes.omp` expressed by putting
-   * `host: true` on `current-host` alone.
+   * `host: true` on `host` alone.
    *
    * The knob is on the harness because it is a fact about that harness's
    * adapter, not about any dial.
@@ -512,7 +533,7 @@ export interface CompiledDelivery {
   /**
    * The EXECUTOR harness this delivery resolved onto (was `driver`).
    *
-   * `null` only for `current-host` with no host: the base dial names whatever
+   * `null` only for `host` with no host: the base dial names whatever
    * session is running, and in a bare shell there is none. Naming a harness
    * there — `standalone`, say — would print a value that is not in the table.
    */
@@ -523,7 +544,7 @@ export interface CompiledDelivery {
    * carry this identity.
    *
    * Not the same as `spec.adapter === 'host'`. A host spec is also how a
-   * delivery with NO command argv is represented (`current-host` in a bare
+   * delivery with NO command argv is represented (`host` in a bare
    * shell, a host-only harness named from a different host) — there is nothing
    * to spawn and nothing to deliver in-session, which is the one shape with no
    * lane at all. Route on THIS field (`laneOf`), never on `spec.adapter`.
@@ -543,7 +564,7 @@ export function deliveryIsHost(compiled: CompiledDelivery): boolean {
  * A compile that knows the host answers from `hostCandidate`, which folds in
  * `harness === host`, the harness declaring `host:`, and its `identity:`.
  * `spec.adapter === 'host'` is NOT that question: a host spec is also how a
- * delivery with no argv at all is represented (`current-host` in a bare shell,
+ * delivery with no argv at all is represented (`host` in a bare shell,
  * a host-only harness named from a different host), so the two disagree
  * exactly there — which is how a Codex host agent once got written for a model
  * that harness could not deliver.
@@ -870,13 +891,13 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
   // models
   const models: Record<string, ModelEntry> = {};
   for (const [name, raw] of Object.entries(doc.models as Record<string, unknown>)) {
-    if (!BARE_IDENTIFIER_RE.test(name) && name !== 'current-host') {
-      if (!BARE_IDENTIFIER_RE.test(name)) {
-        throw new ExecutorProfileError(`${source}: model name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      }
+    if (!BARE_IDENTIFIER_RE.test(name)) {
+      throw new ExecutorProfileError(`${source}: model name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
     }
-    if (name === 'current-host') {
-      throw new ExecutorProfileError(`${source}: model "current-host" is built-in.`);
+    // Reserved rather than lexically impossible: before the rename this name
+    // carried a hyphen and could not be written at all.
+    if (name === HOST_MODEL || name === LEGACY_HOST_MODEL) {
+      throw new ExecutorProfileError(`${source}: model "${name}" is built-in — \`${HOST_MODEL}\` names the session's own model.`);
     }
     if (!isMapping(raw)) {
       throw new ExecutorProfileError(`${source}: model "${name}" is not a mapping.`);
@@ -916,7 +937,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
     }
     models[name] = { provider: prov, id, effort, spellings, ...(modelHarness != null ? { harness: modelHarness } : {}) };
   }
-  models['current-host'] = { provider: 'current-host', id: 'current-host', effort: 'default', spellings: {} };
+  models['host'] = { provider: 'host', id: 'host', effort: 'default', spellings: {} };
 
   // harnesses — ONE table, keyed by harness id.
   const harnesses: Record<string, HarnessRaw> = {};
@@ -938,7 +959,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
         // `standalone` is the NO-host value, not a harness: it is what
         // `activeHarness()` answers when nothing claims the session. A
         // `harnesses.standalone` entry would make every bare shell a host
-        // candidate and `current-host` deliverable with no session to deliver
+        // candidate and `host` deliverable with no session to deliver
         // into — the exact pretence v4 removed.
         throw new ExecutorProfileError(
           `${source}: \`harnesses.standalone\` is not a harness — \`standalone\` is the value \`host\` takes when NO harness claims the session, so there is nothing there to run inside.`,
@@ -1057,7 +1078,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
   // home harness for its provider. Otherwise the dial fails much later, deep
   // inside resolution, with a message that names neither the model nor the fix.
   for (const [name, entry] of Object.entries(models)) {
-    if (name === 'current-host') continue;
+    if (name === 'host') continue;
     for (const spellingHarness of Object.keys(entry.spellings)) {
       if (!Object.hasOwn(harnesses, spellingHarness)) {
         throw new ExecutorProfileError(
@@ -1114,7 +1135,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
     }
     for (const [role, rawRef] of Object.entries(doc.bindings)) {
       if (role === '*') {
-        notes.push('binding "*" is deprecated and ignored — base fallback is now automatic (current-host)');
+        notes.push('binding "*" is deprecated and ignored — base fallback is now automatic (host)');
         continue;
       }
       if (typeof role !== 'string' || role.length === 0) {
@@ -1399,7 +1420,7 @@ export function resolveDialCascade(
       }
     }
   }
-  return { ref: { model: 'current-host' }, source: 'base', resolvedVia: null };
+  return { ref: { model: 'host' }, source: 'base', resolvedVia: null };
 }
 
 export interface RoleResolution {
@@ -1523,7 +1544,7 @@ export function resolveDelivery(
     const command = entry?.command ?? null;
 
     // The host lane exists when the dial's harness IS the host and that
-    // harness declares `host:`. `current-host` under a bare shell has neither,
+    // harness declares `host:`. `host` under a bare shell has neither,
     // which is why a bare shell has no lane at all rather than pretending an
     // in-session delivery it cannot make.
     const hostSide = harness === host ? entry?.host ?? null : null;
@@ -1532,11 +1553,11 @@ export function resolveDelivery(
       // `identity: session` means the host lane can deliver only the session's
       // own identity: the adapter rewrites the agent NAME and nothing else, so
       // a named model handed to a host spawn there would be silently ignored.
-      && (hostSide.identity !== 'session' || model === 'current-host');
+      && (hostSide.identity !== 'session' || model === 'host');
 
     // A HOST spec is emitted for a genuine host candidate, and for the one
     // other shape that has no argv to run: a delivery with neither a host lane
-    // here nor a command anywhere (`current-host` in a bare shell, a host-only
+    // here nor a command anywhere (`host` in a bare shell, a host-only
     // harness named from a different host). `hostCandidate` on the result —
     // never `spec.adapter` — is what tells those two apart.
     const spec: ExecutorSpec = hostCandidate || command == null
@@ -1571,16 +1592,16 @@ export function resolveDelivery(
     };
   };
 
-  // `current-host` is the base dial, not a harness: it names whatever host is
+  // `host` is the base dial, not a harness: it names whatever host is
   // running. In a bare shell there is none, and the honest answer is
   // `restart_required`, which falls out of an absent `harnesses.standalone`.
-  if (ref.model === 'current-host') {
+  if (ref.model === 'host') {
     const entry = harnesses[host];
     return build({
-      model: 'current-host',
-      modelId: 'current-host',
+      model: 'host',
+      modelId: 'host',
       effectiveEffort: ref.effort ?? 'default',
-      provider: 'current-host',
+      provider: 'host',
       // Null in a bare shell: `standalone` is not a harness in the table, and
       // printing it as one invited a reader to look it up.
       harness: entry != null ? host : null,
@@ -1588,8 +1609,8 @@ export function resolveDelivery(
       // The host lane, with its command lanes AND its eligibility stripped.
       //
       // Both removals matter. There is no argv for "the session you are
-      // already in", so `current-host` must never acquire a fallback command —
-      // that is what makes `current-host` in a bare shell honestly lane-less
+      // already in", so `host` must never acquire a fallback command —
+      // that is what makes `host` in a bare shell honestly lane-less
       // rather than silently spawning a second session.
       entry: entry?.host != null
         ? { host: { effort_channel: entry.host.effort_channel, identity: entry.host.identity } }

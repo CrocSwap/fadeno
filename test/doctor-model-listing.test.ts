@@ -311,15 +311,15 @@ test('model-listing: a harness that is not in the listings is skipped, not a fin
   );
 });
 
-test('model-listing: the current-host identity is never checked against a backend listing', () => {
+test('model-listing: the host identity is never checked against a backend listing', () => {
   const listing = listHarnessModels('codex', { models_command: ['codex', 'models'] }, ok(MESSY_LISTING));
   assert.deepEqual(
     listingFindings({
-      dialed: [dial('worker', 'codex', 'current-host')],
+      dialed: [dial('worker', 'codex', 'host')],
       listings: [{ harness: 'codex', result: listing }],
     }),
     [],
-    'current-host names the session itself; no backend lists it',
+    'host names the session itself; no backend lists it',
   );
 });
 

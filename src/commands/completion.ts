@@ -268,7 +268,7 @@ function readProfile(repoRoot: string): ExecutorProfile | null {
  * The aliases `model remove` can actually take: the USER catalog's own keys.
  *
  * The general `executor` kind answers with the MERGED registry, so it proposed
- * `current-host` plus every project and builtin alias — every one of which the
+ * `host` plus every project and builtin alias — every one of which the
  * command refuses by construction, naming a file to hand-edit instead. A
  * completion that offers values the command rejects is worse than no
  * completion: it teaches a surface that does not exist.
@@ -278,7 +278,7 @@ function userCatalogModels(): string[] {
     const parsed = parseYaml(readFileSync(userPaths().executorsFile, 'utf8')) as { models?: unknown };
     const models = parsed?.models;
     if (models == null || typeof models !== 'object' || Array.isArray(models)) return [];
-    return uniqueSorted(Object.keys(models as Record<string, unknown>).filter((name) => name !== 'current-host'));
+    return uniqueSorted(Object.keys(models as Record<string, unknown>).filter((name) => name !== 'host'));
   } catch {
     return [];
   }
@@ -300,7 +300,7 @@ function dialedModelRefs(repoRoot: string, cwd: string): string[] {
   const profile = readProfile(repoRoot);
   const values = new Set<string>();
   for (const row of rows) {
-    if (row.harness == null || row.model_id === 'current-host') continue;
+    if (row.harness == null || row.model_id === 'host') continue;
     values.add(row.model);
     values.add(row.model_id);
     const entry = profile?.models[row.model];

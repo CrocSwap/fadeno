@@ -110,7 +110,7 @@ if (carried != null) {
   }
   const wantModel = opened.model_id ?? opened.model;
   const wantEffort = opened.effort;
-  const modelOk = wantModel === 'current-host' || explicitModel === wantModel;
+  const modelOk = wantModel === 'host' || explicitModel === wantModel;
   // An unpinned dial states no effort, and a spawn that names none then
   // inherits the session — which is the intended outcome, not a mismatch.
   const effortOk = wantEffort == null || explicitEffort === wantEffort;
@@ -144,7 +144,7 @@ if (run.status !== 0) {
   if (/nothing to invoke/.test(reason)) {
     deny(
       `fadeno: the ${archetype} archetype resolves to a model this session can neither deliver in-session nor run as a process, so there is no lane for it here. ` +
-        `Dial it onto a model with a command lane (\`fadeno dial ${archetype} <model>\`), or onto this session's own model (\`fadeno dial ${archetype} current-host\`), then spawn it again.`,
+        `Dial it onto a model with a command lane (\`fadeno dial ${archetype} <model>\`), or onto this session's own model (\`fadeno dial ${archetype} host\`), then spawn it again.`,
     );
   }
   deny(`fadeno: could not open the ${archetype} dispatch — ${reason}`);
@@ -172,9 +172,9 @@ if (answer.opened !== true) {
 }
 
 // The host lane: opened, and the corrected spawn is one retry away.
-const wantModel = answer.model === 'current-host' ? null : answer.modelId;
+const wantModel = answer.model === 'host' ? null : answer.modelId;
 const wantEffort = answer.effort;
-const identity = answer.model === 'current-host' ? "this session's own model" : `${answer.model}${wantEffort ? `@${wantEffort}` : ''}`;
+const identity = answer.model === 'host' ? "this session's own model" : `${answer.model}${wantEffort ? `@${wantEffort}` : ''}`;
 const call = [
   `agent_type: "${archetype}"`,
   wantModel != null ? `model: "${wantModel}"` : null,

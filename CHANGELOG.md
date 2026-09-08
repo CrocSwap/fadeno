@@ -6,6 +6,17 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The reserved model `current-host` is now `host`.** One word for one
+  referent — host mode, the host lane, the harness table's `host:` block — and
+  a bare identifier at last, so the reserved name is no longer the single model
+  name the grammar forbids. The old spelling is still read wherever a dial ref
+  is read (a catalog, a user or session dial file, a CLI argument) and answered
+  as `host`; a `fadeno dial` that names it says so once and records the new
+  name, so the layer it writes stops carrying the old one. Ledger rows keep
+  whatever they were written with — history is not rewritten.
+
 ## [0.7.0] — the rewrite
 
 Fadeno was a playbook engine that had grown a dispatch layer. It is now the

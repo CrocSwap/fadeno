@@ -76,8 +76,8 @@ test('v4 models registry happy path', () => {
   assert.deepEqual(profile.dials, { judge: { model: 'opus' } });
   assert.deepEqual(profile.bindings, { my_role: { model: 'sol', effort: 'high' } });
   assert.equal(profile.unregisteredModelHarness, 'opencode');
-  assert.ok(Object.hasOwn(profile.models, 'current-host'));
-  assert.equal(profile.models['current-host']!.provider, 'current-host');
+  assert.ok(Object.hasOwn(profile.models, 'host'));
+  assert.equal(profile.models['host']!.provider, 'host');
   const withDefaultId = parseDoc({
     schema_version: 4,
     models: { foo: { provider: 'openai' } },
@@ -87,8 +87,8 @@ test('v4 models registry happy path', () => {
   assert.equal(withDefaultId.models.foo!.effort, 'default');
 });
 
-test('declaring built-in current-host is error', () => {
-  assert.throws(() => parseDoc({ schema_version: 4, models: { 'current-host': { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'] } } }), /built-in/);
+test('declaring built-in host is error', () => {
+  assert.throws(() => parseDoc({ schema_version: 4, models: { 'host': { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'] } } }), /built-in/);
 });
 
 test('v4 harness entries carry provider and effort_encoding', () => {
@@ -332,18 +332,18 @@ test('resolveDelivery: unknown harness error naming the declared table', () => {
   assert.throws(() => resolveDelivery({ model: 'nope-model' }, parseDoc({ schema_version: 4, models: { sol: { provider: 'xai' } }, harnesses: { grok: { provider: 'xai', command: ['grok'] } }, unregistered_model_harness: 'opencode' })), /unknown harness "opencode"/);
 });
 
-test('resolveDelivery: host built-in current-host compiles to host', () => {
+test('resolveDelivery: host built-in host compiles to host', () => {
   const profile = parseDoc({
     schema_version: 4,
     models: { sol: { provider: 'openai' } },
     harnesses: { codex: { provider: 'openai', command: ['codex'] } },
   });
-  const host = resolveDelivery({ model: 'current-host' }, profile);
+  const host = resolveDelivery({ model: 'host' }, profile);
   assert.equal(host.spec.adapter, 'host');
   assert.equal(deliveryIsHost(host), true);
   assert.equal(host.effectiveEffort, 'default');
   const profile2 = parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['codex'] } } });
-  const implicit = resolveDelivery({ model: 'current-host' }, profile2);
+  const implicit = resolveDelivery({ model: 'host' }, profile2);
   assert.equal(implicit.spec.adapter, 'host');
 });
 
@@ -448,7 +448,7 @@ test('cascade: binding-first, then session→repo→user, base terminal', () => 
   assert.equal(resolveDialCascade('coder', 'worker', { bindings: {}, archetypes: profileNoBinding.archetypes }, { session: {}, repo: profileNoBinding.dials, user: { worker: { model: 'sol' } } }).source, 'repo');
   assert.equal(resolveDialCascade('coder', 'worker', { bindings: {}, archetypes: profileNoBinding.archetypes }, { session: {}, repo: {}, user: { worker: { model: 'sol' } } }).source, 'user');
   assert.equal(resolveDialCascade('coder', 'worker', { bindings: {}, archetypes: profileNoBinding.archetypes }, { session: {}, repo: {}, user: {} }).source, 'base');
-  assert.deepEqual(resolveDialCascade('coder', 'worker', { bindings: {}, archetypes: {} }, { session: {}, repo: {}, user: {} }).ref, { model: 'current-host' });
+  assert.deepEqual(resolveDialCascade('coder', 'worker', { bindings: {}, archetypes: {} }, { session: {}, repo: {}, user: {} }).ref, { model: 'host' });
   assert.equal(resolveDialCascade('arbitrary', null, { bindings: {}, archetypes: {} }, { session: {}, repo: {}, user: {} }).source, 'base');
 });
 

@@ -135,7 +135,7 @@ export function runModelsVerify(opts: ModelsVerifyOptions = {}): ModelsVerifyRes
   // share it, and probing the same pair once per dial would just be slower.
   const targets = new Map<string, Target>();
   for (const row of show.rows) {
-    if (row.harness == null || row.model_id === 'current-host') continue;
+    if (row.harness == null || row.model_id === 'host') continue;
     const key = `${row.harness} ${row.model_id}`;
     let target = targets.get(key);
     if (target == null) {

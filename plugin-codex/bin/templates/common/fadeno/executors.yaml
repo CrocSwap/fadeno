@@ -19,7 +19,7 @@
 #     judge: sol
 #
 # The cascade is: binding → session dial → repo pin → user dial → host-native
-# base (current-host). There are no named presets.
+# base (host). There are no named presets.
 schema_version: 4
 
 models:
@@ -243,7 +243,7 @@ harnesses:
       effort_channel: none
       # `session`, not `model`: the OpenCode plugin's rewrite sets only the
       # agent NAME, so a dialed model handed to a host spawn here would be
-      # silently ignored. Only `current-host` — the session's own identity —
+      # silently ignored. Only `host` — the session's own identity —
       # takes the host lane; a named model on `opencode` is a command delivery.
       identity: session
     command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
@@ -284,7 +284,7 @@ harnesses:
     host:
       effort_channel: none
       # Same as OpenCode: the omp extension's rewrite sets only `agent`, so a
-      # dialed model cannot reach a host spawn. Only `current-host` is
+      # dialed model cannot reach a host spawn. Only `host` is
       # host-delivered here.
       identity: session
 

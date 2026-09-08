@@ -333,7 +333,7 @@ export function closeDispatch(
  * Whether the model an agent's transcript reports is the one the dial asked
  * for. The dial names a registry alias (`opus`) and the harness reports its
  * own id (`claude-opus-5`), so equality is too strict; an alias that appears
- * inside the reported id is taken as agreement, and `current-host` agrees
+ * inside the reported id is taken as agreement, and `host` agrees
  * with anything, since it names whatever the session runs on.
  */
 export function modelAgrees(
@@ -342,7 +342,7 @@ export function modelAgrees(
   askedId?: string | null,
 ): boolean {
   if (asked == null || observed == null) return true;
-  if (asked === 'current-host') return true;
+  if (asked === 'host') return true;
   // The recorded provider id, where the row has one: an exact answer, and the
   // reason `model_id` is on the row at all.
   if (askedId != null && askedId.length > 0) return askedId === observed || observed.includes(askedId);

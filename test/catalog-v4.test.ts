@@ -80,7 +80,7 @@ test('v4: an explicit `on <harness>` resolves onto that harness, with its spelli
     // rewrites only the agent NAME: a dialed model handed to a host spawn
     // there would be silently ignored. So a named model on `opencode` is a
     // command delivery, exactly as v3's `routes.opencode` expressed it by
-    // putting `host: true` on `current-host` alone.
+    // putting `host: true` on `host` alone.
     assert.equal(compiled.hostCandidate, false, host);
   }
 });
@@ -259,7 +259,7 @@ test('v4: from a bare shell nothing is a host lane, and nothing about the model 
   // host lane with nothing to invoke — reported as a null command, never as a
   // command lane that would work.
   const base = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer' });
-  assert.equal(base.model, 'current-host');
+  assert.equal(base.model, 'host');
   assert.equal(base.lane, 'command');
   assert.equal(base.command, null);
 });
@@ -354,7 +354,7 @@ test('regression: an undeliverable USER model is dropped with a note, not a load
   assert.equal(Object.hasOwn(layered.profile.models, 'ox'), false, 'dropped means NOT registered');
   // Every unrelated dial still works — the whole point.
   const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker', env: {} });
-  assert.equal(resolved.model, 'current-host');
+  assert.equal(resolved.model, 'host');
   // And the user is told, once, on the surface that lists models.
   assert.match(runDialShow({ repoRoot: root, userPathOptions: paths }).note ?? '', /user-catalog model "ox" dropped/);
 });
@@ -422,7 +422,7 @@ test('dispatch\'s host-lane note agrees with dial resolve on the no-argv shapes'
   };
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({ archetypes: { worker: {} } }));
-  // Undialed from a bare shell → `current-host`, which has no session to
+  // Undialed from a bare shell → `host`, which has no session to
   // deliver into and no argv to spawn.
   const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer' });
   assert.equal(resolved.lane, 'command');
@@ -442,8 +442,8 @@ test('host.identity: session delivers only the session\'s own identity', () => {
     assert.equal(profile.harnesses[host]?.host?.identity, 'session', host);
 
     // The session's own identity IS host-deliverable.
-    const base = resolveDelivery({ model: 'current-host' }, profile, host, { archetype: 'worker' });
-    assert.equal(base.hostCandidate, true, `${host}: current-host is the session`);
+    const base = resolveDelivery({ model: 'host' }, profile, host, { archetype: 'worker' });
+    assert.equal(base.hostCandidate, true, `${host}: host is the session`);
 
     // A named model on that same harness is not.
     const named = resolveDelivery(parseDialRef(`opus on ${host}`, 't'), profile, host, { archetype: 'worker' });
@@ -460,7 +460,7 @@ test('host.identity: session delivers only the session\'s own identity', () => {
   assert.equal(resolveDelivery({ model: 'luna' }, codex, 'codex', { archetype: 'worker' }).hostCandidate, true);
 });
 
-test('a bare shell reports harness: null for current-host, not a name that is not in the table', (t) => {
+test('a bare shell reports harness: null for host, not a name that is not in the table', (t) => {
   const root = tempRepo(t);
   const paths: UserPathOptions = {
     home: join(root, 'home'),
@@ -469,7 +469,7 @@ test('a bare shell reports harness: null for current-host, not a name that is no
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({ archetypes: { worker: {} } }));
   const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer', env: {} });
-  assert.equal(resolved.model, 'current-host');
+  assert.equal(resolved.model, 'host');
   assert.equal(resolved.host, 'standalone');
   assert.equal(resolved.harness, null, '`standalone` is the NO-host value, not a harness to look up');
 });

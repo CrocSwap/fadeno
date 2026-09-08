@@ -18,7 +18,7 @@ import {
 } from '../src/lib/spawn.ts';
 import { git, gitRepo, tempRepo } from './helpers.ts';
 
-// A bare shell: no host frame, so `current-host` has nothing to deliver.
+// A bare shell: no host frame, so `host` has nothing to deliver.
 const ISOLATED = { env: { FADENO_HARNESS: 'standalone' } } as const;
 
 /** An executor that echoes its stdin with a prefix — the report is the prompt. */
@@ -61,7 +61,7 @@ function repo(t: TestContext, cmd: string[] = ECHO('REPORT:'), extra: Record<str
   return root;
 }
 
-test('resolveArchetype: a dialed archetype resolves to a command lane; an undialed one is current-host with nothing to invoke from a shell', (t) => {
+test('resolveArchetype: a dialed archetype resolves to a command lane; an undialed one is host with nothing to invoke from a shell', (t) => {
   const root = repo(t);
   const worker = resolveArchetype({ repoRoot: root, archetype: 'worker', userPathOptions: ISOLATED });
   assert.equal(worker.model, 'echo');
@@ -73,7 +73,7 @@ test('resolveArchetype: a dialed archetype resolves to a command lane; an undial
   assert.equal(worker.source, 'repo');
   assert.equal(worker.unclosedLimit, 5);
   const reviewer = resolveArchetype({ repoRoot: root, archetype: 'reviewer', userPathOptions: ISOLATED });
-  assert.equal(reviewer.model, 'current-host');
+  assert.equal(reviewer.model, 'host');
   assert.equal(reviewer.source, 'base');
   assert.equal(reviewer.command, null, 'a bare shell has no session to be current in');
   const explicit = resolveArchetype({ repoRoot: root, archetype: 'reviewer', explicitModel: 'echo@low', userPathOptions: ISOLATED });

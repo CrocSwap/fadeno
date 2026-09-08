@@ -56,14 +56,14 @@ test('starter catalog: an undialed scout resolves to the host-native base, never
   const profile = parseStarter();
   const baseLayers = { session: {}, repo: {}, user: {} };
   const native = resolveRole('prover', 'scout', profile, baseLayers as any);
-  assert.equal(native.delivery.model, 'current-host');
+  assert.equal(native.delivery.model, 'host');
   assert.equal(native.source, 'base');
   assert.equal(native.resolvedVia, null);
 
   // A worker dial no longer leaks into scout: it stays on base.
   const lunaLayers = { session: {}, repo: { worker: { model: 'luna' } }, user: {} };
   const stillBase = resolveRole('prover', 'scout', profile, lunaLayers as any);
-  assert.equal(stillBase.delivery.model, 'current-host');
+  assert.equal(stillBase.delivery.model, 'host');
   assert.equal(stillBase.source, 'base');
   assert.equal(stillBase.resolvedVia, null);
 

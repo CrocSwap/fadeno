@@ -180,7 +180,7 @@ test('an archetype with no lane at all is refused by name, not opened', (t) => {
   ].join('\n'));
   const reason = denial(plugin.run(HOOK, spawnEvent(root, { agent_type: 'worker', message: 'x' })));
   assert.match(reason ?? '', /neither deliver in-session nor run as a process, so there is no lane for it here/);
-  assert.match(reason ?? '', /fadeno dial worker current-host/);
+  assert.match(reason ?? '', /fadeno dial worker host/);
   assert.ok(!existsSync(join(root, '.fadeno', 'dispatches.jsonl')), 'a refusal opens nothing');
 });
 

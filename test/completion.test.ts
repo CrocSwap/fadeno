@@ -48,7 +48,7 @@ test('completion: model remove offers user-catalog aliases, models verify offers
 
   // `remove` edits the user catalog and refuses everything else by name, so
   // the merged registry (which is what the general `executor` kind answers
-  // with) is the wrong list: it proposed `current-host` and every project and
+  // with) is the wrong list: it proposed `host` and every project and
   // builtin alias, none of which the command will accept.
   for (const spelling of ['model', 'models']) {
     assert.deepEqual(complete(root, ['fadeno', spelling, 'remove', '']), ['personal']);
@@ -60,7 +60,7 @@ test('completion: model remove offers user-catalog aliases, models verify offers
   const refs = complete(root, ['fadeno', 'models', 'verify', '']);
   assert.deepEqual(refs, ['alpha', 'alpha-id', 'openai/alpha-id', 'openai/personal-id', 'personal', 'personal-id']);
   assert.ok(!refs.includes('projectonly'), 'a registered but undialed model is not a verify target');
-  assert.ok(!refs.includes('current-host'));
+  assert.ok(!refs.includes('host'));
 
   // `[<ref>...]` is variadic. Two declared slots meant the third argument
   // completed as flags — the completion announcing the command was done

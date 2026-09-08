@@ -119,7 +119,7 @@ host lane iff h === host and H declares a `host:` that can carry this identity
 
 A dial never names a lane. `hostCandidate` on the result is the lane bit;
 `spec.adapter` is **not** — a host spec is also how a delivery with no argv at
-all is represented (`current-host` in a bare shell), and conflating the two is
+all is represented (`host` in a bare shell), and conflating the two is
 how a Codex host agent once got written for a model that harness could not
 deliver.
 

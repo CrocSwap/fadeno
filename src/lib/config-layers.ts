@@ -237,8 +237,8 @@ function repairUserLayer(doc: Record<string, unknown>, path: string, repairs: st
     repairs.push(`${where}: model "${name}" dropped — ${why}`);
   };
   for (const [name, raw] of Object.entries(models)) {
-    if (name === 'current-host') {
-      dropModel(name, '"current-host" is built in');
+    if (name === 'host') {
+      dropModel(name, '"host" is built in');
       continue;
     }
     if (!BARE_IDENTIFIER_RE.test(name)) {

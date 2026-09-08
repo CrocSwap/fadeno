@@ -192,7 +192,7 @@ function printDialShow(result: DialShowResult): void {
   if (result.staleDials.length > 0) printStaleDials(result.staleDials);
   console.log(`${'ARCHETYPE'.padEnd(12)}  ${'MODEL'.padEnd(20)}  ${'HARNESS'.padEnd(12)}  SOURCE`);
   for (const row of result.rows) {
-    // `—` for a null harness, which is `current-host` outside a session: the
+    // `—` for a null harness, which is `host` outside a session: the
     // cell has no value rather than the value `null`.
     const harness = (row.harness ?? '—').padEnd(12);
     // `inherits`, not `via`: `resolvedVia` is the ARCHETYPE this row borrowed

@@ -130,15 +130,15 @@ test('model remove: a builtin alias reports the builtin layer, not "not found"',
   );
 });
 
-test('model remove: an unknown alias and current-host are refused distinctly', (t) => {
+test('model remove: an unknown alias and host are refused distinctly', (t) => {
   const { root, user } = seed(t);
   assert.throws(
     () => runModelsRemove({ repoRoot: root, userPathOptions: user, alias: 'nope' }),
     /no model named "nope"/,
   );
   assert.throws(
-    () => runModelsRemove({ repoRoot: root, userPathOptions: user, alias: 'current-host' }),
-    /current-host is the host itself/,
+    () => runModelsRemove({ repoRoot: root, userPathOptions: user, alias: 'host' }),
+    /host is the host itself/,
   );
 });
 

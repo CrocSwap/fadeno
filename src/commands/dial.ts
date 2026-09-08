@@ -10,6 +10,7 @@ import {
   declaredHarnesses,
   ExecutorProfileError,
   formatDialRef,
+  LEGACY_HOST_MODEL,
   knownArchetypes,
   parseDialRef,
   qualifyListedModelId,
@@ -65,7 +66,7 @@ export interface EffectiveRow {
   pinned_effort: string | null;
   /**
    * What the model's registry entry declares, or null for a model with no
-   * entry (`current-host`). Paired with `pinned_effort` it is what tells a
+   * entry (`host`). Paired with `pinned_effort` it is what tells a
    * pin apart from a fall-through — the table shows an effort only when the
    * dial asked for one the registry would not have given it.
    */
@@ -89,7 +90,7 @@ export interface EffectiveRow {
   /**
    * Whether this archetype can be delivered at all from where the question
    * was asked. False for a command-lane dial with no argv to run — which from
-   * a bare shell is every undialed archetype, since `current-host` names a
+   * a bare shell is every undialed archetype, since `host` names a
    * session that is not there. Printed rather than left to the lane column,
    * which would otherwise say `command` about a dispatch that cannot start.
    */
@@ -243,8 +244,8 @@ export function probeModel(
   // never through the host. Asking the session's harness whether some other
   // harness serves a model answers a question nobody asked.
   const entry = profile.harnesses?.[harness] ?? null;
-  // If model is current-host, skip silently (no probe)
-  if (modelId === 'current-host') return { status: null, note: null };
+  // If model is host, skip silently (no probe)
+  if (modelId === 'host') return { status: null, note: null };
   if (entry == null) {
     return { status: 'unverified', note: `note: cannot verify ${modelId} on ${harness} (no such harness declared) — dialing unverified` };
   }
@@ -430,7 +431,7 @@ function providerNoveltyNote(params: {
 }): string | null {
   const { profile, layers, archetype, refString, compiled } = params;
   const provider = compiled.provider;
-  if (provider == null || provider === 'current-host') return null;
+  if (provider == null || provider === 'host') return null;
   const inUse = new Set<string>();
   for (const other of knownArchetypes(profile.archetypes, layers.session, layers.repo, layers.user)) {
     if (other === archetype) continue; // the dial being replaced
@@ -467,6 +468,9 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
   }
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
+  // The old name still works, and says so once. It is recorded canonically,
+  // so the layer this set writes stops carrying it.
+  const legacyHostName = new RegExp(`^${LEGACY_HOST_MODEL}(@|$| )`).test(modelInput);
   // An ARCHETYPE where a model goes, answered before anything downstream can
   // mistake it for a model. Fadeno knows both vocabularies, so it can say
   // which one was typed instead of resolving a name that was never a model:
@@ -498,6 +502,9 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
   let verification: VerificationStatus = null;
   let probeNote: string | null = null;
   const notes: string[] = [];
+  if (legacyHostName) {
+    notes.push(`note: \`${LEGACY_HOST_MODEL}\` was renamed \`${dial.model}\` in 0.7 — recorded as \`${formatDialRef(dial)}\``);
+  }
   // Set time validates against the REGISTRY and nothing else. The lane is a
   // property of the CALL — it depends on which harness you are sitting in —
   // so a dial stored host-neutrally and re-resolved at every dispatch must not
@@ -508,9 +515,9 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
         '(declare it under models: to set a home harness or standard effort)',
     );
   }
-  // Skip for current-host silently; a registered model on a harness with no
+  // Skip for host silently; a registered model on a harness with no
   // models_command also skips silently (probing is for harnesses that answer).
-  const shouldProbe = compiled.model !== 'current-host' && compiled.harness != null;
+  const shouldProbe = compiled.model !== 'host' && compiled.harness != null;
   const hasModelsCommand = harnessCanProbe(profile, compiled.harness);
   if (shouldProbe) {
     if (!hasModelsCommand) {
@@ -847,7 +854,7 @@ export interface DialResolveResult {
   pinned_effort: string | null;
   /** The effort this delivery runs at: the pin, else the registry default. */
   effective_effort: string;
-  /** The EXECUTOR harness; null only for `current-host` in a bare shell. */
+  /** The EXECUTOR harness; null only for `host` in a bare shell. */
   harness: string | null;
   /** Where a spawn from inside the host would be delivered. */
   lane: Lane;

@@ -125,7 +125,7 @@ pre .c { color: var(--faint); }
   <li>A dial pointing at another archetype is followed to a terminal model. <b>An alias carries model and effort together.</b> Wanting the same model at a different effort means a separate route, not a partial alias.</li>
   <li>Aliasing binds routing, never meaning: an aliased archetype <b>keeps its own description</b>.</li>
   <li>Cycles are refused <b>at set time and at resolve time</b> — a cycle can be formed across scopes by two edits that are each individually valid.</li>
-  <li>An archetype with no dial resolves to <code>current-host</code>: the host session's own model. This has no edge case — no dial means no model, therefore no harness, therefore host lane.</li>
+  <li>An archetype with no dial resolves to <code>host</code>: the host session's own model. This has no edge case — no dial means no model, therefore no harness, therefore host lane. (Named <code>current-host</code> until 0.7; the old spelling is still read and answered as <code>host</code>.)</li>
 </ul>
 
 <h3>Visibility</h3>

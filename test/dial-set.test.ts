@@ -49,6 +49,34 @@ function isolatedUser(root: string): UserPathOptions {
   };
 }
 
+test('the 0.7 rename: `current-host` is still read, answered as `host`, and never written back', (t) => {
+  // A dial file written by 0.6 — the shape Doug's own user dials had on the
+  // day of the rename (`"judge":"current-host"`).
+  const root = seedCatalog(t, { dials: { worker: 'current-host', reviewer: 'current-host@low' } });
+  const user = isolatedUser(root);
+  const rows = runDialShow({ repoRoot: root, userPathOptions: user }).rows;
+  const row = (a: string) => rows.find((r) => r.archetype === a)!;
+  assert.equal(row('worker').model, 'host', 'a 0.6 catalog keeps resolving');
+  assert.equal(row('reviewer').model, 'host');
+  assert.equal(row('reviewer').pinned_effort, 'low', 'the effort rides along untouched');
+
+  // Typed at the CLI it is accepted, recorded canonically, and said once.
+  const set = runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'judge', model: 'current-host', session: true });
+  assert.equal(set.model, 'host');
+  assert.equal(set.refString, 'host');
+  assert.ok(set.notes.some((n) => /`current-host` was renamed `host` in 0\.7 — recorded as `host`/.test(n)), set.notes.join('\n'));
+  assert.equal(runDialShow({ repoRoot: root, userPathOptions: user }).dials.session.judge!.model, 'host', 'nothing writes the old spelling back');
+
+  // And the name is reserved under both spellings: neither may be redeclared.
+  for (const name of ['host', 'current-host']) {
+    const shadow = seedCatalog(t, { models: { [name]: { provider: 'x', id: 'y' } } });
+    assert.throws(
+      () => runDialShow({ repoRoot: shadow, userPathOptions: isolatedUser(shadow) }),
+      (err: unknown) => new RegExp(`model "${name}" is built-in`).test((err as Error).message),
+    );
+  }
+});
+
 test('set: an archetype where a model goes is named as one, not probed as a model', (t) => {
   const root = seedCatalog(t);
   // `fadeno dial scout worker` reads as "make scout follow worker" and is not
@@ -237,7 +265,7 @@ test('set time validates against the REGISTRY only — no lane notes, nothing ab
   const user = isolatedUser(root);
 
   // An `@effort` pin on a host-shaped dial is recorded, silently.
-  const hostEffort = runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'scout', model: 'current-host@high' });
+  const hostEffort = runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'scout', model: 'host@high' });
   assert.equal(hostEffort.pinned_effort, 'high');
   assert.deepEqual(hostEffort.notes, [], 'no lane narration at set time');
 

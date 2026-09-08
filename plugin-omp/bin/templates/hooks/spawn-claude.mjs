@@ -117,13 +117,13 @@ const closeLine = (n) => `When it stops, read its report and close it: \`fadeno 
 
 if (answer.opened === true) {
   const o = answer;
-  const identity = o.model === 'current-host' ? "this session's model" : `${o.model}${o.effort ? `@${o.effort}` : ''}`;
+  const identity = o.model === 'host' ? "this session's model" : `${o.model}${o.effort ? `@${o.effort}` : ''}`;
   const where = o.workspace?.branch ? `branch ${o.workspace.branch}` : `the shared tree${o.sharedReason ? ` (${o.sharedReason})` : ''}`;
   const updatedInput = { ...input, subagent_type: agentType(archetype), prompt: o.prompt };
-  // The dial's model rides the spawn. `current-host` names the session's own
+  // The dial's model rides the spawn. `host` names the session's own
   // model, which is what a spawn with no model runs on; an explicit override
   // was resolved by the CLI and is what `modelId` now carries.
-  if (o.model !== 'current-host' && str(o.modelId) != null) updatedInput.model = o.modelId;
+  if (o.model !== 'host' && str(o.modelId) != null) updatedInput.model = o.modelId;
   else delete updatedInput.model;
   finish({
     systemMessage: `fadeno: ${archetype} → ${o.name} (${o.id.slice(0, 8)}) on ${identity}, host lane, ${where}`,

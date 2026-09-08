@@ -131,11 +131,11 @@ test('dial resolve from a bare shell resolves standalone and stays memo-independ
   for (const row of runDialShow({ repoRoot: root, userPathOptions: user }).rows) {
     const resolved = runDialResolve({ repoRoot: root, userPathOptions: user, archetype: row.archetype });
     assert.equal(resolved.host, 'standalone', `${row.archetype} must resolve against the standalone host`);
-    // A bare shell can never resolve a HOST LANE: `current-host` names
+    // A bare shell can never resolve a HOST LANE: `host` names
     // whatever session is running, and there is none. The undialed archetype
     // is therefore off the host lane with nothing to invoke — a null command,
     // never a host lane it cannot take.
-    if (resolved.model === 'current-host') assert.equal(resolved.command, null);
+    if (resolved.model === 'host') assert.equal(resolved.command, null);
     assert.notEqual(resolved.lane, 'host', `${row.archetype} claims an in-session lane from a bare shell`);
   }
 });

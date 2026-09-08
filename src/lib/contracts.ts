@@ -110,7 +110,7 @@ export function composeWorkerPrompt(callerPrompt: string, contract: string): str
 export interface ArchetypeLine {
   name: string;
   description: string;
-  /** Resolved model, or `current-host`. */
+  /** Resolved model, or `host`. */
   model: string;
   effort: string | null;
   source: string;
@@ -135,7 +135,7 @@ export function hostVocabulary(input: HostVocabularyInput): string {
   lines.push('## Archetypes', '');
   lines.push('Name an archetype when you spawn a subagent and Fadeno applies the model and effort the dials bind to it. The routing below is live; change it with `fadeno dial <archetype> <model[@effort]>`.', '');
   for (const a of input.archetypes) {
-    const route = a.model === 'current-host' ? 'this session\'s own model' : `${a.model}${a.effort ? `@${a.effort}` : ''}`;
+    const route = a.model === 'host' ? 'this session\'s own model' : `${a.model}${a.effort ? `@${a.effort}` : ''}`;
     lines.push(`- **${a.name}** — ${a.description} _(routes to ${route}; ${a.source})_`);
   }
   lines.push('');

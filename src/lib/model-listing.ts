@@ -199,7 +199,7 @@ export function listingContains(listing: ModelListing, modelId: string): boolean
  *
  * Skipped without a finding: a dialed model whose harness has no listing in
  * `listings` (it declares no `models_command`, or was not probed), and the
- * `current-host` identity, which names the session itself and appears in no
+ * `host` identity, which names the session itself and appears in no
  * backend listing — the same case `src/commands/dial.ts` skips before probing.
  */
 export function listingFindings(input: {
@@ -210,7 +210,7 @@ export function listingFindings(input: {
   for (const entry of input.listings) {
     if (!byHarness.has(entry.harness)) byHarness.set(entry.harness, entry.result);
   }
-  const checkable = input.dialed.filter((dial) => dial.modelId !== 'current-host');
+  const checkable = input.dialed.filter((dial) => dial.modelId !== 'host');
 
   const findings: ListingFinding[] = [];
 

@@ -70,7 +70,7 @@ test('the host vocabulary carries the archetype list with live routing, the spaw
   const text = hostVocabulary({
     archetypes: [
       { name: 'worker', description: 'Implements.', model: 'luna', effort: 'xhigh', source: 'repo' },
-      { name: 'reviewer', description: 'Reviews.', model: 'current-host', effort: null, source: 'base' },
+      { name: 'reviewer', description: 'Reviews.', model: 'host', effort: null, source: 'base' },
     ],
     unclosed,
     unclosedLimit: 5,

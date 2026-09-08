@@ -201,10 +201,10 @@ test('appendRow creates .fadeno on first use and only ever appends', (t) => {
   assert.equal(after.trim().split('\n').length, 2);
 });
 
-test('modelAgrees reads an alias inside the harness\'s reported id as the dial applied, and current-host as anything', () => {
+test('modelAgrees reads an alias inside the harness\'s reported id as the dial applied, and host as anything', () => {
   assert.equal(modelAgrees('opus', 'claude-opus-5'), true);
   assert.equal(modelAgrees('opus', 'opus'), true);
-  assert.equal(modelAgrees('current-host', 'gpt-6-astra'), true);
+  assert.equal(modelAgrees('host', 'gpt-6-astra'), true);
   assert.equal(modelAgrees('opus', 'claude-sonnet-4-7'), false);
   assert.equal(modelAgrees('echo', 'claude-haiku-4-5'), false);
   assert.equal(modelAgrees(null, 'x'), true, 'nothing asked, nothing to disagree with');

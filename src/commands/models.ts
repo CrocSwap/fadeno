@@ -252,7 +252,7 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
   const rows: ModelRow[] = [];
   for (const name of Object.keys(profile.models).sort()) {
     const entry = profile.models[name]!;
-    const home = name === 'current-host' ? 'current-host' : homeHarness(profile, entry);
+    const home = name === 'host' ? 'host' : homeHarness(profile, entry);
     const deliveries: ModelRow['deliveries'] = [];
     let resolvedHarness: string | null = null;
     let row: ModelRow;
@@ -305,7 +305,7 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
       };
     }
     for (const candidate of harnessIds) {
-      if (candidate === resolvedHarness || name === 'current-host') continue;
+      if (candidate === resolvedHarness || name === 'host') continue;
       try {
         const alt = resolveDelivery({ model: name, harness: candidate }, profile);
         const altAdapter = alt.spec.adapter;
@@ -385,7 +385,7 @@ export function runModelsHarness(opts: HarnessListingOptions): HarnessListingRes
   // same call rather than with two spellings of the same idea.
   const deliveredBy: Array<{ name: string; ids: string[] }> = [];
   for (const [name, model] of Object.entries(profile.models)) {
-    if (name === 'current-host') continue;
+    if (name === 'host') continue;
     const ids: string[] = [];
     if (homeHarness(profile, model) === harness) ids.push(model.id);
     if (model.spellings[harness] != null) ids.push(model.spellings[harness]!);
@@ -486,8 +486,8 @@ function atomicWrite(path: string, text: string): void {
  */
 export function runModelsAdd(opts: ModelAddOptions): ModelAddResult {
   const alias = opts.alias.trim();
-  if (!BARE_IDENTIFIER_RE.test(alias) || alias === 'current-host') {
-    throw new ModelsError(`canonical alias "${opts.alias}" must be a bare lowercase identifier and may not be current-host.`);
+  if (!BARE_IDENTIFIER_RE.test(alias) || alias === 'host') {
+    throw new ModelsError(`canonical alias "${opts.alias}" must be a bare lowercase identifier and may not be host.`);
   }
   const { provider, id } = splitDiscoveryId(opts.discoveryId.trim());
   const repoRoot = repoRootOf(opts);
@@ -654,8 +654,8 @@ function catalogLayerPath(layer: ConfigLayer, repoRoot: string, paths: { executo
  */
 export function runModelsRemove(opts: ModelRemoveOptions): ModelRemoveResult {
   const alias = opts.alias.trim();
-  if (alias.length === 0 || alias === 'current-host') {
-    throw new ModelsError(`"${opts.alias}" is not a removable model alias; current-host is the host itself, not a registry entry.`);
+  if (alias.length === 0 || alias === 'host') {
+    throw new ModelsError(`"${opts.alias}" is not a removable model alias; host is the host itself, not a registry entry.`);
   }
   const repoRoot = repoRootOf(opts);
   const userPathOptions = opts.userPathOptions ?? {};

@@ -102,7 +102,7 @@ test('models: registry table — deliveries, lane marks, verification cache', (t
 
   const names = result.models.map((r) => r.name);
   assert.deepEqual(
-    names.filter((n) => n !== 'current-host'),
+    names.filter((n) => n !== 'host'),
     ['opus', 'sol'],
     'rows sort by home_harness (claude < codex)',
   );
@@ -113,7 +113,7 @@ test('models: registry table — deliveries, lane marks, verification cache', (t
   assert.equal(sol.effort, 'high');
   assert.equal(sol.verified_at, '2026-08-16T00:00:00Z');
 
-  const host = result.models.find((r) => r.name === 'current-host');
+  const host = result.models.find((r) => r.name === 'host');
   // `false`, from a bare shell and against a catalog whose harnesses declare
   // no `host:` block at all. `native` means "runs in the session you are in",
   // and there is no session here — the `true` this used to assert came from
@@ -353,8 +353,8 @@ test('models: rows sort by home_harness, then provider, then name', (t) => {
     result.models.map((r) => [r.name, r.home_harness, r.provider]),
     [
       ['zulu', 'claude', 'anthropic'],
-      // The synthesized current-host row participates in the same ordering.
-      ['current-host', 'current-host', 'current-host'],
+      // The synthesized host row participates in the same ordering.
+      ['host', 'host', 'host'],
       ['bravo', 'shared_a', 'acme'],
       ['mike', 'shared_a', 'acme'],
       ['alpha', 'shared_z', 'zenith'],

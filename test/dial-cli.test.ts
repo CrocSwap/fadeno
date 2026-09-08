@@ -67,7 +67,7 @@ test('dial show: every archetype, and where it goes', (t) => {
   const worker = result.rows.find((r) => r.archetype === 'worker')!;
   assert.ok(worker);
   assert.equal(worker.source, 'base');
-  assert.equal(worker.model, 'current-host');
+  assert.equal(worker.model, 'host');
   // Routing only. What an archetype is FOR is `fadeno context`; a row that
   // carried it too meant one description with two owners.
   assert.ok(!('description' in worker));
@@ -256,9 +256,9 @@ test('dial rows carry the lane for status, and the table prints archetype, model
   const row = (archetype: string) => rows.find((r) => r.archetype === archetype)!;
   assert.equal(row('worker').lane, 'host');
   assert.equal(row('reviewer').lane, 'command');
-  // Undialed inside a host session: `current-host` IS the session, so it is a
+  // Undialed inside a host session: `host` IS the session, so it is a
   // host candidate here — the same dial that has no lane from a bare shell.
-  assert.equal(row('judge').model, 'current-host');
+  assert.equal(row('judge').model, 'host');
   assert.equal(row('judge').lane, 'host');
   assert.equal(row('judge').deliverable, true);
 
@@ -277,7 +277,7 @@ test('dial rows carry the lane for status, and the table prints archetype, model
   // knows (an empty harness cell), and `status` is where "cannot be dispatched
   // from here" is reported to someone who has to act on it.
   const bare = cliRun(root, isolated(root), ['dial']);
-  assert.match(bare.split('\n').find((line) => line.startsWith('judge'))!, /current-host\s+—\s+—$/);
+  assert.match(bare.split('\n').find((line) => line.startsWith('judge'))!, /host\s+—\s+—$/);
   assert.doesNotMatch(bare, /no lane/);
   assert.equal(runDialShow({ repoRoot: root, userPathOptions: isolated(root) }).rows.find((r) => r.archetype === 'judge')!.deliverable, false);
 });

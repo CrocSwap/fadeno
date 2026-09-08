@@ -7520,7 +7520,7 @@ function closeDispatch(repoRoot, record, verb, note, now = /* @__PURE__ */ new D
 }
 function modelAgrees(asked, observed, askedId) {
   if (asked == null || observed == null) return true;
-  if (asked === "current-host") return true;
+  if (asked === "host") return true;
   if (askedId != null && askedId.length > 0) return askedId === observed || observed.includes(askedId);
   if (asked === observed) return true;
   return observed.toLowerCase().includes(asked.toLowerCase());
@@ -7593,7 +7593,7 @@ function hostVocabulary(input) {
   lines.push("## Archetypes", "");
   lines.push("Name an archetype when you spawn a subagent and Fadeno applies the model and effort the dials bind to it. The routing below is live; change it with `fadeno dial <archetype> <model[@effort]>`.", "");
   for (const a of input.archetypes) {
-    const route = a.model === "current-host" ? "this session's own model" : `${a.model}${a.effort ? `@${a.effort}` : ""}`;
+    const route = a.model === "host" ? "this session's own model" : `${a.model}${a.effort ? `@${a.effort}` : ""}`;
     lines.push(`- **${a.name}** \u2014 ${a.description} _(routes to ${route}; ${a.source})_`);
   }
   lines.push("");
@@ -8033,6 +8033,11 @@ function legacyDriverHarness(driver) {
 }
 var ON_SEPARATOR = " on ";
 var VIA_SEPARATOR = " via ";
+var HOST_MODEL = "host";
+var LEGACY_HOST_MODEL = "current-host";
+function canonicalModelName(name) {
+  return name === LEGACY_HOST_MODEL ? HOST_MODEL : name;
+}
 function parseDialRef(raw, label) {
   if (typeof raw === "string") {
     const trimmed = raw.trim();
@@ -8077,7 +8082,7 @@ function parseDialRef(raw, label) {
       if (effort.includes("@") || effort.includes(" ")) {
         throw new ExecutorProfileError(`${label} "${raw}" has invalid effort "${effort}".`);
       }
-      const out2 = { model };
+      const out2 = { model: canonicalModelName(model) };
       if (effort) out2.effort = effort;
       if (harness) out2.harness = harness;
       return out2;
@@ -8085,7 +8090,7 @@ function parseDialRef(raw, label) {
     if (core.includes(" ") || core.includes("@")) {
       throw new ExecutorProfileError(`${label} "${raw}" is not a valid dial ref.`);
     }
-    const out = { model: core };
+    const out = { model: canonicalModelName(core) };
     if (harness) out.harness = harness;
     return out;
   }
@@ -8099,7 +8104,7 @@ function parseDialRef(raw, label) {
     if (trimmedModel.includes(" ")) {
       throw new ExecutorProfileError(`${label} model "${trimmedModel}" contains whitespace.`);
     }
-    const out = { model: trimmedModel };
+    const out = { model: canonicalModelName(trimmedModel) };
     if (map.effort !== void 0) {
       if (typeof map.effort !== "string" || map.effort.trim().length === 0) {
         throw new ExecutorProfileError(`${label} "effort" must be a non-empty string.`);
@@ -8300,13 +8305,11 @@ function parseExecutorProfile(text, source, host = "standalone") {
   const notes = [];
   const models = {};
   for (const [name, raw] of Object.entries(doc.models)) {
-    if (!BARE_IDENTIFIER_RE.test(name) && name !== "current-host") {
-      if (!BARE_IDENTIFIER_RE.test(name)) {
-        throw new ExecutorProfileError(`${source}: model name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      }
+    if (!BARE_IDENTIFIER_RE.test(name)) {
+      throw new ExecutorProfileError(`${source}: model name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
     }
-    if (name === "current-host") {
-      throw new ExecutorProfileError(`${source}: model "current-host" is built-in.`);
+    if (name === HOST_MODEL || name === LEGACY_HOST_MODEL) {
+      throw new ExecutorProfileError(`${source}: model "${name}" is built-in \u2014 \`${HOST_MODEL}\` names the session's own model.`);
     }
     if (!isMapping(raw)) {
       throw new ExecutorProfileError(`${source}: model "${name}" is not a mapping.`);
@@ -8346,7 +8349,7 @@ function parseExecutorProfile(text, source, host = "standalone") {
     }
     models[name] = { provider: prov, id, effort, spellings, ...modelHarness != null ? { harness: modelHarness } : {} };
   }
-  models["current-host"] = { provider: "current-host", id: "current-host", effort: "default", spellings: {} };
+  models["host"] = { provider: "host", id: "host", effort: "default", spellings: {} };
   const harnesses = {};
   if (doc.routes !== void 0) throw v4MigrationError(source, "routes");
   if (doc.harnesses !== void 0) {
@@ -8464,7 +8467,7 @@ function parseExecutorProfile(text, source, host = "standalone") {
     homeByProvider[provider] = harnessKey;
   }
   for (const [name, entry] of Object.entries(models)) {
-    if (name === "current-host") continue;
+    if (name === "host") continue;
     for (const spellingHarness of Object.keys(entry.spellings)) {
       if (!Object.hasOwn(harnesses, spellingHarness)) {
         throw new ExecutorProfileError(
@@ -8505,7 +8508,7 @@ function parseExecutorProfile(text, source, host = "standalone") {
     }
     for (const [role, rawRef] of Object.entries(doc.bindings)) {
       if (role === "*") {
-        notes.push('binding "*" is deprecated and ignored \u2014 base fallback is now automatic (current-host)');
+        notes.push('binding "*" is deprecated and ignored \u2014 base fallback is now automatic (host)');
         continue;
       }
       if (typeof role !== "string" || role.length === 0) {
@@ -8724,7 +8727,7 @@ function resolveDialCascade(role, archetype, policy, layers) {
       }
     }
   }
-  return { ref: { model: "current-host" }, source: "base", resolvedVia: null };
+  return { ref: { model: "host" }, source: "base", resolvedVia: null };
 }
 function resolveRole(role, archetype, profile, layers) {
   const cascade = resolveDialCascade(role, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, layers);
@@ -8770,7 +8773,7 @@ function resolveDelivery(ref, profile, host = profile.host ?? "standalone") {
     const subst = (argv) => argv.map((part) => part.split("{model}").join(modelId2).split("{reasoning_effort}").join(effectiveEffort2));
     const command2 = entry?.command ?? null;
     const hostSide = harness2 === host ? entry?.host ?? null : null;
-    const hostCandidate = hostSide != null && (hostSide.identity !== "session" || model === "current-host");
+    const hostCandidate = hostSide != null && (hostSide.identity !== "session" || model === "host");
     const spec = hostCandidate || command2 == null ? {
       adapter: "host",
       model: modelId2,
@@ -8800,13 +8803,13 @@ function resolveDelivery(ref, profile, host = profile.host ?? "standalone") {
       registered: params.registered
     };
   };
-  if (ref.model === "current-host") {
+  if (ref.model === "host") {
     const entry = harnesses[host];
     return build({
-      model: "current-host",
-      modelId: "current-host",
+      model: "host",
+      modelId: "host",
       effectiveEffort: ref.effort ?? "default",
-      provider: "current-host",
+      provider: "host",
       // Null in a bare shell: `standalone` is not a harness in the table, and
       // printing it as one invited a reader to look it up.
       harness: entry != null ? host : null,
@@ -8814,8 +8817,8 @@ function resolveDelivery(ref, profile, host = profile.host ?? "standalone") {
       // The host lane, with its command lanes AND its eligibility stripped.
       //
       // Both removals matter. There is no argv for "the session you are
-      // already in", so `current-host` must never acquire a fallback command —
-      // that is what makes `current-host` in a bare shell honestly lane-less
+      // already in", so `host` must never acquire a fallback command —
+      // that is what makes `host` in a bare shell honestly lane-less
       // rather than silently spawning a second session.
       entry: entry?.host != null ? { host: { effort_channel: entry.host.effort_channel, identity: entry.host.identity } } : void 0
     });
@@ -8924,8 +8927,8 @@ function repairUserLayer(doc, path, repairs) {
     repairs.push(`${where}: model "${name}" dropped \u2014 ${why}`);
   };
   for (const [name, raw] of Object.entries(models)) {
-    if (name === "current-host") {
-      dropModel(name, '"current-host" is built in');
+    if (name === "host") {
+      dropModel(name, '"host" is built in');
       continue;
     }
     if (!BARE_IDENTIFIER_RE.test(name)) {
@@ -10370,7 +10373,7 @@ function nearestMatches(target, candidates, limit = 3) {
 }
 function probeModel(profile, harness, modelId, opts = {}) {
   const entry = profile.harnesses?.[harness] ?? null;
-  if (modelId === "current-host") return { status: null, note: null };
+  if (modelId === "host") return { status: null, note: null };
   if (entry == null) {
     return { status: "unverified", note: `note: cannot verify ${modelId} on ${harness} (no such harness declared) \u2014 dialing unverified` };
   }
@@ -10464,7 +10467,7 @@ function runDialSetMany(opts) {
 function providerNoveltyNote(params) {
   const { profile, layers, archetype, refString, compiled } = params;
   const provider = compiled.provider;
-  if (provider == null || provider === "current-host") return null;
+  if (provider == null || provider === "host") return null;
   const inUse = /* @__PURE__ */ new Set();
   for (const other of knownArchetypes(profile.archetypes, layers.session, layers.repo, layers.user)) {
     if (other === archetype) continue;
@@ -10497,6 +10500,7 @@ function runDialSet(opts) {
   }
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
+  const legacyHostName = new RegExp(`^${LEGACY_HOST_MODEL}(@|$| )`).test(modelInput);
   if (!Object.hasOwn(profile.models, dial.model) && Object.hasOwn(profile.archetypes, dial.model)) {
     throw new DialError(
       `"${dial.model}" is an archetype, not a model \u2014 this would dial ${archetype} to a model of that name, and the registry has none. To route both to one model, name them together: \`fadeno dial ${archetype} ${dial.model} <model>\`. To make ${archetype} follow ${dial.model}'s dial wherever it goes, declare the chain in the project catalog: \`archetypes.${archetype}.fallback: ${dial.model}\` in .fadeno/executors.yaml.`
@@ -10514,12 +10518,15 @@ function runDialSet(opts) {
   let verification = null;
   let probeNote = null;
   const notes = [];
+  if (legacyHostName) {
+    notes.push(`note: \`${LEGACY_HOST_MODEL}\` was renamed \`${dial.model}\` in 0.7 \u2014 recorded as \`${formatDialRef(dial)}\``);
+  }
   if (!compiled.registered) {
     notes.push(
       `note: ${compiled.model} is not in the model registry \u2014 running on ${compiled.harness}, id passed verbatim (declare it under models: to set a home harness or standard effort)`
     );
   }
-  const shouldProbe = compiled.model !== "current-host" && compiled.harness != null;
+  const shouldProbe = compiled.model !== "host" && compiled.harness != null;
   const hasModelsCommand = harnessCanProbe(profile, compiled.harness);
   if (shouldProbe) {
     if (!hasModelsCommand) {
@@ -10925,7 +10932,7 @@ function runModels(opts = {}) {
   const rows = [];
   for (const name of Object.keys(profile.models).sort()) {
     const entry = profile.models[name];
-    const home = name === "current-host" ? "current-host" : homeHarness(profile, entry);
+    const home = name === "host" ? "host" : homeHarness(profile, entry);
     const deliveries = [];
     let resolvedHarness = null;
     let row;
@@ -10973,7 +10980,7 @@ function runModels(opts = {}) {
       };
     }
     for (const candidate of harnessIds) {
-      if (candidate === resolvedHarness || name === "current-host") continue;
+      if (candidate === resolvedHarness || name === "host") continue;
       try {
         const alt = resolveDelivery({ model: name, harness: candidate }, profile);
         const altAdapter = alt.spec.adapter;
@@ -11013,7 +11020,7 @@ function runModelsHarness(opts) {
   const { modelsCommand, ids: tokens, listing } = runListingCommand(profile, harness, opts.spawn);
   const deliveredBy = [];
   for (const [name, model] of Object.entries(profile.models)) {
-    if (name === "current-host") continue;
+    if (name === "host") continue;
     const ids = [];
     if (homeHarness(profile, model) === harness) ids.push(model.id);
     if (model.spellings[harness] != null) ids.push(model.spellings[harness]);
@@ -11077,8 +11084,8 @@ function atomicWrite(path, text) {
 }
 function runModelsAdd(opts) {
   const alias = opts.alias.trim();
-  if (!BARE_IDENTIFIER_RE.test(alias) || alias === "current-host") {
-    throw new ModelsError(`canonical alias "${opts.alias}" must be a bare lowercase identifier and may not be current-host.`);
+  if (!BARE_IDENTIFIER_RE.test(alias) || alias === "host") {
+    throw new ModelsError(`canonical alias "${opts.alias}" must be a bare lowercase identifier and may not be host.`);
   }
   const { provider, id } = splitDiscoveryId(opts.discoveryId.trim());
   const repoRoot = repoRootOf2(opts);
@@ -11170,8 +11177,8 @@ function catalogLayerPath(layer, repoRoot, paths) {
 }
 function runModelsRemove(opts) {
   const alias = opts.alias.trim();
-  if (alias.length === 0 || alias === "current-host") {
-    throw new ModelsError(`"${opts.alias}" is not a removable model alias; current-host is the host itself, not a registry entry.`);
+  if (alias.length === 0 || alias === "host") {
+    throw new ModelsError(`"${opts.alias}" is not a removable model alias; host is the host itself, not a registry entry.`);
   }
   const repoRoot = repoRootOf2(opts);
   const userPathOptions = opts.userPathOptions ?? {};
@@ -11349,7 +11356,7 @@ function runModelsVerify(opts = {}) {
   })();
   const targets = /* @__PURE__ */ new Map();
   for (const row of show.rows) {
-    if (row.harness == null || row.model_id === "current-host") continue;
+    if (row.harness == null || row.model_id === "host") continue;
     const key = `${row.harness} ${row.model_id}`;
     let target = targets.get(key);
     if (target == null) {
@@ -11862,7 +11869,7 @@ function userCatalogModels() {
     const parsed = (0, import_yaml5.parse)((0, import_node_fs14.readFileSync)(userPaths().executorsFile, "utf8"));
     const models = parsed?.models;
     if (models == null || typeof models !== "object" || Array.isArray(models)) return [];
-    return uniqueSorted(Object.keys(models).filter((name) => name !== "current-host"));
+    return uniqueSorted(Object.keys(models).filter((name) => name !== "host"));
   } catch {
     return [];
   }
@@ -11877,7 +11884,7 @@ function dialedModelRefs(repoRoot, cwd) {
   const profile = readProfile(repoRoot);
   const values = /* @__PURE__ */ new Set();
   for (const row of rows) {
-    if (row.harness == null || row.model_id === "current-host") continue;
+    if (row.harness == null || row.model_id === "host") continue;
     values.add(row.model);
     values.add(row.model_id);
     const entry = profile?.models[row.model];
