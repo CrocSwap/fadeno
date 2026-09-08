@@ -230,7 +230,7 @@ test('dial CLI: the effort column shows the pin, and `inherit` where there is no
 // command lane — so it is printed, from `laneOf`, the same one bit the spawn
 // wrapper routes on.
 
-test('dial CLI: the table prints the lane, the description, and names a row with no lane at all', (t) => {
+test('dial CLI: the table prints the lane, one line per row, and names a row with no lane at all', (t) => {
   const root = seedCatalog(t, {
     harnesses: {
       // The host: `sol` is deliverable in-session here, and has a command lane.
@@ -265,4 +265,27 @@ test('dial CLI: the table prints the lane, the description, and names a row with
   const bare = cliRun(root, isolated(root), ['dial']);
   assert.match(bare.split('\n').find((line) => line.startsWith('judge'))!, /current-host\s+inherit\s+—\s+none\s/);
   assert.match(bare, /none: no lane from here/);
+});
+
+test('the `none` legend names the condition, not one of the two causes that reach it', (t) => {
+  const root = seedCatalog(t, {
+    models: {
+      sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
+      stray: { provider: 'ompco', id: 'stray-1', harness: 'omp' },
+    },
+    harnesses: {
+      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: ['node', '-e', '0'] },
+      // A host Fadeno can run inside and cannot spawn. From a codex session a
+      // model living here has no lane either — and this is the second cause.
+      omp: { host: { effort_channel: 'none', identity: 'model' } },
+    },
+    dials: { worker: 'stray' },
+  });
+  const table = cliRun(root, inCodex(root), ['dial']);
+  assert.match(table.split('\n').find((line) => line.startsWith('worker'))!, /stray\s+inherit\s+omp \(home\)\s+none\s/);
+  assert.match(table, /the model is one this session can neither deliver in-session nor run as a process/);
+  // The row says `stray` and this IS a session, so a legend that gave the
+  // bare-shell cause as the reason would be telling the reader something
+  // false about the row in front of them.
+  assert.doesNotMatch(table, /^none: no lane from here — `current-host`/m);
 });

@@ -191,10 +191,16 @@ function printDialShow(result: DialShowResult): void {
     const lane = (row.deliverable ? row.lane : 'none').padEnd(8);
     console.log(`${arch}  ${model}  ${effort}  ${harness}  ${lane}  ${roleResolutionEchoLabel(row.source)}${inherits}`);
   }
+  // The legend names the CONDITION, not one of its causes. Two dials reach
+  // `none`: `current-host` outside a session, and a named model whose harness
+  // hosts but cannot be spawned, seen from a different host. The footer used
+  // to state the first as the reason for both, which told a reader looking at
+  // a row that says `stray` that their session was not a session.
   if (result.rows.some((row) => !row.deliverable)) {
     console.log(
-      'none: no lane from here — `current-host` names the session\'s own model and this is not a session. ' +
-        'Spawn it from a host harness, or dial it onto a model with a command lane.',
+      'none: no lane from here — the model is one this session can neither deliver in-session nor run as a process. ' +
+        'Spawn it from a host that can deliver it, or dial it onto a model with a command lane. ' +
+        "(`current-host` outside a session is the usual cause: it names the session's own model and there is no session.)",
     );
   }
   if (result.note) console.log(result.note);

@@ -12750,7 +12750,7 @@ function printDialShow(result) {
   }
   if (result.rows.some((row) => !row.deliverable)) {
     console.log(
-      "none: no lane from here \u2014 `current-host` names the session's own model and this is not a session. Spawn it from a host harness, or dial it onto a model with a command lane."
+      "none: no lane from here \u2014 the model is one this session can neither deliver in-session nor run as a process. Spawn it from a host that can deliver it, or dial it onto a model with a command lane. (`current-host` outside a session is the usual cause: it names the session's own model and there is no session.)"
     );
   }
   if (result.note) console.log(result.note);
