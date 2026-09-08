@@ -10872,6 +10872,12 @@ function defaultSpawn(command2, opts) {
   const run = (0, import_node_child_process4.spawnSync)(command2[0], command2.slice(1), { timeout: opts.timeout, encoding: "utf8" });
   return { status: run.status, stdout: run.stdout ?? "", stderr: run.stderr ?? "", ...run.error != null ? { error: run.error } : {} };
 }
+function listableHarnesses(profile) {
+  return Object.keys(harnessTable(profile)).sort().filter((id) => {
+    const command2 = harnessTable(profile)[id].models_command;
+    return command2 != null && command2.length > 0;
+  });
+}
 function runListingCommand(profile, harness, spawn2) {
   const entry = harnessTable(profile)[harness];
   if (entry == null) {
@@ -10879,7 +10885,10 @@ function runListingCommand(profile, harness, spawn2) {
   }
   const modelsCommand = entry.models_command;
   if (modelsCommand == null || modelsCommand.length === 0) {
-    throw new ModelsError(`harness "${harness}" declares no models_command \u2014 its backend cannot be listed.`);
+    const listable = listableHarnesses(profile);
+    throw new ModelsError(
+      `harness "${harness}" declares no models_command \u2014 its backend cannot be listed.` + (listable.length > 0 ? ` These can: ${listable.join(", ")}.` : "")
+    );
   }
   const spawnFn = spawn2 ?? defaultSpawn;
   let result;
@@ -10982,16 +10991,12 @@ function runModels(opts = {}) {
     if (pa !== pb) return pa < pb ? -1 : 1;
     return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
   });
-  const listable = harnessIds.filter((id) => {
-    const command2 = harnessTable(profile)[id].models_command;
-    return command2 != null && command2.length > 0;
-  });
   return {
     host,
     host_source: hostSource(opts.userPathOptions),
     models: rows,
     unregistered_model_harness: profile.unregisteredModelHarness,
-    listable_harnesses: listable
+    listable_harnesses: listableHarnesses(profile)
   };
 }
 function runModelsHarness(opts) {
@@ -12663,9 +12668,6 @@ function printModels(result, options = {}) {
   }
   for (const row of result.models) {
     if (row.stale != null) console.error(`warning: ${row.name} \u2014 ${row.stale}`);
-  }
-  if (result.listable_harnesses.length > 0) {
-    console.log(`live backend listings: fadeno models --harness <${result.listable_harnesses.join("|")}>`);
   }
 }
 function printModelDetail(result, name) {

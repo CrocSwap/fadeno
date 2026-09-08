@@ -187,6 +187,14 @@ function defaultSpawn(command: string[], opts: { timeout: number }): ReturnType<
  * and the parity test in `test/doctor-model-listing.test.ts` fails loudly if
  * anyone reintroduces a local copy.
  */
+/** Harnesses whose backend can actually be listed — those declaring a `models_command`. */
+function listableHarnesses(profile: ExecutorProfile): string[] {
+  return Object.keys(harnessTable(profile)).sort().filter((id) => {
+    const command = harnessTable(profile)[id]!.models_command;
+    return command != null && command.length > 0;
+  });
+}
+
 function runListingCommand(
   profile: ExecutorProfile,
   harness: string,
@@ -198,7 +206,13 @@ function runListingCommand(
   }
   const modelsCommand = entry.models_command;
   if (modelsCommand == null || modelsCommand.length === 0) {
-    throw new ModelsError(`harness "${harness}" declares no models_command — its backend cannot be listed.`);
+    // Which harnesses CAN be listed is answered here, at the moment someone
+    // asks for one that cannot, rather than under every `fadeno models`.
+    const listable = listableHarnesses(profile);
+    throw new ModelsError(
+      `harness "${harness}" declares no models_command — its backend cannot be listed.` +
+        (listable.length > 0 ? ` These can: ${listable.join(', ')}.` : ''),
+    );
   }
   const spawnFn = spawn ?? defaultSpawn;
   let result: ReturnType<ListingSpawn>;
@@ -323,17 +337,12 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
     return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
   });
 
-  const listable = harnessIds.filter((id) => {
-    const command = harnessTable(profile)[id]!.models_command;
-    return command != null && command.length > 0;
-  });
-
   return {
     host,
     host_source: hostSource(opts.userPathOptions),
     models: rows,
     unregistered_model_harness: profile.unregisteredModelHarness,
-    listable_harnesses: listable,
+    listable_harnesses: listableHarnesses(profile),
   };
 }
 

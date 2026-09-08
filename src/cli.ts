@@ -77,9 +77,6 @@ function printModels(result: ModelsResult, options: { catchAll?: boolean } = {})
   for (const row of result.models) {
     if (row.stale != null) console.error(`warning: ${row.name} — ${row.stale}`);
   }
-  if (result.listable_harnesses.length > 0) {
-    console.log(`live backend listings: fadeno models --harness <${result.listable_harnesses.join('|')}>`);
-  }
 }
 
 function printModelDetail(result: ModelsResult, name: string): void {

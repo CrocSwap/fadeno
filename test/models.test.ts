@@ -73,6 +73,8 @@ test('models: the catch-all is a row, not a footnote', (t) => {
   // under the table that a reader scanning the harness column never reaches.
   assert.match(out, /^\*\s+\*\s+\*\s+\*\s+opencode$/m);
   assert.doesNotMatch(out, /any other name runs on/);
+  // Nothing under the table at all: the last line is a row.
+  assert.doesNotMatch(out, /live backend listings/);
   // The header is the only uppercase line: column names, docker-style.
   assert.match(out.split('\n')[0]!, /^MODEL\s+PROVIDER\s+ID\s+EFFORT\s+HARNESS$/);
   // The row follows the catalog: a repo that sets the key sees its own answer.
@@ -273,7 +275,12 @@ test('models --harness: unknown harness and probe-less harness refuse with guida
   );
   assert.throws(
     () => runModelsHarness({ repoRoot: root, userPathOptions: user, harness: 'claude' }),
-    (err: unknown) => err instanceof ModelsError && /declares no models_command/.test((err as Error).message),
+    // And the refusal names the harnesses that CAN be listed — the discovery
+    // that used to sit under every `fadeno models`, moved to the one moment
+    // someone is asking for it.
+    (err: unknown) => err instanceof ModelsError
+      && /declares no models_command/.test((err as Error).message)
+      && /These can: codex, opencode\./.test((err as Error).message),
   );
 });
 
