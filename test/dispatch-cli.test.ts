@@ -120,7 +120,7 @@ test('dispatch-open and dispatch-stop: the host lane\'s two halves through the C
   // From a bare shell nothing is a host candidate, so the host lane is asked for by name.
   const second = cli(root, ['dispatch-open', '--archetype', 'reviewer', '--lane', 'host', '--json'], 'Review it.');
   assert.equal(second.status, 0, second.stderr);
-  assert.match((JSON.parse(second.stdout) as { nag: string }).nag, /## Unclosed dispatches \(1 of 5 allowed\)/);
+  assert.match((JSON.parse(second.stdout) as { nag: string }).nag, /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)/);
 
   writeFileSync(join(json.cwd, 'new.txt'), 'x\n');
   const stopped = cli(root, ['dispatch-stop', 'in-host', '--agent-cwd', root], 'All done; new.txt added.');
@@ -136,14 +136,21 @@ test('dispatch-open and dispatch-stop: the host lane\'s two halves through the C
 
 test('dispatch-open refuses at the limit with exit 3 on both lanes, and --json carries the refusal', (t) => {
   const root = repo(t);
-  for (let i = 0; i < 5; i += 1) assert.equal(cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host'], `job ${i}`).status, 0);
+  // Five running dispatches refuse nothing — the limit counts work waiting on
+  // a person, and a running dispatch has no report to read.
+  for (let i = 0; i < 5; i += 1) assert.equal(cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', `j${i}`], `job ${i}`).status, 0);
+  assert.equal(cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host'], 'while they run').status, 0);
+  cli(root, ['dispatch-close', 'while-they-run', '--discarded']);
+  for (let i = 0; i < 5; i += 1) cli(root, ['dispatch-stop', `j${i}`], 'done');
   const refused = cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--json'], 'six');
   assert.equal(refused.status, 3);
-  assert.match((JSON.parse(refused.stdout) as { refused: string }).refused, /5 dispatches are unclosed and the limit is 5/);
+  assert.match((JSON.parse(refused.stdout) as { refused: string }).refused, /5 dispatches have stopped and are waiting for your decision, and the limit is 5/);
   // The relay is refused too: a proxy sent to be refused one process later would waste a turn.
   const relayRefused = cli(root, ['dispatch-open', '--archetype', 'worker', '--json'], 'seven');
   assert.equal(relayRefused.status, 3);
-  assert.equal(readDispatches(root).records.length, 5);
+  // The five at the limit plus the one that ran and was closed while they
+  // were still going — and neither refusal added a row.
+  assert.equal(readDispatches(root).records.length, 6);
   assert.ok(!existsSync(join(root, '.fadeno', 'local', 'relay')), 'nothing is staged for a refused relay');
 });
 
@@ -177,9 +184,10 @@ test('context prints the vocabulary with live routing and the nag', (t) => {
   cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', 'pending'], 'x');
   const ctx = cli(root, ['context']);
   assert.equal(ctx.status, 0, ctx.stderr);
-  assert.match(ctx.stdout, /- \*\*worker\*\* — Implements .* _\(routes to echo@high; repo\)_/);
-  assert.match(ctx.stdout, /- \*\*reviewer\*\* — Reviews .* _\(routes to this session's own model; no dial\)_/);
-  assert.match(ctx.stdout, /## Unclosed dispatches \(1 of 5 allowed\)/);
+  assert.match(ctx.stdout, /- \*\*worker\*\* — Implements /);
+  assert.match(ctx.stdout, /- \*\*reviewer\*\* — Reviews /);
+  assert.doesNotMatch(ctx.stdout, /routes to/, 'the vocabulary carries no routing snapshot');
+  assert.match(ctx.stdout, /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)/);
   assert.match(ctx.stdout, /`pending`/);
   const json = JSON.parse(cli(root, ['context', '--json']).stdout) as { archetypes: Array<{ name: string }> };
   // A self-contained project catalog suppresses the builtin layer, so only its own archetypes plus the role canon appear.
@@ -285,7 +293,7 @@ test('a director\'s contract carries the host vocabulary, and a dispatch run fro
   const run = cli(root, ['dispatch', '--archetype', 'director', '--name', 'lead'], 'Coordinate the fix.');
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /\*\*You may spawn\.\*\* The dispatches you open are recorded under yours/);
-  assert.match(run.stdout, /## Archetypes\n\n[\s\S]*- \*\*director\*\* — Coordinates a whole task[\s\S]*_\(routes to echo@high; repo\)_/);
+  assert.match(run.stdout, /## Archetypes\n\n[\s\S]*- \*\*director\*\* — Coordinates a whole task/);
   assert.match(run.stdout, /## Closing/);
   assert.ok(run.stdout.trimEnd().endsWith('## End of Fadeno dispatch contract'), 'the vocabulary sits inside the contract');
   const worktree = join(root, '.fadeno', 'local', 'worktrees', 'lead');

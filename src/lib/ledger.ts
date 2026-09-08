@@ -22,6 +22,7 @@
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { sanitizeName } from './worktree.ts';
 
 export const LEDGER_FILE = join('.fadeno', 'dispatches.jsonl');
 export const PROMPTS_DIR = join('.fadeno', 'prompts');
@@ -229,13 +230,21 @@ export type DispatchLookup =
  * Resolve a dispatch by full id, unique id prefix, or unique name. A name
  * that several dispatches share is ambiguous rather than "the newest": the
  * caller has an id for exactly this case.
+ *
+ * The name is matched as GIVEN and as RECORDED. `--name 'Fix the row_base
+ * hazard'` is stored as the branch-safe `fix-the-row_base-hazard`, so a proxy
+ * told to recover with the name it was handed asked for a dispatch that,
+ * as far as the ledger was concerned, did not exist — while the one it wanted
+ * sat in the "known names" list underneath. Two spellings of one name is not
+ * an ambiguity to report; it is a lookup to do.
  */
 export function findDispatch(records: readonly DispatchRecord[], query: string): DispatchLookup {
   const q = query.trim();
   if (q === '') return { ok: false, reason: 'unknown', message: 'empty dispatch reference.' };
   const exact = records.find((record) => record.id === q);
   if (exact != null) return { ok: true, record: exact, by: 'id' };
-  const byName = records.filter((record) => record.opened?.name === q);
+  const sanitized = sanitizeName(q);
+  const byName = records.filter((record) => record.opened?.name === q || record.opened?.name === sanitized);
   if (byName.length === 1) return { ok: true, record: byName[0]!, by: 'name' };
   if (byName.length > 1) {
     return {

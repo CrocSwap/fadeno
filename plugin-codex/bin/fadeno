@@ -7374,10 +7374,169 @@ var import_node_path8 = require("node:path");
 
 // src/lib/ledger.ts
 var import_node_crypto = require("node:crypto");
+var import_node_fs2 = require("node:fs");
+var import_node_path2 = require("node:path");
+
+// src/lib/worktree.ts
 var import_node_fs = require("node:fs");
+var import_node_child_process = require("node:child_process");
 var import_node_path = require("node:path");
-var LEDGER_FILE = (0, import_node_path.join)(".fadeno", "dispatches.jsonl");
-var PROMPTS_DIR = (0, import_node_path.join)(".fadeno", "prompts");
+var WORKTREES_DIR = (0, import_node_path.join)(".fadeno", "local", "worktrees");
+var BRANCH_PREFIX = "fadeno/";
+var BRANCH_NAME_MAX = 60;
+var GIT_TIMEOUT_MS = 2e4;
+var DIRTY_PATH_LIMIT = 200;
+function canonical(path) {
+  try {
+    return (0, import_node_fs.realpathSync)(path);
+  } catch {
+    return (0, import_node_path.resolve)(path);
+  }
+}
+function git(cwd, args, timeoutMs = GIT_TIMEOUT_MS) {
+  const result = (0, import_node_child_process.spawnSync)("git", args, { cwd, encoding: "utf8", timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 });
+  if (result.error != null) {
+    const code = result.error.code;
+    return {
+      ok: false,
+      error: code === "ETIMEDOUT" ? `git ${args[0]} did not answer within ${timeoutMs}ms` : `git could not be run: ${result.error.message}`
+    };
+  }
+  if (result.status !== 0) {
+    const stderr = (result.stderr ?? "").trim();
+    return { ok: false, error: stderr.length > 0 ? stderr : `git ${args[0]} exited ${result.status}` };
+  }
+  return { ok: true, stdout: result.stdout ?? "" };
+}
+function sanitizeName(raw) {
+  const cleaned = raw.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, BRANCH_NAME_MAX).replace(/[-.]+$/g, "");
+  return cleaned.length > 0 ? cleaned : "dispatch";
+}
+function uniqueName(base, taken) {
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n += 1) {
+    const candidate = `${base}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+function existingFadenoBranches(repoRoot) {
+  const listed = git(repoRoot, ["for-each-ref", "--format=%(refname:short)", `refs/heads/${BRANCH_PREFIX}`]);
+  const names = /* @__PURE__ */ new Set();
+  if (!listed.ok) return names;
+  for (const line of listed.stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith(BRANCH_PREFIX)) names.add(trimmed.slice(BRANCH_PREFIX.length));
+  }
+  return names;
+}
+function dirtyPaths(dir) {
+  const status = git(dir, ["status", "--porcelain", "--untracked-files=all"]);
+  if (!status.ok) return "unavailable";
+  const lines = status.stdout.split("\n").filter((line) => line.trim() !== "");
+  return { paths: lines.slice(0, DIRTY_PATH_LIMIT).map((line) => line.slice(3)), truncated: lines.length > DIRTY_PATH_LIMIT };
+}
+function currentBranch(dir) {
+  const head = git(dir, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  return head.ok ? head.stdout.trim() || null : null;
+}
+function cutWorktree(opts) {
+  const { repoRoot, name } = opts;
+  const ref = opts.from?.trim() || "HEAD";
+  const base = git(repoRoot, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  if (!base.ok) return { ok: false, reason: `"${ref}" is not a commit in this repository: ${base.error}` };
+  const baseSha = base.stdout.trim();
+  const upstream = ref === "HEAD" ? currentBranch(repoRoot) ?? baseSha : ref;
+  const branch = `${BRANCH_PREFIX}${name}`;
+  const absolute = (0, import_node_path.resolve)(repoRoot, WORKTREES_DIR, name);
+  if ((0, import_node_fs.existsSync)(absolute)) return { ok: false, reason: `${(0, import_node_path.relative)(repoRoot, absolute)} already exists.` };
+  try {
+    (0, import_node_fs.mkdirSync)((0, import_node_path.resolve)(repoRoot, WORKTREES_DIR), { recursive: true });
+  } catch (err) {
+    return { ok: false, reason: `could not create ${WORKTREES_DIR}: ${err.message}` };
+  }
+  git(repoRoot, ["worktree", "prune"]);
+  const added = git(repoRoot, ["worktree", "add", "-b", branch, absolute, baseSha]);
+  if (!added.ok) return { ok: false, reason: added.error };
+  return {
+    ok: true,
+    worktree: { absolute, path: (0, import_node_path.relative)(repoRoot, absolute), branch, base: baseSha, upstream }
+  };
+}
+function listRegisteredWorktrees(repoRoot) {
+  const listed = git(repoRoot, ["worktree", "list", "--porcelain"]);
+  if (!listed.ok) return [];
+  const root = canonical(repoRoot);
+  const out = [];
+  let current = {};
+  const flush = () => {
+    if (current.absolute == null) return;
+    const absolute = canonical(current.absolute);
+    const branch = current.branch ?? null;
+    const insideDir = absolute.startsWith((0, import_node_path.join)(root, WORKTREES_DIR));
+    if (absolute !== root && (insideDir || branch != null && branch.startsWith(BRANCH_PREFIX))) {
+      out.push({
+        absolute,
+        path: (0, import_node_path.relative)(root, absolute),
+        branch,
+        head: current.head ?? null,
+        exists: (0, import_node_fs.existsSync)(absolute)
+      });
+    }
+    current = {};
+  };
+  for (const line of listed.stdout.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      flush();
+      current.absolute = line.slice("worktree ".length);
+    } else if (line.startsWith("HEAD ")) current.head = line.slice(5).trim();
+    else if (line.startsWith("branch ")) current.branch = line.slice(7).trim().replace(/^refs\/heads\//, "");
+    else if (line.trim() === "") flush();
+  }
+  flush();
+  return out;
+}
+function isRegisteredWorktree(repoRoot, absolute) {
+  const target = canonical(absolute);
+  return listRegisteredWorktrees(repoRoot).some((entry) => entry.absolute === target);
+}
+function reportWorktrees(repoRoot) {
+  return listRegisteredWorktrees(repoRoot).map((entry) => {
+    const dirty = entry.exists ? dirtyPaths(entry.absolute) : "unavailable";
+    let unmerged = "unavailable";
+    if (entry.branch != null) {
+      const count = git(repoRoot, ["rev-list", "--count", `HEAD..${entry.branch}`]);
+      if (count.ok) unmerged = Number.parseInt(count.stdout.trim(), 10) || 0;
+    }
+    return { ...entry, dirty, unmerged };
+  });
+}
+function removeWorktree(opts) {
+  const absolute = canonical(opts.absolute);
+  if (absolute === canonical(opts.repoRoot)) return { ok: false, reason: "refusing to remove the repository root." };
+  if (!isRegisteredWorktree(opts.repoRoot, absolute)) {
+    if ((0, import_node_fs.existsSync)(absolute) && (0, import_node_fs.statSync)(absolute).isDirectory()) {
+      return { ok: false, reason: `${absolute} is not a registered worktree; not deleting a plain directory.` };
+    }
+    git(opts.repoRoot, ["worktree", "prune"]);
+    return { ok: true };
+  }
+  if ((0, import_node_fs.existsSync)(absolute) && !opts.force) {
+    const dirty = dirtyPaths(absolute);
+    if (dirty === "unavailable") return { ok: false, reason: `${absolute}: could not read its status; not removing a tree that may hold work.` };
+    if (dirty.paths.length > 0) {
+      const sample = dirty.paths.slice(0, 5).join(", ");
+      return { ok: false, reason: `${absolute} holds ${dirty.paths.length} uncommitted path(s) (${sample}); commit or discard them first, or pass --force.` };
+    }
+  }
+  const removed = git(opts.repoRoot, ["worktree", "remove", ...opts.force ? ["--force"] : [], absolute]);
+  if (!removed.ok) return { ok: false, reason: removed.error };
+  git(opts.repoRoot, ["worktree", "prune"]);
+  return { ok: true };
+}
+
+// src/lib/ledger.ts
+var LEDGER_FILE = (0, import_node_path2.join)(".fadeno", "dispatches.jsonl");
+var PROMPTS_DIR = (0, import_node_path2.join)(".fadeno", "prompts");
 var TASK_EXCERPT_CHARS = 300;
 var FINAL_MESSAGE_CHARS = 2e3;
 var CLOSE_VERBS = ["merged", "kept", "discarded", "failed"];
@@ -7388,9 +7547,9 @@ function nowIso(now = /* @__PURE__ */ new Date()) {
   return now.toISOString();
 }
 function appendRow(repoRoot, row) {
-  const file = (0, import_node_path.join)(repoRoot, LEDGER_FILE);
-  (0, import_node_fs.mkdirSync)((0, import_node_path.dirname)(file), { recursive: true });
-  (0, import_node_fs.appendFileSync)(file, `${JSON.stringify(row)}
+  const file = (0, import_node_path2.join)(repoRoot, LEDGER_FILE);
+  (0, import_node_fs2.mkdirSync)((0, import_node_path2.dirname)(file), { recursive: true });
+  (0, import_node_fs2.appendFileSync)(file, `${JSON.stringify(row)}
 `);
 }
 var KNOWN_ROWS = /* @__PURE__ */ new Set(["opened", "stopped", "closed"]);
@@ -7398,12 +7557,12 @@ function isRecord(value) {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 function readLedger(repoRoot) {
-  const file = (0, import_node_path.join)(repoRoot, LEDGER_FILE);
+  const file = (0, import_node_path2.join)(repoRoot, LEDGER_FILE);
   const reading = { rows: [], unreadable: 0, unknown: 0 };
-  if (!(0, import_node_fs.existsSync)(file)) return reading;
+  if (!(0, import_node_fs2.existsSync)(file)) return reading;
   let text;
   try {
-    text = (0, import_node_fs.readFileSync)(file, "utf8");
+    text = (0, import_node_fs2.readFileSync)(file, "utf8");
   } catch {
     return { rows: [], unreadable: 1, unknown: 0 };
   }
@@ -7453,7 +7612,8 @@ function findDispatch(records, query) {
   if (q === "") return { ok: false, reason: "unknown", message: "empty dispatch reference." };
   const exact = records.find((record) => record.id === q);
   if (exact != null) return { ok: true, record: exact, by: "id" };
-  const byName = records.filter((record) => record.opened?.name === q);
+  const sanitized = sanitizeName(q);
+  const byName = records.filter((record) => record.opened?.name === q || record.opened?.name === sanitized);
   if (byName.length === 1) return { ok: true, record: byName[0], by: "name" };
   if (byName.length > 1) {
     return {
@@ -7485,20 +7645,20 @@ function excerptFinalMessage(message) {
   return message.length <= FINAL_MESSAGE_CHARS ? message : `${message.slice(0, FINAL_MESSAGE_CHARS)}\u2026`;
 }
 function promptPath(id) {
-  return (0, import_node_path.join)(PROMPTS_DIR, `${id}.md`);
+  return (0, import_node_path2.join)(PROMPTS_DIR, `${id}.md`);
 }
 function writePrompt(repoRoot, id, prompt) {
   const rel = promptPath(id);
-  const file = (0, import_node_path.join)(repoRoot, rel);
-  (0, import_node_fs.mkdirSync)((0, import_node_path.dirname)(file), { recursive: true });
-  (0, import_node_fs.writeFileSync)(file, prompt);
+  const file = (0, import_node_path2.join)(repoRoot, rel);
+  (0, import_node_fs2.mkdirSync)((0, import_node_path2.dirname)(file), { recursive: true });
+  (0, import_node_fs2.writeFileSync)(file, prompt);
   return rel;
 }
 function readPrompt(repoRoot, record) {
   const rel = record.opened?.prompt;
   if (rel == null) return null;
   try {
-    return (0, import_node_fs.readFileSync)((0, import_node_path.join)(repoRoot, rel), "utf8");
+    return (0, import_node_fs2.readFileSync)((0, import_node_path2.join)(repoRoot, rel), "utf8");
   } catch {
     return null;
   }
@@ -7591,17 +7751,27 @@ function hostVocabulary(input) {
   lines.push("# Fadeno", "");
   lines.push("Fadeno routes delegated work to models by archetype, gives each dispatched agent its own worktree, and keeps a ledger of every dispatch. You decide what to delegate; Fadeno records it and reminds you to close it.", "");
   lines.push("## Archetypes", "");
-  lines.push("Name an archetype when you spawn a subagent and Fadeno applies the model and effort the dials bind to it. The routing below is live; change it with `fadeno dial <archetype> <model[@effort]>`.", "");
+  lines.push(
+    "Name an archetype when you spawn a subagent and Fadeno applies the model and effort its dial binds to it. Routing is resolved at the spawn and reported by the hook that opens the dispatch; this block deliberately does not list it, because a dial changed after this text was written would make the list a confident wrong answer. Run `fadeno dial` for the current table, `fadeno dial <archetype> <model[@effort]>` to change it.",
+    ""
+  );
   for (const a of input.archetypes) {
-    const route = a.model === "host" ? "this session's own model" : `${a.model}${a.effort ? `@${a.effort}` : ""}`;
-    lines.push(`- **${a.name}** \u2014 ${a.description} _(routes to ${route}; ${a.source})_`);
+    lines.push(`- **${a.name}** \u2014 ${a.description}`);
   }
   lines.push("");
   lines.push("## Spawning", "");
   lines.push("- Spawn through your harness's subagent tool with the archetype as the agent type (`fadeno:worker` on Claude Code; `worker` on Codex). Where no Fadeno hook can observe a spawn, run `fadeno dispatch --archetype <name> --prompt-file <file>` instead; it does the same thing as a process.");
   lines.push("- Write the prompt as the task itself, addressed to the agent that will do it. Fadeno appends the dispatch contract; do not describe Fadeno to the worker.");
   lines.push("- Every dispatch gets a worktree cut from HEAD on a branch named `fadeno/<name>`. If the work needs uncommitted changes, commit them first, or ask for the shared tree by saying so in the spawn (`--shared` on the command lane). Two agents must never share one tree.");
-  lines.push("- To escalate one task to a different model, pass the model explicitly on the spawn. That is an override for one dispatch, not a change to the dial.", "");
+  lines.push(
+    "- **To escalate one task to a different model**, pass the model explicitly on the spawn \u2014 an override for that dispatch, not a change to the dial.",
+    "  - Claude Code: the subagent tool's own `model` field, e.g. agent type `fadeno:scout` with `model: opus`.",
+    "  - Command lane: `fadeno dispatch --archetype scout --model opus@xhigh --prompt-file <file>`.",
+    "  - A model is `<name>[@effort]` using the names `fadeno models` lists. A name the registry does not hold is NOT refused: it is passed verbatim to the unregistered-model harness (the `*` row of `fadeno models` names it), so a typo runs somewhere you did not intend rather than failing loudly.",
+    "  - The override changes the model and nothing else: the worktree is still cut, the contract is still appended, and the ledger records the model you named beside the archetype, so a reader can tell an escalated dispatch from a routed one.",
+    "  - Escalate when a task has already failed on the dialed model, or when what it decides is worth more than the difference in spend. Otherwise name the archetype and let the dial answer.",
+    ""
+  );
   lines.push("## What the worker was promised", "");
   lines.push("It owns the change: it commits on its branch, merges from upstream before finishing, and its final message states what is in the tree and recommends merge or discard. That recommendation is a claim, not a finding: read the diff, run what you can, and reach your own conclusion.", "");
   lines.push("## Closing", "");
@@ -7625,52 +7795,60 @@ function describeUnclosed(record, now) {
   const parent = opened?.parent ? ` (spawned by ${opened.parent.slice(0, 8)})` : "";
   return `- \`${opened?.name ?? record.id}\` ${record.id.slice(0, 8)} \u2014 ${opened?.archetype ?? "?"}${where}, ${state}, ${formatAge(ageMinutes(record, now))} old${parent}`;
 }
+function awaitingDecision(unclosed) {
+  return unclosed.filter((record) => record.stopped != null);
+}
 function nagText(unclosed, limit, now) {
   if (unclosed.length === 0) return "No unclosed dispatches in this repository.";
-  const lines = [`## Unclosed dispatches (${unclosed.length} of ${limit} allowed)`, ""];
-  lines.push("Review each and close it; a stopped dispatch is waiting for you to read its report and decide.");
+  const waiting = awaitingDecision(unclosed);
+  const lines = [
+    `## Unclosed dispatches (${unclosed.length}; ${waiting.length} of ${limit} allowed are waiting on you)`,
+    ""
+  ];
+  lines.push("Review each and close it; a stopped dispatch is waiting for you to read its report and decide. A running one is not counted against the limit \u2014 there is nothing yet to decide.");
   for (const record of unclosed) lines.push(describeUnclosed(record, now));
-  if (unclosed.length >= limit) {
-    lines.push("", `**At the limit.** The next spawn is refused until some of these are closed (\`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed\`).`);
+  if (waiting.length >= limit) {
+    lines.push("", `**At the limit.** The next spawn is refused until some of the STOPPED ones are closed (\`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed\`).`);
   }
   return lines.join("\n");
 }
 function spawnRefusedByLimit(unclosed, limit) {
-  if (unclosed.length < limit) return null;
-  return `Fadeno refuses this spawn: ${unclosed.length} dispatches are unclosed and the limit is ${limit}. Close some first \u2014 ${unclosed.slice(0, 5).map((r) => `\`${r.opened?.name ?? r.id.slice(0, 8)}\``).join(", ")}${unclosed.length > 5 ? ", \u2026" : ""} \u2014 with \`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed\`. Report this refusal to the user instead of routing around it.`;
+  const waiting = awaitingDecision(unclosed);
+  if (waiting.length < limit) return null;
+  return `Fadeno refuses this spawn: ${waiting.length} dispatches have stopped and are waiting for your decision, and the limit is ${limit}. Read their reports and close them \u2014 ${waiting.slice(0, 5).map((r) => `\`${r.opened?.name ?? r.id.slice(0, 8)}\``).join(", ")}${waiting.length > 5 ? ", \u2026" : ""} \u2014 with \`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed\`. Report this refusal to the user instead of routing around it.`;
 }
 
 // src/lib/paths.ts
-var import_node_fs2 = require("node:fs");
-var import_node_path2 = require("node:path");
+var import_node_fs3 = require("node:fs");
+var import_node_path3 = require("node:path");
 var import_node_url = require("node:url");
 var import_meta = {};
-var moduleDir = typeof __dirname === "string" ? __dirname : (0, import_node_path2.dirname)((0, import_node_url.fileURLToPath)(import_meta.url));
+var moduleDir = typeof __dirname === "string" ? __dirname : (0, import_node_path3.dirname)((0, import_node_url.fileURLToPath)(import_meta.url));
 function findUp(name, startDir) {
-  let dir = (0, import_node_path2.resolve)(startDir);
+  let dir = (0, import_node_path3.resolve)(startDir);
   for (; ; ) {
-    const candidate = (0, import_node_path2.join)(dir, name);
-    if ((0, import_node_fs2.existsSync)(candidate)) return candidate;
-    const parent = (0, import_node_path2.dirname)(dir);
+    const candidate = (0, import_node_path3.join)(dir, name);
+    if ((0, import_node_fs3.existsSync)(candidate)) return candidate;
+    const parent = (0, import_node_path3.dirname)(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
 function templatesDir() {
   const candidates = [
-    (0, import_node_path2.resolve)(moduleDir, "templates"),
+    (0, import_node_path3.resolve)(moduleDir, "templates"),
     // bundled binary: <bin>/templates (plugin/bin)
-    (0, import_node_path2.resolve)(moduleDir, "../templates"),
-    (0, import_node_path2.resolve)(moduleDir, "../../templates")
+    (0, import_node_path3.resolve)(moduleDir, "../templates"),
+    (0, import_node_path3.resolve)(moduleDir, "../../templates")
     // dev (src/lib) and built (dist/lib)
   ];
   for (const candidate of candidates) {
-    if ((0, import_node_fs2.existsSync)(candidate)) return candidate;
+    if ((0, import_node_fs3.existsSync)(candidate)) return candidate;
   }
   const pkg = findUp("package.json", moduleDir);
   if (pkg) {
-    const beside = (0, import_node_path2.join)((0, import_node_path2.dirname)(pkg), "templates");
-    if ((0, import_node_fs2.existsSync)(beside)) return beside;
+    const beside = (0, import_node_path3.join)((0, import_node_path3.dirname)(pkg), "templates");
+    if ((0, import_node_fs3.existsSync)(beside)) return beside;
   }
   throw new Error(
     "Could not locate the Fadeno templates directory. Is the package installed correctly?"
@@ -7679,27 +7857,27 @@ function templatesDir() {
 function findRepoRoot(startDir = process.cwd()) {
   const gitPath = findUp(".git", startDir);
   if (gitPath) return mainRepoRoot(gitPath);
-  return (0, import_node_path2.resolve)(startDir);
+  return (0, import_node_path3.resolve)(startDir);
 }
 function mainRepoRoot(gitPath) {
   try {
-    if ((0, import_node_fs2.statSync)(gitPath).isDirectory()) return (0, import_node_path2.dirname)(gitPath);
-    const pointer = (0, import_node_fs2.readFileSync)(gitPath, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
+    if ((0, import_node_fs3.statSync)(gitPath).isDirectory()) return (0, import_node_path3.dirname)(gitPath);
+    const pointer = (0, import_node_fs3.readFileSync)(gitPath, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
     if (pointer) {
-      const gitDir = (0, import_node_path2.resolve)((0, import_node_path2.dirname)(gitPath), pointer);
+      const gitDir = (0, import_node_path3.resolve)((0, import_node_path3.dirname)(gitPath), pointer);
       const common = gitDir.match(/^(.*)[\\/]worktrees[\\/][^\\/]+[\\/]?$/)?.[1];
-      if (common) return (0, import_node_path2.dirname)(common);
+      if (common) return (0, import_node_path3.dirname)(common);
     }
   } catch {
   }
-  return (0, import_node_path2.dirname)(gitPath);
+  return (0, import_node_path3.dirname)(gitPath);
 }
 function packageVersion() {
   if (true) return "0.6.1";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
-    const raw = (0, import_node_fs2.readFileSync)(pkgPath, "utf8");
+    const raw = (0, import_node_fs3.readFileSync)(pkgPath, "utf8");
     const parsed = JSON.parse(raw);
     return parsed.version ?? "0.0.0";
   } catch {
@@ -7714,32 +7892,32 @@ var import_node_fs7 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/lib/config-layers.ts
-var import_node_fs5 = require("node:fs");
-var import_node_path5 = require("node:path");
+var import_node_fs6 = require("node:fs");
+var import_node_path6 = require("node:path");
 var import_yaml2 = __toESM(require_dist(), 1);
 
 // src/lib/executors.ts
 var import_node_crypto2 = require("node:crypto");
-var import_node_fs4 = require("node:fs");
-var import_node_path4 = require("node:path");
+var import_node_fs5 = require("node:fs");
+var import_node_path5 = require("node:path");
 var import_yaml = __toESM(require_dist(), 1);
 
 // src/lib/user-paths.ts
-var import_node_fs3 = require("node:fs");
+var import_node_fs4 = require("node:fs");
 var import_node_os = require("node:os");
-var import_node_path3 = require("node:path");
+var import_node_path4 = require("node:path");
 function userPaths(options = {}) {
   const env = options.env ?? process.env;
   const home = options.home ?? (0, import_node_os.homedir)();
   const os = options.platform ?? (0, import_node_os.platform)();
   const windows = os === "win32";
-  const configHome = env.FADENO_CONFIG_HOME ?? (windows ? env.APPDATA : env.XDG_CONFIG_HOME) ?? (0, import_node_path3.join)(home, windows ? "AppData" : ".config");
-  const stateHome = env.FADENO_STATE_HOME ?? (windows ? env.LOCALAPPDATA : env.XDG_STATE_HOME) ?? (windows ? (0, import_node_path3.join)(home, "AppData", "Local") : (0, import_node_path3.join)(home, ".local", "state"));
-  const dataHome = env.FADENO_DATA_HOME ?? (windows ? env.LOCALAPPDATA : env.XDG_DATA_HOME) ?? (windows ? (0, import_node_path3.join)(home, "AppData", "Local") : (0, import_node_path3.join)(home, ".local", "share"));
-  const configDir = (0, import_node_path3.join)(configHome, "fadeno");
-  const stateDir = (0, import_node_path3.join)(stateHome, "fadeno");
-  const dataDir = (0, import_node_path3.join)(dataHome, "fadeno");
-  const binDir = env.FADENO_BIN_DIR?.trim() || (windows ? (0, import_node_path3.join)(dataDir, "bin") : (0, import_node_path3.join)(home, ".local", "bin"));
+  const configHome = env.FADENO_CONFIG_HOME ?? (windows ? env.APPDATA : env.XDG_CONFIG_HOME) ?? (0, import_node_path4.join)(home, windows ? "AppData" : ".config");
+  const stateHome = env.FADENO_STATE_HOME ?? (windows ? env.LOCALAPPDATA : env.XDG_STATE_HOME) ?? (windows ? (0, import_node_path4.join)(home, "AppData", "Local") : (0, import_node_path4.join)(home, ".local", "state"));
+  const dataHome = env.FADENO_DATA_HOME ?? (windows ? env.LOCALAPPDATA : env.XDG_DATA_HOME) ?? (windows ? (0, import_node_path4.join)(home, "AppData", "Local") : (0, import_node_path4.join)(home, ".local", "share"));
+  const configDir = (0, import_node_path4.join)(configHome, "fadeno");
+  const stateDir = (0, import_node_path4.join)(stateHome, "fadeno");
+  const dataDir = (0, import_node_path4.join)(dataHome, "fadeno");
+  const binDir = env.FADENO_BIN_DIR?.trim() || (windows ? (0, import_node_path4.join)(dataDir, "bin") : (0, import_node_path4.join)(home, ".local", "bin"));
   return {
     configHome,
     stateHome,
@@ -7747,36 +7925,36 @@ function userPaths(options = {}) {
     configDir,
     stateDir,
     dataDir,
-    executorsFile: (0, import_node_path3.join)(configDir, "executors.yaml"),
-    configFile: (0, import_node_path3.join)(configDir, "config.yaml"),
+    executorsFile: (0, import_node_path4.join)(configDir, "executors.yaml"),
+    configFile: (0, import_node_path4.join)(configDir, "config.yaml"),
     binDir,
-    linkPath: (0, import_node_path3.join)(binDir, windows ? "fadeno.cmd" : "fadeno"),
-    dialsFile: (0, import_node_path3.join)(stateDir, "dials.json"),
-    modelVerificationsFile: (0, import_node_path3.join)(stateDir, "model-verifications.json")
+    linkPath: (0, import_node_path4.join)(binDir, windows ? "fadeno.cmd" : "fadeno"),
+    dialsFile: (0, import_node_path4.join)(stateDir, "dials.json"),
+    modelVerificationsFile: (0, import_node_path4.join)(stateDir, "model-verifications.json")
   };
 }
 function retiredStateFiles(paths) {
   return [
-    (0, import_node_path3.join)(paths.stateDir, "harness"),
-    (0, import_node_path3.join)(paths.stateDir, "loadout"),
+    (0, import_node_path4.join)(paths.stateDir, "harness"),
+    (0, import_node_path4.join)(paths.stateDir, "loadout"),
     // The installation manifest: it recorded which files a managed-runtime
     // COPY had installed and at what version. `setup` links now, so there is
     // no copy to reconcile and nothing left to record.
-    (0, import_node_path3.join)(paths.stateDir, "installations.json")
+    (0, import_node_path4.join)(paths.stateDir, "installations.json")
   ];
 }
 function retiredStateDirs(paths) {
-  return [(0, import_node_path3.join)(paths.dataDir, "runtime")];
+  return [(0, import_node_path4.join)(paths.dataDir, "runtime")];
 }
 function writeUserFileAtomic(path, text) {
-  (0, import_node_fs3.mkdirSync)((0, import_node_path3.join)(path, ".."), { recursive: true });
+  (0, import_node_fs4.mkdirSync)((0, import_node_path4.join)(path, ".."), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  (0, import_node_fs3.writeFileSync)(tmp, text, "utf8");
+  (0, import_node_fs4.writeFileSync)(tmp, text, "utf8");
   try {
-    (0, import_node_fs3.renameSync)(tmp, path);
+    (0, import_node_fs4.renameSync)(tmp, path);
   } catch (err) {
     try {
-      (0, import_node_fs3.rmSync)(tmp, { force: true });
+      (0, import_node_fs4.rmSync)(tmp, { force: true });
     } catch {
     }
     throw err;
@@ -7848,8 +8026,8 @@ function interpretUserDials(doc, path) {
 }
 function readUserDials(options = {}) {
   const path = userPaths(options).dialsFile;
-  if (!(0, import_node_fs3.existsSync)(path)) return {};
-  const text = (0, import_node_fs3.readFileSync)(path, "utf8").trim();
+  if (!(0, import_node_fs4.existsSync)(path)) return {};
+  const text = (0, import_node_fs4.readFileSync)(path, "utf8").trim();
   if (text.length === 0) return {};
   let doc;
   try {
@@ -7866,7 +8044,7 @@ function writeUserDials(options, dials) {
   const path = userPaths(options).dialsFile;
   const keys = Object.keys(dials).sort();
   if (keys.length === 0) {
-    if ((0, import_node_fs3.existsSync)(path)) (0, import_node_fs3.unlinkSync)(path);
+    if ((0, import_node_fs4.existsSync)(path)) (0, import_node_fs4.unlinkSync)(path);
     return path;
   }
   const sorted = {};
@@ -7907,8 +8085,8 @@ function verificationRow(entry) {
   return { harness, model: map.model, verified_at: map.verified_at };
 }
 function readVerificationDocument(path) {
-  if (!(0, import_node_fs3.existsSync)(path)) return { rows: [], understood: true };
-  const text = (0, import_node_fs3.readFileSync)(path, "utf8").trim();
+  if (!(0, import_node_fs4.existsSync)(path)) return { rows: [], understood: true };
+  const text = (0, import_node_fs4.readFileSync)(path, "utf8").trim();
   if (text.length === 0) return { rows: [], understood: true };
   let parsed;
   try {
@@ -7969,7 +8147,7 @@ function removeVerifiedModels(options, predicate) {
 function codexUserAgentDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.home ?? (0, import_node_os.homedir)();
-  return (0, import_node_path3.join)(env.CODEX_HOME?.trim() || (0, import_node_path3.join)(home, ".codex"), "agents");
+  return (0, import_node_path4.join)(env.CODEX_HOME?.trim() || (0, import_node_path4.join)(home, ".codex"), "agents");
 }
 
 // src/lib/executors.ts
@@ -8182,7 +8360,7 @@ function withoutHarnessIdentity(env) {
   }
   return next;
 }
-var EXECUTORS_FILE = (0, import_node_path4.join)(".fadeno", "executors.yaml");
+var EXECUTORS_FILE = (0, import_node_path5.join)(".fadeno", "executors.yaml");
 var CATALOG_TOP_LEVEL_KEYS = [
   "schema_version",
   "models",
@@ -8625,7 +8803,7 @@ function loadExecutorProfile(repoRoot, options = {}, harness) {
     throw new ExecutorProfileError(err.message);
   }
 }
-var DIALS_LOCAL_FILE = (0, import_node_path4.join)(".fadeno", "local", "dials");
+var DIALS_LOCAL_FILE = (0, import_node_path5.join)(".fadeno", "local", "dials");
 var LOCAL_DIALS_SCHEMA_VERSION = 1;
 function localDialPinError(detail) {
   return new ExecutorProfileError(
@@ -8633,9 +8811,9 @@ function localDialPinError(detail) {
   );
 }
 function readLocalDialState(repoRoot) {
-  const path = (0, import_node_path4.join)(repoRoot, DIALS_LOCAL_FILE);
-  if (!(0, import_node_fs4.existsSync)(path)) return { dials: {} };
-  const text = (0, import_node_fs4.readFileSync)(path, "utf8");
+  const path = (0, import_node_path5.join)(repoRoot, DIALS_LOCAL_FILE);
+  if (!(0, import_node_fs5.existsSync)(path)) return { dials: {} };
+  const text = (0, import_node_fs5.readFileSync)(path, "utf8");
   if (text.trim().length === 0) return { dials: {} };
   let doc;
   try {
@@ -8673,26 +8851,26 @@ function readLocalDialState(repoRoot) {
   return { dials };
 }
 function writeLocalDialState(repoRoot, state) {
-  const path = (0, import_node_path4.join)(repoRoot, DIALS_LOCAL_FILE);
+  const path = (0, import_node_path5.join)(repoRoot, DIALS_LOCAL_FILE);
   const keys = Object.keys(state.dials).sort();
   if (keys.length === 0) {
-    if ((0, import_node_fs4.existsSync)(path)) (0, import_node_fs4.unlinkSync)(path);
+    if ((0, import_node_fs5.existsSync)(path)) (0, import_node_fs5.unlinkSync)(path);
     return path;
   }
-  (0, import_node_fs4.mkdirSync)((0, import_node_path4.dirname)(path), { recursive: true });
+  (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(path), { recursive: true });
   const dials = {};
   for (const key of keys) {
     if (!BARE_IDENTIFIER_RE.test(key)) throw new ExecutorProfileError(`dial key "${key}" is not a bare identifier.`);
     dials[key] = serializeDialRef(state.dials[key]);
   }
   const tmp = `${path}.tmp-${process.pid}-${(0, import_node_crypto2.randomUUID)()}`;
-  (0, import_node_fs4.writeFileSync)(tmp, `${JSON.stringify({ schema_version: LOCAL_DIALS_SCHEMA_VERSION, dials })}
+  (0, import_node_fs5.writeFileSync)(tmp, `${JSON.stringify({ schema_version: LOCAL_DIALS_SCHEMA_VERSION, dials })}
 `, "utf8");
   try {
-    (0, import_node_fs4.renameSync)(tmp, path);
+    (0, import_node_fs5.renameSync)(tmp, path);
   } catch (err) {
     try {
-      (0, import_node_fs4.rmSync)(tmp, { force: true });
+      (0, import_node_fs5.rmSync)(tmp, { force: true });
     } catch {
     }
     throw err;
@@ -8855,7 +9033,7 @@ function mapping(value) {
 function parseLayer(path) {
   let parsed;
   try {
-    parsed = (0, import_yaml2.parse)((0, import_node_fs5.readFileSync)(path, "utf8"));
+    parsed = (0, import_yaml2.parse)((0, import_node_fs6.readFileSync)(path, "utf8"));
   } catch (err) {
     throw new ExecutorProfileError(`${path} did not parse: ${err.message}`);
   }
@@ -9157,9 +9335,9 @@ function loadLayeredProfile(repoRoot, options = {}, host) {
   const layers = [
     { layer: "builtin", path: `${templatesDir()}/common/fadeno/executors.yaml` },
     { layer: "user", path: paths.executorsFile },
-    { layer: "project", path: (0, import_node_path5.join)(repoRoot, ".fadeno", "executors.yaml") }
+    { layer: "project", path: (0, import_node_path6.join)(repoRoot, ".fadeno", "executors.yaml") }
   ];
-  const present = layers.filter((entry) => (0, import_node_fs5.existsSync)(entry.path));
+  const present = layers.filter((entry) => (0, import_node_fs6.existsSync)(entry.path));
   if (present.length === 0) throw new ExecutorProfileError("No executor catalog is available.");
   const repairs = [];
   const parsedLayers = new Map(present.map((entry) => {
@@ -9194,7 +9372,7 @@ function loadGlobalProfile(options = {}, host) {
     { layer: "builtin", path: `${templatesDir()}/common/fadeno/executors.yaml` },
     { layer: "user", path: paths.executorsFile }
   ];
-  const present = layers.filter((entry) => (0, import_node_fs5.existsSync)(entry.path));
+  const present = layers.filter((entry) => (0, import_node_fs6.existsSync)(entry.path));
   if (present.length === 0) throw new ExecutorProfileError("No executor catalog is available.");
   const document = {};
   const provenance = { bindings: {} };
@@ -9226,163 +9404,6 @@ function stringifyObject(value) {
 }
 function normalizeSchemaVersion(document) {
   document.schema_version = 4;
-}
-
-// src/lib/worktree.ts
-var import_node_fs6 = require("node:fs");
-var import_node_child_process = require("node:child_process");
-var import_node_path6 = require("node:path");
-var WORKTREES_DIR = (0, import_node_path6.join)(".fadeno", "local", "worktrees");
-var BRANCH_PREFIX = "fadeno/";
-var BRANCH_NAME_MAX = 60;
-var GIT_TIMEOUT_MS = 2e4;
-var DIRTY_PATH_LIMIT = 200;
-function canonical(path) {
-  try {
-    return (0, import_node_fs6.realpathSync)(path);
-  } catch {
-    return (0, import_node_path6.resolve)(path);
-  }
-}
-function git(cwd, args, timeoutMs = GIT_TIMEOUT_MS) {
-  const result = (0, import_node_child_process.spawnSync)("git", args, { cwd, encoding: "utf8", timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 });
-  if (result.error != null) {
-    const code = result.error.code;
-    return {
-      ok: false,
-      error: code === "ETIMEDOUT" ? `git ${args[0]} did not answer within ${timeoutMs}ms` : `git could not be run: ${result.error.message}`
-    };
-  }
-  if (result.status !== 0) {
-    const stderr = (result.stderr ?? "").trim();
-    return { ok: false, error: stderr.length > 0 ? stderr : `git ${args[0]} exited ${result.status}` };
-  }
-  return { ok: true, stdout: result.stdout ?? "" };
-}
-function sanitizeName(raw) {
-  const cleaned = raw.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, BRANCH_NAME_MAX).replace(/[-.]+$/g, "");
-  return cleaned.length > 0 ? cleaned : "dispatch";
-}
-function uniqueName(base, taken) {
-  if (!taken.has(base)) return base;
-  for (let n = 2; ; n += 1) {
-    const candidate = `${base}-${n}`;
-    if (!taken.has(candidate)) return candidate;
-  }
-}
-function existingFadenoBranches(repoRoot) {
-  const listed = git(repoRoot, ["for-each-ref", "--format=%(refname:short)", `refs/heads/${BRANCH_PREFIX}`]);
-  const names = /* @__PURE__ */ new Set();
-  if (!listed.ok) return names;
-  for (const line of listed.stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith(BRANCH_PREFIX)) names.add(trimmed.slice(BRANCH_PREFIX.length));
-  }
-  return names;
-}
-function dirtyPaths(dir) {
-  const status = git(dir, ["status", "--porcelain", "--untracked-files=all"]);
-  if (!status.ok) return "unavailable";
-  const lines = status.stdout.split("\n").filter((line) => line.trim() !== "");
-  return { paths: lines.slice(0, DIRTY_PATH_LIMIT).map((line) => line.slice(3)), truncated: lines.length > DIRTY_PATH_LIMIT };
-}
-function currentBranch(dir) {
-  const head = git(dir, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  return head.ok ? head.stdout.trim() || null : null;
-}
-function cutWorktree(opts) {
-  const { repoRoot, name } = opts;
-  const ref = opts.from?.trim() || "HEAD";
-  const base = git(repoRoot, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
-  if (!base.ok) return { ok: false, reason: `"${ref}" is not a commit in this repository: ${base.error}` };
-  const baseSha = base.stdout.trim();
-  const upstream = ref === "HEAD" ? currentBranch(repoRoot) ?? baseSha : ref;
-  const branch = `${BRANCH_PREFIX}${name}`;
-  const absolute = (0, import_node_path6.resolve)(repoRoot, WORKTREES_DIR, name);
-  if ((0, import_node_fs6.existsSync)(absolute)) return { ok: false, reason: `${(0, import_node_path6.relative)(repoRoot, absolute)} already exists.` };
-  try {
-    (0, import_node_fs6.mkdirSync)((0, import_node_path6.resolve)(repoRoot, WORKTREES_DIR), { recursive: true });
-  } catch (err) {
-    return { ok: false, reason: `could not create ${WORKTREES_DIR}: ${err.message}` };
-  }
-  git(repoRoot, ["worktree", "prune"]);
-  const added = git(repoRoot, ["worktree", "add", "-b", branch, absolute, baseSha]);
-  if (!added.ok) return { ok: false, reason: added.error };
-  return {
-    ok: true,
-    worktree: { absolute, path: (0, import_node_path6.relative)(repoRoot, absolute), branch, base: baseSha, upstream }
-  };
-}
-function listRegisteredWorktrees(repoRoot) {
-  const listed = git(repoRoot, ["worktree", "list", "--porcelain"]);
-  if (!listed.ok) return [];
-  const root = canonical(repoRoot);
-  const out = [];
-  let current = {};
-  const flush = () => {
-    if (current.absolute == null) return;
-    const absolute = canonical(current.absolute);
-    const branch = current.branch ?? null;
-    const insideDir = absolute.startsWith((0, import_node_path6.join)(root, WORKTREES_DIR));
-    if (absolute !== root && (insideDir || branch != null && branch.startsWith(BRANCH_PREFIX))) {
-      out.push({
-        absolute,
-        path: (0, import_node_path6.relative)(root, absolute),
-        branch,
-        head: current.head ?? null,
-        exists: (0, import_node_fs6.existsSync)(absolute)
-      });
-    }
-    current = {};
-  };
-  for (const line of listed.stdout.split("\n")) {
-    if (line.startsWith("worktree ")) {
-      flush();
-      current.absolute = line.slice("worktree ".length);
-    } else if (line.startsWith("HEAD ")) current.head = line.slice(5).trim();
-    else if (line.startsWith("branch ")) current.branch = line.slice(7).trim().replace(/^refs\/heads\//, "");
-    else if (line.trim() === "") flush();
-  }
-  flush();
-  return out;
-}
-function isRegisteredWorktree(repoRoot, absolute) {
-  const target = canonical(absolute);
-  return listRegisteredWorktrees(repoRoot).some((entry) => entry.absolute === target);
-}
-function reportWorktrees(repoRoot) {
-  return listRegisteredWorktrees(repoRoot).map((entry) => {
-    const dirty = entry.exists ? dirtyPaths(entry.absolute) : "unavailable";
-    let unmerged = "unavailable";
-    if (entry.branch != null) {
-      const count = git(repoRoot, ["rev-list", "--count", `HEAD..${entry.branch}`]);
-      if (count.ok) unmerged = Number.parseInt(count.stdout.trim(), 10) || 0;
-    }
-    return { ...entry, dirty, unmerged };
-  });
-}
-function removeWorktree(opts) {
-  const absolute = canonical(opts.absolute);
-  if (absolute === canonical(opts.repoRoot)) return { ok: false, reason: "refusing to remove the repository root." };
-  if (!isRegisteredWorktree(opts.repoRoot, absolute)) {
-    if ((0, import_node_fs6.existsSync)(absolute) && (0, import_node_fs6.statSync)(absolute).isDirectory()) {
-      return { ok: false, reason: `${absolute} is not a registered worktree; not deleting a plain directory.` };
-    }
-    git(opts.repoRoot, ["worktree", "prune"]);
-    return { ok: true };
-  }
-  if ((0, import_node_fs6.existsSync)(absolute) && !opts.force) {
-    const dirty = dirtyPaths(absolute);
-    if (dirty === "unavailable") return { ok: false, reason: `${absolute}: could not read its status; not removing a tree that may hold work.` };
-    if (dirty.paths.length > 0) {
-      const sample = dirty.paths.slice(0, 5).join(", ");
-      return { ok: false, reason: `${absolute} holds ${dirty.paths.length} uncommitted path(s) (${sample}); commit or discard them first, or pass --force.` };
-    }
-  }
-  const removed = git(opts.repoRoot, ["worktree", "remove", ...opts.force ? ["--force"] : [], absolute]);
-  if (!removed.ok) return { ok: false, reason: removed.error };
-  git(opts.repoRoot, ["worktree", "prune"]);
-  return { ok: true };
 }
 
 // src/lib/spawn.ts
@@ -13307,9 +13328,15 @@ async function main(argv) {
           console.error(`${name}: no report recorded${out.record.state === "open" ? " \u2014 it is still open" : ""}.`);
           return 1;
         }
+        if (out.record.stopped == null) {
+          const name = out.record.opened?.name ?? out.record.id.slice(0, 8);
+          console.error(
+            `${name} has not stopped: what follows is its output so far, not a report. Run this again when it stops (\`fadeno dispatches\` shows the state).`
+          );
+        }
         process.stdout.write(out.text.endsWith("\n") ? out.text : `${out.text}
 `);
-        return 0;
+        return out.record.stopped == null ? 2 : 0;
       }
       if (ref != null) {
         const detail = runDispatchShow({ ref });

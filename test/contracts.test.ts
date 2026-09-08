@@ -4,6 +4,7 @@ import {
   BUILTIN_ARCHETYPE_DESCRIPTIONS,
   CONTRACT_FOOTER,
   CONTRACT_HEADER,
+  awaitingDecision,
   composeWorkerPrompt,
   describeArchetype,
   formatAge,
@@ -65,7 +66,7 @@ test('describeArchetype prefers the catalog, falls back to the builtin five, and
   assert.deepEqual(Object.keys(BUILTIN_ARCHETYPE_DESCRIPTIONS), ['director', 'worker', 'reviewer', 'judge', 'scout']);
 });
 
-test('the host vocabulary carries the archetype list with live routing, the spawn rules, the close obligation, and the nag', () => {
+test('the host vocabulary carries the archetype list, the spawn rules, the close obligation, and the nag — and NOT routing', () => {
   const unclosed = correlate([opened('a', { name: 'fix-login' })]);
   const text = hostVocabulary({
     archetypes: [
@@ -76,8 +77,17 @@ test('the host vocabulary carries the archetype list with live routing, the spaw
     unclosedLimit: 5,
     now: new Date('2026-09-07T10:30:00Z'),
   });
-  assert.match(text, /\*\*worker\*\* — Implements\. _\(routes to luna@xhigh; repo\)_/);
-  assert.match(text, /\*\*reviewer\*\* — Reviews\. _\(routes to this session's own model; base\)_/);
+  assert.match(text, /- \*\*worker\*\* — Implements\.$/m);
+  assert.match(text, /- \*\*reviewer\*\* — Reviews\.$/m);
+  // This text is injected once and outlives every dial change after it. A
+  // routing list here was read as current three dials later — see the comment
+  // on hostVocabulary. It says where routing IS answered instead.
+  // The models the CALLER passed must not appear anywhere: that is the
+  // snapshot. (`opus@xhigh` does appear — it is the escalation example, a
+  // fixed illustration rather than a reading of the dials.)
+  assert.doesNotMatch(text, /routes to|luna/);
+  assert.match(text, /Routing is resolved at the spawn and reported by the hook that opens the dispatch/);
+  assert.match(text, /Run `fadeno dial` for the current table/);
   assert.match(text, /`fadeno:worker` on Claude Code; `worker` on Codex/);
   assert.match(text, /fadeno dispatch --archetype <name> --prompt-file <file>/, 'a director with no hook still knows the command lane');
   assert.match(text, /Two agents must never share one tree/);
@@ -86,7 +96,7 @@ test('the host vocabulary carries the archetype list with live routing, the spaw
   assert.match(text, /Fadeno performs no merge; you do/);
   assert.match(text, /refuses a new one at 5 unclosed/);
   assert.match(text, /Report it with the dispatch id and the error text, and do not substitute/);
-  assert.match(text, /## Unclosed dispatches \(1 of 5 allowed\)/);
+  assert.match(text, /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)/);
   assert.match(text, /- `fix-login` a — worker on `fadeno\/worker-a`, open, 30m old/);
 });
 
@@ -99,21 +109,39 @@ test('the nag names every unclosed dispatch, says which are stopped and awaiting
   ];
   const unclosed = correlate(rows);
   const text = nagText(unclosed, 5, now);
-  assert.match(text, /## Unclosed dispatches \(2 of 5 allowed\)/);
+  // Two unclosed; ONE of them has stopped, and only that one is waiting on a
+  // person. The count the limit uses says so rather than making the reader
+  // work it out from the rows.
+  assert.match(text, /## Unclosed dispatches \(2; 1 of 5 allowed are waiting on you\)/);
   assert.match(text, /- `one` 1 — worker on `fadeno\/worker-1`, open, 10m old/);
   assert.match(text, /- `two` 2 — scout, stopped, awaiting your decision, 3h old \(spawned by 11111111\)/);
   assert.doesNotMatch(text, /At the limit/);
-  assert.match(nagText(unclosed, 2, now), /\*\*At the limit\.\*\* The next spawn is refused/);
+  assert.match(nagText(unclosed, 1, now), /\*\*At the limit\.\*\* The next spawn is refused until some of the STOPPED ones are closed/);
   assert.equal(nagText([], 5, now), 'No unclosed dispatches in this repository.');
 });
 
-test('the limit refuses at the threshold, names the oldest, and asks for the refusal to be reported', () => {
-  const unclosed = correlate(['1', '2', '3', '4', '5', '6'].map((id) => opened(id, { name: `job-${id}` })));
-  assert.equal(spawnRefusedByLimit(unclosed.slice(0, 4), 5), null);
-  const refused = spawnRefusedByLimit(unclosed, 5);
-  assert.match(refused ?? '', /6 dispatches are unclosed and the limit is 5/);
+test('the limit counts work awaiting a decision, not work in flight', () => {
+  const running = correlate(['1', '2', '3', '4', '5', '6'].map((id) => opened(id, { name: `job-${id}` })));
+  // Six dispatches, all still executing. The old rule refused here and told
+  // the caller to close them, which is not something you can do to work that
+  // has not finished — in Basanos it stopped a reviewer from fanning out
+  // while the host's five were running.
+  assert.equal(spawnRefusedByLimit(running, 5), null);
+
+  const stopped = correlate(['1', '2', '3', '4', '5', '6'].flatMap((id) => [
+    opened(id, { name: `job-${id}` }),
+    { row: 'stopped' as const, id, at: '2026-09-08T10:00:00Z', final_message: 'done', dirty: { paths: [], truncated: false } },
+  ]));
+  assert.equal(spawnRefusedByLimit(stopped.slice(0, 4), 5), null);
+  const refused = spawnRefusedByLimit(stopped, 5);
+  assert.match(refused ?? '', /6 dispatches have stopped and are waiting for your decision, and the limit is 5/);
   assert.match(refused ?? '', /`job-1`, `job-2`, `job-3`, `job-4`, `job-5`, …/);
   assert.match(refused ?? '', /Report this refusal to the user instead of routing around it\./);
+
+  // And a report that has been read still counts until it is CLOSED: the
+  // hygiene the limit exists for is untouched.
+  assert.equal(awaitingDecision(stopped).length, 6);
+  assert.equal(awaitingDecision(running).length, 0);
 });
 
 test('formatAge reads like a clock at every magnitude', () => {

@@ -131,7 +131,7 @@ if (answer.opened === true) {
       hookEventName: 'PreToolUse',
       updatedInput,
       additionalContext:
-        `Fadeno opened dispatch \`${o.name}\` (${o.id}) for this ${archetype} spawn on the host lane: ${identity}, working in ${o.cwd} on ${where}. ` +
+        `Per the ${archetype} dial, Fadeno opened dispatch \`${o.name}\` (${o.id}) for this spawn on the host lane: ${identity}, working in ${o.cwd} on ${where}. ` +
         `${closeLine(o.name)}\n\n${o.nag}`,
     },
   });
@@ -150,7 +150,7 @@ finish({
     hookEventName: 'PreToolUse',
     updatedInput,
     additionalContext:
-      `Fadeno routed this ${archetype} spawn to the command lane (${identity}): the dispatch proxy runs \`${r.relay.command}\`, and the dispatch is recorded as \`${label}\` when it starts. ` +
+      `Per the ${archetype} dial, this spawn takes the command lane (${identity}): the dispatch proxy runs \`${r.relay.command}\`, and the dispatch is recorded as \`${label}\` when it starts. ` +
       `${closeLine(label)}\n\n${r.nag}`,
   },
 });

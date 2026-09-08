@@ -124,26 +124,52 @@ export interface HostVocabularyInput {
 }
 
 /**
- * What the host is told (spec §05/§06): the archetype vocabulary with its
- * current routing, how spawning works, what the worker was promised, what
- * closing requires, and every unclosed dispatch in the repository.
+ * What the host is told (spec §05/§06): the archetype vocabulary, how spawning
+ * works, what the worker was promised, what closing requires, and every
+ * unclosed dispatch in the repository.
+ *
+ * It does NOT carry routing. This text is injected once, at activation, and
+ * then outlives every dial change made after it — a Fable host in Basanos read
+ * `scout → luna@xhigh` from a block written before the dials moved to gemini,
+ * saw its spawns land on gemini, and reported a possible substitution. The
+ * routing was correct and the snapshot was stale, which is the worst shape a
+ * wrong answer can take: confident, specific, and a plausible symptom of a bug
+ * elsewhere. Routing belongs to the moment of the spawn, where the hook
+ * reports it, and to `fadeno dial`, which reads it fresh.
  */
 export function hostVocabulary(input: HostVocabularyInput): string {
   const lines: string[] = [];
   lines.push('# Fadeno', '');
   lines.push('Fadeno routes delegated work to models by archetype, gives each dispatched agent its own worktree, and keeps a ledger of every dispatch. You decide what to delegate; Fadeno records it and reminds you to close it.', '');
   lines.push('## Archetypes', '');
-  lines.push('Name an archetype when you spawn a subagent and Fadeno applies the model and effort the dials bind to it. The routing below is live; change it with `fadeno dial <archetype> <model[@effort]>`.', '');
+  lines.push(
+    'Name an archetype when you spawn a subagent and Fadeno applies the model and effort its dial binds to it. ' +
+      'Routing is resolved at the spawn and reported by the hook that opens the dispatch; this block deliberately does not list it, ' +
+      'because a dial changed after this text was written would make the list a confident wrong answer. ' +
+      'Run `fadeno dial` for the current table, `fadeno dial <archetype> <model[@effort]>` to change it.',
+    '',
+  );
   for (const a of input.archetypes) {
-    const route = a.model === 'host' ? 'this session\'s own model' : `${a.model}${a.effort ? `@${a.effort}` : ''}`;
-    lines.push(`- **${a.name}** — ${a.description} _(routes to ${route}; ${a.source})_`);
+    lines.push(`- **${a.name}** — ${a.description}`);
   }
   lines.push('');
   lines.push('## Spawning', '');
   lines.push('- Spawn through your harness\'s subagent tool with the archetype as the agent type (`fadeno:worker` on Claude Code; `worker` on Codex). Where no Fadeno hook can observe a spawn, run `fadeno dispatch --archetype <name> --prompt-file <file>` instead; it does the same thing as a process.');
   lines.push('- Write the prompt as the task itself, addressed to the agent that will do it. Fadeno appends the dispatch contract; do not describe Fadeno to the worker.');
   lines.push('- Every dispatch gets a worktree cut from HEAD on a branch named `fadeno/<name>`. If the work needs uncommitted changes, commit them first, or ask for the shared tree by saying so in the spawn (`--shared` on the command lane). Two agents must never share one tree.');
-  lines.push('- To escalate one task to a different model, pass the model explicitly on the spawn. That is an override for one dispatch, not a change to the dial.', '');
+  // Escalation had one sentence of policy and no mechanics, and a host that
+  // wanted to use it had to guess three things: where the model goes, what a
+  // model is called, and what happens when the name is wrong. The mechanics
+  // differ by lane, so both are written out.
+  lines.push(
+    '- **To escalate one task to a different model**, pass the model explicitly on the spawn — an override for that dispatch, not a change to the dial.',
+    '  - Claude Code: the subagent tool\'s own `model` field, e.g. agent type `fadeno:scout` with `model: opus`.',
+    '  - Command lane: `fadeno dispatch --archetype scout --model opus@xhigh --prompt-file <file>`.',
+    '  - A model is `<name>[@effort]` using the names `fadeno models` lists. A name the registry does not hold is NOT refused: it is passed verbatim to the unregistered-model harness (the `*` row of `fadeno models` names it), so a typo runs somewhere you did not intend rather than failing loudly.',
+    '  - The override changes the model and nothing else: the worktree is still cut, the contract is still appended, and the ledger records the model you named beside the archetype, so a reader can tell an escalated dispatch from a routed one.',
+    '  - Escalate when a task has already failed on the dialed model, or when what it decides is worth more than the difference in spend. Otherwise name the archetype and let the dial answer.',
+    '',
+  );
   lines.push('## What the worker was promised', '');
   lines.push('It owns the change: it commits on its branch, merges from upstream before finishing, and its final message states what is in the tree and recommends merge or discard. That recommendation is a claim, not a finding: read the diff, run what you can, and reach your own conclusion.', '');
   lines.push('## Closing', '');
@@ -174,23 +200,47 @@ export function describeUnclosed(record: DispatchRecord, now?: Date): string {
   return `- \`${opened?.name ?? record.id}\` ${record.id.slice(0, 8)} — ${opened?.archetype ?? '?'}${where}, ${state}, ${formatAge(ageMinutes(record, now))} old${parent}`;
 }
 
+/**
+ * What the limit counts: dispatches whose agent has STOPPED and whose
+ * decision has not been made.
+ *
+ * Not everything unclosed. A running dispatch has no report to read and
+ * nothing to decide, so counting it produced a refusal whose only instruction
+ * — close some — the recipient could not carry out. In Basanos a reviewer was
+ * refused because the host's five dispatches were all still executing, and it
+ * narrowed its own audit instead. A refusal must name an action its recipient
+ * can take; this one named waiting.
+ *
+ * The hygiene the limit exists for is unaffected: unread reports still pile up
+ * and still refuse the next spawn. Fan-out is a judgement, and Fadeno does not
+ * cap judgement.
+ */
+export function awaitingDecision(unclosed: readonly DispatchRecord[]): DispatchRecord[] {
+  return unclosed.filter((record) => record.stopped != null);
+}
+
 /** The reminder that keeps the ledger honest: nothing is forgotten silently. */
 export function nagText(unclosed: readonly DispatchRecord[], limit: number, now?: Date): string {
   if (unclosed.length === 0) return 'No unclosed dispatches in this repository.';
-  const lines = [`## Unclosed dispatches (${unclosed.length} of ${limit} allowed)`, ''];
-  lines.push('Review each and close it; a stopped dispatch is waiting for you to read its report and decide.');
+  const waiting = awaitingDecision(unclosed);
+  const lines = [
+    `## Unclosed dispatches (${unclosed.length}; ${waiting.length} of ${limit} allowed are waiting on you)`,
+    '',
+  ];
+  lines.push('Review each and close it; a stopped dispatch is waiting for you to read its report and decide. A running one is not counted against the limit — there is nothing yet to decide.');
   for (const record of unclosed) lines.push(describeUnclosed(record, now));
-  if (unclosed.length >= limit) {
-    lines.push('', `**At the limit.** The next spawn is refused until some of these are closed (\`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed\`).`);
+  if (waiting.length >= limit) {
+    lines.push('', `**At the limit.** The next spawn is refused until some of the STOPPED ones are closed (\`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed\`).`);
   }
   return lines.join('\n');
 }
 
 export function spawnRefusedByLimit(unclosed: readonly DispatchRecord[], limit: number): string | null {
-  if (unclosed.length < limit) return null;
+  const waiting = awaitingDecision(unclosed);
+  if (waiting.length < limit) return null;
   return (
-    `Fadeno refuses this spawn: ${unclosed.length} dispatches are unclosed and the limit is ${limit}. ` +
-    `Close some first — ${unclosed.slice(0, 5).map((r) => `\`${r.opened?.name ?? r.id.slice(0, 8)}\``).join(', ')}${unclosed.length > 5 ? ', …' : ''} — ` +
+    `Fadeno refuses this spawn: ${waiting.length} dispatches have stopped and are waiting for your decision, and the limit is ${limit}. ` +
+    `Read their reports and close them — ${waiting.slice(0, 5).map((r) => `\`${r.opened?.name ?? r.id.slice(0, 8)}\``).join(', ')}${waiting.length > 5 ? ', …' : ''} — ` +
     'with `fadeno dispatch-close <name> --merged|--kept|--discarded|--failed`. Report this refusal to the user instead of routing around it.'
   );
 }

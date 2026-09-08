@@ -33,8 +33,9 @@ test('Claude: the host command enables the session, injects the vocabulary, remi
   assert.ok(!existsSync(join(root, 'CLAUDE.md')) && !existsSync(join(root, 'AGENTS.md')));
   // The skill carries the policy on the activating turn; the hook adds only what the skill cannot: the live vocabulary.
   assert.match(activation ?? '', /^# Fadeno\n/);
-  assert.match(activation ?? '', /- \*\*reviewer\*\* — .* _\(routes to opus@xhigh; repo\)_/);
-  assert.match(activation ?? '', /## Unclosed dispatches \(1 of 5 allowed\)[\s\S]*`pending`/);
+  assert.match(activation ?? '', /- \*\*reviewer\*\* — Reviews /);
+  assert.doesNotMatch(activation ?? '', /routes to/, 'no routing snapshot to go stale in a long session');
+  assert.match(activation ?? '', /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)[\s\S]*`pending`/);
   assert.doesNotMatch(activation ?? '', /Fadeno host mode \(session-scoped\)/);
 
   const later = context(plugin, { hook_event_name: 'UserPromptSubmit', session_id: 'claude-session', prompt: 'Continue' }, root);

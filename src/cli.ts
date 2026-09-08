@@ -798,8 +798,20 @@ async function main(argv: string[]): Promise<number> {
           console.error(`${name}: no report recorded${out.record.state === 'open' ? ' — it is still open' : ''}.`);
           return 1;
         }
+        // A running dispatch has output but no REPORT. Handing back the
+        // stream so far with nothing said is the worst answer this command
+        // can give: a proxy whose Bash call was killed recovered exactly this
+        // and had to work out for itself that it held an interim log. Say it,
+        // on stderr so the relayed stdout stays verbatim.
+        if (out.record.stopped == null) {
+          const name = out.record.opened?.name ?? out.record.id.slice(0, 8);
+          console.error(
+            `${name} has not stopped: what follows is its output so far, not a report. ` +
+              'Run this again when it stops (`fadeno dispatches` shows the state).',
+          );
+        }
         process.stdout.write(out.text.endsWith('\n') ? out.text : `${out.text}\n`);
-        return 0;
+        return out.record.stopped == null ? 2 : 0;
       }
       if (ref != null) {
         const detail = runDispatchShow({ ref });

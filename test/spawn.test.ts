@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
@@ -123,7 +123,7 @@ test('a nested spawn inherits its parent from the environment, and a second prep
   assert.ok(second.ok);
   const p = second.ok ? second.prepared : null!;
   assert.equal(p.parent, first.ok ? first.prepared.id : null);
-  assert.match(p.nag, /## Unclosed dispatches \(1 of 5 allowed\)/);
+  assert.match(p.nag, /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)/);
   assert.match(p.nag, new RegExp(`\`${first.ok ? first.prepared.name : ''}\``));
   assert.notEqual(p.name, first.ok ? first.prepared.name : '', 'names are unique per repo');
 });
@@ -146,10 +146,20 @@ test('the limit refuses the sixth spawn, and the catalog can raise it', (t) => {
     };
     appendRow(root, row);
   }
-  const refused = prepareDispatch({ repoRoot: root, archetype: 'worker', prompt: 'six', lane: 'host', userPathOptions: ISOLATED, env: {} });
+  // Five OPEN dispatches are not five decisions owed: they refuse nothing.
+  const whileRunning = prepareDispatch({ repoRoot: root, archetype: 'worker', prompt: 'six', lane: 'host', userPathOptions: ISOLATED, env: {} });
+  assert.ok(whileRunning.ok, 'work in flight does not stand between a caller and the next dispatch');
+
+  // Stopped and unread, they do.
+  for (let i = 0; i < 5; i += 1) {
+    appendRow(root, { row: 'stopped', id: `id-${i}`, at: '2026-09-01T01:00:00Z', final_message: 'done', dirty: { paths: [], truncated: false } });
+  }
+  const refused = prepareDispatch({ repoRoot: root, archetype: 'worker', prompt: 'seven', lane: 'host', userPathOptions: ISOLATED, env: {} });
   assert.ok(!refused.ok);
-  assert.match(refused.ok ? '' : refused.refused, /5 dispatches are unclosed and the limit is 5/);
-  assert.ok(!existsSync(join(root, '.fadeno', 'local', 'worktrees')), 'a refused spawn cuts nothing');
+  assert.match(refused.ok ? '' : refused.refused, /5 dispatches have stopped and are waiting for your decision, and the limit is 5/);
+  // The allowed one cut its worktree; the refused one added nothing to that.
+  const treesDir = join(root, '.fadeno', 'local', 'worktrees');
+  assert.deepEqual(readdirSync(treesDir), [whileRunning.ok ? whileRunning.prepared.name : ''], 'a refused spawn cuts nothing');
   const raised = tempRepo(t);
   git(raised, ['init', '-q', '-b', 'main']);
   git(raised, ['config', 'user.email', 'a@b.invalid']);
@@ -161,7 +171,7 @@ test('the limit refuses the sixth spawn, and the catalog can raise it', (t) => {
   writeFileSync(join(raised, LEDGER_FILE), readFileSync(join(root, LEDGER_FILE), 'utf8'));
   const allowed = prepareDispatch({ repoRoot: raised, archetype: 'worker', prompt: 'six', lane: 'host', userPathOptions: ISOLATED, env: {} });
   assert.ok(allowed.ok);
-  assert.match(allowed.ok ? allowed.prepared.nag : '', /\(5 of 7 allowed\)/);
+  assert.match(allowed.ok ? allowed.prepared.nag : '', /\(5; 5 of 7 allowed are waiting on you\)/);
 });
 
 test('shared on request, and shared as a fallback when git cannot cut, each say so in the contract', (t) => {

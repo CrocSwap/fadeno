@@ -155,7 +155,7 @@ test('a model this session cannot deliver takes the command lane, refused with t
   assert.ok(command, reason);
   assert.match(command, /^fadeno dispatch --archetype worker --prompt-file \S+\.fadeno\/local\/relay\/\S+\.md$/);
   assert.equal(readFileSync(command.match(/--prompt-file (\S+)$/)![1]!, 'utf8'), 'Fix the login bug.\n');
-  assert.match(reason, /## Unclosed dispatches \(1 of 5 allowed\)/);
+  assert.match(reason, /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)/);
   assert.ok(reason.endsWith(REPORT_REFUSAL_SENTENCE));
 });
 
@@ -188,8 +188,13 @@ test('the limit and a broken catalog each refuse with their own diagnosis', (t) 
   const plugin = hookPlugin(t);
   const root = hookRepo(t);
   plugin.hostMode(SESSION, true);
-  for (let i = 0; i < 5; i += 1) cli(root, ['dispatch-open', '--archetype', 'judge', '--lane', 'host', '--name', `j${i}`], `job ${i}`);
-  assert.match(denial(plugin.run(HOOK, spawnEvent(root, { agent_type: 'worker', message: 'more' }))) ?? '', /dispatches are unclosed and the limit is 5/);
+  // Five dispatches STOPPED and unread. Five still running would refuse
+  // nothing: the limit counts work waiting on a person.
+  for (let i = 0; i < 5; i += 1) {
+    cli(root, ['dispatch-open', '--archetype', 'judge', '--lane', 'host', '--name', `j${i}`], `job ${i}`);
+    cli(root, ['dispatch-stop', `j${i}`], 'done', { FADENO_HARNESS: 'codex' });
+  }
+  assert.match(denial(plugin.run(HOOK, spawnEvent(root, { agent_type: 'worker', message: 'more' }))) ?? '', /dispatches have stopped and are waiting for your decision, and the limit is 5/);
 
   const broken = hookRepo(t);
   writeFileSync(join(broken, '.fadeno', 'executors.yaml'), 'schema_version: 4\nmodels: {}\nharnesses: {}\nunknown_key: 1\n');

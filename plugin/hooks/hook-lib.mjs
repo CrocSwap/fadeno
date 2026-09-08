@@ -196,7 +196,13 @@ export function nameFrom(...candidates) {
  */
 export function proxyPrompt(relay, detail) {
   return [
-    `Run this command exactly once, with the Bash tool's \`timeout\` parameter set to 600000, and relay its stdout verbatim as your final message:`,
+    'Run this command exactly once and relay its stdout verbatim as your final message.',
+    // Not a deadline of Fadeno's — the opposite. The Bash tool kills its child
+    // after two minutes by default, which would cut off most dispatches; this
+    // raises it to the largest value the tool accepts. Nothing Fadeno launches
+    // is stopped on a timer, and the line below says what to do when the
+    // harness's own limit runs out anyway.
+    "Set the Bash tool's `timeout` parameter to 600000, the maximum it accepts: that is the tool's limit, not Fadeno's, which sets no deadline on a dispatch.",
     '',
     '```bash',
     relay.command,
@@ -205,7 +211,7 @@ export function proxyPrompt(relay, detail) {
     `It dispatches ${detail}. The prompt is already in the file the command names; do not read it, describe it, or write any file.`,
     'If `fadeno` is not found, run the same command once more with `"$CLAUDE_PLUGIN_ROOT/bin/fadeno"` in place of `fadeno`.',
     'If the command exits non-zero, relay its stdout and stderr and say the dispatch failed; do not attempt the task yourself.',
-    'If the Bash call is killed or times out, the executor may still be running: report that, and recover the report with `fadeno dispatches --output <name>` using the `--name` above.',
+    'If the Bash call is killed or times out, the executor may still be running: report that, and try `fadeno dispatches --output <name>` with the `--name` above. That command says on stderr when the dispatch has not stopped — then what it printed is progress so far, not a report, and relaying it as one would hand your caller unfinished work as finished.',
     'Report only what the command printed. Nothing else is yours to claim.',
   ].join('\n');
 }
