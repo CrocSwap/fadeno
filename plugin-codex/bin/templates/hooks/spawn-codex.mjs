@@ -233,7 +233,7 @@ if (row.lane === 'command') {
     `fadeno: this ${archetype} spawn goes through the command lane (${answer.model}${answer.effort ? `@${answer.effort}` : ''} on ${answer.harness ?? '?'}) — that model runs as a process, not as a subagent of this session. ` +
       `The task is staged; run this, with a 600-second shell timeout, and read what it prints:\n\n    ${answer.relay.command}\n\n` +
       `It records the dispatch as \`${label}\`. If that call is killed or times out, the dispatch is still running and its report is still coming: ` +
-      `run \`fadeno dispatch-wait ${label}\` — it blocks until the dispatch stops and prints the report. It exits 2 with "still running" when it reaches its own bound first, which is not an error: run it again, as many times as it takes. ` +
+      `run \`fadeno dispatch-wait ${label}\` — it blocks until the dispatch stops and prints the report, and reconstructs the stop record when the killed call was the thing that would have written it. It exits 2 with "still running" when it reaches its own bound first, which is not an error: run it again, as many times as it takes; only exit 5 means the dispatch left no report at all. ` +
       `When you have the report, read it and close the dispatch with \`fadeno dispatch-close ${label} --merged|--kept|--discarded|--failed\`. ` +
       `${answer.nag ?? ''}`,
   );

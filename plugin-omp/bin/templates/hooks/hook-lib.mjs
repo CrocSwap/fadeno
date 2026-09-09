@@ -366,14 +366,19 @@ export function proxyPrompt(relay, detail, name) {
     'If `fadeno` is not found, run the same command once more with `"$CLAUDE_PLUGIN_ROOT/bin/fadeno"` in place of `fadeno`.',
     'If the command exits non-zero, relay its stdout and stderr and say the dispatch failed; do not attempt the task yourself.',
     // The dispatch outliving the harness's shell ceiling is ORDINARY, not a
-    // failure: the launcher keeps waiting in the background and still records
-    // the stop. What used to happen is that the proxy returned at that moment
-    // with whatever had been written so far, and the session was told the
-    // agent had finished. So: wait in bites the harness allows, and do not
-    // finish until the dispatch has.
+    // failure: the executor is detached and finishes on its own, and
+    // `dispatch-wait` reconstructs the stop row when the killed launcher is
+    // not there to write it. What used to happen is that the proxy returned at
+    // that moment with whatever had been written so far, and the session was
+    // told the agent had finished. So: wait in bites the harness allows, and
+    // do not finish until the dispatch has.
     `If that call is killed, times out, or is moved to the background, the dispatch is still running and its report is still coming. Do not report yet. Run \`fadeno dispatch-wait ${waitFor}\` — it blocks until the dispatch stops and then prints the report, which you relay verbatim.`,
     '`dispatch-wait` exits 2 with "still running" when it reaches its own bound before the dispatch does. That is not an error and nothing is wrong: run the exact same command again, as many times as it takes. Only exit 0 carries the report.',
-    'If it exits 4, the executor is gone and no report is coming: relay what it says, including the path it names, and say the dispatch did not finish.',
+    // Exit 5 is the one ending with nothing to relay. It used to be reachable
+    // as exit 4 too — "no report is coming" for a dispatch that had in fact
+    // committed its work and written its report — and 26 finished dispatches
+    // in one night were reported to their hosts as dead on the strength of it.
+    'If it exits 5, the dispatch stopped without leaving any report: relay what it says verbatim and say so. Do not call the work lost — the message says what its branch holds, and that is for the caller to judge.',
     'Report only what the command printed. Nothing else is yours to claim.',
   ].join('\n');
 }

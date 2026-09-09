@@ -506,6 +506,8 @@ export function recordStopped(
     modelObserved?: string | null;
     /** Everything the executor wrote to stderr; the tail is recorded. */
     stderr?: string | null;
+    /** True when this row is reconstructed after the fact — see `StoppedRow`. */
+    reconstructed?: boolean;
     now?: Date;
   },
 ): StoppedRow {
@@ -529,6 +531,7 @@ export function recordStopped(
     cwd: input.cwd,
     ...(ignored === 'unavailable' || ignored.paths.length > 0 ? { ignored } : {}),
     ...(input.exit != null ? { exit: input.exit } : {}),
+    ...(input.reconstructed === true ? { reconstructed: true as const } : {}),
     ...(input.modelObserved != null ? { model_observed: input.modelObserved } : {}),
     ...(stderrExcerpt != null ? { stderr_excerpt: stderrExcerpt } : {}),
     ...(work != null ? { work } : {}),
@@ -586,9 +589,17 @@ function formatElapsed(ms: number): string {
  * Launch the executor for a prepared dispatch in its worktree, in its own
  * process group, with the composed prompt on stdin (or at `{prompt_file}`),
  * both streams captured to disk. The opened row is written the moment the
- * group exists; the stopped row when it exits. A SIGTERM or SIGINT to this
- * process is forwarded to the whole group so a killed CLI does not orphan
- * its executor.
+ * group exists; the stopped row when it exits.
+ *
+ * A signal to THIS process is not forwarded to the executor. The executor is
+ * detached in its own group and routinely outlives its launcher — the harness
+ * kills the relay's shell call at its ceiling, and the shell kills this CLI —
+ * so a launcher that killed its group on the way out would destroy an hour of
+ * work for a shell timeout, which is exactly how one dispatch lost 1h50m and
+ * left 544 uncommitted lines behind. This process is the executor's recorder,
+ * not its owner. Ending a dispatch on purpose is `fadeno cancel`'s job, and
+ * `dispatch-wait` reconstructs the stop row when this process is not there to
+ * write it.
  */
 export function runCommandDispatch(input: RunInput): Promise<RunResult> {
   const { repoRoot, prepared } = input;
@@ -637,16 +648,12 @@ export function runCommandDispatch(input: RunInput): Promise<RunResult> {
       const pgid = child.pid!;
       const opened = recordOpened(repoRoot, prepared, { lane: 'command', processGroup: pgid });
       input.onEcho?.(`dispatch ${prepared.name} (${prepared.id}) → ${prepared.resolution.model} on ${prepared.resolution.harness ?? '?'}; process group ${pgid}; ${prepared.shared ? 'shared tree' : prepared.workspace.branch}`);
-      const forward = (signal: NodeJS.Signals) => {
-        try {
-          process.kill(-pgid, signal);
-        } catch {
-          /* already gone */
-        }
-      };
-      const onTerm = () => forward('SIGTERM');
-      process.on('SIGTERM', onTerm);
-      process.on('SIGINT', onTerm);
+      // Said at launch, while there is certainly someone to hear it: if this
+      // call is killed, the line is already on screen, where a message sent at
+      // signal time would not be.
+      input.onEcho?.(
+        `dispatch ${prepared.name} outlives this call — if it is killed, \`fadeno dispatch-wait ${prepared.name}\` recovers the report and \`fadeno cancel ${prepared.name}\` ends the executor.`,
+      );
       const heartbeat = input.heartbeatMs && input.heartbeatMs > 0
         ? setInterval(() => input.onEcho?.(`dispatch ${prepared.name}: still running (${formatElapsed(Date.now() - startedAt)})`), input.heartbeatMs)
         : null;
@@ -658,8 +665,6 @@ export function runCommandDispatch(input: RunInput): Promise<RunResult> {
       }
       child.once('close', (code, signal) => {
         if (heartbeat != null) clearInterval(heartbeat);
-        process.off('SIGTERM', onTerm);
-        process.off('SIGINT', onTerm);
         closeSync(outFd);
         closeSync(errFd);
         const stdout = readFileSync(stdoutAbs, 'utf8');

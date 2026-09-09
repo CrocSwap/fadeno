@@ -186,33 +186,47 @@ test('dispatch-wait: answers with the report when the stop lands, and says "run 
   assert.match(cli(root, ['dispatch-wait', 'no-such-dispatch']).stderr, /no dispatch "no-such-dispatch"/);
 });
 
-test('dispatch-wait: a dead process group with no stop row is answered, not waited on forever', (t) => {
+test('dispatch-wait: a dead process group with no stop row has its stop reconstructed, not reported as a loss', (t) => {
   const root = repo(t);
   // A command-lane row whose launcher is gone: pid 2 is init's child on macOS
   // and Linux alike and is never a Fadeno process group, so the liveness probe
   // finds nothing. This is the shape a killed (rather than backgrounded) shell
-  // call leaves behind, and no report is ever coming for it.
+  // call leaves behind — the launching CLI writes the stop row when its child
+  // exits, so a harness that kills it at a shell ceiling leaves nobody to
+  // write one at all.
   const id = '3f3f3f3f-0000-4000-8000-000000000000';
-  writeFileSync(join(root, LEDGER_FILE), `${JSON.stringify({
+  const opened = {
     row: 'opened', id, name: 'orphaned', at: new Date().toISOString(), session: null, parent: null, archetype: 'worker',
     model: 'echo', effort: 'high', explicit_model: null, lane: 'command', harness: 'codex', workspace: null,
     task: 'x', prompt: 'p', process_group: 999_999,
-  })}\n`);
+  };
+  writeFileSync(join(root, LEDGER_FILE), `${JSON.stringify(opened)}\n`);
   const answer = cli(root, ['dispatch-wait', 'orphaned', '--wait-seconds', '600'], '', { FADENO_ABANDON_SETTLE_MS: '0' });
-  assert.equal(answer.status, 4, 'not 2: asking again would never help');
-  assert.match(answer.stderr, /orphaned is not running and never recorded a stop/);
-  assert.match(answer.stderr, /It wrote nothing\./, 'nothing was captured, and saying so is the answer');
-  assert.match(answer.stderr, /fadeno dispatch-stop orphaned`, then close it/);
+  assert.equal(answer.status, 5, 'it stopped and left nothing: a different ending from a report, and from still running');
+  assert.match(answer.stderr, /orphaned stopped \(its launcher was killed before it could record the stop, so how it ended is unknown\) and recorded NO REPORT/);
+  // The row is now on disk, so the dispatch is no longer open forever and the
+  // next reader is not asked to work out what happened all over again.
+  const recorded = readDispatches(root).records[0]!;
+  assert.equal(recorded.state, 'stopped');
+  assert.equal(recorded.stopped?.reconstructed, true);
+  assert.equal(recorded.stopped?.exit, undefined, 'how it ended is unknown, and an invented exit code would say otherwise');
 
-  // With output on disk, the message names it — because "no stop row" and
-  // "no work" are different, and a worker that ran an hour and committed five
-  // times was once reported as lost on the strength of the first.
-  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
-  writeFileSync(join(root, '.fadeno', 'local', 'outputs', `${id}.md`), 'the work is done and committed\n');
-  const withOutput = cli(root, ['dispatch-wait', 'orphaned', '--wait-seconds', '600'], '', { FADENO_ABANDON_SETTLE_MS: '0' });
-  assert.equal(withOutput.status, 4);
-  assert.match(withOutput.stderr, /It wrote 31 byte\(s\) to \S*outputs\S*\.md/);
-  assert.match(withOutput.stderr, /fadeno dispatch-stop orphaned --message-file \S*outputs\S*\.md/);
+  // The case that matters: the executor finished, committed, and wrote its
+  // report — and only the recording of it was lost. Twenty-six of these in one
+  // night were handed back to their hosts as dead dispatches.
+  const root2 = repo(t);
+  writeFileSync(join(root2, LEDGER_FILE), `${JSON.stringify(opened)}\n`);
+  mkdirSync(join(root2, '.fadeno', 'local', 'outputs'), { recursive: true });
+  writeFileSync(join(root2, '.fadeno', 'local', 'outputs', `${id}.md`), 'the work is done and committed\n');
+  writeFileSync(join(root2, '.fadeno', 'local', 'outputs', `${id}.err`), 'warning: something\n');
+  const withOutput = cli(root2, ['dispatch-wait', 'orphaned', '--wait-seconds', '600'], '', { FADENO_ABANDON_SETTLE_MS: '0' });
+  assert.equal(withOutput.status, 0, 'the report is right there; exit 0 means "here it is"');
+  assert.equal(withOutput.stdout, 'the work is done and committed\n', 'relayed verbatim: a proxy passes stdout on');
+  assert.match(withOutput.stderr, /its report was recovered from what it left on disk/, 'and stderr says it was recovered, not watched arriving');
+  const recovered = readDispatches(root2).records[0]!;
+  assert.equal(recovered.stopped?.reconstructed, true);
+  assert.match(recovered.stopped?.final_message ?? '', /the work is done and committed/);
+  assert.match(recovered.stopped?.stderr_excerpt ?? '', /warning: something/, 'the stderr is recovered too: it is how a full disk was diagnosed');
 });
 
 test('dispatch-wait: a dead group is given its writer a moment, because the writer is another process', (t) => {

@@ -135,6 +135,16 @@ export interface StoppedRow {
    */
   stderr_excerpt?: string | null;
   /**
+   * Set when nobody was left to write this row and it was reconstructed from
+   * what the executor left on disk. The launching CLI records the stop when
+   * its child exits, so a harness that kills the CLI at a shell ceiling leaves
+   * a finished dispatch with no stop row at all — 26 of them in one night, all
+   * reported to their hosts as lost work that was in fact committed. `exit` is
+   * absent on such a row because how the executor ended is genuinely unknown,
+   * and its absence must never be read as a clean exit.
+   */
+  reconstructed?: true;
+  /**
    * What the branch held, measured from git rather than reported by the agent
    * — see `WorkMeasured`. Absent for a shared-tree dispatch, which has no
    * branch of its own to measure, and on rows an older Fadeno wrote.

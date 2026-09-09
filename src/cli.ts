@@ -861,59 +861,58 @@ async function main(argv: string[]): Promise<number> {
         // nothing is a different ending needing a different action, and
         // answering it with 0 and an empty stdout is how four disk-killed
         // workers were relayed to their proxies as finished.
+        const s = outcome.record.stopped;
+        // A reconstructed row means the launcher was killed before it could
+        // record anything, so how the executor ended is unknown. Said plainly
+        // both ways round: an absent exit code must not read as a clean one,
+        // and a recovered report must not read as one this call watched
+        // arrive.
+        const how = s?.reconstructed === true
+          ? ' (its launcher was killed before it could record the stop, so how it ended is unknown)'
+          : s?.exit == null
+            ? ''
+            : s.exit.signal != null
+              ? ` (killed by ${s.exit.signal})`
+              : ` (exit ${s.exit.code})`;
         if (outcome.text == null) {
           if (!values.json) {
-            const s = outcome.record.stopped;
-            const how = s?.exit == null ? '' : s.exit.signal != null ? ` (killed by ${s.exit.signal})` : ` (exit ${s.exit.code})`;
             const why = lastStderrLine(s?.stderr_excerpt);
+            const w = s?.work;
+            const held = w == null
+              ? ''
+              : w.commits === 0
+                ? ' Its branch holds no commits HEAD lacks.'
+                : ` Its branch holds ${w.commits} commit(s) HEAD does not have (${w.files} file(s), +${w.insertions} -${w.deletions}).`;
             console.error(
               `${name} stopped${how} and recorded NO REPORT.` +
                 (why != null ? ` Its stderr ends: ${why}` : '') +
+                held +
                 ` Read \`fadeno dispatches ${name}\` for what its branch holds, then close it.${stillWaiting}`,
             );
           }
           return 5;
         }
         if (!values.json) {
-          if (refs.length > 1) console.error(`${name} stopped; its report follows.${stillWaiting}`);
+          // stderr, never stdout: what follows on stdout is the report
+          // verbatim, because a proxy relays it.
+          if (s?.reconstructed === true) console.error(`${name} stopped${how}; its report was recovered from what it left on disk, and follows.${stillWaiting}`);
+          else if (refs.length > 1) console.error(`${name} stopped; its report follows.${stillWaiting}`);
           process.stdout.write(outcome.text.endsWith('\n') ? outcome.text : `${outcome.text}\n`);
         }
         return 0;
       }
-      if (outcome.state === 'running') {
-        // Exit 2, the same code `dispatches --output` uses for "not finished".
-        // The message is one instruction, because the only thing a caller can
-        // usefully do is ask again.
-        if (!values.json) {
-          const which = outcome.waiting.length > 1
-            ? `${outcome.waiting.length} dispatches are still running (${others.join(', ')})`
-            : `${name} is still running (${ageOf(outcome.record)} in)`;
-          console.error(`${which}. Run this command again.`);
-        }
-        return 2;
-      }
+      // Still running when the bound elapsed. Exit 2, the same code
+      // `dispatches --output` uses for "not finished". The message is one
+      // instruction, because the only thing a caller can usefully do is ask
+      // again. There is no third ending: a dead group with no stop row is
+      // reconstructed into one above rather than reported as a loss.
       if (!values.json) {
-        // Whether it FINISHED and whether anyone RECORDED it are two
-        // questions, and the answer to the first is on disk. A worker that ran
-        // an hour and committed five times was reported as lost because only
-        // the second was ever answered.
-        const { bytes, work } = outcome.captured;
-        const left = bytes === 0 ? 'It wrote nothing' : `It wrote ${bytes} byte(s) to ${outcome.stdoutPath}`;
-        const committed = work == null
-          ? ''
-          : work.commits === 0
-            ? ', and its branch holds no commits HEAD lacks'
-            : `, and its branch holds ${work.commits} commit(s) HEAD does not have (${work.files} file(s), +${work.insertions} -${work.deletions})`;
-        console.error(
-          `${name} is not running and never recorded a stop: its process group is gone, so no report is coming. ` +
-            `${left}${committed}. ` +
-            (bytes > 0
-              ? `Record it with \`fadeno dispatch-stop ${name} --message-file ${outcome.stdoutPath}\`, then close it.`
-              : `Record it with \`fadeno dispatch-stop ${name}\`, then close it.`) +
-            stillWaiting,
-        );
+        const which = outcome.waiting.length > 1
+          ? `${outcome.waiting.length} dispatches are still running (${others.join(', ')})`
+          : `${name} is still running (${ageOf(outcome.record)} in)`;
+        console.error(`${which}. Run this command again.`);
       }
-      return 4;
+      return 2;
     }
     case 'feedback': {
       const text = positionals.slice(1).join(' ').trim();

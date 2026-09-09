@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { CONTRACT_HEADER } from '../src/lib/contracts.ts';
@@ -299,4 +301,52 @@ test('cancel refuses a host-lane dispatch and says whose it is to stop', async (
   const refused = await cancelDispatch(root, readDispatches(root).records[0]!);
   assert.ok(!refused.ok && refused.reason === 'host_lane');
   assert.match(refused.ok ? '' : refused.message, /harness's to stop/);
+});
+
+test('a signal to the launcher does not kill the executor: the launcher is its recorder, not its owner', async (t) => {
+  // The harness kills the relay's shell call at its ceiling; the shell kills
+  // this CLI. The CLI used to forward that signal to the executor's whole
+  // process group, which turned a shell timeout into destroyed work — one
+  // dispatch lost 1h50m and left 544 uncommitted lines in its worktree. The
+  // executor is detached and owns its own group; ending it is `cancel`'s job.
+  const root = gitRepo(t);
+  const sentinel = join(root, 'the-executor-finished');
+  seedCatalog(root, [
+    process.execPath,
+    '-e',
+    `process.stdin.resume();setTimeout(()=>{require('fs').writeFileSync(${JSON.stringify(sentinel)},'finished');process.stdout.write('REPORT: committed and done\\n');process.exit(0)},2000)`,
+  ]);
+  git(root, ['add', '-A']);
+  git(root, ['commit', '-q', '-m', 'catalog']);
+
+  // A real launcher in its own process, because the thing under test is what
+  // happens when that process is killed.
+  const spawnModule = pathToFileURL(join(import.meta.dirname, '..', 'src', 'lib', 'spawn.ts')).href;
+  const launcher = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { prepareDispatch, runCommandDispatch } from ${JSON.stringify(spawnModule)};
+    const outcome = prepareDispatch({
+      repoRoot: ${JSON.stringify(root)}, archetype: 'worker', prompt: 'go', name: 'survivor',
+      lane: 'command', userPathOptions: { env: { FADENO_HARNESS: 'standalone' } }, env: {},
+    });
+    if (!outcome.ok) process.exit(9);
+    await runCommandDispatch({ repoRoot: ${JSON.stringify(root)}, prepared: outcome.prepared, env: { PATH: process.env.PATH ?? '' } });
+  `], { stdio: 'ignore' });
+  t.after(() => { try { launcher.kill('SIGKILL'); } catch { /* already gone */ } });
+
+  // The opened row is the moment the executor's group exists.
+  const opened = Date.now() + 20_000;
+  while (Date.now() < opened && readDispatches(root).records.length === 0) await new Promise((r) => setTimeout(r, 50));
+  const record = readDispatches(root).records[0]!;
+  assert.ok(record.opened?.process_group, 'the group is on the opened row');
+
+  launcher.kill('SIGTERM');
+  await new Promise((r) => launcher.once('exit', r));
+
+  const done = Date.now() + 20_000;
+  while (Date.now() < done && !existsSync(sentinel)) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(existsSync(sentinel), 'the executor outlived the launcher and finished its work');
+  assert.equal(readFileSync(join(root, outputPaths(record.id).stdout), 'utf8'), 'REPORT: committed and done\n', 'and wrote its report');
+  // And nobody recorded it, which is exactly why `dispatch-wait` reconstructs
+  // the stop row rather than calling the dispatch lost.
+  assert.equal(readDispatches(root).records[0]!.stopped, null, 'nobody was left to write the stop row');
 });

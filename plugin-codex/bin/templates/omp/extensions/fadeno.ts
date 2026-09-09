@@ -104,7 +104,7 @@ function proxyPrompt(relay: { command: string }, detail: string): string {
     '',
     `It dispatches ${detail}. The prompt is already in the file the command names; do not read it, describe it, or write any file.`,
     'If the command exits non-zero, relay its stdout and stderr and say the dispatch failed; do not attempt the task yourself.',
-    'If the bash call is killed or times out, the executor may still be running: report that, and recover the report with `FADENO_CLI... dispatches --output <name>` using the `--name` above.',
+    'If the bash call is killed or times out, the dispatch is still running and its report is still coming: do not report yet. Run `FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatch-wait <name>` with the `--name` above — it blocks until the dispatch stops and prints the report, exits 2 with "still running" when it reaches its own bound (not an error: run it again), and exits 5 only when the dispatch left no report at all.',
     'Report only what the command printed. Nothing else is yours to claim.',
   ].join('\n');
 }

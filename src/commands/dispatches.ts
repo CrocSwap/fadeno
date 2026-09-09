@@ -9,7 +9,7 @@
  * reader for every surface.
  */
 
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { DEFAULT_UNCLOSED_LIMIT, formatAge, hostVocabulary, nagText, spawnRefusedByLimit, type ArchetypeLine } from '../lib/contracts.ts';
 import {
@@ -56,7 +56,6 @@ import type { UserPathOptions } from '../lib/user-paths.ts';
 import {
   WORKTREES_DIR,
   canonical,
-  measureWork,
   removeWorktree,
   reportWorktrees,
   verifyMerged,
@@ -408,6 +407,13 @@ export interface DispatchStopOptions extends CommonOptions {
    * still resolves when the contract never reached the transcript at all.
    */
   agentId?: string | null;
+  /** The executor's stderr, when the caller has it; the tail is recorded. */
+  stderr?: string | null;
+  /**
+   * Mark the row reconstructed — see `StoppedRow.reconstructed`. Set only by
+   * the wait path, which writes the row nobody was left alive to write.
+   */
+  reconstructed?: boolean;
 }
 
 export interface DispatchStopped {
@@ -458,6 +464,8 @@ export function runDispatchStop(opts: DispatchStopOptions): DispatchStopped {
     cwd: assigned,
     branch: record.opened.workspace?.branch ?? null,
     modelObserved: facts?.model ?? null,
+    stderr: opts.stderr ?? null,
+    reconstructed: opts.reconstructed === true,
   });
   return { record: { ...record, stopped: row, state: record.closed ? 'closed' : 'stopped' }, row, replayed: false, mismatchedCwd };
 }
@@ -817,20 +825,7 @@ export type WaitOutcome =
   /** One of them stopped (or was already stopped): `text` is its report. */
   | { state: 'stopped'; record: DispatchRecord; text: string | null; waitedMs: number; waiting: DispatchRecord[] }
   /** All still running when the bound elapsed. Ask again; nothing is wrong. */
-  | { state: 'running'; record: DispatchRecord; waitedMs: number; waiting: DispatchRecord[] }
-  /**
-   * One executor's process group is gone and no stop row was ever written, so
-   * no amount of waiting will produce one. `captured` is what it left behind,
-   * which is usually the whole answer to "did it actually finish".
-   */
-  | {
-      state: 'abandoned';
-      record: DispatchRecord;
-      stdoutPath: string;
-      captured: { bytes: number; work: WorkMeasured | null };
-      waitedMs: number;
-      waiting: DispatchRecord[];
-    };
+  | { state: 'running'; record: DispatchRecord; waitedMs: number; waiting: DispatchRecord[] };
 
 export interface DispatchWaitOptions extends CommonOptions {
   /**
@@ -932,19 +927,29 @@ export async function runDispatchWait(opts: DispatchWaitOptions): Promise<WaitOu
       if (settled.stopped != null || settled.closed != null) {
         return { state: 'stopped', record: settled, text: report(settled.id), waitedMs: Date.now() - started, waiting: others };
       }
-      const stdoutPath = join(repoRoot, outputPaths(settled.id).stdout);
+      // Nobody is left to write the stop row, so write it here from what the
+      // executor left on disk. Whether it FINISHED and whether anyone
+      // RECORDED it are two questions, and only the second one failed: the
+      // report, the commits and the stderr are all still there. Answering the
+      // first with "no report is coming" is how a night of finished, committed
+      // work was handed back to its hosts as lost.
+      const paths = outputPaths(settled.id);
+      const stdoutPath = join(repoRoot, paths.stdout);
+      const stderrPath = join(repoRoot, paths.stderr);
+      const recovered = runDispatchStop({
+        repoRoot,
+        ref: settled.id,
+        messageFile: existsSync(stdoutPath) ? stdoutPath : null,
+        stderr: existsSync(stderrPath) ? readFileSync(stderrPath, 'utf8') : null,
+        // How it ended is genuinely unknown — that is the one thing that died
+        // with the launcher — so the row says it was reconstructed and carries
+        // no exit rather than inventing a clean one.
+        reconstructed: true,
+      });
       return {
-        state: 'abandoned',
-        record: settled,
-        stdoutPath,
-        // What it left behind, because "no stop row" and "no work" are
-        // different things and the caller has to tell them apart: a worker
-        // that ran an hour, committed five times and died before its launcher
-        // could append is not a dispatch that produced nothing.
-        captured: {
-          bytes: existsSync(stdoutPath) ? statSync(stdoutPath).size : 0,
-          work: measureWork({ repoRoot, branch: settled.opened?.workspace?.branch ?? null }),
-        },
+        state: 'stopped',
+        record: recovered.record,
+        text: report(settled.id),
         waitedMs: Date.now() - started,
         waiting: others,
       };
