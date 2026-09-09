@@ -166,6 +166,13 @@ export interface HostVocabularyInput {
   unclosedLimit: number;
   /** `.fadeno/preamble.md`, so the host knows what its dispatches already carry. */
   preamble?: Preamble | null;
+  /**
+   * The harness this text is being read inside. Spawning differs between them
+   * in ways a host cannot guess: on Claude the wrapper rewrites the spawn, so
+   * naming the archetype is enough; on Codex it can only refuse one, so the
+   * spawn has to carry the dialed model itself.
+   */
+  host?: string | null;
   now?: Date;
 }
 
@@ -200,11 +207,26 @@ export function hostVocabulary(input: HostVocabularyInput): string {
   }
   lines.push('');
   lines.push('## Spawning', '');
-  lines.push('- Spawn through your harness\'s subagent tool with the archetype as the agent type (`fadeno:worker` on Claude Code; `worker` on Codex). Where no Fadeno hook can observe a spawn, run `fadeno dispatch --archetype <name> --prompt-file <file>` instead; it does the same thing as a process.');
+  if (input.host === 'codex') {
+    // Codex cannot rewrite a spawn, only refuse one, so the model has to be on
+    // the call. A host that learned this from a refusal paid a round trip for
+    // it every time; a host told here pays none. The VALUES are deliberately
+    // not written out — see the note above about stale routing — so this says
+    // where to read them at the moment of the spawn.
+    lines.push(
+      '- Spawn through the subagent tool with `agent_type: "fadeno-<archetype>"` (`fadeno-worker`, `fadeno-reviewer`, …), and pass the dial\'s ' +
+        'model and effort ON THE SPAWN, as `model` and `reasoning_effort`. Read them at the moment you spawn with `fadeno dial <archetype> --json`. ' +
+        'A spawn carrying no model, or a different one, is REFUSED: a Codex hook can refuse a spawn but cannot rewrite one, so an unrouted subagent ' +
+        "would silently run on this session's model.",
+    );
+    lines.push('- Nothing else has to be added to the spawn. Fadeno opens the dispatch and hands the agent its contract as it starts, so write the prompt as the task alone.');
+  } else {
+    lines.push('- Spawn through your harness\'s subagent tool with the archetype as the agent type (`fadeno:worker` on Claude Code). Where no Fadeno hook can observe a spawn, run `fadeno dispatch --archetype <name> --prompt-file <file>` instead; it does the same thing as a process.');
+  }
   lines.push('- Write the prompt as the task itself, addressed to the agent that will do it. Fadeno appends the dispatch contract; do not describe Fadeno to the worker.');
   lines.push(
     input.preamble?.exists
-      ? '- This repository states conventions for every dispatch in `.fadeno/preamble.md`, and Fadeno appends them to every prompt you dispatch. Do not repeat them in a brief; read the file if you need to know what your workers were already told, and add to it rather than to a prompt when something turns out to hold for all of them.'
+      ? '- This repository states conventions for every dispatch in `.fadeno/preamble.md`, and Fadeno delivers them to every agent it dispatches. Do not repeat them in a brief; read the file if you need to know what your workers were already told, and add to it rather than to a prompt when something turns out to hold for all of them.'
       : '- Conventions that hold for EVERY dispatch here — the interpreter, the shared build directory, where receipts belong, what is forbidden — belong in `.fadeno/preamble.md`, which Fadeno appends to every dispatched prompt when it exists. Putting one there beats retyping it into each brief, and makes a brief that forgets it impossible.',
   );
   lines.push('- Every dispatch gets a worktree cut from HEAD on a branch named `fadeno/<name>`. If the work needs uncommitted changes, commit them first, or ask for the shared tree by saying so in the spawn (`--shared` on the command lane). Two agents must never share one tree.');

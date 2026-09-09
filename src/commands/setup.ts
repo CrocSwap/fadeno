@@ -2,6 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
+import { CODEX_AGENT_MARKER, codexAgentFile, codexAgentFilename } from '../lib/codex-agents.ts';
+import { BUILTIN_ARCHETYPE_DESCRIPTIONS } from '../lib/contracts.ts';
 import { loadExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import {
@@ -56,6 +58,8 @@ export interface SetupResult {
   link: SetupLink;
   /** Retired state this setup swept, if any. */
   removed: string[];
+  /** Codex agent files written: the archetype vocabulary a Codex host spawns by. */
+  codexAgents: string[];
   permission: { path: string; rule: string } | null;
   notices: string[];
 }
@@ -78,18 +82,65 @@ function probe(command: string): CommandProbe {
 }
 
 /**
- * The marker an earlier Fadeno wrote at the top of every agent file it
- * materialized. Nothing writes one now — model and effort ride the spawn — so
- * a file carrying it is Fadeno's own litter, and on Codex it is worse than
- * litter: an agent file's `model` wins over the value a spawn passes, so a
- * stale one silently overrides the dial it was supposed to serve.
+ * The marker at the top of every agent file Fadeno writes.
+ *
+ * `writeCodexAgents` writes this version's set; the sweep takes any OTHER
+ * managed file — an archetype that is no longer builtin, or a project-scope
+ * copy from a Fadeno that wrote them there. A file carrying the marker is
+ * Fadeno's to remove, and on Codex a stale one is worse than litter: if it
+ * declares a `model`, that model wins over the one the spawn passes and
+ * silently overrides the dial it was written to serve.
  */
-const MANAGED_AGENT_MARKER = '# fadeno:managed';
+const MANAGED_AGENT_MARKER = CODEX_AGENT_MARKER;
 
-/** Agent files a previous Fadeno materialized, in the two places it wrote them. */
+/** The agent files this version stands behind, by filename. */
+function ourCodexAgentFiles(): Set<string> {
+  return new Set(Object.keys(BUILTIN_ARCHETYPE_DESCRIPTIONS).map((archetype) => codexAgentFilename(archetype)));
+}
+
+/**
+ * Write the archetype vocabulary Codex reads agent types from.
+ *
+ * Runs after the sweep, so the files that exist afterwards are this version's.
+ * A failure here is a notice, never a thrown setup: linking the CLI is what
+ * `setup` promised, and a home directory Fadeno cannot write to should not
+ * cost the user that.
+ */
+function writeCodexAgents(options: UserPathOptions | undefined, notices: string[]): string[] {
+  const dir = codexUserAgentDir(options);
+  const written: string[] = [];
+  try {
+    mkdirSync(dir, { recursive: true });
+    for (const [archetype, description] of Object.entries(BUILTIN_ARCHETYPE_DESCRIPTIONS)) {
+      const path = join(dir, codexAgentFilename(archetype));
+      writeFileSync(path, codexAgentFile(archetype, description), 'utf8');
+      written.push(path);
+    }
+  } catch (err) {
+    notices.push(
+      `could not write the Codex agent files under ${dir} (${(err as Error).message}). ` +
+        'Codex spawns cannot name an archetype without them, so host mode there will route every spawn to the command lane.',
+    );
+    return written;
+  }
+  notices.push(
+    `Codex archetype vocabulary written to ${dir} (${written.length} agents, spawned as \`fadeno-<archetype>\`). ` +
+      'They declare no model: the dial rides the spawn, so routing stays live.',
+  );
+  return written;
+}
+
+/**
+ * Managed agent files this version does not write, in the two places Fadeno
+ * has written them. The user-scope files it DOES write are left for
+ * `writeCodexAgents` to overwrite: sweeping them would make every setup report
+ * removing the files it is about to put back.
+ */
 function sweepManagedAgents(repoRoot: string, options: UserPathOptions | undefined): string[] {
   const removed: string[] = [];
-  for (const dir of [codexUserAgentDir(options), join(repoRoot, '.codex', 'agents')]) {
+  const userDir = codexUserAgentDir(options);
+  const ours = ourCodexAgentFiles();
+  for (const dir of [userDir, join(repoRoot, '.codex', 'agents')]) {
     let entries: string[];
     try {
       entries = readdirSync(dir);
@@ -98,6 +149,7 @@ function sweepManagedAgents(repoRoot: string, options: UserPathOptions | undefin
     }
     for (const entry of entries) {
       if (!entry.endsWith('.toml')) continue;
+      if (dir === userDir && ours.has(entry)) continue;
       const path = join(dir, entry);
       try {
         if (!readFileSync(path, 'utf8').startsWith(MANAGED_AGENT_MARKER)) continue;
@@ -283,6 +335,9 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
   }
   const link = linkCli(paths, source, opts.userPathOptions, opts.force ?? false);
   const removed = [...sweepRetiredState(paths), ...sweepManagedAgents(repoRoot, opts.userPathOptions)];
+  // After the sweep, never before: the sweep takes every managed file, and
+  // these are the ones this version stands behind.
+  const codexAgents = writeCodexAgents(opts.userPathOptions, notices);
   const permission = opts.target === 'claude' ? ensureClaudePermission(opts.userPathOptions, notices) : null;
 
   // Name the target, and say what it means rather than what it usually means:
@@ -301,11 +356,11 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
   for (const path of removed) {
     notices.push(
       path.endsWith('.toml')
-        ? `Removed the agent file ${path}, which an earlier Fadeno materialized. Nothing writes one now, and on Codex a stale one overrides the dial.`
+        ? `Removed the agent file ${path}, which an earlier Fadeno materialized and this one does not write. On Codex a stale file that declares a model overrides the dial.`
         : `Removed retired state ${path} (nothing reads it).`,
     );
   }
   notices.push('Skills and subagents are loaded at host session start; a fresh session is required to pick up a new plugin version.');
 
-  return { target: opts.target ?? null, repoRoot, paths, probes, link, removed, permission, notices };
+  return { target: opts.target ?? null, repoRoot, paths, probes, link, removed, codexAgents, permission, notices };
 }

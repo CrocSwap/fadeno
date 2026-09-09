@@ -9,13 +9,14 @@
  * reader for every surface.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import { DEFAULT_UNCLOSED_LIMIT, formatAge, hostVocabulary, nagText, spawnRefusedByLimit, type ArchetypeLine } from '../lib/contracts.ts';
 import {
   ageMinutes,
   closeDispatch,
   findDispatch,
+  findDispatchByAgentId,
   isCloseVerb,
   modelAgrees,
   readDispatches,
@@ -40,6 +41,7 @@ import {
   prepareDispatch,
   recordOpened,
   recordStopped,
+  commandLaneAvailable,
   requireCommand,
   resolveArchetype,
   runCommandDispatch,
@@ -57,7 +59,6 @@ import {
   measureWork,
   removeWorktree,
   reportWorktrees,
-  sanitizeName,
   verifyMerged,
   type MergeCheck,
   type WorkMeasured,
@@ -85,6 +86,22 @@ function readPromptInput(opts: { prompt?: string | null; promptFile?: string | n
   }
   if (typeof opts.prompt === 'string') return opts.prompt;
   throw new DispatchesError('no prompt: pass --prompt-file <path> or pipe the prompt on stdin.');
+}
+
+/**
+ * What stands in the prompt file when the harness sealed the ask. It reads as
+ * what it is — an absence with a reason and a place to look — so that a person
+ * scrolling `fadeno dispatches` is never shown a sentence Fadeno made up and
+ * told it was the task.
+ */
+export function sealedPromptText(reason: string): string {
+  return (
+    `(Fadeno did not see this dispatch's prompt: ${reason})\n\n` +
+    'The task went straight from the host to the agent. What the agent was asked is in the ' +
+    "host's own transcript and in the agent's; it was never Fadeno's to record. Everything else " +
+    'about this dispatch — its archetype, model, worktree, branch, and what the branch ended up ' +
+    'holding — was measured as usual.\n'
+  );
 }
 
 function lookup(repoRoot: string, ref: string): DispatchRecord {
@@ -166,34 +183,37 @@ export interface DispatchOpenOptions extends CommonOptions {
    */
   parentTranscript?: string | null;
   /**
-   * Also write the contract-bearing prompt to a file and return its path.
-   *
-   * For a caller that cannot put the prompt on the spawn itself. A Codex hook
-   * can refuse a spawn but not rewrite one, so it hands the host a path to
-   * read rather than a string to reproduce — and a file read is one thing a
-   * model does reliably, where copying four hundred lines verbatim out of a
-   * refusal message is not.
-   */
-  stagePrompt?: boolean;
-  /**
-   * Return the dispatch this session already opened for this archetype and
-   * name, instead of opening a second one.
-   *
-   * The retry guard for the refuse-and-retry lane: the host is told what to
-   * spawn, and if it comes back with the instruction misapplied the wrapper
-   * must not cut another worktree each time round. Requires `stagePrompt`,
-   * because a reused dispatch's prompt is read back from the staged file — the
-   * contract cannot be recomposed byte-for-byte after the fact (a director's
-   * carries the live unclosed list).
-   */
-  reuseOpen?: boolean;
-  /**
    * `auto` (the default) lets the resolution choose: a host candidate opens on
    * the host lane, anything else is handed to the command lane as a relay.
    * `host` opens on the host lane regardless — the caller is about to run the
    * agent in-session itself. `command` stages the relay regardless.
    */
   lane?: OpenLane;
+  /**
+   * The harness's own id for the subagent being opened for. Recorded, and the
+   * exact handle a stop hook resolves by.
+   */
+  agentId?: string | null;
+  /**
+   * The harness sealed the caller's prompt, and this is why. Codex's newer
+   * spawn tool encrypts the message it carries, so a hook watching the spawn
+   * sees a ciphertext where the ask should be. Rather than record a blob or
+   * invent an ask, the row records this sentence and is stamped `prompt_sealed`
+   * so no reader can mistake it for what the host wrote.
+   */
+  promptSealed?: string | null;
+  /**
+   * Resolve and run every refusal check, then answer what WOULD happen and
+   * open nothing — no worktree, no row, no staged prompt.
+   *
+   * For a hook that must decide before it has anything to open with. Codex's
+   * spawn hook opens at `SubagentStart`, where the agent id makes the binding
+   * exact, but the call it has to refuse arrives one event earlier — and a
+   * refusal that reasoned from its own copy of the rules would be a second
+   * source of truth for the lane and the unclosed limit. This is the same code
+   * path, stopped one step short of writing.
+   */
+  dryRun?: boolean;
 }
 
 export type OpenLane = 'auto' | 'host' | 'command';
@@ -214,14 +234,16 @@ export interface DispatchOpened {
   workspace: { path: string; branch: string | null; base: string };
   shared: boolean;
   sharedReason: string | null;
-  /** The contract-bearing prompt the agent should receive. */
+  /** The contract-bearing prompt the agent should receive, as one document. */
   prompt: string;
-  /** Where that prompt was staged, when `--stage-prompt` asked for a file. */
-  promptFile?: string;
+  /**
+   * The contract alone. What a caller that cannot touch the prompt delivers
+   * separately — Codex's `SubagentStart` hands this to the subagent as
+   * developer context, since a Codex hook can add to a spawn but never rewrite
+   * one.
+   */
   contract: string;
   nag: string;
-  /** True when this is the dispatch a previous call opened, not a new one. */
-  reused?: true;
 }
 
 /**
@@ -243,16 +265,55 @@ export interface DispatchRelayed {
   nag: string;
 }
 
-export type DispatchOpenOutcome = DispatchOpened | DispatchRelayed | { ok: false; refused: string };
+/** What a `--dry-run` open answers: the routing, and that nothing was written. */
+export interface DispatchWouldOpen {
+  ok: true;
+  opened: false;
+  dryRun: true;
+  lane: Lane;
+  archetype: string;
+  model: string;
+  modelId: string;
+  effort: string | null;
+  harness: string | null;
+  /** Whether this archetype can be delivered at all from here. */
+  deliverable: boolean;
+  nag: string;
+}
+
+export type DispatchOpenOutcome = DispatchOpened | DispatchRelayed | DispatchWouldOpen | { ok: false; refused: string };
 
 export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome {
   const repoRoot = rootOf(opts);
-  const prompt = readPromptInput(opts, opts.cwd ?? process.cwd());
-  if (prompt.trim().length === 0) throw new SpawnError('empty prompt: nothing to dispatch.');
+  const sealed = opts.promptSealed?.trim() || null;
+  const dryRun = opts.dryRun === true;
+  const prompt = dryRun ? '' : sealed != null ? sealedPromptText(sealed) : readPromptInput(opts, opts.cwd ?? process.cwd());
+  if (!dryRun && prompt.trim().length === 0) throw new SpawnError('empty prompt: nothing to dispatch.');
   const resolution = resolveArchetype({ repoRoot, archetype: opts.archetype, explicitModel: opts.model ?? null, userPathOptions: opts.userPathOptions });
   const wanted = opts.lane ?? 'auto';
   if (!OPEN_LANES.includes(wanted)) throw new DispatchesError(`--lane ${String(wanted)}: expected one of ${OPEN_LANES.join(', ')}.`);
   const lane = wanted === 'auto' ? resolution.lane : wanted;
+  if (dryRun) {
+    const unclosed = unclosedDispatches(repoRoot);
+    // The limit first, and by the same call the real open uses: a hook that
+    // counted unclosed rows itself would be a second reader of one rule, which
+    // is how the two ever come to disagree.
+    const refused = spawnRefusedByLimit(unclosed, resolution.unclosedLimit);
+    if (refused != null) return { ok: false, refused };
+    return {
+      ok: true,
+      opened: false,
+      dryRun: true,
+      lane,
+      archetype: resolution.archetype,
+      model: resolution.model,
+      modelId: resolution.modelId,
+      effort: resolution.effort,
+      harness: opts.harness ?? resolution.harness,
+      deliverable: lane === 'host' || commandLaneAvailable(resolution),
+      nag: nagText(unclosed, resolution.unclosedLimit),
+    };
+  }
   const parentTranscript = opts.parentTranscript?.trim() ? resolve(opts.cwd ?? process.cwd(), opts.parentTranscript.trim()) : null;
   const parent = opts.parent !== undefined && opts.parent !== null
     ? opts.parent
@@ -287,13 +348,6 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
       nag: nagText(unclosed, resolution.unclosedLimit),
     };
   }
-  // The retry guard, before anything is prepared: a host that was refused and
-  // told what to spawn may come back with the same archetype and name, and it
-  // must get the dispatch it was already given rather than a second one.
-  if (opts.reuseOpen === true) {
-    const existing = reusableOpen(repoRoot, opts.archetype, opts.name ?? null, opts.session ?? null);
-    if (existing != null) return existing;
-  }
   const outcome = prepareDispatch({
     repoRoot,
     archetype: opts.archetype,
@@ -305,6 +359,8 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
     session: opts.session ?? null,
     parent,
     lane: 'host',
+    agentId: opts.agentId ?? null,
+    promptSealed: sealed != null,
     userPathOptions: opts.userPathOptions,
     env: opts.env,
     resolution,
@@ -328,66 +384,9 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
     shared: p.shared,
     sharedReason: p.sharedReason,
     prompt: p.composedPrompt,
-    ...(opts.stagePrompt === true ? { promptFile: stageHostPrompt(repoRoot, p.id, p.composedPrompt) } : {}),
     contract: p.contract,
     nag: p.nag,
   };
-}
-
-/** Where a host-lane prompt is staged for a caller that cannot carry it inline. */
-function hostPromptPath(repoRoot: string, id: string): string {
-  return join(repoRoot, RELAY_DIR, `${id}.md`);
-}
-
-function stageHostPrompt(repoRoot: string, id: string, composed: string): string {
-  const path = hostPromptPath(repoRoot, id);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, composed.endsWith('\n') ? composed : `${composed}\n`, 'utf8');
-  return path;
-}
-
-/**
- * The dispatch a previous call already opened for this archetype and name, or
- * null.
- *
- * Deliberately narrow: same session, same archetype, same name, opened and not
- * yet stopped, and its staged prompt still on disk. Anything looser would hand
- * a caller somebody else's dispatch, and there is no failure worse than two
- * agents believing they own one worktree.
- */
-function reusableOpen(repoRoot: string, archetype: string, name: string | null, session: string | null): DispatchOpened | null {
-  if (name == null || name.trim().length === 0) return null;
-  const wanted = sanitizeName(name.trim());
-  for (const record of readDispatches(repoRoot).records) {
-    const o = record.opened;
-    if (o == null || record.state !== 'open' || record.stopped != null) continue;
-    if (o.archetype !== archetype || o.name !== wanted || o.lane !== 'host') continue;
-    if (session != null && o.session !== session) continue;
-    const staged = hostPromptPath(repoRoot, o.id);
-    if (!existsSync(staged)) continue;
-    return {
-      ok: true,
-      opened: true,
-      reused: true,
-      id: o.id,
-      name: o.name,
-      archetype: o.archetype,
-      model: o.model,
-      modelId: o.model_id ?? o.model,
-      effort: o.effort,
-      harness: o.harness,
-      lane: 'host',
-      cwd: o.workspace != null ? resolve(repoRoot, o.workspace.path) : repoRoot,
-      workspace: o.workspace ?? { path: '.', branch: null, base: 'unknown' },
-      shared: o.workspace == null || o.workspace.path === '.',
-      sharedReason: null,
-      prompt: readFileSync(staged, 'utf8'),
-      promptFile: staged,
-      contract: '',
-      nag: nagText(unclosedDispatches(repoRoot), DEFAULT_UNCLOSED_LIMIT),
-    };
-  }
-  return null;
 }
 
 export interface DispatchStopOptions extends CommonOptions {
@@ -403,6 +402,12 @@ export interface DispatchStopOptions extends CommonOptions {
    * last assistant text when no message was passed.
    */
   transcript?: string | null;
+  /**
+   * The harness's own id for the subagent that stopped. Tried before the
+   * transcript: it is exact, it is what the harness actually knows, and it
+   * still resolves when the contract never reached the transcript at all.
+   */
+  agentId?: string | null;
 }
 
 export interface DispatchStopped {
@@ -420,11 +425,21 @@ export function runDispatchStop(opts: DispatchStopOptions): DispatchStopped {
   const repoRoot = rootOf(opts);
   const transcriptPath = opts.transcript?.trim() ? resolve(opts.cwd ?? process.cwd(), opts.transcript.trim()) : null;
   const facts = transcriptPath != null ? readTranscriptFacts(transcriptPath) : null;
-  const ref = opts.ref?.trim() || facts?.dispatchId || null;
+  // The agent id first: the harness knows it for certain, where the contract
+  // header is something Fadeno hopes it will find in a file the harness wrote.
+  // An id that names no dispatch is not an error here — a stop hook fires for
+  // every subagent, and most of them are nobody's dispatch — so it falls
+  // through to the transcript, which is what says "not a dispatch" out loud.
+  const byAgent = opts.agentId?.trim() ? findDispatchByAgentId(readDispatches(repoRoot).records, opts.agentId.trim()) : null;
+  const ref = byAgent?.ok === true ? byAgent.record.id : opts.ref?.trim() || facts?.dispatchId || null;
   if (ref == null) {
-    throw transcriptPath != null
-      ? new NotADispatchError(`${transcriptPath} carries no Fadeno dispatch contract; this agent was not a dispatch.`)
-      : new DispatchesError('name a dispatch (<name|id>) or pass --transcript <path> so the contract header can name it.');
+    // "No dispatch answers to this agent" is the same finding as "this
+    // transcript carries no contract", and gets the same exit: not an error,
+    // just a subagent that was nobody's dispatch. A stop hook fires for every
+    // one of them, so this is the ordinary case, not the exceptional one.
+    if (transcriptPath != null) throw new NotADispatchError(`${transcriptPath} carries no Fadeno dispatch contract; this agent was not a dispatch.`);
+    if (opts.agentId?.trim()) throw new NotADispatchError(`no dispatch was opened for agent ${opts.agentId.trim()}; this agent was not a dispatch.`);
+    throw new DispatchesError('name a dispatch (<name|id>), pass --agent-id <id>, or pass --transcript <path> so the contract header can name it.');
   }
   const record = lookup(repoRoot, ref);
   if (record.opened == null) throw new DispatchesError(`dispatch ${record.id} has no opened row; nothing to stop.`);
@@ -690,6 +705,13 @@ export function renderDispatchDetail(d: DispatchDetail): string[] {
     `  worktree:  ${d.worktree ?? '(none recorded)'}${e.branch ? ` on ${e.branch}` : e.shared ? ' (shared tree)' : ''}`,
     `  state:     ${e.state}${e.verb ? ` (${e.verb}${e.note ? `: ${e.note}` : ''})` : ''}`,
   ];
+  // Said once, plainly, at the top: the row has no record of the ask. A reader
+  // who scrolls to "what the agent reported" and works back would otherwise
+  // meet the explanation in the task column and take it for the task.
+  if (d.record.opened?.prompt_sealed === true) {
+    const why = (d.prompt ?? '').split('\n', 1)[0]!.replace(/^\(|\)$/g, '');
+    lines.push(`  the ask:   NOT RECORDED — ${why}`);
+  }
   if (d.record.stopped != null) {
     const s = d.record.stopped;
     const dirty = s.dirty === 'unavailable' ? 'unreadable' : s.dirty.paths.length === 0 ? 'clean' : `${s.dirty.paths.length}${s.dirty.truncated ? '+' : ''} path(s): ${s.dirty.paths.slice(0, 8).join(', ')}`;
@@ -998,7 +1020,7 @@ export function runContext(opts: CommonOptions & { now?: Date } = {}): { text: s
   const unclosed = unclosedDispatches(repoRoot);
   const limit = profile.unclosedLimit ?? DEFAULT_UNCLOSED_LIMIT;
   const preamble = readPreamble(repoRoot);
-  return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, preamble, now: opts.now }), archetypes, preamble };
+  return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, preamble, host: profile.host ?? null, now: opts.now }), archetypes, preamble };
 }
 
 // ---------------------------------------------------------------------------

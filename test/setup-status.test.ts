@@ -99,13 +99,16 @@ test('setup sweeps the state the managed-runtime era wrote, because nothing read
   assert.equal(existsSync(join(stateDir, 'dials.json')), true);
 });
 
-test('setup removes the agent files an earlier Fadeno materialized, and leaves hand-written ones alone', (t) => {
+test('setup replaces its own agent files, sweeps the ones it no longer writes, and leaves hand-written ones alone', (t) => {
   const { root, user, source } = seed(t);
   const projectAgents = join(root, '.codex', 'agents');
   const userAgents = join(root, 'home', '.codex', 'agents');
   mkdirSync(projectAgents, { recursive: true });
   mkdirSync(userAgents, { recursive: true });
+  // Project scope: Fadeno no longer writes there at all, so its own file goes.
   writeFileSync(join(projectAgents, 'worker.toml'), '# fadeno:managed version=0.6.1\nmodel = "gpt-5.6-luna"\n', 'utf8');
+  // User scope, a name this version still writes: REPLACED, not removed —
+  // sweeping it would make every setup report deleting a file it puts back.
   writeFileSync(join(userAgents, 'fadeno-judge.toml'), '# fadeno:managed version=0.6.1\nmodel = "opus"\n', 'utf8');
   // Not Fadeno's, and never touched: an agent file without the marker belongs
   // to the user, whatever it is named.
@@ -113,9 +116,22 @@ test('setup removes the agent files an earlier Fadeno materialized, and leaves h
 
   const result = runSetup({ repoRoot: root, userPathOptions: user, source, target: 'codex' });
   assert.equal(existsSync(join(projectAgents, 'worker.toml')), false);
-  assert.equal(existsSync(join(userAgents, 'fadeno-judge.toml')), false);
   assert.equal(existsSync(join(projectAgents, 'reviewer.toml')), true, 'a hand-written agent file is the user\'s');
-  assert.match(result.notices.join('\n'), /worker\.toml, which an earlier Fadeno materialized.*overrides the dial/s);
+  assert.match(result.notices.join('\n'), /worker\.toml, which an earlier Fadeno materialized/s);
+
+  // The stale user-scope file survives as a file and dies as a routing
+  // decision: this version's content, and no `model` key to beat the dial.
+  const judge = readFileSync(join(userAgents, 'fadeno-judge.toml'), 'utf8');
+  assert.doesNotMatch(judge, /^\s*model\s*=/m, 'a model here would silently override the dial');
+  assert.match(judge, /^# fadeno:managed archetype=judge/);
+  assert.match(judge, /name = "fadeno-judge"/);
+
+  // Every builtin archetype is spawnable by name, which is the whole point:
+  // without these files Codex has no `agent_type` parameter at all.
+  for (const archetype of ['worker', 'reviewer', 'judge', 'scout', 'director']) {
+    assert.ok(result.codexAgents.some((path) => path.endsWith(`fadeno-${archetype}.toml`)), archetype);
+    assert.equal(existsSync(join(userAgents, `fadeno-${archetype}.toml`)), true, archetype);
+  }
 });
 
 test('setup --claude grants the CLI permission once, in the user\'s own settings', (t) => {
@@ -197,9 +213,35 @@ test('status names an unlinked CLI, an agent file that answers an archetype, and
   );
   const attention = result.attention.join('\n');
   assert.match(attention, /no `fadeno` linked at .*run `fadeno setup`/);
-  assert.match(attention, /fadeno-reviewer\.toml defines the agent "reviewer" \(user scope, codex\)\. A Codex agent file wins over the model a spawn passes/);
+  assert.match(attention, /fadeno-reviewer\.toml defines the agent "reviewer" \(user scope, codex\)\. It declares a model, and on Codex a file's model wins/);
   assert.match(attention, /worker\.md defines the agent "worker" \(project scope, claude\)/);
   assert.doesNotMatch(attention, /note-taker/);
+});
+
+test('what makes a Codex agent file a finding is the model it declares, not that it exists', (t) => {
+  const { root, user, source } = seed(t);
+  runSetup({ repoRoot: root, userPathOptions: user, source, target: 'codex' });
+  const userAgents = join(root, 'home', '.codex', 'agents');
+
+  // Fadeno's own vocabulary: present, routed, and NOT a finding. Reporting the
+  // five files it just wrote would train a reader to skim the one line here
+  // that means something.
+  const quiet = runStatus({ repoRoot: root, userPathOptions: user });
+  assert.deepEqual(quiet.agentFiles, []);
+  assert.doesNotMatch(quiet.attention.join('\n'), /agents/);
+
+  // A hand-written file with no model does not beat the dial, and is not
+  // described as if it did — but its instructions still reach the spawn.
+  writeFileSync(join(userAgents, 'mine.toml'), 'name = "worker"\ndeveloper_instructions = "be brief"\n', 'utf8');
+  const soft = runStatus({ repoRoot: root, userPathOptions: user });
+  assert.deepEqual(soft.agentFiles.map((f) => [f.archetype, f.declaresModel]), [['worker', false]]);
+  assert.match(soft.attention.join('\n'), /declares no model, so the dial still routes/);
+
+  // Add a model and the same file becomes the thing worth saying out loud.
+  writeFileSync(join(userAgents, 'mine.toml'), 'name = "worker"\nmodel = "gpt-5"\n', 'utf8');
+  const loud = runStatus({ repoRoot: root, userPathOptions: user });
+  assert.deepEqual(loud.agentFiles.map((f) => [f.archetype, f.declaresModel]), [['worker', true]]);
+  assert.match(loud.attention.join('\n'), /it overrides the dial/);
 });
 
 test('status refuses in one voice with dial when the machine-local dials cannot be read', (t) => {

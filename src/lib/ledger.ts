@@ -79,11 +79,25 @@ export interface OpenedRow {
   lane: Lane;
   harness: string | null;
   workspace: Workspace | null;
+  /**
+   * The harness's own id for the subagent this dispatch was opened for, when
+   * the harness names one. Codex's `SubagentStart` does; it is the only field
+   * that ties a dispatch to a running subagent exactly, without parsing a
+   * transcript for the contract header.
+   */
+  agent_id?: string;
   /** First `TASK_EXCERPT_CHARS` of the caller's prompt. */
   task: string;
   task_truncated?: true;
   /** Repo-relative path of the full prompt text. */
   prompt: string;
+  /**
+   * Set when the harness sealed the caller's prompt from Fadeno — Codex's
+   * newer spawn tool encrypts the message it carries, so `task` and `prompt`
+   * hold an explanation rather than the ask. A flag, not prose to parse: a
+   * reader must never present the explanation as what the host wrote.
+   */
+  prompt_sealed?: true;
   /** Command lane only: the process group Fadeno launched, for `cancel`. */
   process_group?: number;
 }
@@ -297,6 +311,30 @@ export function findDispatch(records: readonly DispatchRecord[], query: string):
   const names = [...new Set(records.map((record) => record.opened?.name).filter((n): n is string => n != null))];
   const hint = names.length === 0 ? 'the ledger holds no dispatches.' : `known names: ${names.slice(-10).join(', ')}.`;
   return { ok: false, reason: 'unknown', message: `no dispatch "${q}"; ${hint}` };
+}
+
+/**
+ * Resolve a dispatch by the harness's own subagent id. Exact or nothing: an
+ * agent id is the harness's, never a human's, so there is no prefix or alias
+ * to be generous about, and a near miss is a bug rather than a typo.
+ *
+ * Separate from `findDispatch` on purpose. That one resolves what a person or
+ * an agent typed; this one resolves what a stop hook was handed. Folding the
+ * two would let a dispatch NAMED like an agent id answer for the wrong agent.
+ */
+export function findDispatchByAgentId(records: readonly DispatchRecord[], agentId: string): DispatchLookup {
+  const q = agentId.trim();
+  if (q === '') return { ok: false, reason: 'unknown', message: 'empty agent id.' };
+  const matches = records.filter((record) => record.opened?.agent_id === q);
+  if (matches.length === 1) return { ok: true, record: matches[0]!, by: 'id' };
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      reason: 'ambiguous',
+      message: `${matches.length} dispatches claim agent ${q}: ${matches.map((r) => r.id).join(', ')} — the binding is broken, not the query.`,
+    };
+  }
+  return { ok: false, reason: 'unknown', message: `no dispatch was opened for agent ${q}.` };
 }
 
 /** The inline task excerpt: the first characters of the prompt, flagged when cut. */

@@ -103,9 +103,10 @@ const COMMANDS: Record<string, CommandSpec> = {
   'dispatch-open': command({
     '--archetype': { kind: 'archetype' }, '--model': { kind: 'free' }, '--name': { kind: 'free' }, '--prompt-file': PATH,
     '--shared': NONE, '--from': { kind: 'free' }, '--session-id': { kind: 'free' }, '--parent': { kind: 'free' }, '--parent-transcript': PATH, '--harness': { kind: 'free' }, '--lane': { kind: 'free' },
-    '--stage-prompt': NONE, '--reuse-open': NONE, '--json': NONE,
+    '--json': NONE,
+    '--prompt-sealed': { kind: 'free' }, '--agent-id': { kind: 'free' }, '--dry-run': NONE,
   }),
-  'dispatch-stop': command({ '--transcript': PATH, '--message-file': PATH, '--agent-cwd': PATH, '--json': NONE }, ['free']),
+  'dispatch-stop': command({ '--agent-id': { kind: 'free' }, '--transcript': PATH, '--message-file': PATH, '--agent-cwd': PATH, '--json': NONE }, ['free']),
   'dispatch-wait': command({ '--wait-seconds': { kind: 'free' }, '--json': NONE }, ['free', 'free', 'free', 'free']),
   'dispatch-close': command({ '--merged': NONE, '--kept': NONE, '--discarded': NONE, '--failed': NONE, '--note': { kind: 'free' }, '--force': NONE }, ['free']),
   cancel: command({}, ['free']),

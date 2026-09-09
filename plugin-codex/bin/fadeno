@@ -7709,6 +7709,20 @@ function findDispatch(records, query) {
   const hint = names.length === 0 ? "the ledger holds no dispatches." : `known names: ${names.slice(-10).join(", ")}.`;
   return { ok: false, reason: "unknown", message: `no dispatch "${q}"; ${hint}` };
 }
+function findDispatchByAgentId(records, agentId) {
+  const q = agentId.trim();
+  if (q === "") return { ok: false, reason: "unknown", message: "empty agent id." };
+  const matches = records.filter((record) => record.opened?.agent_id === q);
+  if (matches.length === 1) return { ok: true, record: matches[0], by: "id" };
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      reason: "ambiguous",
+      message: `${matches.length} dispatches claim agent ${q}: ${matches.map((r) => r.id).join(", ")} \u2014 the binding is broken, not the query.`
+    };
+  }
+  return { ok: false, reason: "unknown", message: `no dispatch was opened for agent ${q}.` };
+}
 function excerptTask(prompt) {
   const normalized = prompt.replace(/\r\n/g, "\n").trim();
   if (normalized.length <= TASK_EXCERPT_CHARS) return { task: normalized, truncated: false };
@@ -7863,10 +7877,17 @@ function hostVocabulary(input) {
   }
   lines.push("");
   lines.push("## Spawning", "");
-  lines.push("- Spawn through your harness's subagent tool with the archetype as the agent type (`fadeno:worker` on Claude Code; `worker` on Codex). Where no Fadeno hook can observe a spawn, run `fadeno dispatch --archetype <name> --prompt-file <file>` instead; it does the same thing as a process.");
+  if (input.host === "codex") {
+    lines.push(
+      "- Spawn through the subagent tool with `agent_type: \"fadeno-<archetype>\"` (`fadeno-worker`, `fadeno-reviewer`, \u2026), and pass the dial's model and effort ON THE SPAWN, as `model` and `reasoning_effort`. Read them at the moment you spawn with `fadeno dial <archetype> --json`. A spawn carrying no model, or a different one, is REFUSED: a Codex hook can refuse a spawn but cannot rewrite one, so an unrouted subagent would silently run on this session's model."
+    );
+    lines.push("- Nothing else has to be added to the spawn. Fadeno opens the dispatch and hands the agent its contract as it starts, so write the prompt as the task alone.");
+  } else {
+    lines.push("- Spawn through your harness's subagent tool with the archetype as the agent type (`fadeno:worker` on Claude Code). Where no Fadeno hook can observe a spawn, run `fadeno dispatch --archetype <name> --prompt-file <file>` instead; it does the same thing as a process.");
+  }
   lines.push("- Write the prompt as the task itself, addressed to the agent that will do it. Fadeno appends the dispatch contract; do not describe Fadeno to the worker.");
   lines.push(
-    input.preamble?.exists ? "- This repository states conventions for every dispatch in `.fadeno/preamble.md`, and Fadeno appends them to every prompt you dispatch. Do not repeat them in a brief; read the file if you need to know what your workers were already told, and add to it rather than to a prompt when something turns out to hold for all of them." : "- Conventions that hold for EVERY dispatch here \u2014 the interpreter, the shared build directory, where receipts belong, what is forbidden \u2014 belong in `.fadeno/preamble.md`, which Fadeno appends to every dispatched prompt when it exists. Putting one there beats retyping it into each brief, and makes a brief that forgets it impossible."
+    input.preamble?.exists ? "- This repository states conventions for every dispatch in `.fadeno/preamble.md`, and Fadeno delivers them to every agent it dispatches. Do not repeat them in a brief; read the file if you need to know what your workers were already told, and add to it rather than to a prompt when something turns out to hold for all of them." : "- Conventions that hold for EVERY dispatch here \u2014 the interpreter, the shared build directory, where receipts belong, what is forbidden \u2014 belong in `.fadeno/preamble.md`, which Fadeno appends to every dispatched prompt when it exists. Putting one there beats retyping it into each brief, and makes a brief that forgets it impossible."
   );
   lines.push("- Every dispatch gets a worktree cut from HEAD on a branch named `fadeno/<name>`. If the work needs uncommitted changes, commit them first, or ask for the shared tree by saying so in the spawn (`--shared` on the command lane). Two agents must never share one tree.");
   lines.push(
@@ -9604,6 +9625,9 @@ function loadProfile(repoRoot, userPathOptions) {
     throw err;
   }
 }
+function commandLaneAvailable(resolution) {
+  return resolution.command != null && resolution.command.length > 0;
+}
 function requireCommand(resolution) {
   if (resolution.command == null || resolution.command.length === 0) {
     throw new SpawnError(
@@ -9736,7 +9760,9 @@ function prepareDispatch(input) {
       session: input.session ?? null,
       parent,
       at: nowIso(now),
-      lane: input.lane
+      lane: input.lane,
+      agentId: input.agentId?.trim() || null,
+      promptSealed: input.promptSealed === true
     }
   };
 }
@@ -9768,9 +9794,11 @@ function recordOpened(repoRoot, prepared, extra = {}) {
     lane: extra.lane ?? prepared.lane,
     harness: extra.harness !== void 0 ? extra.harness : prepared.resolution.harness,
     workspace: prepared.workspace,
+    ...prepared.agentId != null ? { agent_id: prepared.agentId } : {},
     task,
     ...truncated ? { task_truncated: true } : {},
     prompt: prepared.promptPath,
+    ...prepared.promptSealed ? { prompt_sealed: true } : {},
     ...extra.processGroup != null ? { process_group: extra.processGroup } : {}
   };
   appendRow(repoRoot, row);
@@ -10064,6 +10092,12 @@ function readPromptInput(opts, cwd) {
   if (typeof opts.prompt === "string") return opts.prompt;
   throw new DispatchesError("no prompt: pass --prompt-file <path> or pipe the prompt on stdin.");
 }
+function sealedPromptText(reason) {
+  return `(Fadeno did not see this dispatch's prompt: ${reason})
+
+The task went straight from the host to the agent. What the agent was asked is in the host's own transcript and in the agent's; it was never Fadeno's to record. Everything else about this dispatch \u2014 its archetype, model, worktree, branch, and what the branch ended up holding \u2014 was measured as usual.
+`;
+}
 function lookup(repoRoot, ref) {
   const found = findDispatch(readDispatches(repoRoot).records, ref);
   if (!found.ok) throw new DispatchesError(found.message);
@@ -10101,12 +10135,32 @@ async function runDispatch(opts) {
 var OPEN_LANES = ["auto", "host", "command"];
 function runDispatchOpen(opts) {
   const repoRoot = rootOf(opts);
-  const prompt = readPromptInput(opts, opts.cwd ?? process.cwd());
-  if (prompt.trim().length === 0) throw new SpawnError("empty prompt: nothing to dispatch.");
+  const sealed = opts.promptSealed?.trim() || null;
+  const dryRun = opts.dryRun === true;
+  const prompt = dryRun ? "" : sealed != null ? sealedPromptText(sealed) : readPromptInput(opts, opts.cwd ?? process.cwd());
+  if (!dryRun && prompt.trim().length === 0) throw new SpawnError("empty prompt: nothing to dispatch.");
   const resolution = resolveArchetype({ repoRoot, archetype: opts.archetype, explicitModel: opts.model ?? null, userPathOptions: opts.userPathOptions });
   const wanted = opts.lane ?? "auto";
   if (!OPEN_LANES.includes(wanted)) throw new DispatchesError(`--lane ${String(wanted)}: expected one of ${OPEN_LANES.join(", ")}.`);
   const lane = wanted === "auto" ? resolution.lane : wanted;
+  if (dryRun) {
+    const unclosed = unclosedDispatches(repoRoot);
+    const refused = spawnRefusedByLimit(unclosed, resolution.unclosedLimit);
+    if (refused != null) return { ok: false, refused };
+    return {
+      ok: true,
+      opened: false,
+      dryRun: true,
+      lane,
+      archetype: resolution.archetype,
+      model: resolution.model,
+      modelId: resolution.modelId,
+      effort: resolution.effort,
+      harness: opts.harness ?? resolution.harness,
+      deliverable: lane === "host" || commandLaneAvailable(resolution),
+      nag: nagText(unclosed, resolution.unclosedLimit)
+    };
+  }
   const parentTranscript = opts.parentTranscript?.trim() ? (0, import_node_path9.resolve)(opts.cwd ?? process.cwd(), opts.parentTranscript.trim()) : null;
   const parent = opts.parent !== void 0 && opts.parent !== null ? opts.parent : parentTranscript != null && (0, import_node_fs10.existsSync)(parentTranscript) ? readTranscriptFacts(parentTranscript).dispatchId ?? void 0 : opts.parent;
   if (lane === "command") {
@@ -10137,10 +10191,6 @@ function runDispatchOpen(opts) {
       nag: nagText(unclosed, resolution.unclosedLimit)
     };
   }
-  if (opts.reuseOpen === true) {
-    const existing = reusableOpen(repoRoot, opts.archetype, opts.name ?? null, opts.session ?? null);
-    if (existing != null) return existing;
-  }
   const outcome = prepareDispatch({
     repoRoot,
     archetype: opts.archetype,
@@ -10152,6 +10202,8 @@ function runDispatchOpen(opts) {
     session: opts.session ?? null,
     parent,
     lane: "host",
+    agentId: opts.agentId ?? null,
+    promptSealed: sealed != null,
     userPathOptions: opts.userPathOptions,
     env: opts.env,
     resolution
@@ -10175,54 +10227,9 @@ function runDispatchOpen(opts) {
     shared: p.shared,
     sharedReason: p.sharedReason,
     prompt: p.composedPrompt,
-    ...opts.stagePrompt === true ? { promptFile: stageHostPrompt(repoRoot, p.id, p.composedPrompt) } : {},
     contract: p.contract,
     nag: p.nag
   };
-}
-function hostPromptPath(repoRoot, id) {
-  return (0, import_node_path9.join)(repoRoot, RELAY_DIR, `${id}.md`);
-}
-function stageHostPrompt(repoRoot, id, composed) {
-  const path = hostPromptPath(repoRoot, id);
-  (0, import_node_fs10.mkdirSync)((0, import_node_path9.dirname)(path), { recursive: true });
-  (0, import_node_fs10.writeFileSync)(path, composed.endsWith("\n") ? composed : `${composed}
-`, "utf8");
-  return path;
-}
-function reusableOpen(repoRoot, archetype, name, session) {
-  if (name == null || name.trim().length === 0) return null;
-  const wanted = sanitizeName(name.trim());
-  for (const record of readDispatches(repoRoot).records) {
-    const o = record.opened;
-    if (o == null || record.state !== "open" || record.stopped != null) continue;
-    if (o.archetype !== archetype || o.name !== wanted || o.lane !== "host") continue;
-    if (session != null && o.session !== session) continue;
-    const staged = hostPromptPath(repoRoot, o.id);
-    if (!(0, import_node_fs10.existsSync)(staged)) continue;
-    return {
-      ok: true,
-      opened: true,
-      reused: true,
-      id: o.id,
-      name: o.name,
-      archetype: o.archetype,
-      model: o.model,
-      modelId: o.model_id ?? o.model,
-      effort: o.effort,
-      harness: o.harness,
-      lane: "host",
-      cwd: o.workspace != null ? (0, import_node_path9.resolve)(repoRoot, o.workspace.path) : repoRoot,
-      workspace: o.workspace ?? { path: ".", branch: null, base: "unknown" },
-      shared: o.workspace == null || o.workspace.path === ".",
-      sharedReason: null,
-      prompt: (0, import_node_fs10.readFileSync)(staged, "utf8"),
-      promptFile: staged,
-      contract: "",
-      nag: nagText(unclosedDispatches(repoRoot), DEFAULT_UNCLOSED_LIMIT)
-    };
-  }
-  return null;
 }
 var NotADispatchError = class extends DispatchesError {
 };
@@ -10230,9 +10237,12 @@ function runDispatchStop(opts) {
   const repoRoot = rootOf(opts);
   const transcriptPath = opts.transcript?.trim() ? (0, import_node_path9.resolve)(opts.cwd ?? process.cwd(), opts.transcript.trim()) : null;
   const facts = transcriptPath != null ? readTranscriptFacts(transcriptPath) : null;
-  const ref = opts.ref?.trim() || facts?.dispatchId || null;
+  const byAgent = opts.agentId?.trim() ? findDispatchByAgentId(readDispatches(repoRoot).records, opts.agentId.trim()) : null;
+  const ref = byAgent?.ok === true ? byAgent.record.id : opts.ref?.trim() || facts?.dispatchId || null;
   if (ref == null) {
-    throw transcriptPath != null ? new NotADispatchError(`${transcriptPath} carries no Fadeno dispatch contract; this agent was not a dispatch.`) : new DispatchesError("name a dispatch (<name|id>) or pass --transcript <path> so the contract header can name it.");
+    if (transcriptPath != null) throw new NotADispatchError(`${transcriptPath} carries no Fadeno dispatch contract; this agent was not a dispatch.`);
+    if (opts.agentId?.trim()) throw new NotADispatchError(`no dispatch was opened for agent ${opts.agentId.trim()}; this agent was not a dispatch.`);
+    throw new DispatchesError("name a dispatch (<name|id>), pass --agent-id <id>, or pass --transcript <path> so the contract header can name it.");
   }
   const record = lookup(repoRoot, ref);
   if (record.opened == null) throw new DispatchesError(`dispatch ${record.id} has no opened row; nothing to stop.`);
@@ -10399,6 +10409,10 @@ function renderDispatchDetail(d) {
     `  worktree:  ${d.worktree ?? "(none recorded)"}${e.branch ? ` on ${e.branch}` : e.shared ? " (shared tree)" : ""}`,
     `  state:     ${e.state}${e.verb ? ` (${e.verb}${e.note ? `: ${e.note}` : ""})` : ""}`
   ];
+  if (d.record.opened?.prompt_sealed === true) {
+    const why = (d.prompt ?? "").split("\n", 1)[0].replace(/^\(|\)$/g, "");
+    lines.push(`  the ask:   NOT RECORDED \u2014 ${why}`);
+  }
   if (d.record.stopped != null) {
     const s = d.record.stopped;
     const dirty = s.dirty === "unavailable" ? "unreadable" : s.dirty.paths.length === 0 ? "clean" : `${s.dirty.paths.length}${s.dirty.truncated ? "+" : ""} path(s): ${s.dirty.paths.slice(0, 8).join(", ")}`;
@@ -10553,7 +10567,7 @@ function runContext(opts = {}) {
   const unclosed = unclosedDispatches(repoRoot);
   const limit = profile.unclosedLimit ?? DEFAULT_UNCLOSED_LIMIT;
   const preamble = readPreamble(repoRoot);
-  return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, preamble, now: opts.now }), archetypes, preamble };
+  return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, preamble, host: profile.host ?? null, now: opts.now }), archetypes, preamble };
 }
 function runClean(opts = {}) {
   const repoRoot = rootOf(opts);
@@ -12067,11 +12081,12 @@ var COMMANDS = {
     "--parent-transcript": PATH,
     "--harness": { kind: "free" },
     "--lane": { kind: "free" },
-    "--stage-prompt": NONE,
-    "--reuse-open": NONE,
-    "--json": NONE
+    "--json": NONE,
+    "--prompt-sealed": { kind: "free" },
+    "--agent-id": { kind: "free" },
+    "--dry-run": NONE
   }),
-  "dispatch-stop": command({ "--transcript": PATH, "--message-file": PATH, "--agent-cwd": PATH, "--json": NONE }, ["free"]),
+  "dispatch-stop": command({ "--agent-id": { kind: "free" }, "--transcript": PATH, "--message-file": PATH, "--agent-cwd": PATH, "--json": NONE }, ["free"]),
   "dispatch-wait": command({ "--wait-seconds": { kind: "free" }, "--json": NONE }, ["free", "free", "free", "free"]),
   "dispatch-close": command({ "--merged": NONE, "--kept": NONE, "--discarded": NONE, "--failed": NONE, "--note": { kind: "free" }, "--force": NONE }, ["free"]),
   cancel: command({}, ["free"]),
@@ -12409,6 +12424,51 @@ var import_node_child_process5 = require("node:child_process");
 var import_node_fs17 = require("node:fs");
 var import_node_os2 = require("node:os");
 var import_node_path16 = require("node:path");
+
+// src/lib/codex-agents.ts
+var CODEX_AGENT_MARKER = "# fadeno:managed";
+function codexAgentName(archetype) {
+  return `fadeno-${archetype}`;
+}
+function codexAgentFilename(archetype) {
+  return `${codexAgentName(archetype)}.toml`;
+}
+function tomlString(value) {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+function codexAgentFile(archetype, description) {
+  return [
+    `${CODEX_AGENT_MARKER} archetype=${archetype}`,
+    "# Fadeno writes this file. It states no model and no reasoning effort on",
+    "# purpose: on Codex a file's model WINS over the one a spawn passes, so a",
+    "# model here would override the dial with whatever was true when it was",
+    "# written. Change routing with `fadeno dial`, never by editing this file.",
+    "",
+    `name = ${tomlString(codexAgentName(archetype))}`,
+    `description = ${tomlString(description)}`,
+    'developer_instructions = """',
+    `You are the \`${archetype}\` archetype of a Fadeno dispatch.`,
+    "",
+    "Fadeno delivers your dispatch contract as developer context when you start:",
+    "it says where to work, what you own, and what your final message must",
+    "contain. Follow it. It is the authority on all three, over anything you",
+    "infer from the task itself.",
+    "",
+    "If no `## Fadeno dispatch` contract reached you, you were spawned outside",
+    "Fadeno: do the task as asked, work in the directory you were started in,",
+    "commit nothing, and say plainly in your report that you had no contract.",
+    '"""',
+    ""
+  ].join("\n");
+}
+function declaresModel(text) {
+  return /^\s*model\s*=\s*["']/m.test(text);
+}
+function isManagedAgentFile(text) {
+  return text.startsWith(CODEX_AGENT_MARKER);
+}
+
+// src/commands/setup.ts
 var SetupError = class extends Error {
 };
 var PROBES = [
@@ -12426,10 +12486,36 @@ function probe(command2) {
     version: output.length > 0 ? output.split(/\r?\n/, 1)[0] ?? null : null
   };
 }
-var MANAGED_AGENT_MARKER = "# fadeno:managed";
+var MANAGED_AGENT_MARKER = CODEX_AGENT_MARKER;
+function ourCodexAgentFiles() {
+  return new Set(Object.keys(BUILTIN_ARCHETYPE_DESCRIPTIONS).map((archetype) => codexAgentFilename(archetype)));
+}
+function writeCodexAgents(options, notices) {
+  const dir = codexUserAgentDir(options);
+  const written = [];
+  try {
+    (0, import_node_fs17.mkdirSync)(dir, { recursive: true });
+    for (const [archetype, description] of Object.entries(BUILTIN_ARCHETYPE_DESCRIPTIONS)) {
+      const path = (0, import_node_path16.join)(dir, codexAgentFilename(archetype));
+      (0, import_node_fs17.writeFileSync)(path, codexAgentFile(archetype, description), "utf8");
+      written.push(path);
+    }
+  } catch (err) {
+    notices.push(
+      `could not write the Codex agent files under ${dir} (${err.message}). Codex spawns cannot name an archetype without them, so host mode there will route every spawn to the command lane.`
+    );
+    return written;
+  }
+  notices.push(
+    `Codex archetype vocabulary written to ${dir} (${written.length} agents, spawned as \`fadeno-<archetype>\`). They declare no model: the dial rides the spawn, so routing stays live.`
+  );
+  return written;
+}
 function sweepManagedAgents(repoRoot, options) {
   const removed = [];
-  for (const dir of [codexUserAgentDir(options), (0, import_node_path16.join)(repoRoot, ".codex", "agents")]) {
+  const userDir = codexUserAgentDir(options);
+  const ours = ourCodexAgentFiles();
+  for (const dir of [userDir, (0, import_node_path16.join)(repoRoot, ".codex", "agents")]) {
     let entries;
     try {
       entries = (0, import_node_fs17.readdirSync)(dir);
@@ -12438,6 +12524,7 @@ function sweepManagedAgents(repoRoot, options) {
     }
     for (const entry of entries) {
       if (!entry.endsWith(".toml")) continue;
+      if (dir === userDir && ours.has(entry)) continue;
       const path = (0, import_node_path16.join)(dir, entry);
       try {
         if (!(0, import_node_fs17.readFileSync)(path, "utf8").startsWith(MANAGED_AGENT_MARKER)) continue;
@@ -12577,6 +12664,7 @@ function runSetup(opts = {}) {
   }
   const link = linkCli(paths, source, opts.userPathOptions, opts.force ?? false);
   const removed = [...sweepRetiredState(paths), ...sweepManagedAgents(repoRoot, opts.userPathOptions)];
+  const codexAgents = writeCodexAgents(opts.userPathOptions, notices);
   const permission = opts.target === "claude" ? ensureClaudePermission(opts.userPathOptions, notices) : null;
   notices.unshift(
     `Fadeno ${packageVersion()} linked at ${link.path} -> ${link.target}. It is a link, not a copy: \`fadeno\` runs whatever is at that path, so there is no second CLI to keep in step. Run setup from the plugin's own launcher to point it at the plugin instead.`
@@ -12587,11 +12675,11 @@ function runSetup(opts = {}) {
   notices.push(`User configuration and state live under ${paths.configDir} and ${paths.stateDir}; project files were not changed.`);
   for (const path of removed) {
     notices.push(
-      path.endsWith(".toml") ? `Removed the agent file ${path}, which an earlier Fadeno materialized. Nothing writes one now, and on Codex a stale one overrides the dial.` : `Removed retired state ${path} (nothing reads it).`
+      path.endsWith(".toml") ? `Removed the agent file ${path}, which an earlier Fadeno materialized and this one does not write. On Codex a stale file that declares a model overrides the dial.` : `Removed retired state ${path} (nothing reads it).`
     );
   }
   notices.push("Skills and subagents are loaded at host session start; a fresh session is required to pick up a new plugin version.");
-  return { target: opts.target ?? null, repoRoot, paths, probes, link, removed, permission, notices };
+  return { target: opts.target ?? null, repoRoot, paths, probes, link, removed, codexAgents, permission, notices };
 }
 
 // src/commands/status.ts
@@ -12643,9 +12731,16 @@ function shadowingAgentFiles(repoRoot, archetypes, options) {
     for (const entry of entries) {
       if (!entry.endsWith(root.ext)) continue;
       const path = (0, import_node_path17.join)(root.dir, entry);
+      let text;
+      try {
+        text = (0, import_node_fs18.readFileSync)(path, "utf8");
+      } catch {
+        continue;
+      }
+      if (isManagedAgentFile(text)) continue;
       const archetype = declaredAgentName(path, root.ext);
-      if (!routed.has(archetype)) continue;
-      found.push({ path, archetype, harness: root.harness, scope: root.scope });
+      if (!routed.has(archetype) && !routed.has(archetype.replace(/^fadeno-/, ""))) continue;
+      found.push({ path, archetype, harness: root.harness, scope: root.scope, declaresModel: root.ext === ".toml" && declaresModel(text) });
     }
   }
   return found;
@@ -12686,7 +12781,7 @@ function runStatus(opts = {}) {
   }
   for (const file of agentFiles) {
     attention.push(
-      `${file.path} defines the agent "${file.archetype}" (${file.scope} scope, ${file.harness}). ` + (file.harness === "codex" ? "A Codex agent file wins over the model a spawn passes, so it overrides the dial." : "It supplies the prompt and tools for that spawn, whatever the dial says.")
+      `${file.path} defines the agent "${file.archetype}" (${file.scope} scope, ${file.harness}). ` + (file.harness === "codex" ? file.declaresModel ? "It declares a model, and on Codex a file's model wins over the one a spawn passes, so it overrides the dial." : "It declares no model, so the dial still routes; its instructions still reach that spawn." : "It supplies the prompt and tools for that spawn, whatever the dial says.")
     );
   }
   if (worktrees.length > 0) {
@@ -12767,13 +12862,16 @@ var TOP_LEVEL = {
     "The executor runs in a worktree cut from HEAD (`--from <ref>` cuts elsewhere; `--shared` works in the live tree on your explicit request), with the dispatch contract appended to the prompt. Its stdout is the report and is printed verbatim; its exit code is yours.",
     "Every dispatch must be closed afterwards: `fadeno dispatch-close <name> --merged|--kept|--discarded|--failed`. Fadeno performs no merge."
   ]),
-  "dispatch-open": page("The spawn wrapper for a spawn the host is about to make: open it on the host lane, or hand it to the command lane.", "fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] (--prompt-file <path> | stdin) [--json]", [
+  "dispatch-open": page("The spawn wrapper for a spawn the host is about to make: open it on the host lane, or hand it to the command lane.", "fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] [--agent-id <id>] (--prompt-file <path> | stdin | --prompt-sealed <reason> | --dry-run) [--json]", [
     "The spawn hook's entry point. With `--lane auto` (the default) the resolution decides: a model this session can deliver opens on the host lane \u2014 worktree cut, row written, and `--json` carries the contract-bearing prompt the agent should receive \u2014 while any other model is a relay: nothing is opened, the prompt is staged, and `relay.command` is the `fadeno dispatch` call the dispatch proxy runs.",
     "`--lane host` opens on the host lane regardless, for a caller about to run the agent in-session itself; `--lane command` stages the relay regardless.",
-    "`--stage-prompt` also writes the contract-bearing prompt to a file and returns its path, for a caller that cannot put it on the spawn itself; `--reuse-open` returns the dispatch already open for this archetype and name instead of opening a second one. Together they are the refuse-and-retry lane a hook that cannot rewrite a spawn uses.",
+    "`--agent-id <id>` records the harness's own id for the subagent, which is what `dispatch-stop` then resolves by \u2014 exactly, and without reading a transcript.",
+    "`--prompt-sealed <reason>` opens a dispatch whose prompt the harness never showed Fadeno (Codex encrypts the message on its newer spawn tool). The row is stamped `prompt_sealed` and records the reason where the ask would be, so nothing downstream can mistake the explanation for the task. Every other field is measured as usual.",
+    "`--dry-run` runs the resolution and every refusal check and then stops: it answers the lane, the model, the effort and whether this archetype is deliverable at all, and writes nothing. For a hook that must refuse a call one event before it has anything to open with \u2014 the same code path, so the refusal cannot drift from the open.",
     "Refused (exit 3) at the unclosed-dispatch limit; the refusal names what to close."
   ]),
-  "dispatch-stop": page("Record that a host-lane dispatch's agent stopped, and what its tree holds.", "fadeno dispatch-stop [<name|id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json]", [
+  "dispatch-stop": page("Record that a host-lane dispatch's agent stopped, and what its tree holds.", "fadeno dispatch-stop [<name|id>] [--agent-id <id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json]", [
+    "`--agent-id` is tried first and is exact: it matches the id recorded when the dispatch was opened for that subagent. An id that names no dispatch falls through to the transcript rather than failing, because a stop hook fires for every subagent and most are nobody's dispatch.",
     "The stop hook's entry point. Records presence of a final message, never completeness, and the uncommitted paths in the assigned worktree. A second stop for the same dispatch is a replay.",
     "`--transcript` reads the agent's transcript: the contract header in its prompt names the dispatch (so the ref may be omitted), the last assistant turn supplies the final message when none was passed, and the model the agent ran on is recorded beside the one the dial asked for. A transcript with no contract is not a dispatch: exit 4, nothing recorded."
   ]),
@@ -12886,8 +12984,9 @@ var OPTION_HINTS = {
   "--session": "Local session scope",
   "--session-id": "Host session the spawn came from",
   "--lane": "Which lane opens it: auto (the resolution decides), host, or command",
-  "--stage-prompt": "Also write the prompt to a file and return its path",
-  "--reuse-open": "Return the dispatch already open for this archetype and name",
+  "--prompt-sealed": "Open for a prompt the harness never showed Fadeno, and say why",
+  "--dry-run": "Answer what would happen and open nothing",
+  "--agent-id": "The harness's own id for the subagent",
   "--transcript": "The agent's transcript, read for the dispatch id, final message and model",
   "--parent-transcript": "The spawning agent's transcript; its contract header names the parent dispatch",
   "--shared": "Work in the live tree instead of a worktree",
@@ -12910,6 +13009,7 @@ var OPTION_FORMS = {
   "--lane": "--lane <auto|host|command>",
   "--transcript": "--transcript <path>",
   "--parent-transcript": "--parent-transcript <path>",
+  "--prompt-sealed": "--prompt-sealed <reason>",
   "--bind": "--bind <role=executor>",
   "--tool": "--tool <name>",
   "--input": "--input <name=path>",
@@ -12963,8 +13063,8 @@ var PAGE_OPTIONS = {
   dial: withGlobals("--harness", "--session", "--user", "--repo", "--json"),
   clean: withGlobals("--force"),
   dispatch: withGlobals("--archetype", "--model", "--name", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--heartbeat"),
-  "dispatch-open": withGlobals("--archetype", "--model", "--name", "--lane", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--parent-transcript", "--harness", "--stage-prompt", "--reuse-open", "--json"),
-  "dispatch-stop": withGlobals("--transcript", "--message-file", "--agent-cwd", "--json"),
+  "dispatch-open": withGlobals("--archetype", "--model", "--name", "--lane", "--prompt-file", "--prompt-sealed", "--agent-id", "--dry-run", "--shared", "--from", "--session-id", "--parent", "--parent-transcript", "--harness", "--json"),
+  "dispatch-stop": withGlobals("--agent-id", "--transcript", "--message-file", "--agent-cwd", "--json"),
   "dispatch-wait": withGlobals("--wait-seconds", "--json"),
   "dispatch-close": withGlobals("--merged", "--kept", "--discarded", "--failed", "--note", "--force"),
   cancel: withGlobals(),
@@ -13268,11 +13368,12 @@ async function main(argv) {
         from: { type: "string" },
         shared: { type: "boolean" },
         lane: { type: "string" },
-        "stage-prompt": { type: "boolean" },
-        "reuse-open": { type: "boolean" },
         parent: { type: "string" },
         "session-id": { type: "string" },
         "prompt-file": { type: "string" },
+        "prompt-sealed": { type: "string" },
+        "dry-run": { type: "boolean" },
+        "agent-id": { type: "string" },
         "message-file": { type: "string" },
         "agent-cwd": { type: "string" },
         transcript: { type: "string" },
@@ -13589,10 +13690,11 @@ async function main(argv) {
     case "dispatch-open": {
       if (!values.archetype) {
         throw new Error(
-          "Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] [--stage-prompt] [--reuse-open] (--prompt-file <path> | stdin) [--json]"
+          "Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] [--agent-id <id>] (--prompt-file <path> | stdin | --prompt-sealed <reason> | --dry-run) [--json]"
         );
       }
       const promptFile = values["prompt-file"];
+      const promptSealed = values["prompt-sealed"] ?? null;
       const outcome = runDispatchOpen({
         archetype: values.archetype,
         model: values.model ?? null,
@@ -13600,14 +13702,18 @@ async function main(argv) {
         shared: Boolean(values.shared),
         from: values.from ?? null,
         promptFile,
-        prompt: promptFile == null ? (0, import_node_fs19.readFileSync)(0, "utf8") : void 0,
+        // Nothing is read from stdin when the harness sealed the prompt: there
+        // is no prompt to read, and a hook that opened a pipe it never fills
+        // would hang the spawn it is supposed to be waving through.
+        prompt: promptSealed != null || promptFile != null ? void 0 : (0, import_node_fs19.readFileSync)(0, "utf8"),
+        promptSealed,
+        agentId: values["agent-id"] ?? null,
+        dryRun: Boolean(values["dry-run"]),
         session: values["session-id"] ?? null,
         parent: values.parent,
         harness: values.harness ?? null,
         parentTranscript: values["parent-transcript"] ?? null,
-        lane: values.lane ?? "auto",
-        stagePrompt: Boolean(values["stage-prompt"]),
-        reuseOpen: Boolean(values["reuse-open"])
+        lane: values.lane ?? "auto"
       });
       if (!outcome.ok) {
         if (values.json) console.log(JSON.stringify({ ok: false, refused: outcome.refused }));
@@ -13616,6 +13722,13 @@ async function main(argv) {
       }
       if (values.json) {
         console.log(JSON.stringify(outcome));
+        return 0;
+      }
+      if (!outcome.opened && "dryRun" in outcome) {
+        console.log(
+          `${outcome.archetype} resolves to ${outcome.model}${outcome.effort ? `@${outcome.effort}` : ""}${outcome.harness ? ` on ${outcome.harness}` : ""} on the ${outcome.lane} lane${outcome.deliverable ? "" : ", which cannot be delivered from here"}. Nothing was opened.`
+        );
+        console.log(outcome.nag);
         return 0;
       }
       if (!outcome.opened) {
@@ -13627,25 +13740,26 @@ async function main(argv) {
         return 0;
       }
       console.log(
-        `${outcome.name} (${outcome.id}) ${outcome.reused ? "is already open" : "opened"} on the host lane: ${outcome.model}${outcome.effort ? `@${outcome.effort}` : ""}${outcome.harness ? ` on ${outcome.harness}` : ""}`
+        `${outcome.name} (${outcome.id}) opened on the host lane: ${outcome.model}${outcome.effort ? `@${outcome.effort}` : ""}${outcome.harness ? ` on ${outcome.harness}` : ""}`
       );
       console.log(`  work in: ${outcome.cwd}${outcome.workspace.branch ? ` (${outcome.workspace.branch})` : " (shared tree)"}`);
-      if (outcome.promptFile != null) console.log(`  prompt staged at: ${outcome.promptFile}`);
-      else console.log("  the contract-bearing prompt is in the --json output; the hook hands it to the agent.");
+      console.log("  the contract-bearing prompt is in the --json output; the hook hands it to the agent.");
       console.log(outcome.nag);
       return 0;
     }
     case "dispatch-stop": {
       const [, ref] = positionals;
       const transcript = values.transcript ?? null;
-      if (!ref && !transcript) {
-        throw new Error("Usage: fadeno dispatch-stop [<name|id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json] \u2014 a transcript can name the dispatch by its contract header.");
+      const agentId = values["agent-id"] ?? null;
+      if (!ref && !transcript && !agentId) {
+        throw new Error("Usage: fadeno dispatch-stop [<name|id>] [--agent-id <id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json] \u2014 an agent id or a transcript can name the dispatch itself.");
       }
       const messageFile = values["message-file"];
       let stopped;
       try {
         stopped = runDispatchStop({
           ref: ref ?? null,
+          agentId,
           transcript,
           messageFile,
           message: messageFile == null && !process.stdin.isTTY ? (0, import_node_fs19.readFileSync)(0, "utf8") : null,

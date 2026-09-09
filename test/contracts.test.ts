@@ -88,7 +88,7 @@ test('the host vocabulary carries the archetype list, the spawn rules, the close
   assert.doesNotMatch(text, /routes to|luna/);
   assert.match(text, /Routing is resolved at the spawn and reported by the hook that opens the dispatch/);
   assert.match(text, /Run `fadeno dial` for the current table/);
-  assert.match(text, /`fadeno:worker` on Claude Code; `worker` on Codex/);
+  assert.match(text, /`fadeno:worker` on Claude Code/);
   assert.match(text, /fadeno dispatch --archetype <name> --prompt-file <file>/, 'a director with no hook still knows the command lane');
   assert.match(text, /Two agents must never share one tree/);
   assert.match(text, /That recommendation is a claim, not a finding/);
@@ -149,4 +149,26 @@ test('formatAge reads like a clock at every magnitude', () => {
   assert.equal(formatAge(5), '5m');
   assert.equal(formatAge(125), '2h');
   assert.equal(formatAge(60 * 50), '2d');
+});
+
+test('the spawn instruction differs by harness, because what a hook can do to a spawn differs', () => {
+  const archetypes = [{ name: 'worker', description: 'd', model: 'sol', effort: 'high', source: 'base' }];
+  const base = { archetypes, unclosed: [], unclosedLimit: 5 };
+
+  // Claude's wrapper rewrites the spawn, so naming the archetype is enough.
+  const claude = hostVocabulary({ ...base, host: 'claude' });
+  assert.match(claude, /`fadeno:worker` on Claude Code/);
+  assert.doesNotMatch(claude, /reasoning_effort/);
+
+  // Codex's can only refuse one, so the spawn has to carry the dialed model.
+  // A host that learned this from a refusal paid a round trip for every first
+  // spawn — which is exactly what happened the first time this ran live.
+  const codex = hostVocabulary({ ...base, host: 'codex' });
+  assert.match(codex, /agent_type: "fadeno-<archetype>"/);
+  assert.match(codex, /`model` and `reasoning_effort`/);
+  assert.match(codex, /fadeno dial <archetype> --json/);
+  assert.match(codex, /is REFUSED/);
+  // Still no routing VALUES: the stale-snapshot rule holds on both harnesses.
+  assert.doesNotMatch(codex, /sol@high/);
+  assert.doesNotMatch(codex, /gpt-/);
 });

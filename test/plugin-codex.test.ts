@@ -92,17 +92,31 @@ test('codex plugin: carries setup, the hook family, bundled CLI, and built-in de
   const hooks = JSON.parse(read(outDir, 'hooks/hooks.json'));
   assert.ok(Array.isArray(hooks.hooks.UserPromptSubmit));
   assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/host-mode\.mjs/);
-  // The spawn hook is registered on `PreToolUse`/`Agent` — without the
-  // manifest entry the script is inert cargo, which is exactly the state the
-  // Codex plugin was in when a host session spawned three unsteered subagents.
-  // Codex keys hook trust per matcher group by index, so the ORDER is part of
-  // the contract: the spawn hook first, the Bash guard second.
+  // The spawn hook is registered on `PreToolUse` — without the manifest entry
+  // the script is inert cargo, which is exactly the state the Codex plugin was
+  // in when a host session spawned three unsteered subagents. Codex keys hook
+  // trust per matcher group by index, so the ORDER is part of the contract:
+  // the spawn hook first, the Bash guard second.
   assert.equal(hooks.hooks.PreToolUse.length, 2);
-  assert.equal(hooks.hooks.PreToolUse[0].matcher, 'Agent');
+  // The matcher is an ANCHORED regex over the tool's names, and the spawn
+  // tool's name is not stable: `spawn_agent` on gpt-5.6-luna,
+  // `collaborationspawn_agent` on gpt-6-astra, `Agent` on Claude. A matcher of
+  // just `Agent` matched two of the three, which is how Fadeno's spawn hook
+  // came to be absent on a whole model family.
+  const spawnMatcher = hooks.hooks.PreToolUse[0].matcher;
+  for (const toolName of ['Agent', 'spawn_agent', 'collaborationspawn_agent']) {
+    assert.ok(new RegExp(`^(?:${spawnMatcher})$`).test(toolName), `${spawnMatcher} must match ${toolName}`);
+  }
   assert.match(hooks.hooks.PreToolUse[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/spawn-codex\.mjs/);
   assert.match(hooks.hooks.PreToolUse[1].matcher, /(^|\|)Bash(\||$)/);
   assert.match(hooks.hooks.PreToolUse[1].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/bash-guard\.mjs/);
   assert.match(hooks.hooks.SubagentStop[0].hooks[0].command, /agent-stop\.mjs/);
+  // SubagentStart is where the contract is delivered, and the default context
+  // budget (~2,500 tokens) would elide the middle of a contract carrying a
+  // full preamble. The limit is raised explicitly rather than left on the
+  // default's headroom.
+  assert.match(hooks.hooks.SubagentStart[0].hooks[0].command, /spawn-codex\.mjs/);
+  assert.ok(hooks.hooks.SubagentStart[0].hooks[0].additionalContextLimit >= 100000);
   assert.ok(exists(outDir, 'bin/fadeno'), 'codex plugin must bundle a binary');
   assert.ok(exists(outDir, 'bin/templates/common/fadeno/executors.yaml'));
   const binary = join(outDir, 'bin', 'fadeno');

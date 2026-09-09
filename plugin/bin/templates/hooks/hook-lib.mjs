@@ -10,8 +10,8 @@
 // about nothing but which command to run.
 
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -158,18 +158,161 @@ export function hostModeEnabled(sessionId, env = process.env) {
 }
 
 /**
- * What a spawn asked for, read off its agent type. `fadeno:worker` and a bare
- * `worker` name the archetype; `fadeno:dispatch` is the proxy; anything else
- * is the harness's own business. A custom archetype cannot be named this way
- * because no shipped agent exists for it — it runs on the command lane.
+ * How long a stashed label is worth reading. Not a deadline on anything: it
+ * bounds a CACHE, so a spawn that was refused, or a session that died between
+ * the spawn and the start, cannot leave a label behind to be attached to
+ * somebody else's agent an hour later.
+ */
+export const PENDING_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Where PreToolUse leaves what only it can see, for SubagentStart to pick up.
+ *
+ * The two events share no id: PreToolUse has a `tool_use_id`, SubagentStart
+ * has an `agent_id`, and nothing links them. So the archetype and the session
+ * are the only key there is, and the match is by arrival order.
+ *
+ * What is stashed here is deliberately only the LABEL — the task name and the
+ * prompt when it was readable. Everything consequential (the dispatch id, the
+ * worktree, the branch, the contract) is decided at SubagentStart, where the
+ * agent id is known and the binding is exact. So the worst a mismatched pop
+ * can do is put the wrong title on a row; it can never send an agent to
+ * another agent's tree.
+ */
+function pendingDir(sessionId, archetype, env = process.env) {
+  const root = env.PLUGIN_DATA || env.CLAUDE_PLUGIN_DATA;
+  if (typeof root !== 'string' || root.trim() === '' || !str(sessionId) || !str(archetype)) return null;
+  const key = createHash('sha256').update(`${sessionId} ${archetype}`).digest('hex');
+  return join(root, 'pending', key);
+}
+
+/** Stash one spawn's label. Best effort: a spawn is never failed over a title. */
+export function stashPending(sessionId, archetype, entry, env = process.env) {
+  const dir = pendingDir(sessionId, archetype, env);
+  if (dir == null) return false;
+  try {
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${Date.now()}-${randomUUID()}.json`);
+    writeFileSync(file, JSON.stringify({ at: Date.now(), ...entry }), 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Take the label this start belongs to, if it can be known.
+ *
+ * Returns `null` when nothing is pending, and `{ ambiguous: true, count }`
+ * when more than one is. Two spawns of one archetype in flight cannot be told
+ * apart here, and a pop that picked one would look confident while being a
+ * coin flip. Declining to guess costs a dispatch its title; guessing costs it
+ * the truth about what it was asked.
+ *
+ * Ambiguity POISONS the key rather than clearing it: every entry is rewritten
+ * to carry the count and nothing else, so each of the sibling starts still to
+ * come reports the same reason. Clearing outright would have let the second
+ * agent find an empty key and be told its prompt was encrypted, which is a
+ * different thing and was not true.
+ */
+export function takePending(sessionId, archetype, env = process.env) {
+  const dir = pendingDir(sessionId, archetype, env);
+  if (dir == null) return null;
+  let names;
+  try {
+    names = readdirSync(dir).filter((n) => n.endsWith('.json')).sort();
+  } catch {
+    return null;
+  }
+  const drop = (name) => {
+    try {
+      rmSync(join(dir, name), { force: true });
+    } catch {
+      // a label that will not delete is a label read once more, never a failure
+    }
+  };
+  const fresh = [];
+  for (const name of names) {
+    let entry = null;
+    try {
+      entry = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+    } catch {
+      // unreadable is indistinguishable from stale, and treated the same
+    }
+    if (entry == null || typeof entry.at !== 'number' || Date.now() - entry.at > PENDING_TTL_MS) drop(name);
+    else fresh.push({ name, entry });
+  }
+  if (fresh.length === 0) return null;
+  if (fresh.length > 1) {
+    const count = fresh.length;
+    for (const { name, entry } of fresh.slice(1)) {
+      try {
+        writeFileSync(join(dir, name), JSON.stringify({ at: entry.at, ambiguous: count }), 'utf8');
+      } catch {
+        // a label that will not rewrite is one more start told nothing, which
+        // is the same answer by a longer road
+      }
+    }
+    drop(fresh[0].name);
+    return { ambiguous: true, count };
+  }
+  drop(fresh[0].name);
+  const entry = fresh[0].entry;
+  if (typeof entry.ambiguous === 'number') return { ambiguous: true, count: entry.ambiguous };
+  return { ambiguous: false, entry };
+}
+
+/**
+ * What a spawn asked for, read off its agent type. `fadeno:worker` (Claude),
+ * `fadeno-worker` (Codex, where an agent is a user-scoped TOML whose name has
+ * to be unmistakably Fadeno's) and a bare `worker` all name the archetype;
+ * `fadeno:dispatch` is the proxy; anything else is the harness's own business.
+ * A custom archetype cannot be named this way because no shipped agent exists
+ * for it — it runs on the command lane.
  */
 export function classifyAgentType(agentType) {
   const raw = str(agentType);
   if (raw == null) return { kind: 'generic', archetype: null, bare: null };
-  const bare = raw.split(':').at(-1);
+  const bare = raw.split(':').at(-1).replace(/^fadeno-/, '');
   if (bare === PROXY_AGENT) return { kind: 'proxy', archetype: null, bare };
   if (CANON_ARCHETYPES.includes(bare)) return { kind: 'archetype', archetype: bare, bare };
   return { kind: 'generic', archetype: null, bare };
+}
+
+/**
+ * Whether a PreToolUse event is about spawning a subagent.
+ *
+ * The tool's NAME is not stable across Codex models: measured on 0.153.4,
+ * gpt-5.6-luna calls it `spawn_agent` while gpt-6-astra calls it
+ * `collaborationspawn_agent` — a tool-namespace prefix concatenated onto the
+ * same verb. Matching the exact name is how Fadeno's spawn hook came to be
+ * silent on one of the two, so this tests the suffix and accepts any
+ * namespace. Claude spells it `Agent`.
+ *
+ * The hook manifest's `matcher` needs the same generosity, and is matched as
+ * an ANCHORED regex against the tool's names rather than searched: `spawn`
+ * matches nothing, `.*spawn_agent` matches both.
+ */
+export function isSpawnTool(toolName) {
+  const raw = str(toolName);
+  return raw != null && (raw === 'Agent' || raw === 'spawn_agent' || raw.endsWith('spawn_agent'));
+}
+
+/**
+ * Whether a spawn's message is text Fadeno can read, or an envelope it cannot.
+ *
+ * Codex's newer spawn tool encrypts the message: measured on gpt-6-astra, the
+ * `message` field arrives as a Fernet token (`gAAAAA…`) where gpt-5.6-luna
+ * sends the prompt in the clear. A hook that treated the ciphertext as a
+ * prompt would stage a blob as the task and record it as what the host asked.
+ *
+ * The test is shape, not a prefix: an unbroken run of base64url with no
+ * whitespace at all, past a length no written brief reaches. A real prompt has
+ * a space in it long before a hundred characters.
+ */
+export function messageIsSealed(message) {
+  const text = typeof message === 'string' ? message.trim() : '';
+  return text.length >= 100 && /^[A-Za-z0-9_-]+={0,2}$/.test(text);
 }
 
 /**

@@ -1,9 +1,9 @@
 {
-  "description": "Fadeno on Codex: in host mode, refuse generic subagents and hand archetype spawns to the command lane (a Codex hook can refuse a spawn but not rewrite one); guard dispatched agents' shell calls; record every subagent's stop; keep host mode on for one session.",
+  "description": "Fadeno on Codex: in host mode, refuse generic subagents and mis-dialed spawns at PreToolUse, then open the dispatch and deliver its contract at SubagentStart, where the agent id makes the binding exact; guard dispatched agents' shell calls; record every subagent's stop; keep host mode on for one session.",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Agent",
+        "matcher": ".*spawn_agent|Agent",
         "hooks": [
           {
             "type": "command",
@@ -19,6 +19,18 @@
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/bash-guard.mjs",
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/spawn-codex.mjs",
+            "timeout": 60,
+            "additionalContextLimit": 200000
           }
         ]
       }

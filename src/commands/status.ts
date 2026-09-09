@@ -4,6 +4,7 @@ import { basename, join } from 'node:path';
 import { activeHarness, HOST_MODEL } from '../lib/executors.ts';
 import { unclosedDispatches } from '../lib/ledger.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
+import { declaresModel, isManagedAgentFile } from '../lib/codex-agents.ts';
 import { codexUserAgentDir, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 import { runDialShow, type EffectiveRow } from './dial.ts';
 import { runWorktrees, type WorktreeEntry } from './dispatches.ts';
@@ -32,6 +33,8 @@ export interface ShadowingAgentFile {
   archetype: string;
   harness: 'claude' | 'codex';
   scope: 'user' | 'project';
+  /** Codex only: the file declares a `model`, which is what beats a dial. */
+  declaresModel: boolean;
 }
 
 export interface StatusResult {
@@ -124,9 +127,20 @@ function shadowingAgentFiles(
     for (const entry of entries) {
       if (!entry.endsWith(root.ext)) continue;
       const path = join(root.dir, entry);
+      let text: string;
+      try {
+        text = readFileSync(path, 'utf8');
+      } catch {
+        continue;
+      }
+      // Fadeno's own vocabulary files are not a finding. They exist so a Codex
+      // host can name an archetype at all, and they state no model precisely so
+      // the dial keeps deciding — reporting them would train a reader to skim
+      // past the line that matters, which is a HAND-WRITTEN file overriding it.
+      if (isManagedAgentFile(text)) continue;
       const archetype = declaredAgentName(path, root.ext);
-      if (!routed.has(archetype)) continue;
-      found.push({ path, archetype, harness: root.harness, scope: root.scope });
+      if (!routed.has(archetype) && !routed.has(archetype.replace(/^fadeno-/, ''))) continue;
+      found.push({ path, archetype, harness: root.harness, scope: root.scope, declaresModel: root.ext === '.toml' && declaresModel(text) });
     }
   }
   return found;
@@ -188,7 +202,9 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     attention.push(
       `${file.path} defines the agent "${file.archetype}" (${file.scope} scope, ${file.harness}). ` +
         (file.harness === 'codex'
-          ? 'A Codex agent file wins over the model a spawn passes, so it overrides the dial.'
+          ? file.declaresModel
+            ? 'It declares a model, and on Codex a file\'s model wins over the one a spawn passes, so it overrides the dial.'
+            : 'It declares no model, so the dial still routes; its instructions still reach that spawn.'
           : 'It supplies the prompt and tools for that spawn, whatever the dial says.'),
     );
   }

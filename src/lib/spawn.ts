@@ -191,6 +191,11 @@ function loadProfile(repoRoot: string, userPathOptions?: UserPathOptions): Execu
   }
 }
 
+/** Whether this resolution has an argv to run — the command lane's whole precondition. */
+export function commandLaneAvailable(resolution: Resolution): boolean {
+  return resolution.command != null && resolution.command.length > 0;
+}
+
 /** The command lane needs an argv; a resolution without one has nothing to invoke. */
 export function requireCommand(resolution: Resolution): string[] {
   if (resolution.command == null || resolution.command.length === 0) {
@@ -289,6 +294,10 @@ export interface PrepareInput {
   parent?: string | null;
   /** Which lane will actually deliver this dispatch. */
   lane: Lane;
+  /** The harness's id for the subagent this is being opened for, when it names one. */
+  agentId?: string | null;
+  /** The harness sealed the caller's prompt: `prompt` explains that instead of being it. */
+  promptSealed?: boolean;
   userPathOptions?: UserPathOptions;
   env?: NodeJS.ProcessEnv;
   now?: Date;
@@ -318,6 +327,10 @@ export interface Prepared {
   at: string;
   /** The lane that will deliver this dispatch, as the caller declared it. */
   lane: Lane;
+  /** The harness's subagent id, when the caller knew it at open time. */
+  agentId: string | null;
+  /** Whether the recorded prompt is the ask or an explanation of its absence. */
+  promptSealed: boolean;
 }
 
 export type PrepareOutcome = { ok: true; prepared: Prepared } | { ok: false; refused: string };
@@ -429,6 +442,8 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
       parent,
       at: nowIso(now),
       lane: input.lane,
+      agentId: input.agentId?.trim() || null,
+      promptSealed: input.promptSealed === true,
     },
   };
 }
@@ -467,9 +482,11 @@ export function recordOpened(repoRoot: string, prepared: Prepared, extra: { lane
     lane: extra.lane ?? prepared.lane,
     harness: extra.harness !== undefined ? extra.harness : prepared.resolution.harness,
     workspace: prepared.workspace,
+    ...(prepared.agentId != null ? { agent_id: prepared.agentId } : {}),
     task,
     ...(truncated ? { task_truncated: true as const } : {}),
     prompt: prepared.promptPath,
+    ...(prepared.promptSealed ? { prompt_sealed: true as const } : {}),
     ...(extra.processGroup != null ? { process_group: extra.processGroup } : {}),
   };
   appendRow(repoRoot, row);

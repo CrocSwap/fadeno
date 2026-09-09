@@ -455,3 +455,59 @@ test('a director\'s contract carries the host vocabulary, and a dispatch run fro
   assert.ok(!existsSync(join(worktree, '.fadeno', 'dispatches.jsonl')));
   assert.ok(existsSync(join(root, '.fadeno', 'local', 'worktrees', 'child')));
 });
+
+test('--dry-run answers what would happen and writes nothing, by the same path that would open it', (t) => {
+  const root = repo(t);
+  // No prompt at all: a dry run has nothing to dispatch and does not pretend to.
+  const run = cli(root, ['dispatch-open', '--archetype', 'worker', '--dry-run', '--json'], '');
+  assert.equal(run.status, 0, run.stderr);
+  const answer = JSON.parse(run.stdout) as Record<string, unknown>;
+  assert.equal(answer.ok, true);
+  assert.equal(answer.opened, false);
+  assert.equal(answer.dryRun, true);
+  assert.equal(answer.lane, 'command');
+  assert.equal(answer.model, 'echo');
+  assert.equal(answer.modelId, 'echo-model');
+  assert.equal(answer.effort, 'high');
+  assert.equal(answer.deliverable, true);
+  assert.ok(!existsSync(join(root, LEDGER_FILE)), 'a dry run writes no row');
+  assert.ok(!existsSync(join(root, '.fadeno', 'local')), 'and stages nothing');
+
+  // The refusal checks run too — that is the whole reason it exists, so a
+  // caller that must refuse one event early cannot drift from the real open.
+  for (let i = 0; i < 5; i += 1) {
+    cli(root, ['dispatch-open', '--archetype', 'reviewer', '--lane', 'host', '--name', `r${i}`], `job ${i}`);
+    cli(root, ['dispatch-stop', `r${i}`], 'done');
+  }
+  const refused = cli(root, ['dispatch-open', '--archetype', 'worker', '--dry-run', '--json'], '');
+  assert.equal(refused.status, 3);
+  assert.match(JSON.parse(refused.stdout).refused, /waiting for your decision/);
+});
+
+test('a sealed prompt is recorded as an absence with a reason, never as the ask', (t) => {
+  const root = repo(t);
+  const run = cli(root, [
+    'dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', 'sealed', '--json',
+    '--agent-id', 'agent-42', '--prompt-sealed', 'Codex encrypted the message',
+  ]);
+  assert.equal(run.status, 0, run.stderr);
+  const opened = readDispatches(root).records[0]!.opened!;
+  assert.equal(opened.prompt_sealed, true);
+  assert.equal(opened.agent_id, 'agent-42');
+  assert.match(opened.task, /Fadeno did not see this dispatch's prompt: Codex encrypted the message/);
+  assert.doesNotMatch(opened.task, /^Codex encrypted/, 'the reason is framed as an absence, not offered as the task');
+  // And the detail view says so at the top, where a reader looks first.
+  const shown = cli(root, ['dispatches', 'sealed']);
+  assert.match(shown.stdout, /the ask:\s+NOT RECORDED — Fadeno did not see this dispatch's prompt: Codex encrypted the message/);
+
+  // `--agent-id` resolves the stop exactly, with no transcript to read.
+  const stopped = cli(root, ['dispatch-stop', '--agent-id', 'agent-42', '--json'], 'done');
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.equal(JSON.parse(stopped.stdout).name, 'sealed');
+
+  // An agent id nobody opened for is not an error here: a stop hook fires for
+  // every subagent, and most of them are nobody's dispatch.
+  const stranger = cli(root, ['dispatch-stop', '--agent-id', 'agent-nobody', '--json'], 'x');
+  assert.equal(stranger.status, 4);
+  assert.equal(JSON.parse(stranger.stdout).dispatch, null);
+});

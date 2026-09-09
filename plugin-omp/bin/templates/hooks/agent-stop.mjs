@@ -3,12 +3,19 @@
 // subagent stops — finished, interrupted, killed, or cut off by a session
 // limit — hand the CLI the facts and let it write the stopped row.
 //
-// A stop event names an agent, never a dispatch. The one thing that ties the
-// two is the contract Fadeno appended to the agent's prompt, whose header
-// carries the dispatch id; the prompt is the first record of the agent's
-// transcript, so `fadeno dispatch-stop --transcript <path>` reads it back.
-// An agent whose transcript carries no contract was not a dispatch, and the
-// CLI says so with exit 4; nothing is recorded and nothing is claimed.
+// A stop event names an agent, never a dispatch, so something has to tie the
+// two. There are two ties and the CLI tries them in this order:
+//
+//   `--agent-id` — the harness's own id for the subagent, recorded on the row
+//   when the dispatch was opened for it. Exact, and it holds even when the
+//   contract never reached the transcript.
+//
+//   `--transcript` — the contract header in the agent's prompt names the
+//   dispatch. The only tie on a harness that gives a stop hook no agent id,
+//   and the one that catches a dispatch opened before this Fadeno.
+//
+// An agent that answers to neither was not a dispatch, and the CLI says so
+// with exit 4; nothing is recorded and nothing is claimed.
 //
 // What the row can and cannot say is the CLI's business (see `dispatch-stop`):
 // the presence of a final message, never completeness; the paths dirty in
@@ -31,12 +38,16 @@ if (typeof event.hook_event_name === 'string' && event.hook_event_name !== 'Suba
 // has not earned a guess. Both harnesses always send `cwd`.
 const cwd = str(event.cwd);
 const transcript = str(event.agent_transcript_path);
-if (cwd == null || transcript == null) finish(null);
+const agentId = str(event.agent_id);
+if (cwd == null || (transcript == null && agentId == null)) finish(null);
 
 const cli = resolveCli(import.meta.url);
 const harness = typeof event.turn_id === 'string' ? 'codex' : 'claude';
 const lastMessage = typeof event.last_assistant_message === 'string' ? event.last_assistant_message : '';
-const run = runFadeno(cli, ['dispatch-stop', '--transcript', transcript, '--json'], {
+const args = ['dispatch-stop', '--json'];
+if (agentId != null) args.push('--agent-id', agentId);
+if (transcript != null) args.push('--transcript', transcript);
+const run = runFadeno(cli, args, {
   cwd,
   input: lastMessage,
   harness,

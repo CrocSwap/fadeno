@@ -299,11 +299,12 @@ async function main(argv: string[]): Promise<number> {
         from: { type: 'string' },
         shared: { type: 'boolean' },
         lane: { type: 'string' },
-        'stage-prompt': { type: 'boolean' },
-        'reuse-open': { type: 'boolean' },
         parent: { type: 'string' },
         'session-id': { type: 'string' },
         'prompt-file': { type: 'string' },
+        'prompt-sealed': { type: 'string' },
+        'dry-run': { type: 'boolean' },
+        'agent-id': { type: 'string' },
         'message-file': { type: 'string' },
         'agent-cwd': { type: 'string' },
         transcript: { type: 'string' },
@@ -674,11 +675,12 @@ async function main(argv: string[]): Promise<number> {
       if (!values.archetype) {
         throw new Error(
           'Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] ' +
-            '[--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] [--stage-prompt] [--reuse-open] ' +
-            '(--prompt-file <path> | stdin) [--json]',
+            '[--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] [--agent-id <id>] ' +
+            '(--prompt-file <path> | stdin | --prompt-sealed <reason> | --dry-run) [--json]',
         );
       }
       const promptFile = values['prompt-file'];
+      const promptSealed = values['prompt-sealed'] ?? null;
       const outcome = runDispatchOpen({
         archetype: values.archetype,
         model: values.model ?? null,
@@ -686,14 +688,18 @@ async function main(argv: string[]): Promise<number> {
         shared: Boolean(values.shared),
         from: values.from ?? null,
         promptFile,
-        prompt: promptFile == null ? readFileSync(0, 'utf8') : undefined,
+        // Nothing is read from stdin when the harness sealed the prompt: there
+        // is no prompt to read, and a hook that opened a pipe it never fills
+        // would hang the spawn it is supposed to be waving through.
+        prompt: promptSealed != null || promptFile != null ? undefined : readFileSync(0, 'utf8'),
+        promptSealed,
+        agentId: values['agent-id'] ?? null,
+        dryRun: Boolean(values['dry-run']),
         session: values['session-id'] ?? null,
         parent: values.parent,
         harness: values.harness ?? null,
         parentTranscript: values['parent-transcript'] ?? null,
         lane: (values.lane ?? 'auto') as OpenLane,
-        stagePrompt: Boolean(values['stage-prompt']),
-        reuseOpen: Boolean(values['reuse-open']),
       });
       if (!outcome.ok) {
         if (values.json) console.log(JSON.stringify({ ok: false, refused: outcome.refused }));
@@ -702,6 +708,14 @@ async function main(argv: string[]): Promise<number> {
       }
       if (values.json) {
         console.log(JSON.stringify(outcome));
+        return 0;
+      }
+      if (!outcome.opened && 'dryRun' in outcome) {
+        console.log(
+          `${outcome.archetype} resolves to ${outcome.model}${outcome.effort ? `@${outcome.effort}` : ''}${outcome.harness ? ` on ${outcome.harness}` : ''} ` +
+            `on the ${outcome.lane} lane${outcome.deliverable ? '' : ', which cannot be delivered from here'}. Nothing was opened.`,
+        );
+        console.log(outcome.nag);
         return 0;
       }
       if (!outcome.opened) {
@@ -713,26 +727,27 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       console.log(
-        `${outcome.name} (${outcome.id}) ${outcome.reused ? 'is already open' : 'opened'} on the host lane: ` +
+        `${outcome.name} (${outcome.id}) opened on the host lane: ` +
           `${outcome.model}${outcome.effort ? `@${outcome.effort}` : ''}${outcome.harness ? ` on ${outcome.harness}` : ''}`,
       );
       console.log(`  work in: ${outcome.cwd}${outcome.workspace.branch ? ` (${outcome.workspace.branch})` : ' (shared tree)'}`);
-      if (outcome.promptFile != null) console.log(`  prompt staged at: ${outcome.promptFile}`);
-      else console.log('  the contract-bearing prompt is in the --json output; the hook hands it to the agent.');
+      console.log('  the contract-bearing prompt is in the --json output; the hook hands it to the agent.');
       console.log(outcome.nag);
       return 0;
     }
     case 'dispatch-stop': {
       const [, ref] = positionals;
       const transcript = values.transcript ?? null;
-      if (!ref && !transcript) {
-        throw new Error('Usage: fadeno dispatch-stop [<name|id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json] — a transcript can name the dispatch by its contract header.');
+      const agentId = values['agent-id'] ?? null;
+      if (!ref && !transcript && !agentId) {
+        throw new Error('Usage: fadeno dispatch-stop [<name|id>] [--agent-id <id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json] — an agent id or a transcript can name the dispatch itself.');
       }
       const messageFile = values['message-file'];
       let stopped;
       try {
         stopped = runDispatchStop({
           ref: ref ?? null,
+          agentId,
           transcript,
           messageFile,
           message: messageFile == null && !process.stdin.isTTY ? readFileSync(0, 'utf8') : null,
