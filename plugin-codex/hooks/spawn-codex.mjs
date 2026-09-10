@@ -179,7 +179,7 @@ if (spawn.kind !== 'archetype') {
       'with no dial, no worktree, no contract and no ledger row. ' +
       `Spawn one of ${CANON_ARCHETYPES.map((a) => `\`fadeno-${a}\``).join(', ')} instead — those agents exist because \`fadeno setup\` wrote them, and ` +
       '`fadeno context` shows what each one is for and which model it is dialed to. ' +
-      'If the archetype you want is not among them, run `fadeno dispatch --archetype <name> --name <name> --prompt-file <file>` yourself. ' +
+      'If the archetype you want is not among them, run `fadeno dispatch --archetype <name> --name <name> --prompt-file <file>` yourself, in your own shell — that command IS the dispatch, so never make it the prompt of a spawn: the spawn would open one dispatch and the agent it starts would open a second. ' +
       'To allow generic subagents again for the rest of this session, run `$fadeno-host off`.',
   );
 }
@@ -214,7 +214,7 @@ if (row.lane === 'command') {
     deny(
       `fadeno: this ${archetype} spawn belongs on the command lane (${row.model}${row.effort ? `@${row.effort}` : ''} runs as a process, not as a subagent of this session), ` +
         'and Codex encrypted the message on this spawn, so Fadeno cannot stage the task for it. ' +
-        `Write the task to a file and run it yourself:\n\n    fadeno dispatch --archetype ${archetype} --name <name> --prompt-file <file>\n\n` +
+        `Write the task to a file and run this in your own shell — the command IS the dispatch, so do not make it the prompt of another spawn:\n\n    fadeno dispatch --archetype ${archetype} --name <name> --prompt-file <file>\n\n` +
         'It prints the report on stdout. Close it afterwards with `fadeno dispatch-close <name> --merged|--kept|--discarded|--failed`.',
     );
   }
