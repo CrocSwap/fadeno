@@ -350,3 +350,42 @@ test('a signal to the launcher does not kill the executor: the launcher is its r
   // the stop row rather than calling the dispatch lost.
   assert.equal(readDispatches(root).records[0]!.stopped, null, 'nobody was left to write the stop row');
 });
+
+test('a spawn whose prompt is a `fadeno dispatch` command is refused, because dispatching is what the spawn already does', (t) => {
+  const root = repo(t);
+  const refuse = (prompt: string) =>
+    prepareDispatch({ repoRoot: root, archetype: 'worker', prompt, lane: 'command', userPathOptions: ISOLATED, env: {} });
+
+  // The five shapes basanos actually sent in two minutes. Each one opened a
+  // dispatch whose recorded task was the command, and the agent it started
+  // then opened a second with the real brief: two worktrees, two model runs,
+  // and one pair whose names differed by a typo so neither closed by name.
+  for (const prompt of [
+    'Run exactly: fadeno dispatch --archetype worker --name fix-route-metadata-oom --prompt-file /tmp/brief.md',
+    'Run exactly: fadeno dispatch --archetype worker --model opus@xhigh --name fix-entries-55-92 --prompt-file /tmp/b.md',
+    'Run this command:\n\n```bash\nfadeno dispatch --archetype worker --prompt-file /tmp/brief.md\n```',
+    'FADENO_HARNESS=claude "$CLAUDE_PLUGIN_ROOT/bin/fadeno" dispatch --archetype worker --prompt-file /tmp/b.md',
+    'fadeno dispatch-open --archetype worker --prompt-file /tmp/b.md',
+  ]) {
+    const outcome = refuse(prompt);
+    assert.equal(outcome.ok, false, `should refuse: ${prompt.slice(0, 50)}`);
+    assert.match(outcome.ok ? '' : outcome.refused, /prompt is a `fadeno dispatch` command, not a task/);
+  }
+  // Nothing was cut for any of them: a refusal costs a round trip, not a tree.
+  assert.equal(readDispatches(root).records.length, 0);
+  assert.ok(!existsSync(join(root, '.fadeno', 'local', 'worktrees')));
+
+  // An ordinary brief is not refused, including one that MENTIONS the command
+  // in prose or tells the agent to run a different fadeno verb. Over-refusing
+  // here would block real work, so the match is anchored to a line that IS the
+  // command rather than one that contains it.
+  for (const prompt of [
+    'Fix the kind-16 page-2 defect. Do not run `fadeno dispatch` yourself; report and stop.',
+    'Fix the OOM.\n\nWhen you are done, run `fadeno dispatch-close` is NOT your job — the director closes it.',
+    'Wait for the other worker with `fadeno dispatch-wait sibling`, then merge.',
+    'Dispatch name: fix-entries-55-92\n\nPin and fix the last two defects found by the adjudication.',
+  ]) {
+    const outcome = refuse(prompt);
+    assert.equal(outcome.ok, true, `should NOT refuse: ${prompt.slice(0, 50)}`);
+  }
+});

@@ -319,6 +319,54 @@ export function nagText(unclosed: readonly DispatchRecord[], limit: number, now?
   return lines.join('\n');
 }
 
+/**
+ * `fadeno dispatch` at the start of a line, and nothing before it but a
+ * lead-in or an environment assignment. Anchored so that a brief which
+ * MENTIONS the command in prose ("do not run fadeno dispatch yourself") is
+ * ordinary text, and only a line that IS the command matches. `dispatch-wait`,
+ * `dispatch-close` and `dispatches` are excluded: those an agent may well be
+ * told to run.
+ */
+const DISPATCH_COMMAND_LINE =
+  /^(?:(?:please\s+)?(?:run|execute)[^:\n]{0,40}:\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*\S*\bfadeno\b["']?\s+dispatch(?:-open)?(?![\w-])/i;
+
+/**
+ * The prompt is not a task: it is an instruction to run `fadeno dispatch`.
+ * Returns the correction, or null for an ordinary brief.
+ *
+ * A host that writes the brief to a file and then spawns an archetype whose
+ * PROMPT is "run fadeno dispatch --prompt-file <that file>" gets two
+ * dispatches, not one: Fadeno opens the first for the spawn — its whole
+ * recorded task being the command — and the agent it starts runs the command
+ * and opens a second with the real brief. Basanos did it five times in two
+ * minutes and got a dispatch nested under another (`fix-route-metadata-oom`
+ * inside `fix-route-metadata-oom-2`), a host-lane dispatch wrapping a
+ * command-lane one, two worktrees and two model runs per task, and a pair
+ * whose names differed by a typo so neither could be closed by the name the
+ * brief itself used.
+ *
+ * Fadeno cannot tell a good brief from a bad one. It can tell that this one is
+ * addressed to Fadeno rather than to an agent, and one refused spawn costs a
+ * round trip where the alternative costs a duplicate dispatch.
+ */
+export function spawnRefusedAsDispatchCommand(prompt: string): string | null {
+  const lines = prompt
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('```'));
+  // "Run exactly:" on a line of its own is framing, not content.
+  const body = lines.filter((line) => !/^(?:please\s+)?(?:run|execute)[^:\n]{0,40}:$/i.test(line));
+  if (body.length !== 1 || !DISPATCH_COMMAND_LINE.test(body[0]!)) return null;
+  return (
+    'Fadeno refuses this spawn: its prompt is a `fadeno dispatch` command, not a task. ' +
+    'Dispatching is what Fadeno does with this spawn — pass the BRIEF itself as the prompt and exactly one dispatch is opened for it, ' +
+    'on whichever lane the archetype resolves to, with the worktree and the ledger row already handled. ' +
+    'A prompt that tells an agent to dispatch opens two: this one, whose recorded task is the command, and the one the agent then runs. ' +
+    'Give the dispatch its name through the spawn itself (the description on a Claude spawn, `--name` on the command line), not through a line inside the brief. ' +
+    'Report this refusal to the user instead of routing around it.'
+  );
+}
+
 export function spawnRefusedByLimit(unclosed: readonly DispatchRecord[], limit: number): string | null {
   const waiting = awaitingDecision(unclosed);
   if (waiting.length < limit) return null;

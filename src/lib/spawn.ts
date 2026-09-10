@@ -28,6 +28,7 @@ import {
   describeArchetype,
   hostVocabulary,
   nagText,
+  spawnRefusedAsDispatchCommand,
   spawnRefusedByLimit,
   workerContract,
   type ArchetypeLine,
@@ -357,6 +358,11 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
   const repoRoot = resolve(input.repoRoot);
   const prompt = input.prompt;
   if (prompt.trim().length === 0) throw new SpawnError('empty prompt: nothing to dispatch.');
+  // Checked here, before the resolution and before anything is cut: a spawn
+  // addressed to Fadeno rather than to an agent must cost a refusal, not a
+  // worktree and a second dispatch.
+  const misaddressed = spawnRefusedAsDispatchCommand(prompt);
+  if (misaddressed != null) return { ok: false, refused: misaddressed };
   const resolution = input.resolution ?? resolveArchetype({
     repoRoot,
     archetype: input.archetype,

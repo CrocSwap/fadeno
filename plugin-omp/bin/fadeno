@@ -7945,6 +7945,13 @@ function nagText(unclosed, limit, now) {
   }
   return lines.join("\n");
 }
+var DISPATCH_COMMAND_LINE = /^(?:(?:please\s+)?(?:run|execute)[^:\n]{0,40}:\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*\S*\bfadeno\b["']?\s+dispatch(?:-open)?(?![\w-])/i;
+function spawnRefusedAsDispatchCommand(prompt) {
+  const lines = prompt.split("\n").map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("```"));
+  const body = lines.filter((line) => !/^(?:please\s+)?(?:run|execute)[^:\n]{0,40}:$/i.test(line));
+  if (body.length !== 1 || !DISPATCH_COMMAND_LINE.test(body[0])) return null;
+  return "Fadeno refuses this spawn: its prompt is a `fadeno dispatch` command, not a task. Dispatching is what Fadeno does with this spawn \u2014 pass the BRIEF itself as the prompt and exactly one dispatch is opened for it, on whichever lane the archetype resolves to, with the worktree and the ledger row already handled. A prompt that tells an agent to dispatch opens two: this one, whose recorded task is the command, and the one the agent then runs. Give the dispatch its name through the spawn itself (the description on a Claude spawn, `--name` on the command line), not through a line inside the brief. Report this refusal to the user instead of routing around it.";
+}
 function spawnRefusedByLimit(unclosed, limit) {
   const waiting = awaitingDecision(unclosed);
   if (waiting.length < limit) return null;
@@ -9685,6 +9692,8 @@ function prepareDispatch(input) {
   const repoRoot = (0, import_node_path8.resolve)(input.repoRoot);
   const prompt = input.prompt;
   if (prompt.trim().length === 0) throw new SpawnError("empty prompt: nothing to dispatch.");
+  const misaddressed = spawnRefusedAsDispatchCommand(prompt);
+  if (misaddressed != null) return { ok: false, refused: misaddressed };
   const resolution = input.resolution ?? resolveArchetype({
     repoRoot,
     archetype: input.archetype,
