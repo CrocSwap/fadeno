@@ -10141,6 +10141,8 @@ function runDispatchOpen(opts) {
   const dryRun = opts.dryRun === true;
   const prompt = dryRun ? "" : sealed != null ? sealedPromptText(sealed) : readPromptInput(opts, opts.cwd ?? process.cwd());
   if (!dryRun && prompt.trim().length === 0) throw new SpawnError("empty prompt: nothing to dispatch.");
+  const misaddressed = spawnRefusedAsDispatchCommand(prompt);
+  if (misaddressed != null) return { ok: false, refused: misaddressed };
   const resolution = resolveArchetype({ repoRoot, archetype: opts.archetype, explicitModel: opts.model ?? null, userPathOptions: opts.userPathOptions });
   const wanted = opts.lane ?? "auto";
   if (!OPEN_LANES.includes(wanted)) throw new DispatchesError(`--lane ${String(wanted)}: expected one of ${OPEN_LANES.join(", ")}.`);

@@ -11,7 +11,7 @@
 
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { DEFAULT_UNCLOSED_LIMIT, formatAge, hostVocabulary, nagText, spawnRefusedByLimit, type ArchetypeLine } from '../lib/contracts.ts';
+import { DEFAULT_UNCLOSED_LIMIT, formatAge, hostVocabulary, nagText, spawnRefusedAsDispatchCommand, spawnRefusedByLimit, type ArchetypeLine } from '../lib/contracts.ts';
 import {
   ageMinutes,
   closeDispatch,
@@ -288,6 +288,13 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
   const dryRun = opts.dryRun === true;
   const prompt = dryRun ? '' : sealed != null ? sealedPromptText(sealed) : readPromptInput(opts, opts.cwd ?? process.cwd());
   if (!dryRun && prompt.trim().length === 0) throw new SpawnError('empty prompt: nothing to dispatch.');
+  // Before the lane is even chosen, so both answer the same way at the same
+  // moment. `prepareDispatch` checks this too and catches the command lane's
+  // own `fadeno dispatch` call; here it is caught at the SPAWN, where the
+  // correction reaches the host that wrote the prompt rather than the proxy
+  // relaying a non-zero exit back to it.
+  const misaddressed = spawnRefusedAsDispatchCommand(prompt);
+  if (misaddressed != null) return { ok: false, refused: misaddressed };
   const resolution = resolveArchetype({ repoRoot, archetype: opts.archetype, explicitModel: opts.model ?? null, userPathOptions: opts.userPathOptions });
   const wanted = opts.lane ?? 'auto';
   if (!OPEN_LANES.includes(wanted)) throw new DispatchesError(`--lane ${String(wanted)}: expected one of ${OPEN_LANES.join(', ')}.`);
