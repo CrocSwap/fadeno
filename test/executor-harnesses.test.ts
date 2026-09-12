@@ -89,6 +89,12 @@ test('the harness table keeps providers honest — exactly one home each', () =>
   assert.ok((onOpencode.spec as { command: string[] }).command.includes('openrouter/anthropic/claude-opus-4.8'));
 });
 
+test('the shipped OpenAI model defaults use their registry efforts', () => {
+  const profile = catalogFor('standalone');
+  assert.equal(profile.models.sol?.effort, 'medium');
+  assert.equal(profile.models.terra?.effort, 'high');
+});
+
 test('the Antigravity lane keeps the three flags that stop it exiting 0 having done nothing', () => {
   const agy = catalogFor('standalone').harnesses.agy!;
   const command = agy.command?.command ?? [];
