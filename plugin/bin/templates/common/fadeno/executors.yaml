@@ -72,7 +72,7 @@ models:
     effort: high
   muse:
     provider: muse
-    id: muse-spark-1.2-contributor
+    id: muse-spark-1.3-contributor
     effort: xhigh
 # A model may also name a non-home harness explicitly with `harness: <id>`;
 # the harness-facing id then goes in `spellings.<harness>`. That is what
