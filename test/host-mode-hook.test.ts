@@ -97,6 +97,12 @@ test('every sentence of the hook policy survives in the fadeno-host skill', (t) 
   assert.match(readFileSync(SKILL, 'utf8'), /Report this refusal to the user/);
 });
 
+test('the host skill keeps a live foreground dispatch session instead of duplicating an empty initial chunk', () => {
+  const skill = readFileSync(SKILL, 'utf8');
+  assert.match(skill, /empty initial tool chunk with a live session id is not a silent launch/);
+  assert.match(skill, /Continue the same\s+managed session and read its later chunks; do not launch a duplicate dispatch/);
+});
+
 test('the host hook ignores unrelated prompts and malformed input', (t) => {
   const plugin = hookPlugin(t);
   assert.equal(context(plugin, { hook_event_name: 'UserPromptSubmit', session_id: 'ordinary', prompt: 'Please fix the tests' }, plugin.root), null);

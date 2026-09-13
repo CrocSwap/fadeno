@@ -239,6 +239,18 @@ function optionalTarget(values: TargetFlags): Target | undefined {
   return selected[0];
 }
 
+function printDispatchPreparing(values: { name?: string; archetype?: string; model?: string }): void {
+  const details = [
+    values.name?.trim() ? `name "${values.name.trim()}"` : null,
+    values.archetype?.trim() ? `archetype ${values.archetype.trim()}` : null,
+    values.model?.trim() ? `model ${values.model.trim()}` : null,
+  ].filter((detail): detail is string => detail != null);
+  const target = details.length > 0 ? ` (${details.join('; ')})` : '';
+  console.error(
+    `dispatch${target}: preparation underway — this dispatch has not opened a ledger row or started an executor yet.`,
+  );
+}
+
 async function main(argv: string[]): Promise<number> {
   // The generated completer places the complete COMP_WORDS vector after an
   // explicit `--` boundary. Parse this tiny protocol before node:util.parseArgs
@@ -632,6 +644,7 @@ async function main(argv: string[]): Promise<number> {
       throw new Error('Usage: fadeno dial [<archetype> [<model>[@effort] [--harness <id>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | resolve --archetype <name>]');
     }
     case 'dispatch': {
+      printDispatchPreparing({ name: values.name, archetype: values.archetype, model: values.model });
       const promptFile = values['prompt-file'];
       const outcome = await runDispatch({
         archetype: values.archetype ?? null,

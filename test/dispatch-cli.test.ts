@@ -38,6 +38,52 @@ function cli(root: string, args: string[], stdin = '', extraEnv: NodeJS.ProcessE
   return { status: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
 }
 
+test('dispatch acknowledges on stderr before it reads input or starts preparation', async (t) => {
+  const root = repo(t, [process.execPath, '-e', "process.stdin.resume();process.stdin.on('end',()=>setTimeout(()=>process.stdout.write('LATE ACK REPORT\\n'),2000))"]);
+  const launcher = spawn(process.execPath, [CLI, 'dispatch', '--archetype', 'worker', '--model', 'echo', '--name', 'Fix Login'], {
+    cwd: root,
+    env: { ...process.env, FADENO_HARNESS: 'standalone' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  t.after(() => {
+    launcher.stdin?.destroy();
+    launcher.kill('SIGTERM');
+  });
+
+  let stdout = '';
+  let stderr = '';
+  launcher.stdout?.setEncoding('utf8');
+  launcher.stderr?.setEncoding('utf8');
+  launcher.stdout?.on('data', (chunk: string) => { stdout += chunk; });
+  launcher.stderr?.on('data', (chunk: string) => { stderr += chunk; });
+
+  const firstStderr = await new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('dispatch did not acknowledge preparation promptly')), 1000);
+    launcher.stderr?.once('data', (chunk: string) => {
+      clearTimeout(timer);
+      resolve(chunk);
+    });
+    launcher.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+  assert.match(firstStderr, /dispatch \(name "Fix Login"; archetype worker; model echo\): preparation underway/);
+  assert.match(firstStderr, /has not opened a ledger row or started an executor yet/);
+  assert.equal(stdout, '', 'the acknowledgement must not enter the agent report stream');
+
+  launcher.stdin?.end('Fix the login bug.\n');
+  const finished = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    launcher.once('error', reject);
+    launcher.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  assert.equal(finished.code, 0, stderr);
+  assert.equal(finished.signal, null);
+  assert.ok(stdout.startsWith('LATE ACK REPORT\n'), stdout);
+  assert.match(stderr, /dispatch \(name "Fix Login"; archetype worker; model echo\): preparation underway/);
+  assert.doesNotMatch(stdout, /preparation underway/);
+});
+
 test('dispatch: the report is stdout verbatim, the exit code is the executor\'s, the ledger holds opened and stopped, and close records the decision', (t) => {
   const root = repo(t);
   const run = cli(root, ['dispatch', '--archetype', 'worker', '--name', 'Fix Login'], 'Fix the login bug.\n');

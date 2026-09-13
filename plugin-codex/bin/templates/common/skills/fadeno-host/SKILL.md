@@ -13,6 +13,12 @@ task after the skill name, begin that task under the policy below. If it
 includes no task, acknowledge activation briefly and wait for the user's next
 request.
 
+An empty initial tool chunk with a live session id is not a silent launch: the
+foreground command is still running, possibly while dispatch preparation
+resolves routing, cuts the worktree, or starts the executor. Continue the same
+managed session and read its later chunks; do not launch a duplicate dispatch.
+Only retry after that session ends with a refusal or failure.
+
 The plugin hook injects `fadeno context` alongside this policy: the archetypes,
 how spawning works, what closing requires, and every unclosed dispatch in the
 repository. Run `fadeno context` yourself whenever you want it again. It

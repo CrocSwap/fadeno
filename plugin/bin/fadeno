@@ -13328,6 +13328,17 @@ function optionalTarget(values) {
   if (selected.length > 1) throw new Error("Choose at most one target: --codex, --claude, --grok, --opencode, or --omp.");
   return selected[0];
 }
+function printDispatchPreparing(values) {
+  const details = [
+    values.name?.trim() ? `name "${values.name.trim()}"` : null,
+    values.archetype?.trim() ? `archetype ${values.archetype.trim()}` : null,
+    values.model?.trim() ? `model ${values.model.trim()}` : null
+  ].filter((detail) => detail != null);
+  const target = details.length > 0 ? ` (${details.join("; ")})` : "";
+  console.error(
+    `dispatch${target}: preparation underway \u2014 this dispatch has not opened a ledger row or started an executor yet.`
+  );
+}
 async function main(argv) {
   if (argv[0] === "completion" && argv[1] === "candidates") {
     const separator = argv.indexOf("--", 3);
@@ -13666,6 +13677,7 @@ async function main(argv) {
       throw new Error("Usage: fadeno dial [<archetype> [<model>[@effort] [--harness <id>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | resolve --archetype <name>]");
     }
     case "dispatch": {
+      printDispatchPreparing({ name: values.name, archetype: values.archetype, model: values.model });
       const promptFile = values["prompt-file"];
       const outcome = await runDispatch({
         archetype: values.archetype ?? null,
