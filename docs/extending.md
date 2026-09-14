@@ -14,6 +14,25 @@ npm run build:plugin && npm run build:plugin:codex && npm run build:plugin:omp
 The plugin rebuilds are not optional when you touch `templates/` — the drift
 tests compare what is committed against a fresh generation.
 
+The Codex sealed-prompt handshake is `fadeno prompt-stage`: stage the exact
+plaintext from stdin or `--prompt-file`, optionally pass `--name <semantic-name>`,
+copy its returned lowercase `task_name` (readable slug plus opaque token) onto
+the next archetype spawn, and let the hook consume it once. Its records are
+repository-bound expiring scratch under `.fadeno/local/`; they are not
+dispatches or prompt evidence. The hook reserves one same-session/
+same-archetype handoff slot before consuming the token, and SubagentStart
+claims it atomically before reading plaintext.
+
+Codex native subagent threads have a runtime concurrency limit; command-lane
+processes do not consume native slots. Keep host-lane work interactive and use
+the command lane for planned overflow or broad fan-out. If a correctly routed
+spawn fails before opening with `agent thread limit reached`, retry the identical
+archetype, model, effort, prompt, and worktree policy via direct `fadeno
+dispatch`, in a managed foreground shell. Never use `nohup` or manually invoke
+an executor argv; use `fadeno dispatch-wait` if the shell yields. The capacity
+refusal creates no dispatch, so use repository-level `fadeno feedback` without
+`--dispatch` when the attempted name cannot be resolved.
+
 ---
 
 ## Add a CLI command
@@ -34,6 +53,17 @@ tests compare what is committed against a fresh generation.
 5. **`test/`** — call `run<Name>()` directly. Reach for the CLI subprocess only
    when the thing under test *is* the output.
 
+Streaming commands follow the same split: keep reference resolution, path
+derivation, byte cursors, and stop/drain policy in `src/commands/` or `src/lib/`,
+and keep stdout writes and exit codes in `src/cli.ts`. Do not turn a recorded
+scratch path into a caller-supplied file option.
+
+The direct model runner is `src/commands/model-run.ts`. It is deliberately a
+command-lane process call without `prepareDispatch`, so do not add ledger,
+worktree, contract, or dispatch-name behavior to it. Use `resolveDelivery` for
+model and effort substitution and `substitutePromptFile` for file-prompt
+harnesses; a new command harness must not grow a second compiler.
+
 ## Add a model to the registry
 
 For yourself, no code change:
@@ -42,6 +72,8 @@ For yourself, no code change:
 fadeno models add moonshot moonshot/kimi-k3   # discovers and writes ~/.config/fadeno/executors.yaml
 fadeno models                                 # the effective registry
 fadeno models verify                          # re-probe every dialed model against its backend
+fadeno models verify kimi                     # verify a registered alias even when undialed
+fadeno models verify moonshot/kimi-k3         # provider/id or delivered-id spelling
 ```
 
 To ship one for everybody, add it to `templates/common/fadeno/executors.yaml`
@@ -107,8 +139,11 @@ A **host** harness needs three things:
    layout, plus a `npm run build:plugin:<harness>` script.
 
 The hook must be able to answer one question — *what did the CLI say to do?* —
-and apply it. If the harness cannot rewrite a spawn, it can still refuse one
-with the command that does the work; `spawn-codex.mjs` is the worked example.
+and apply it. A harness that cannot rewrite a spawn may still deliver a host
+contract through a start event. `spawn-codex.mjs` is the worked example:
+`PreToolUse` validates model and effort, and `SubagentStart` opens the dispatch
+and injects its contract. Only command-lane routing returns a command for the
+host to execute instead of spawning a subagent.
 
 ## Add an archetype
 
@@ -129,6 +164,10 @@ To ship one, add it to `templates/common/fadeno/executors.yaml` **and** to
 when a catalog declares none), and decide whether it belongs in
 `ARCHETYPE_DISPLAY_ORDER` and `CANON_ARCHETYPES` (`templates/hooks/hook-lib.mjs`
 — the names a spawn hook recognizes without a `fadeno:` prefix).
+
+The next Codex `$fadeno-host` activation reconciles the corresponding
+user-scoped agent-name file. Those files never contain model ids or effort, so
+changing a dial or updating the model registry does not regenerate them.
 
 ## Change a template
 
@@ -156,7 +195,8 @@ and a test enforces it. When a test names a sentence, change both or neither.
   branch, what to merge from, what the final message must say, and (for a
   director) the archetype vocabulary.
 - `hostVocabulary()` — what a host session is told: the archetype list with live
-  routing, how spawning works, the close obligation, and the nag.
+  routing, how spawning works, the close obligation, and the nag. Host turns
+  also receive a compact reminder from the live ledger through `context --json`.
 
 Both are one function with two delivery points, which is why the host mode skill
 and a spawned director cannot drift apart. Injected text is never recorded in

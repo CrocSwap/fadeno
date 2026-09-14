@@ -88,13 +88,13 @@ pre .c { color: var(--faint); }
 <div class="wrap">
 
 <header class="masthead">
-  <div class="eyebrow"><span>Specification</span><span>Draft 3</span><span>2026-09-07</span><span>derives from decisions 01–34</span><span>built</span></div>
+  <div class="eyebrow"><span>Specification</span><span>Draft 8</span><span>2026-09-13</span><span>amends decisions 14, 19, 32 and 37; adds 35–38</span><span>built</span></div>
   <h1>Fadeno</h1>
   <p class="standfirst">A meta-harness for common subagent workflow patterns, neutral across harnesses and models. It routes work to models by role, wraps the spawn with deterministic scaffolding, and keeps a record nobody has to think about. Everything else is the intelligence's job.</p>
 </header>
 
 <p class="lede" style="margin-top:26px;">This document specifies behaviour, not implementation. Every call in it has been made and reviewed; nothing is left open.</p>
-<p style="color:var(--muted);">Draft 3 amends §07 and §08 to match what was built: the ledger's <code>stopped</code> row gained <code>model_observed</code>, and the command surface gained the four verbs the hooks and the command lane actually call. Nothing in the design changed — these are facts the draft-2 surface implied and did not name.</p>
+<p style="color:var(--muted);">Draft 8 also settles the command-lane close/report race: a dispatch cannot close itself, only a <code>stopped</code> row is report-ready, and a close-only dead process is settled and reconstructed from its output. It retains Draft 7's explicit baseline rule: a <code>--from</code> dispatch name or id follows the ledger only to the reachable branch of an isolated dispatch; its recorded opening base is never a recovery substitute, and a shared-tree dispatch cannot supply a retained result. Literal Git refs and SHAs remain valid. Cross-namespace and dispatch-name/ID-prefix ambiguities refuse rather than guess. Invalid explicit baselines and later isolated-worktree failures refuse rather than silently creating shared-tree dispatches, and <code>--shared --from</code> is rejected before prompt handling. Draft 5's Codex first-use and lifecycle revisions remain: host activation reconciles model-neutral archetype names; unclosed dispatches are advisory; <code>reviewed</code> is neutral; and a clean stopped worktree may be removed independently of closure.</p>
 
 <h2><span class="sn">01</span>What Fadeno is for</h2>
 <p>The user is someone constantly splitting and routing work between different models on different harnesses, who needs structure without ceremony. Fadeno gives them four things and deliberately nothing else:</p>
@@ -137,6 +137,8 @@ pre .c { color: var(--faint); }
   <li><b>Descriptions</b> are injected when a host session activates, so adding an archetype or editing a description requires re-activation. The CLI says so on those changes — and only those.</li>
   <li><b>Dials</b> are resolved at spawn time and are always current. Changing a dial requires nothing.</li>
   <li>Fadeno stamps a catalog fingerprint at activation and reports staleness at the next spawn, so an ignored advisory or a teammate's edit still surfaces.</li>
+  <li>Codex requires user-scoped agent files before custom archetype names appear in its spawn schema. The first <code>$fadeno-host</code> activation reconciles minimal name-and-description files; if they changed, Codex sees them in the next fresh session. They contain no model or effort.</li>
+  <li>Provider model churn never rewrites agent files. <code>host</code> follows the current session model; named models resolve from the live catalog, and <code>models verify</code> reports a backend that no longer lists one. With no ref it follows effective archetype dials; an explicit registry alias or identity can verify an undialed model. There is no silent fallback.</li>
 </ul>
 
 <h2><span class="sn">04</span>Spawning</h2>
@@ -147,7 +149,7 @@ pre .c { color: var(--faint); }
   <ol>
     <li><b>Resolve</b> the archetype to a model and effort, and apply them to the spawn.</li>
     <li><b>Choose the lane</b> — host if the resolved model can be delivered in-session, command otherwise. The host is not told which.</li>
-    <li><b>Cut a worktree</b> on a branch, from HEAD or a named ref, and record its path, branch and base.</li>
+    <li><b>Cut a worktree</b> on a branch, from HEAD or a named ref, and record its path, branch and base. An explicit <code>--from</code> dispatch name or id resolves through the ledger only to that dispatch's reachable isolated branch; its opening base is never substituted, and a shared-tree dispatch cannot supply a retained result.</li>
     <li><b>Inject the worker's contract</b> into the prompt, and write the <code>opened</code> row.</li>
   </ol>
 </div>
@@ -161,7 +163,7 @@ pre .c { color: var(--faint); }
   <li>Cut from <b>HEAD or a named ref — never from dirty state</b>. Git cannot check out uncommitted work, and replaying it is complexity nobody needed: if a worker requires uncommitted work, the host commits first or requests a shared tree.</li>
   <li><b>On a branch</b>, named <code>fadeno/&lt;semantic-name&gt;</code>, so the ledger and git agree on one identifier and a forgotten dispatch is findable by <code>git branch</code> alone.</li>
   <li>The <b>command lane uses a worktree too</b>, under the same rules — and more easily, since Fadeno sets the process's working directory directly.</li>
-  <li>If <code>git worktree add</code> fails, <b>the spawn proceeds in the shared tree and the prompt says so</b>. An environment problem must not cost a turn.</li>
+  <li>An explicit <code>--from</code> accepts a dispatch name/id, an existing Git ref, or a commit SHA. A shared dispatch or an unavailable branch/result is refused with instructions to commit the desired state and pass its Git ref or SHA. A value matching both namespaces, or an exact dispatch name matching another dispatch's id prefix, is refused; qualify a Git ref such as <code>refs/heads/main</code> or use the dispatch's full UUID. If it cannot resolve, the spawn is refused before prompt handling or opening; <code>--shared --from</code> is rejected as incompatible before prompt handling; if isolated worktree creation later fails, it is also refused rather than abandoning the requested baseline in a shared tree. With no explicit <code>--from</code>, an environmental <code>git worktree add</code> failure may still proceed in the shared tree and the prompt says so.</li>
   <li>A shared tree remains available on request. When one is requested while another shared dispatch is open, <b>say so</b> — that is the only collision git does not solve.</li>
 </ul>
 
@@ -169,12 +171,13 @@ pre .c { color: var(--faint); }
 
 <h2><span class="sn">05</span>The three contracts</h2>
 
-<div class="contract">
-  <h4>What the worker is told</h4>
+  <div class="contract">
+    <h4>What the worker is told</h4>
   <ol>
     <li>Its <b>worktree path and branch</b>, and that it should work there.</li>
     <li>That it <b>owns the work</b>: make the change, commit it, and before finalising, <b>merge from upstream and resolve conflicts in its own tree</b> — the responsibilities of a pull-request author.</li>
     <li>That its return message must <b>state what is in the worktree, including anything untracked</b>, and recommend whether it should be merged or discarded.</li>
+    <li>If it delegates, it must <b>never close the dispatch it is currently running in</b>: that dispatch returns its report to its caller/host. It may close only child dispatches it opened, after reading their reports.</li>
   </ol>
 </div>
 
@@ -183,25 +186,25 @@ pre .c { color: var(--faint); }
   <ol>
     <li>The dispatch's <b>UUID and semantic name</b>, at spawn and again at stop where the harness allows.</li>
     <li>That the worker's report is <b>a recommendation to weigh, not a finding to accept</b> — read it and reach an independent conclusion.</li>
-    <li>Every <b>unclosed dispatch in this repository</b>, at each spawn, with the insistence that they be reviewed and closed.</li>
+    <li>Every <b>unclosed dispatch in this repository</b>, at each spawn, with the insistence that it be reviewed and closed; each host user turn also receives a compact reminder of stopped dispatches awaiting a decision.</li>
   </ol>
 </div>
 
 <div class="contract">
   <h4>What closing requires</h4>
-  <p>Exactly one verb: <code>merged</code>, <code>kept</code>, <code>discarded</code>, or <code>failed</code>, with an optional note. Fadeno performs no merge — the host does, or delegates it. <b>The requirement is that the decision be made, not that Fadeno make it.</b></p>
+  <p>Exactly one verb: <code>merged</code>, <code>kept</code>, <code>discarded</code>, <code>failed</code>, or <code>reviewed</code>, with an optional note. <code>reviewed</code> is neutral and report-only: it records that the report was read without claiming what happened to the work. Fadeno performs no merge — the host does, or delegates it. <b>The requirement is that the decision be made, not that Fadeno make it.</b></p>
 </div>
 
 <h3>The nag</h3>
 <ul class="rule-list">
-  <li>At every spawn, the host is reminded of all unclosed dispatches by <b>UUID and name</b>.</li>
-  <li>At <b>five</b> unclosed, the next spawn is <b>refused</b> until some are closed. Configurable; not exposed initially.</li>
+  <li>At every spawn, the host is reminded of all unclosed dispatches by <b>UUID and name</b>; at every host user turn it receives a compact reminder derived from the current ledger, naming stopped dispatches awaiting a decision.</li>
+  <li>Unclosed dispatches are <b>advisory state</b>. There is no unclosed-count threshold and no spawn refusal derived from the ledger.</li>
   <li>Scope is <b>repository-wide, not session-wide</b>. A director that spawns three workers and exits leaves dispatches with no owner; session scope would hide them permanently — exactly where nesting happens. <b>Grandparents inherit orphans.</b></li>
   <li>Reporting targets the stop hook where a harness supports it, and <b>goes into the nag regardless</b>. The nag is load-bearing; stop-time reporting only makes the news arrive sooner.</li>
   <li>When a worker's working directory did not match its assigned worktree, <b>say so</b> — at stop and in the nag.</li>
 </ul>
 
-<p>The threshold is configured in <code>.fadeno/executors.yaml</code>, alongside the dials — it is repo-scoped policy and that file is already the repo's Fadeno config. Wired from the start, unexposed until someone asks.</p>
+<p>An older <code>unclosed_limit</code> catalog key may be read for compatibility, but it is retired and ignored. The ledger remains repository-wide so a fresh host can recover work another session left behind.</p>
 
 <h2><span class="sn">06</span>Context delivery</h2>
 <ul class="rule-list">
@@ -209,6 +212,7 @@ pre .c { color: var(--faint); }
   <li>A <b>spawned director receives the same content injected into its prompt</b>. A director never activates host mode, yet it is the archetype most needing the vocabulary — its job is choosing what to spawn next.</li>
   <li>Both come from <b>one source</b>, so they cannot drift.</li>
   <li>Injected content is the archetype list, routing behaviour, the worktree contract and the close obligation — <b>not</b> setup prose. General rule: <b>if an intelligence can spawn, it needs the vocabulary.</b></li>
+  <li>Host activation may perform the narrow Codex vocabulary reconciliation before injecting that content. It does not link a CLI, probe providers, or edit another harness's settings.</li>
 </ul>
 
 <h2><span class="sn">07</span>The ledger</h2>
@@ -219,7 +223,7 @@ id · name · at · session · <b>parent</b> · archetype · model · effort
 explicit_model · lane · harness · workspace{path,branch,base} · task · prompt · process_group
 
 <span class="c"># stopped — by the stop hook, an outside observation</span>
-id · at · final_message · dirty · <b>model_observed</b>
+id · at · final_message · dirty · <b>model_observed</b> · evidence
 
 <span class="c"># closed — when the host decides</span>
 id · at · verb · note</pre>
@@ -240,25 +244,28 @@ id · at · verb · note</pre>
     <thead><tr><th>Command</th><th>Does</th></tr></thead>
     <tbody>
       <tr><td class="m">dial</td><td>Show, set and resolve archetype bindings. With no arguments, lists archetypes with descriptions and resolved models — the director's reference.</td></tr>
-      <tr><td class="m">models</td><td>Inspect the registry; verify an alias actually resolves against its backend.</td></tr>
+      <tr><td class="m">models</td><td>Inspect the registry; verify dialed deliveries or explicit registry aliases and identities against their backends.</td></tr>
       <tr><td class="m">dispatch</td><td>Run one dispatch on the command lane, start to finish: resolve, cut the worktree, run the executor, record it. The whole wrapper as a process — what a driver harness, a shell, and the dispatch proxy all call.</td></tr>
-      <tr><td class="m">dispatch-open</td><td>The spawn wrapper for a spawn the host is <i>about to</i> make. Resolves, decides the lane, and either <b>opens</b> it on the host lane — worktree cut, row written, the contract-bearing prompt returned — or <b>relays</b> it: nothing opened, the prompt staged, and the <code>dispatch</code> call the proxy should run handed back. <code>--stage-prompt</code> and <code>--reuse-open</code> serve a hook that can only refuse: the prompt goes to a file the host reads, and a repeated call returns the dispatch already open rather than a second one. The hook calls this and writes nothing itself.</td></tr>
-      <tr><td class="m">dispatch-stop</td><td>Record that a host-lane agent stopped. Given the agent's transcript it finds the dispatch from the contract header in its prompt, takes the last assistant turn as the final message when the harness passed none, and records the model the agent ran on. A transcript with no contract is not a dispatch, and nothing is recorded.</td></tr>
+      <tr><td class="m">dispatch-wait</td><td>Wait for a <code>stopped</code> row, then print the report. A <code>closed</code>-only row is not terminal: a live command group remains running, and a dead group gets the settle window before the stop is reconstructed from its output, stderr and worktree. The direct launcher still returns stdout when close precedes stop.</td></tr>
+      <tr><td class="m">dispatch-open</td><td>The spawn wrapper used by the hooks before a Claude spawn or at Codex subagent start. Resolves, decides the lane, and either <b>opens</b> it on the host lane — worktree cut, row written, the contract-bearing prompt returned — or <b>relays</b> it: nothing opened, the prompt staged, and the <code>dispatch</code> call the proxy should run handed back. The Codex host hook delivers the contract at <code>SubagentStart</code>. The hook writes no ledger or repository evidence itself; its separate pending scratch is only the mechanical event bridge.</td></tr>
+      <tr><td class="m">prompt-stage</td><td>Stage plaintext in expiring repository-local scratch for a Codex spawn whose <code>message</code> may be encrypted. An optional semantic name becomes a lowercase slug plus opaque lowercase token in the schema-safe <code>task_name</code>; the hook atomically consumes a repository-bound token once. The plugin handoff reservation is exclusive for a session/archetype because Codex exposes no common event id. No ledger row, worktree, or prompt evidence exists until the ordinary dispatch path opens.</td></tr>
+      <tr><td class="m">dispatch-stop</td><td>Record that a host-lane agent stopped. Given the agent's transcript it finds the dispatch from the contract header in its prompt, takes the last assistant turn as the final message when the harness passed none, and records the model the agent ran on. The stop hook uses a durable first receipt before optional Git inspection; a later idempotent replay may append dirty paths, ignored paths, and branch measurement as enrichment. For recovery, host guidance prefers saving an already-received final response and passing <code>--message-file</code>; stdin remains supported. A transcript with no contract is not a dispatch, and nothing is recorded. If the hook cannot record the receipt, it returns an actionable system message.</td></tr>
       <tr><td class="m">dispatches</td><td>List dispatches; show one; find output by UUID or name.</td></tr>
-      <tr><td class="m">dispatch-close</td><td>Record the terminal decision for a dispatch.</td></tr>
-      <tr><td class="m">cancel</td><td>Stop a running command-lane dispatch by signalling its process group. Writes a <code>stopped</code> row; the dispatch still needs closing. On a host-lane dispatch it refuses and says the subagent is the harness's to stop.</td></tr>
+      <tr><td class="m">logs</td><td>Read the command-lane internal activity stream from the stderr path derived from the dispatch id. <code>--tail &lt;lines&gt;</code> prints the latest positive number of lines; <code>--follow</code> prints existing bytes and waits for appended bytes until a <code>stopped</code> row arrives and the file is drained. Host-lane dispatches have no Fadeno activity file because their harness owns that transcript; <code>clean</code> may remove command-lane scratch.</td></tr>
+      <tr><td class="m">dispatch-close</td><td>Record the terminal decision for a dispatch. The neutral <code>reviewed</code> disposition acknowledges a report without inferring a Git outcome. A process whose <code>FADENO_DISPATCH_ID</code> names the target is refused; its caller/host closes it, while a parent may close a child it opened.</td></tr>
+      <tr><td class="m">cancel</td><td>Stop a running command-lane dispatch by signalling its process group. The direct signal is the fast path; when the caller is denied with <code>EPERM</code>, it places a per-dispatch request in <code>.fadeno/local</code> for the live launcher to consume from its own context. Cancellation succeeds only after that acknowledgement and group exit; an unconsumed request or still-live group is an actionable failure, never a <code>stopped</code> row. The dispatch still needs closing. On a host-lane dispatch it refuses and says the subagent is the harness's to stop.</td></tr>
       <tr><td class="m">worktrees</td><td>Report worktrees holding unmerged work. The cross-session safety net.</td></tr>
-      <tr><td class="m">context</td><td>Print what a host session is told: the archetype vocabulary with live routing, the rules, and every unclosed dispatch. One source for the host-mode hook, a spawned director's prompt, and a person who wants to read it (§06).</td></tr>
+      <tr><td class="m">context</td><td>Print what a host session is told: the archetype vocabulary with live routing, the rules, every unclosed dispatch, and the compact ledger-derived host-turn reminder. One source for the host-mode hook, a spawned director's prompt, and a person who wants to read it (§06).</td></tr>
       <tr><td class="m">status</td><td>Effective routing, harness integration, and whether anything needs attention.</td></tr>
-      <tr><td class="m">clean</td><td>Remove machine-local scratch — worktrees and outputs, never prompts or the ledger.</td></tr>
+      <tr><td class="m">clean</td><td>Remove machine-local scratch — clean, readable worktrees of stopped or closed dispatches (and unknown worktrees), plus outputs; never prompts or the ledger. Open/running, dirty, unreadable, and unregistered paths remain protected, and branches stay.</td></tr>
       <tr><td class="m">plugin</td><td>Generate the harness plugin from this checkout.</td></tr>
-      <tr><td class="m">setup</td><td>Link the CLI onto PATH. <b>A symlink, never a copy</b> — one copy makes version skew structurally impossible.</td></tr>
+      <tr><td class="m">setup</td><td>Optionally link the CLI onto PATH. <b>A symlink, never a copy</b> — one copy makes version skew structurally impossible. Its narrow <code>--codex --agents-only</code> operation is invoked automatically by Codex host activation and changes only Fadeno-managed archetype files.</td></tr>
       <tr><td class="m">completion</td><td>Shell completion.</td></tr>
     </tbody>
   </table>
 </div>
 
-<p><b>Where a hook cannot rewrite a spawn, the wrapper hands the corrected spawn back.</b> Codex's <code>PreToolUse</code> can refuse a call and nothing else, so the host lane there is a two-pass handshake: the first spawn is refused with the dispatch already open and the exact call to make (agent type, model, effort, and the path to the contract-bearing prompt); the retry carries that contract, is checked against the dispatch it names, and passes in silence. <code>--reuse-open</code> makes the first pass idempotent, so a fumbled retry cannot cut a second worktree. It costs one round trip and it is visible rather than silent — which is the honest trade where the alternative is a dial that quietly does nothing.</p>
+<p><b>Codex delivers the host contract at subagent start.</b> Before an archetype spawn, the host resolves the bundled launcher as setup does, stages the exact task with <code>prompt-stage --name &lt;semantic-name&gt; --prompt-file &lt;file&gt; --json</code> (or stdin), and places the returned schema-safe <code>task_name</code> on the spawn, alongside the live model and effort from the archetype dial. <code>PreToolUse</code> atomically reserves one same-session/same-archetype handoff and validates routing; <code>SubagentStart</code> claims the repository-bound reservation before reading plaintext, then calls the CLI to open the dispatch, cut the worktree, bind the agent id, and deliver the contract through <code>additionalContext</code>. A second uncorrelated start is refused before the agent exists, while impossible recovery states receive a sealed fallback. A readable prompt without a staged token remains supported for older Codex versions. A command-lane resolution uses the recovered plaintext to stage and return the <code>fadeno dispatch</code> command for the host to run. Codex native subagent threads have a runtime concurrency limit; command-lane processes do not consume native slots.</p>
 
 <p><b>The lane is decided in one place and by one bit.</b> <code>dispatch-open</code> resolves the archetype and asks whether this session can deliver the resolved model itself; everything else follows. A host-lane answer opens the dispatch there and then, because the hook that asked is about to spawn the agent. A command-lane answer opens nothing — the prompt is staged and the caller is handed the <code>dispatch</code> command — so a proxy that never runs leaves no row behind. <code>--lane host</code> and <code>--lane command</code> force the answer for a caller that already knows; they are for the hooks, not for people.</p>
 
@@ -272,7 +279,7 @@ id · at · verb · note</pre>
     <li><b>Structure workflows.</b> Playbooks, gates, run ledgers and repair loops are gone. A workflow is a sequence of dispatches, which the intelligence composes. They may return as a plugin above this layer.</li>
     <li><b>Adjudicate models.</b> No shadow pairs, no blinded judging, no bakeoff.</li>
     <li><b>Enforce or attest.</b> No prompt digests, no relay attestation, no tamper detection, no <code>verify</code>. The ledger records; it does not police.</li>
-    <li><b>Materialize agent files.</b> Model and effort are set at spawn time. Nothing is written to <code>~/.codex/agents</code> or <code>.claude/agents</code>, so nothing goes stale and no <code>steering apply</code> exists. <b>Fadeno does report a hand-created agent file</b>, because such a file silently overrides what a spawn passes.</li>
+    <li><b>Materialize routing into agent files.</b> Model and effort are set at spawn time. Codex gets only the user-scoped name-and-description files its spawn schema requires; they carry no model or effort and are reconciled at host activation. <b>Fadeno reports rather than overwrites a hand-created same-named agent file</b>, because its model could silently override what a spawn passes.</li>
     <li><b>Police concurrent writes.</b> No window log, no overlap stamps, no lease, no lock. Worktrees and real merges remove the shared-tree world that machinery existed for.</li>
     <li><b>Impose deadlines.</b> Nothing Fadeno launches is killed on a timer. A person may stop it — that is <code>cancel</code> — but Fadeno never decides to on its own.</li>
     <li><b>Decide what work is worth keeping.</b> It never destroys a worktree holding uncommitted work, and never judges whether output matters.</li>

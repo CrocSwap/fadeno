@@ -1,10 +1,9 @@
 import { readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { editDistance, loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
+import { editDistance, loadExecutorProfile, registeredModelRefSpellings, type ExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { userPaths } from '../lib/user-paths.ts';
-import { runDialShow } from './dial.ts';
 
 /** Arguments supplied by the generated Bash completion function. */
 export interface CompletionCandidatesOptions {
@@ -25,8 +24,8 @@ type ValueKind =
   | 'executor'
   /** User-catalog aliases only — the ones `model remove` can actually take. */
   | 'user-model'
-  /** Refs `models verify` accepts: the spellings of a dialed delivery. */
-  | 'dialed-model'
+  /** Refs `models verify` accepts: merged registry aliases and identities. */
+  | 'registered-model'
   | 'archetype'
   | 'free';
 
@@ -73,16 +72,16 @@ const MODELS_SPEC = command(
   ['executor'],
   {
     add: command({ '--json': NONE }, ['free', 'free']),
-    // `remove` edits the user catalog only, and `verify` re-probes what the
-    // dials point at — neither takes the merged registry the `executor` kind
-    // answers with, so neither may propose from it.
+    run: command({ '--prompt-file': PATH }, ['registered-model', 'free'], undefined, true),
+    // `remove` edits the user catalog only. `verify` takes the merged registry
+    // for explicit refs; its no-ref execution mode remains dial-based.
     remove: command({ '--force': NONE, '--json': NONE }, ['user-model']),
-    verify: command({ '--harness': { kind: 'free' }, '--strict': NONE, '--json': NONE }, ['dialed-model'], undefined, true),
+    verify: command({ '--harness': { kind: 'free' }, '--strict': NONE, '--json': NONE }, ['registered-model'], undefined, true),
   },
 );
 
 const COMMANDS: Record<string, CommandSpec> = {
-  setup: command({ '--codex': NONE, '--claude': NONE, '--from': PATH, '--force': NONE, '--json': NONE }),
+  setup: command({ '--codex': NONE, '--claude': NONE, '--agents-only': NONE, '--from': PATH, '--force': NONE, '--json': NONE }),
   status: command({ '--verbose': NONE, '--codex': NONE, '--claude': NONE, '--opencode': NONE, '--omp': NONE, '--json': NONE }),
   models: MODELS_SPEC,
   // Top-level alias for `models` — same handler in cli.ts, same flags.
@@ -106,10 +105,11 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--json': NONE,
     '--prompt-sealed': { kind: 'free' }, '--agent-id': { kind: 'free' }, '--dry-run': NONE,
   }),
-  'dispatch-stop': command({ '--agent-id': { kind: 'free' }, '--transcript': PATH, '--message-file': PATH, '--agent-cwd': PATH, '--json': NONE }, ['free']),
+  'dispatch-stop': command({ '--agent-id': { kind: 'free' }, '--transcript': PATH, '--message-file': PATH, '--agent-cwd': PATH, '--durable': NONE, '--json': NONE }, ['free']),
   'dispatch-wait': command({ '--wait-seconds': { kind: 'free' }, '--json': NONE }, ['free', 'free', 'free', 'free']),
-  'dispatch-close': command({ '--merged': NONE, '--kept': NONE, '--discarded': NONE, '--failed': NONE, '--note': { kind: 'free' }, '--force': NONE }, ['free']),
+  'dispatch-close': command({ '--merged': NONE, '--kept': NONE, '--discarded': NONE, '--failed': NONE, '--reviewed': NONE, '--note': { kind: 'free' }, '--force': NONE }, ['free']),
   cancel: command({}, ['free']),
+  logs: command({ '--tail': { kind: 'free' }, '--follow': NONE }, ['free']),
   dispatches: command({ '--all': NONE, '--tail': { kind: 'free' }, '--json': NONE, '--output': { kind: 'free' } }, ['free']),
   worktrees: command({ '--json': NONE }),
   context: command({ '--json': NONE }),
@@ -118,6 +118,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   completion: command({}, [], {
     bash: command({}),
   }),
+  'prompt-stage': command({ '--name': { kind: 'free' }, '--prompt-file': PATH, '--consume': { kind: 'free' }, '--claim': { kind: 'free' }, '--finalize': { kind: 'free' }, '--rollback': { kind: 'free' }, '--claim-id': { kind: 'free' }, '--json': NONE }),
 };
 
 /** Public top-level spellings shared by completion, CLI dispatch, and help coverage. */
@@ -287,34 +288,6 @@ function userCatalogModels(): string[] {
   }
 }
 
-/**
- * Every spelling `models verify` accepts for a dialed delivery — the alias,
- * the delivered id, the canonical `id`, and `provider/id` — read from the same
- * effective table the command itself narrows against, so the two cannot drift
- * into proposing a ref that then fails to match.
- */
-function dialedModelRefs(repoRoot: string, cwd: string): string[] {
-  let rows: ReadonlyArray<{ model: string; model_id: string; harness: string | null }>;
-  try {
-    rows = runDialShow({ repoRoot, cwd }).rows;
-  } catch {
-    return [];
-  }
-  const profile = readProfile(repoRoot);
-  const values = new Set<string>();
-  for (const row of rows) {
-    if (row.harness == null || row.model_id === 'host') continue;
-    values.add(row.model);
-    values.add(row.model_id);
-    const entry = profile?.models[row.model];
-    if (entry != null) {
-      values.add(`${entry.provider}/${entry.id}`);
-      values.add(entry.id);
-    }
-  }
-  return uniqueSorted([...values]);
-}
-
 function profileValues(repoRoot: string, kind: 'dial' | 'executor' | 'archetype'): string[] {
   const profile = readProfile(repoRoot);
   if (profile == null) return [];
@@ -335,8 +308,10 @@ function dynamicValues(kind: ValueKind, prefix: string, repoRoot: string, cwd: s
       return startsWith(profileValues(repoRoot, kind), prefix);
     case 'user-model':
       return startsWith(userCatalogModels(), prefix);
-    case 'dialed-model':
-      return startsWith(dialedModelRefs(repoRoot, cwd), prefix);
+    case 'registered-model': {
+      const profile = readProfile(repoRoot);
+      return startsWith(profile == null ? [] : registeredModelRefSpellings(profile), prefix);
+    }
     default:
       return [];
   }

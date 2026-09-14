@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import {
@@ -33,16 +32,21 @@ import {
 } from './commands/dial.ts';
 import { runModels, runModelsAdd, runModelsHarness, runModelsRemove, type HarnessListingResult, type ModelAddResult, type ModelRemoveResult, type ModelsResult } from './commands/models.ts';
 import { runModelsVerify, type ModelsVerifyResult } from './commands/models-verify.ts';
+import { runModelRun } from './commands/model-run.ts';
+import { readLogsProgress, runLogs, waitForLogsChange } from './commands/logs.ts';
 import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
 import { knownFlagsFor, retiredFlagFor, runCompletion, runCompletionCandidates, suggestFlag, TOP_LEVEL_COMMANDS, unknownFlagsFor } from './commands/completion.ts';
 import { runFeedbackAdd, runFeedbackRead } from './commands/feedback.ts';
-import { runSetup } from './commands/setup.ts';
+import { runPromptClaim, runPromptConsume, runPromptFinalize, runPromptRollback, runPromptStage } from './commands/prompt-stage.ts';
+import { runCodexAgentBootstrap, runSetup } from './commands/setup.ts';
 import { runStatus } from './commands/status.ts';
 import { roleResolutionEchoLabel } from './lib/executors.ts';
 import { modelAgrees } from './lib/ledger.ts';
 import { packageVersion } from './lib/paths.ts';
 import { renderFocusedHelp, renderGlobalHelp, resolveHelpPath } from './lib/cli-help.ts';
 import { formatAge } from './lib/contracts.ts';
+import { sharedFromRefusal } from './lib/spawn.ts';
+import { readStdin } from './lib/stdin.ts';
 
 export const KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
 
@@ -251,6 +255,24 @@ function printDispatchPreparing(values: { name?: string; archetype?: string; mod
   );
 }
 
+/** Write activity bytes without decoding or adding a newline. */
+async function writeStdoutBytes(bytes: Buffer): Promise<void> {
+  if (bytes.length === 0) return;
+  if (process.stdout.write(bytes)) return;
+  await new Promise<void>((resolve, reject) => {
+    const onDrain = (): void => {
+      process.stdout.off('error', onError);
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      process.stdout.off('drain', onDrain);
+      reject(error);
+    };
+    process.stdout.once('drain', onDrain);
+    process.stdout.once('error', onError);
+  });
+}
+
 async function main(argv: string[]): Promise<number> {
   // The generated completer places the complete COMP_WORDS vector after an
   // explicit `--` boundary. Parse this tiny protocol before node:util.parseArgs
@@ -267,6 +289,17 @@ async function main(argv: string[]): Promise<number> {
     const candidates = runCompletionCandidates({ cword, words: argv.slice(separator + 1) });
     if (candidates.length > 0) process.stdout.write(`${candidates.join('\n')}\n`);
     return 0;
+  }
+  // node:util.parseArgs treats a dash-prefixed value after a string option as
+  // an ambiguous missing argument. `logs` owns a stricter positive-integer
+  // contract, so turn that parser-level case into the same useful error as
+  // every other invalid `--tail` spelling.
+  if (argv[0] === 'logs') {
+    const tailIndex = argv.findIndex((arg) => arg === '--tail');
+    if (tailIndex >= 0) {
+      const raw = argv[tailIndex + 1];
+      if (raw == null || raw.startsWith('-')) throw new Error('--tail must be a positive integer; pass --tail <lines>.');
+    }
   }
   // `--via` is gone with the driver vocabulary it belonged to. `parseArgs`
   // would answer "Unknown option" for it, which tells a reader the flag is
@@ -294,6 +327,7 @@ async function main(argv: string[]): Promise<number> {
         verbose: { type: 'boolean' },
         // Harness targets, for `setup`, `status` and `plugin`.
         codex: { type: 'boolean' },
+        'agents-only': { type: 'boolean' },
         claude: { type: 'boolean' },
         grok: { type: 'boolean' },
         opencode: { type: 'boolean' },
@@ -314,11 +348,17 @@ async function main(argv: string[]): Promise<number> {
         parent: { type: 'string' },
         'session-id': { type: 'string' },
         'prompt-file': { type: 'string' },
+        consume: { type: 'string' },
+        claim: { type: 'string' },
+        finalize: { type: 'string' },
+        rollback: { type: 'string' },
+        'claim-id': { type: 'string' },
         'prompt-sealed': { type: 'string' },
         'dry-run': { type: 'boolean' },
         'agent-id': { type: 'string' },
         'message-file': { type: 'string' },
         'agent-cwd': { type: 'string' },
+        durable: { type: 'boolean' },
         transcript: { type: 'string' },
         'parent-transcript': { type: 'string' },
         heartbeat: { type: 'string' },
@@ -327,6 +367,7 @@ async function main(argv: string[]): Promise<number> {
         kept: { type: 'boolean' },
         discarded: { type: 'boolean' },
         failed: { type: 'boolean' },
+        reviewed: { type: 'boolean' },
         note: { type: 'string' },
         // feedback
         dispatch: { type: 'string' },
@@ -336,6 +377,7 @@ async function main(argv: string[]): Promise<number> {
         all: { type: 'boolean' },
         tail: { type: 'string' },
         output: { type: 'string' },
+        follow: { type: 'boolean' },
         // Retired: accepted, ignored, warned. See RETIRED_FLAGS.
         timeout: { type: 'string' },
       },
@@ -407,10 +449,65 @@ async function main(argv: string[]): Promise<number> {
   }
 
   switch (command) {
+    case 'prompt-stage': {
+      const promptFile = values['prompt-file'];
+      if (positionals.length > 1) {
+        throw new Error('Usage: fadeno prompt-stage [--name <semantic-name>] [--prompt-file <path> | stdin] [--json], or fadeno prompt-stage --consume|--claim|--finalize|--rollback <task_name> --json');
+      }
+      const lifecycle = [values.consume, values.claim, values.finalize, values.rollback].filter((value): value is string => typeof value === 'string');
+      if (lifecycle.length > 1) throw new Error('Usage: choose exactly one of --consume, --claim, --finalize, or --rollback.');
+      if (values.consume != null) {
+        if (promptFile != null || values.name != null || values.consume.trim() === '' || values.json !== true) {
+          throw new Error('Usage: fadeno prompt-stage --consume <task_name> --json');
+        }
+        const consumed = runPromptConsume({ taskName: values.consume });
+        console.log(JSON.stringify({ ok: true, token: consumed.token, name: consumed.name, task_name: consumed.taskName, prompt: consumed.prompt }));
+        return 0;
+      }
+      if (values.claim != null) {
+        if (promptFile != null || values.name != null || values.claim.trim() === '' || values.json !== true || values['claim-id'] != null) {
+          throw new Error('Usage: fadeno prompt-stage --claim <task_name> --json');
+        }
+        const claimed = runPromptClaim({ taskName: values.claim });
+        console.log(JSON.stringify({ ok: true, token: claimed.token, name: claimed.name, task_name: claimed.taskName, claim_id: claimed.claimId, prompt: claimed.prompt }));
+        return 0;
+      }
+      if (values.finalize != null || values.rollback != null) {
+        const taskName = values.finalize ?? values.rollback;
+        if (promptFile != null || values.name != null || taskName == null || taskName.trim() === '' || typeof values['claim-id'] !== 'string' || values['claim-id'].trim() === '' || values.json !== true) {
+          throw new Error(`Usage: fadeno prompt-stage --${values.finalize != null ? 'finalize' : 'rollback'} <task_name> --claim-id <id> --json`);
+        }
+        const options = { taskName, claimId: values['claim-id'] };
+        if (values.finalize != null) runPromptFinalize(options);
+        else runPromptRollback(options);
+        console.log(JSON.stringify({ ok: true, task_name: taskName }));
+        return 0;
+      }
+      const staged = runPromptStage({ name: values.name ?? null, promptFile, prompt: promptFile == null && !process.stdin.isTTY ? readStdin() : undefined });
+      if (values.json) {
+        console.log(JSON.stringify({ ok: true, token: staged.token, name: staged.name, task_name: staged.taskName, expires_at: staged.expiresAt }, null, 2));
+      } else {
+        console.log(`name: ${staged.name}`);
+        console.log(`staged Codex prompt: ${staged.token}`);
+        console.log(`task_name: ${staged.taskName}`);
+        console.log(`expires_at: ${staged.expiresAt}`);
+      }
+      return 0;
+    }
     case 'setup': {
       const target = optionalTarget(values);
       if (target === 'grok' || target === 'opencode' || target === 'omp') {
         throw new Error('`fadeno setup` supports --codex or --claude; Grok, OpenCode, and omp have no user-scoped setup.');
+      }
+      if (values['agents-only']) {
+        if (target !== 'codex') throw new Error('`fadeno setup --agents-only` requires --codex.');
+        if (values.from || values.force) {
+          throw new Error('`fadeno setup --codex --agents-only` does not link a CLI, so it does not accept --from or --force.');
+        }
+        const result = runCodexAgentBootstrap();
+        if (values.json) console.log(JSON.stringify(result, null, 2));
+        else for (const notice of result.notices) console.log(notice);
+        return 0;
       }
       // `--from <bin-dir>` names the directory the CLI lives in, the same
       // shape the plugin launcher publishes; the link points at the file.
@@ -502,6 +599,32 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'model':
     case 'models': {
+      if (positionals[1] === 'run') {
+        if (positionals.length < 3) {
+          throw new Error('Usage: fadeno model run <ref[@effort][ on <harness>]> [<prompt>...] [--prompt-file <path>]');
+        }
+        if (values.json) throw new Error('`fadeno model run` emits the harness streams verbatim and does not support --json.');
+        const promptArgs = positionals.slice(3);
+        if (promptArgs.length > 0 && values['prompt-file'] != null) {
+          throw new Error('conflicting prompt inputs: use either a positional prompt or --prompt-file, not both.');
+        }
+        const stdin = process.stdin.isTTY ? '' : readStdin();
+        if (promptArgs.length > 0 && stdin.length > 0) {
+          throw new Error('conflicting prompt inputs: both a positional prompt and stdin were provided.');
+        }
+        if (promptArgs.length === 0 && values['prompt-file'] != null && stdin.length > 0) {
+          throw new Error('conflicting prompt inputs: both --prompt-file and stdin were provided.');
+        }
+        const result = await runModelRun({
+          model: positionals[2]!,
+          harness: values.harness ?? null,
+          prompt: promptArgs.length > 0 ? promptArgs.join(' ') : values['prompt-file'] != null ? null : stdin,
+          promptFile: values['prompt-file'] ?? null,
+        });
+        process.stdout.write(result.stdout);
+        process.stderr.write(result.stderr);
+        return result.exitCode ?? 1;
+      }
       if (positionals[1] === 'add') {
         if (positionals.length !== 4 || values.harness != null) {
           throw new Error('Usage: fadeno model add <alias> <provider/id> [--json]');
@@ -644,6 +767,11 @@ async function main(argv: string[]): Promise<number> {
       throw new Error('Usage: fadeno dial [<archetype> [<model>[@effort] [--harness <id>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | resolve --archetype <name>]');
     }
     case 'dispatch': {
+      const policy = sharedFromRefusal(Boolean(values.shared), values.from ?? null);
+      if (policy != null) {
+        console.error(policy);
+        return 3;
+      }
       printDispatchPreparing({ name: values.name, archetype: values.archetype, model: values.model });
       const promptFile = values['prompt-file'];
       const outcome = await runDispatch({
@@ -653,7 +781,7 @@ async function main(argv: string[]): Promise<number> {
         shared: Boolean(values.shared),
         from: values.from ?? null,
         promptFile,
-        prompt: promptFile == null ? readFileSync(0, 'utf8') : undefined,
+        prompt: promptFile == null ? readStdin() : undefined,
         session: values['session-id'] ?? null,
         parent: values.parent,
         onEcho: (line) => console.error(line),
@@ -679,7 +807,7 @@ async function main(argv: string[]): Promise<number> {
           (empty ? '; NO OUTPUT — the executor wrote nothing' : '') +
           (lastWords != null ? `; stderr ends: ${lastWords}` : '') +
           (r.stderrBytes > 0 ? `; full stderr at ${r.stderrPath}` : '') +
-          `. Close it: fadeno dispatch-close ${r.name} --merged|--kept|--discarded|--failed`,
+          `. Close it: fadeno dispatch-close ${r.name} --merged|--kept|--discarded|--failed|--reviewed`,
       );
       if (r.exitCode === 0 && empty) return 1;
       return r.exitCode ?? 1;
@@ -687,10 +815,16 @@ async function main(argv: string[]): Promise<number> {
     case 'dispatch-open': {
       if (!values.archetype) {
         throw new Error(
-          'Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <ref>] ' +
+          'Usage: fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <dispatch-name|id|ref|sha>] ' +
             '[--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] [--agent-id <id>] ' +
             '(--prompt-file <path> | stdin | --prompt-sealed <reason> | --dry-run) [--json]',
         );
+      }
+      const policy = sharedFromRefusal(Boolean(values.shared), values.from ?? null);
+      if (policy != null) {
+        if (values.json) console.log(JSON.stringify({ ok: false, refused: policy }));
+        else console.error(policy);
+        return 3;
       }
       const promptFile = values['prompt-file'];
       const promptSealed = values['prompt-sealed'] ?? null;
@@ -704,7 +838,7 @@ async function main(argv: string[]): Promise<number> {
         // Nothing is read from stdin when the harness sealed the prompt: there
         // is no prompt to read, and a hook that opened a pipe it never fills
         // would hang the spawn it is supposed to be waving through.
-        prompt: promptSealed != null || promptFile != null ? undefined : readFileSync(0, 'utf8'),
+        prompt: promptSealed != null || promptFile != null ? undefined : readStdin(),
         promptSealed,
         agentId: values['agent-id'] ?? null,
         dryRun: Boolean(values['dry-run']),
@@ -753,7 +887,7 @@ async function main(argv: string[]): Promise<number> {
       const transcript = values.transcript ?? null;
       const agentId = values['agent-id'] ?? null;
       if (!ref && !transcript && !agentId) {
-        throw new Error('Usage: fadeno dispatch-stop [<name|id>] [--agent-id <id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--json] — an agent id or a transcript can name the dispatch itself.');
+        throw new Error('Usage: fadeno dispatch-stop [<name|id>] [--agent-id <id>] [--transcript <path>] [--message-file <path> | stdin] [--agent-cwd <dir>] [--durable] [--json] — an agent id or a transcript can name the dispatch itself.');
       }
       const messageFile = values['message-file'];
       let stopped;
@@ -763,8 +897,9 @@ async function main(argv: string[]): Promise<number> {
           agentId,
           transcript,
           messageFile,
-          message: messageFile == null && !process.stdin.isTTY ? readFileSync(0, 'utf8') : null,
+          message: messageFile == null && !process.stdin.isTTY ? readStdin() : null,
           agentCwd: values['agent-cwd'] ?? null,
+          durableOnly: Boolean(values.durable),
         });
       } catch (err) {
         // Not a dispatch: the stop hook fires for every subagent, and one that
@@ -789,6 +924,7 @@ async function main(argv: string[]): Promise<number> {
           model: stopped.record.opened?.model ?? null,
           modelObserved: stopped.row.model_observed ?? null,
           modelMismatch: !modelAgrees(stopped.record.opened?.model, stopped.row.model_observed, stopped.record.opened?.model_id),
+          inspectionPending: stopped.row.evidence === 'durable',
         }));
         return 0;
       }
@@ -796,18 +932,18 @@ async function main(argv: string[]): Promise<number> {
       const ran = stopped.row.model_observed ?? null;
       const modelNote = !modelAgrees(asked, ran, stopped.record.opened?.model_id) ? `; WARNING: ran on ${ran}, the dial asked for ${asked}` : '';
       console.log(
-        `${name} stopped${stopped.replayed ? ' (already recorded)' : ''}; tree ${dirty}` +
+        `${name} stopped${stopped.replayed ? ' (already recorded)' : ''}; ${stopped.row.evidence === 'durable' ? 'worktree inspection deferred' : `tree ${dirty}`}` +
           (stopped.mismatchedCwd != null ? `; WARNING: the agent worked in ${stopped.mismatchedCwd}, not its assigned worktree` : '') +
           modelNote +
-          `. Close it: fadeno dispatch-close ${name} --merged|--kept|--discarded|--failed`,
+          `. Close it: fadeno dispatch-close ${name} --merged|--kept|--discarded|--failed|--reviewed`,
       );
       return 0;
     }
     case 'dispatch-close': {
       const [, ref] = positionals;
-      const verbs = (['merged', 'kept', 'discarded', 'failed'] as const).filter((verb) => values[verb]);
+      const verbs = (['merged', 'kept', 'discarded', 'failed', 'reviewed'] as const).filter((verb) => values[verb]);
       if (!ref || verbs.length !== 1) {
-        throw new Error('Usage: fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>] — exactly one verb.');
+        throw new Error('Usage: fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed|--reviewed [--note <text>] — exactly one verb.');
       }
       const closed = runDispatchClose({ ref, verb: verbs[0]!, note: values.note ?? null, force: Boolean(values.force) });
       const name = closed.record.opened?.name ?? closed.record.id;
@@ -835,10 +971,13 @@ async function main(argv: string[]): Promise<number> {
         return 1;
       }
       const name = outcome.record.opened?.name ?? outcome.record.id;
+      const signalDescription = outcome.method === 'cooperative'
+        ? 'launcher cooperatively signalled process group'
+        : 'signalled process group';
       console.log(
-        `cancelled ${name}: signalled process group ${outcome.processGroup}` +
+        `cancelled ${name}: ${signalDescription} ${outcome.processGroup}` +
           (outcome.stoppedRecorded ? '; stop recorded' : '; its launcher recorded the stop') +
-          `. Close it: fadeno dispatch-close ${name} --failed|--kept|--discarded`,
+          `. Close it: fadeno dispatch-close ${name} --failed|--kept|--discarded|--reviewed`,
       );
       return 0;
     }
@@ -940,6 +1079,21 @@ async function main(argv: string[]): Promise<number> {
       if (values.json) console.log(JSON.stringify(added, null, 2));
       else console.log(`recorded in ${added.path} (${added.total} entr${added.total === 1 ? 'y' : 'ies'}).`);
       return 0;
+    }
+    case 'logs': {
+      const ref = positionals[1];
+      if (ref == null || positionals.length !== 2) {
+        throw new Error('Usage: fadeno logs <name|id> [--tail <lines>] [--follow]');
+      }
+      const source = runLogs({ ref, tail: values.tail ?? null, follow: Boolean(values.follow) });
+      await writeStdoutBytes(source.initial);
+      if (!source.follow) return 0;
+      for (;;) {
+        const progress = readLogsProgress(source);
+        await writeStdoutBytes(progress.chunk);
+        if (progress.stopped && progress.drained) return 0;
+        await waitForLogsChange(source);
+      }
     }
     case 'dispatches': {
       const [, ref] = positionals;

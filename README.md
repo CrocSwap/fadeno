@@ -26,13 +26,22 @@ dispatches is the intelligence's job; Fadeno wraps each one and keeps the books.
 
 ## Quickstart
 
-Install the plugin for your harness, start a fresh session, and delegate
-normally.
+Install the plugin for your harness, start a fresh session, and activate host
+mode.
 
 ```text
-/fadeno:setup                       # Claude Code — links the CLI onto your PATH
+$fadeno-host                        # Codex
+/fadeno:host                        # Claude Code
 Add CSV export to the reports module, then have it reviewed.
 ```
+
+There is no required setup command. On its first Codex activation,
+`$fadeno-host` installs the model-neutral `fadeno-*` archetype names into the
+user agent directory. Codex reads those names at session start, so that first
+activation may ask for one more fresh session; later activations are an
+idempotent check. Claude ships its vocabulary inside the plugin. `fadeno setup`
+remains available only when you want a convenient `fadeno` link on your shell
+`PATH` (and, on Claude, its CLI permission).
 
 That is the whole workflow. When the session spawns a subagent named after an
 archetype, Fadeno resolves the model, cuts a worktree, injects the contract, and
@@ -42,6 +51,7 @@ close it when you have decided what to do with the work:
 ```bash
 fadeno dispatches                   # what is still open
 fadeno dispatches csv-export        # the detail, including the report
+fadeno logs csv-export              # the command-lane internal activity stream
 fadeno dispatch-close csv-export --merged
 ```
 
@@ -75,6 +85,16 @@ Dials cascade **binding → session dial → repo pin → user dial → base**, 
 specific wins. An archetype with no dial anywhere runs on your session's own
 model, which is the sensible default and needs no configuration.
 
+Codex model names may change; the agent files do not follow them because they
+contain no model or reasoning effort. `host` always means the current session
+model, while named aliases resolve from the current catalog at every spawn.
+After a provider or Codex upgrade, `fadeno models verify` checks named model
+deliveries against the backend listing. With no refs it checks every named
+delivery in the effective archetype dials; pass one or more registered aliases,
+provider/id identities, or delivered ids to check them directly, including an
+alias no archetype currently dials. A removed model is an error to fix with a
+dial or catalog change, never a silent fallback.
+
 Routing is invisible by default: you name an archetype and Fadeno applies the
 model. Two escape hatches exist and are not encouraged — `fadeno dial resolve
 --archetype worker` to inspect one, and an explicit model on a spawn to escalate
@@ -98,13 +118,29 @@ worktree, and record the dispatch.
 ## The worktree contract
 
 Every dispatch gets its own git worktree under `.fadeno/local/worktrees/`, on a
-branch named `fadeno/<name>`, cut from HEAD. The agent is told where it is, what
-branch it owns, and that its final message must say what it did and where the
-work lives. Two agents never share a tree.
+branch named `fadeno/<name>`, cut from HEAD by default. `--from` accepts a
+dispatch name or id and follows the ledger to that dispatch's reachable branch;
+it never substitutes the dispatch's opening `workspace.base`, because that may
+omit the work the dispatch produced. A shared-tree dispatch has no attributable
+retained result and cannot be used as a baseline. If a referenced branch/result
+is unavailable, commit the desired state and pass that Git ref or commit SHA
+instead. Existing Git refs and commit SHAs continue to work.
+
+If a value matches both a dispatch reference and a Git ref, Fadeno refuses to
+guess: qualify the Git ref (for example `refs/heads/main`) or use the
+dispatch's full UUID. An exact dispatch name that is another dispatch's id
+prefix is likewise ambiguous and requires a full UUID. `--shared` and `--from`
+are incompatible; choose the shared tree without `--from`, or remove
+`--shared` to cut the named baseline. The agent is told where it is, what branch
+it owns, and that its final message must say what it did and where the work
+lives. Two agents never share a tree.
 
 If a task needs uncommitted work, commit it first — or ask for the live tree
 explicitly (`--shared` on the command lane), and the agent is told it is sharing
-and given the git rules that protect other people's work.
+and given the git rules that protect other people's work. An invalid explicit
+`--from` is refused, and a worktree-creation failure does not silently turn
+that requested baseline into a shared-tree run. Without `--from`, an
+environmental worktree failure may still use the shared tree and says why.
 
 **Fadeno performs no merge.** It never touches your branches, never rebases,
 never resolves a conflict. Merging is judgment, and judgment is yours.
@@ -136,9 +172,11 @@ the spawn passed.
 ### Closing, and the nag
 
 Closing takes exactly one verb — `--merged`, `--kept`, `--discarded`,
-`--failed` — with an optional note. At every spawn your session is reminded of
-every unclosed dispatch **in this repository**, by name. At five unclosed, the
-next spawn is refused until you deal with some.
+`--failed`, or `--reviewed` — with an optional note. `--reviewed` is a neutral,
+report-only acknowledgement; it makes no claim about where the work landed.
+At every spawn and every host user turn your session gets a reminder derived
+from every unclosed dispatch **in this repository**, by name. Unclosed rows are
+advisory state: they never refuse another spawn.
 
 The scope is deliberate. A director that spawns three workers and exits leaves
 dispatches with no owner; session scope would hide them forever, which is
@@ -155,23 +193,47 @@ it. A tree it cannot read is reported as unreadable, never as clean.
 | Command | Does |
 |---------|------|
 | `dial` | Show, set, clear and resolve archetype bindings. With no arguments, the reference to read before delegating. |
-| `models` | Inspect the model registry; verify an alias resolves against its backend. |
+| `models` | Inspect the model registry; verify dialed deliveries or explicit registry refs against their backends. |
+| `model run` / `models run` | Run one registered model directly with a positional, stdin, or file prompt in temporary scratch. |
 | `dispatch` | Run one dispatch on the command lane, start to finish. |
-| `dispatch-wait` | Block until a dispatch stops, then print its report — for work that outruns the caller's shell timeout. |
+| `dispatch-wait` | Block until a dispatch stops, then print its report — for work that outruns the caller's shell timeout. Only a `stopped` row is report-ready; a close-only command dispatch remains running until its process stops or is reconstructed after the settle window. |
 | `dispatches` | List dispatches, show one, print a report. |
+| `logs` | Read a command-lane dispatch's internal activity stream; `--tail <lines>` selects the latest lines and `--follow` streams until it stops. |
 | `dispatch-close` | Record the terminal decision. |
 | `cancel` | Stop a running command-lane dispatch by signalling its process group. |
 | `worktrees` | Every worktree holding work that is not on HEAD. |
-| `context` | What a host session is told: archetypes, rules, open dispatches. |
+| `context` | What a host session is told: archetypes, rules, open dispatches, and the compact host-turn reminder. |
 | `feedback` | Record friction with Fadeno itself, or read what has been recorded. |
+| `prompt-stage` | Stage plaintext for Codex's sealed-prompt spawn handshake; returns a one-use `task_name`. |
 | `status` | Effective routing, harness integration, and whatever needs a person. |
 | `clean` | Remove machine-local scratch — never prompts, never the ledger. |
-| `setup` | Link the CLI onto PATH. A symlink, never a copy. |
+| `setup` | Optionally link the CLI onto PATH; Codex host mode uses its narrow agent-vocabulary mode automatically. |
 | `plugin` | Generate the harness plugin from this checkout. |
 | `completion` | Shell completion. |
 
 `dispatch-open` and `dispatch-stop` also exist; they are the hooks' entry
 points, and nothing else should need them.
+
+A dispatch must return its own report. If a process tries to close the dispatch
+whose id is in `FADENO_DISPATCH_ID`, `dispatch-close` refuses and tells it that
+the caller/host must close it; a parent process may still close a child it
+opened. This prevents a close row from hiding a live command-lane report.
+
+For a one-shot smoke test that is not a dispatch, run a registered model
+directly. The alias may include the usual effort and harness ref syntax, such
+as `sol@high on codex` (quote it as one shell argument):
+
+```bash
+fadeno model run sol "Reply exactly: Hello, World!"
+printf '%s\n' 'Reply exactly: Hello, World!' | fadeno models run sol
+fadeno model run sol --prompt-file prompt.txt
+```
+
+The command harness receives the compiled model id and effective effort, and
+runs in a fresh temporary directory. Its stdout, stderr, and exit status pass
+through unchanged. This creates no dispatch ledger row, prompt evidence,
+worktree, branch, or close obligation. Additional positional prompt words are
+joined with single spaces; do not combine them with stdin or `--prompt-file`.
 
 Run `fadeno <command> --help` for exact usage and only that command's options.
 
@@ -196,8 +258,11 @@ dials:
 archetypes:
   auditor:
     description: Checks a change against the compliance checklist.
-unclosed_limit: 5
 ```
+
+Older catalogs may still contain `unclosed_limit`; Fadeno reads it for
+compatibility, reports that it is retired, and ignores it. Spawning is
+unlimited.
 
 A harness is a **host** when Fadeno can run inside it (`host:`) and an
 **executor** when Fadeno can spawn it (`command:`). Most are both. A harness has
@@ -220,18 +285,35 @@ means Claude- or Codex-compatible hooks. Everything else is reached through the
 command lane, which loses nothing: that is where Fadeno controls the process
 outright.
 
-One asymmetry worth knowing: a Codex `PreToolUse` hook can **refuse** a spawn
-and nothing else — it cannot rewrite one. So the host lane there is a two-pass
-handshake. The first spawn is refused with the dispatch already open and the
-exact call to make: agent type, model, reasoning effort, and the path to the
-contract-bearing prompt. The retry carries that contract, Fadeno checks it names
-a dispatch that is open and is being spawned on the model it was opened for, and
-lets it through in silence. A repeated first pass returns the same dispatch
-rather than opening a second.
+On Codex, read `fadeno dial <archetype> --json` immediately before spawning
+`fadeno-<archetype>` and put its resolved model and effort on the spawn. Resolve
+the CLI as the Codex setup skill does (the plugin's sibling launcher when
+present, otherwise `fadeno` on `PATH`). Before that spawn, stage the exact task
+with the resolved launcher and `prompt-stage --name <semantic-name>
+--prompt-file <file> --json` (or stdin), then put the returned `task_name` on
+the spawn exactly. It contains a readable lowercase slug and an opaque
+lowercase token, is bound to this repository, expires after ten minutes, and is
+consumed once. `PreToolUse` reserves one same-session/same-archetype handoff
+slot and recovers the staged plaintext even when Codex encrypts `message`;
+`SubagentStart` then atomically claims that handoff, opens the dispatch, creates
+the worktree, binds the agent id, and delivers the contract. A readable prompt
+without a staged token remains supported for older Codex versions.
 
-It costs one round trip, and the correction is visible rather than applied
-behind your back. A model Codex cannot deliver in-session still takes the
-command lane, refused with the `fadeno dispatch` command that runs it.
+Codex native subagent threads have a runtime concurrency limit; command-lane
+processes do not consume native slots. Keep the host lane for interactive work
+and use the command lane for planned overflow or broad fan-out. If a correctly
+routed spawn fails before opening with `agent thread limit reached`, retry the
+identical archetype, model, effort, prompt, and worktree policy via direct
+`fadeno dispatch`; do not substitute a model. Run it in a managed foreground
+shell, never with `nohup` or a manually invoked executor argv, and use
+`fadeno dispatch-wait` if the shell yields. A native capacity refusal creates
+no dispatch, so omit `--dispatch` when recording that friction with
+`fadeno feedback`.
+
+Codex's inability to rewrite a spawn does not require the command lane. When
+the resolved model belongs on that lane, the hook refuses the spawn with the
+`fadeno dispatch` command for the host to run. Calling that command directly
+explicitly chooses process execution rather than host delivery.
 
 ---
 
@@ -245,10 +327,12 @@ Each of these was in the product and was removed on purpose.
 - **Adjudicate models.** No shadow pairs, no blinded judging, no bakeoff.
 - **Enforce or attest.** No prompt digests, no tamper detection, no `verify`.
   The ledger records; it does not police.
-- **Materialize agent files.** Model and effort are set at spawn time, so
-  nothing is written to `~/.codex/agents` or `.claude/agents` and nothing goes
-  stale. Fadeno does *report* a hand-written agent file, because such a file can
-  silently override what a spawn passes.
+- **Materialize routing into agent files.** Codex needs user-scoped files to
+  expose custom agent names, so Fadeno maintains the smallest possible files:
+  archetype name, description, and contract bootstrap only. They contain no
+  model or effort. Fadeno reports a hand-written same-named file rather than
+  overwriting it, because its model could silently override what a spawn
+  passes.
 - **Police concurrent writes.** No lease, no lock, no overlap stamps. Worktrees
   and real merges remove the shared-tree world that machinery existed for.
 - **Impose deadlines.** Nothing Fadeno launches is killed on a timer. You may
