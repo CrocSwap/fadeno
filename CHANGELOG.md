@@ -13,6 +13,10 @@ workflow engine.
 
 ### Changed
 
+- **Optional model observations.** Hosts may keep workload-specific notes in
+  `.fadeno/model-notes.md` and consult them when discussing performance or
+  choosing a dial. There is no required format or update after a dispatch;
+  notes neither change routing nor become automatic prompt context.
 - **Command reports preserve failure context.** Report reads carry nonzero
   executor status and stderr cause even when partial stdout exists. Proxy and
   host guidance name full-report retrieval and the no-live-inbox follow-up

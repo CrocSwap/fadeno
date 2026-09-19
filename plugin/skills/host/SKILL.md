@@ -194,3 +194,23 @@ in `.fadeno/preamble.md`. Fadeno appends it to every dispatched prompt, so a
 brief never repeats it and a brief that forgets it cannot happen. When you find
 yourself typing the same sentence into a second brief, put it in that file
 instead.
+
+## Optional model observations
+
+When discussing model performance or choosing a dial, consult
+`.fadeno/model-notes.md` in the main repository if it exists. This is an
+optional Markdown notebook for workload-specific observations and user
+preferences. Its contents are not loaded automatically into dispatch prompts
+and do not change routing.
+
+You may create or update it when a user discusses a result or a useful pattern
+emerges. Dispatch completion creates no update obligation; an absent or empty
+file is normal. There is no required schema, score, or entry per dispatch.
+
+Keep notes concise and specific to the workload. When useful, include the date,
+archetype, actual model and effort, what worked or needed correction, and a
+representative dispatch name. Distinguish observed results from hypotheses and
+user preferences; do not turn one attempt into a universal model ranking.
+Revise or qualify earlier observations as evidence changes. Keep these notes
+in the main repository's `.fadeno/`, outside `.fadeno/local/`, so scratch
+cleanup preserves them.
