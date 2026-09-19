@@ -87,6 +87,21 @@ Dials cascade **binding → session dial → repo pin → user dial → base**, 
 specific wins. An archetype with no dial anywhere runs on your session's own
 model, which is the sensible default and needs no configuration.
 
+You can keep optional model observations in `.fadeno/model-notes.md` in the
+main repository. The host consults it when discussing performance or choosing
+a dial, and may record a useful observation from that discussion. There is no
+required format or update after a dispatch. Notes do not change routing and
+are not automatically appended to prompts; `clean` preserves the file.
+
+Useful notes connect a model and effort to an archetype and workload: what
+worked, what needed correction, and what you might try next. Add a date or a
+representative dispatch when helpful, distinguish evidence from hypotheses and
+preferences, and revise conclusions as experience accumulates. For example:
+
+> Worker · model/effort · date — handled bounded CLI edits well; concurrency
+> changes needed review corrections. Tentative preference: use for small
+> implementation tasks with explicit acceptance criteria. Evidence: dispatch name.
+
 Codex model names may change; the agent files do not follow them because they
 contain no model or reasoning effort. `host` always means the current session
 model, while named aliases resolve from the current catalog at every spawn.

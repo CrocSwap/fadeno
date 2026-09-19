@@ -205,6 +205,12 @@ export function hostVocabulary(input: HostVocabularyInput): string {
     lines.push(`- **${a.name}** — ${a.description}`);
   }
   lines.push('');
+  lines.push(
+    'When discussing model performance or choosing a dial, consult `.fadeno/model-notes.md` in the main repository if present. ' +
+      'It is an optional Markdown notebook of workload observations and user preferences, not routing configuration. ' +
+      'You may record a useful observation; dispatch completion creates no update obligation. Distinguish observations from hypotheses, and revise notes as evidence changes.',
+    '',
+  );
   lines.push('## Spawning', '');
   if (input.host === 'codex') {
     // Codex cannot rewrite a spawn, only refuse one, so the model has to be on
