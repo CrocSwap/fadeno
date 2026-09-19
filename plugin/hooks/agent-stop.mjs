@@ -25,11 +25,11 @@
 // `last_assistant_message`), so one file serves both.
 //
 // Budget: the harness gives a stop hook a few seconds on the interrupted path.
-// One CLI call, bounded, and no decision — this is evidence, never a gate.
+// Ask the CLI for its cheap durable receipt first; optional Git inspection is
+// explicitly deferred so the harness budget cannot strand an otherwise done
+// dispatch as open. This is evidence, never a gate.
 
-import { finish, readEvent, resolveCli, runFadeno, str } from './hook-lib.mjs';
-
-const STOP_TIMEOUT_MS = 4_000;
+import { describeFailure, finish, readEvent, resolveCli, runFadeno, str } from './hook-lib.mjs';
 
 const event = readEvent();
 if (event == null) finish(null);
@@ -44,16 +44,31 @@ if (cwd == null || (transcript == null && agentId == null)) finish(null);
 const cli = resolveCli(import.meta.url);
 const harness = typeof event.turn_id === 'string' ? 'codex' : 'claude';
 const lastMessage = typeof event.last_assistant_message === 'string' ? event.last_assistant_message : '';
-const args = ['dispatch-stop', '--json'];
+const args = ['dispatch-stop', '--durable', '--json'];
 if (agentId != null) args.push('--agent-id', agentId);
 if (transcript != null) args.push('--transcript', transcript);
 const run = runFadeno(cli, args, {
   cwd,
   input: lastMessage,
   harness,
-  timeoutMs: STOP_TIMEOUT_MS,
+  // This path writes only the durable receipt. Let the harness own its hook
+  // lifetime rather than adding a second Fadeno deadline that can lose it.
+  timeoutMs: 0,
 });
-if (run.status !== 0 || run.json?.ok !== true) finish(null); // not a dispatch, or nothing this hook can fix
+if (run.status === 4 && run.json?.ok === false && run.json.dispatch == null) finish(null); // an ordinary, non-Fadeno subagent
+if (run.status !== 0 || run.json?.ok !== true) {
+  const replayArgs = ['fadeno', 'dispatch-stop'];
+  if (agentId != null) replayArgs.push('--agent-id', agentId);
+  if (transcript != null) replayArgs.push('--transcript', transcript);
+  const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+  const replay = replayArgs.map(shellQuote).join(' ');
+  finish({
+    systemMessage:
+      `fadeno: could not record the stopped dispatch. ${describeFailure(run, 'fadeno dispatch-stop')} ` +
+      `Verify with \`fadeno dispatches\`; if it is still open, save the received final response to a file and replay idempotently with ` +
+      `\`${replay} --message-file <path>\`, then inspect the report and close it normally. Stdin remains supported, but a live two-process pipeline is not the default recovery path.`,
+  });
+}
 
 const stopped = run.json;
 const dirty = stopped.dirty === 'unavailable'
@@ -65,6 +80,7 @@ const dirty = stopped.dirty === 'unavailable'
 const model = stopped.modelMismatch === true ? `; ran on ${stopped.modelObserved}, not the dialed ${stopped.model}` : '';
 finish({
   systemMessage:
-    `fadeno: dispatch ${stopped.name} stopped${stopped.replayed ? ' (already recorded)' : ''}; ${dirty}${model}. ` +
-    `Close it: fadeno dispatch-close ${stopped.name} --merged|--kept|--discarded|--failed`,
+    `fadeno: dispatch ${stopped.name} stopped${stopped.replayed ? ' (already recorded)' : ''}; ` +
+    `${stopped.inspectionPending === true ? 'stop recorded durably; worktree inspection deferred' : dirty}${model}. ` +
+    `Close it: fadeno dispatch-close ${stopped.name} --merged|--kept|--discarded|--failed|--reviewed`,
 });

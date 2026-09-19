@@ -1,9 +1,17 @@
 import { readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { editDistance, loadExecutorProfile, registeredModelRefSpellings, type ExecutorProfile } from '../lib/executors.ts';
+import {
+  archetypeDisplaySort,
+  editDistance,
+  knownArchetypes,
+  loadExecutorProfile,
+  readLocalDialState,
+  registeredModelRefSpellings,
+  type ExecutorProfile,
+} from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
-import { userPaths } from '../lib/user-paths.ts';
+import { readUserDials, userPaths } from '../lib/user-paths.ts';
 
 /** Arguments supplied by the generated Bash completion function. */
 export interface CompletionCandidatesOptions {
@@ -26,6 +34,7 @@ type ValueKind =
   | 'user-model'
   /** Refs `models verify` accepts: merged registry aliases and identities. */
   | 'registered-model'
+  | 'dispatch-selector'
   | 'archetype'
   | 'free';
 
@@ -65,6 +74,22 @@ const command = (
 const NONE: OptionSpec = { kind: 'none' };
 const PATH: OptionSpec = { kind: 'path' };
 
+const DISPATCH_LAUNCH_OPTIONS: Record<string, OptionSpec> = {
+  '--archetype': { kind: 'archetype' }, '--model': { kind: 'free' }, '--name': { kind: 'free' }, '--prompt-file': PATH,
+  '--shared': NONE, '--from': { kind: 'free' }, '--session-id': { kind: 'free' }, '--parent': { kind: 'free' }, '--heartbeat': { kind: 'free' },
+};
+
+const DISPATCH_SPEC = command(
+  {
+    ...DISPATCH_LAUNCH_OPTIONS,
+    '--all': NONE, '--tail': { kind: 'free' }, '--json': NONE, '--output': { kind: 'free' },
+  },
+  ['dispatch-selector'],
+  {
+    run: command(DISPATCH_LAUNCH_OPTIONS, ['dispatch-selector']),
+  },
+);
+
 // Shared by `models` and its top-level alias `model` — one spec so the two
 // spellings cannot drift apart on which flags they accept.
 const MODELS_SPEC = command(
@@ -95,10 +120,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     },
   ),
   clean: command({ '--force': NONE }),
-  dispatch: command({
-    '--archetype': { kind: 'archetype' }, '--model': { kind: 'free' }, '--name': { kind: 'free' }, '--prompt-file': PATH,
-    '--shared': NONE, '--from': { kind: 'free' }, '--session-id': { kind: 'free' }, '--parent': { kind: 'free' }, '--heartbeat': { kind: 'free' },
-  }),
+  dispatch: DISPATCH_SPEC,
   'dispatch-open': command({
     '--archetype': { kind: 'archetype' }, '--model': { kind: 'free' }, '--name': { kind: 'free' }, '--prompt-file': PATH,
     '--shared': NONE, '--from': { kind: 'free' }, '--session-id': { kind: 'free' }, '--parent': { kind: 'free' }, '--parent-transcript': PATH, '--harness': { kind: 'free' }, '--lane': { kind: 'free' },
@@ -312,6 +334,13 @@ function dynamicValues(kind: ValueKind, prefix: string, repoRoot: string, cwd: s
       const profile = readProfile(repoRoot);
       return startsWith(profile == null ? [] : registeredModelRefSpellings(profile), prefix);
     }
+    case 'dispatch-selector': {
+      const profile = readProfile(repoRoot);
+      if (profile == null) return [];
+      const local = readLocalDialState(repoRoot);
+      const archetypes = archetypeDisplaySort(knownArchetypes(profile.archetypes, profile.dials, local.dials, readUserDials()));
+      return startsWith([...archetypes, ...registeredModelRefSpellings(profile)], prefix);
+    }
     default:
       return [];
   }
@@ -346,7 +375,7 @@ export function runCompletionCandidates(opts: CompletionCandidatesOptions): stri
   }
 
   const base = COMMANDS[context.name];
-  if (base?.subcommands != null && context.spec === base) {
+  if (base?.subcommands != null && context.spec === base && !current.startsWith('-')) {
     const first = firstPositionalIndex(words, context.start, cword, base);
     if (first == null || first === cword) return startsWith(Object.keys(base.subcommands), current);
   }

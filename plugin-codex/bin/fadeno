@@ -7368,6 +7368,7 @@ var import_node_path22 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/commands/dispatches.ts
+var import_node_crypto5 = require("node:crypto");
 var import_node_fs11 = require("node:fs");
 var import_node_path10 = require("node:path");
 
@@ -7830,25 +7831,27 @@ var CONTRACT_HEADER = "## Fadeno dispatch";
 var CONTRACT_FOOTER = "## End of Fadeno dispatch contract";
 function workerContract(input) {
   const lines = [];
+  const upstream = input.worktree.kind === "worktree" ? `\`${input.worktree.upstream}\`` : "its upstream branch";
   lines.push(`${CONTRACT_HEADER} ${input.id} (${input.name})`, "");
   lines.push(`You are the \`${input.archetype}\` for this dispatch. Fadeno recorded it; your caller will read your report and decide what to do with your work.`, "");
   if (input.worktree.kind === "worktree") {
     const wt = input.worktree;
     lines.push("**Where to work.**");
-    lines.push(`- Your worktree is \`${wt.absolute}\`, on branch \`${wt.branch}\`, cut from \`${wt.upstream}\` at \`${wt.base.slice(0, 12)}\`. Work there and nowhere else; the repository at \`${input.repoRoot}\` is someone else's tree.`);
+    lines.push(`- Your assigned worktree is \`${wt.absolute}\`, on branch \`${wt.branch}\`, cut from \`${wt.upstream}\` at \`${wt.base.slice(0, 12)}\`. Put modifications and commits there; the repository at \`${input.repoRoot}\` is someone else's tree.`);
+    lines.push("- Assigned-worktree containment applies to modifications and commits. A caller-authorized read-only inspection outside the assigned tree, including the main repository or another source tree, is allowed; do not write or commit outside the assigned tree.");
     lines.push("- The worktree checks out tracked content only. If a build environment (`node_modules`, `.venv`, `target`, `vendor`) is missing and a check you were asked to run cannot run, say so and report the work as unverified. Never substitute a weaker check and call it a pass.", "");
-    lines.push("**You own the work.**");
-    lines.push("- Make the change and commit it on your branch, with a message that says what and why.");
-    lines.push(`- Before you finish, merge \`${wt.upstream}\` into your branch and resolve any conflicts in your own worktree, the way a pull-request author would. Leave the tree clean: no conflict markers, nothing uncommitted you meant to keep.`, "");
   } else {
     lines.push("**Where to work.**");
     lines.push(
       `- You are working in the shared tree at \`${input.repoRoot}\`${input.worktree.reason ? ` (no worktree was cut: ${input.worktree.reason})` : ""}. Other agents may have uncommitted work here.`
     );
     lines.push("- Never run `git checkout`, `switch`, `restore`, `reset`, `stash` or `clean` in a shared tree: they throw away work that is not yours with no way back. If your own edit was wrong, edit the file to what it should be. If the tree is in a state you cannot work from, stop and report it.", "");
-    lines.push("**You own the work.**");
-    lines.push("- Make the change and commit it, with a message that says what and why.", "");
+    lines.push("- Assigned-tree containment applies to modifications and commits. A caller-authorized read-only inspection outside the assigned tree is allowed; do not write or commit in another source tree.", "");
   }
+  lines.push("**You own the assigned task and report end to end.**");
+  lines.push(`- Let the caller's task and your assigned archetype decide whether this is implementation/integration work or report-only work. For implementation or integration, make the requested changes in the assigned tree, commit them with a message that says what and why, and, when you have an isolated branch, merge ${upstream} into your own tree before finalising and resolve conflicts there.`);
+  lines.push("- For a report-only task (such as review, exploration, or judging), inspect what the caller authorized, change nothing, and do not fabricate a commit or merge. Report the findings and recommend `reviewed`.");
+  lines.push("- A director coordinates delegated work: it does not implement a child's delegated feature itself, but it does integrate accepted child changes in its assigned tree when the task calls for integration, then reports that result. Custom archetypes follow their declared role and the caller's task.", "");
   lines.push(...preambleSection(input.preamble, input.repoRoot));
   lines.push("**If part of it is impossible.**");
   lines.push("- Do every part that is not, and say in your report exactly which part you left out and why. A brief with one blocked clause is not a blocked brief.");
@@ -7856,7 +7859,7 @@ function workerContract(input) {
   lines.push("**Your final message.**");
   lines.push("- State what is in the tree: every file you changed, added or deleted, and anything untracked you left behind on purpose.");
   lines.push("- Say what you verified and how, and what you could not verify.");
-  lines.push("- Recommend whether your work should be merged or discarded, in one line, and why. It is a recommendation: your caller reaches their own conclusion.");
+  lines.push("- For implementation or integration work, recommend whether the result should be merged, kept, discarded, or failed, in one line, and why. For report-only work, recommend `reviewed` in one line. It is a recommendation: your caller reaches their own conclusion.");
   lines.push("- Do not ask questions you cannot get answered; make a reasonable call, state the assumption, and continue.", "");
   if (input.vocabulary != null && input.vocabulary.trim() !== "") {
     lines.push("**You may spawn.** Never close the dispatch you are currently running in: it must return its report, and your caller/host closes it. Only close dispatches you opened (for a director, these are child dispatches), after reading their reports, and report each by name. What follows is what a host session is told.", "");
@@ -8050,7 +8053,7 @@ function mainRepoRoot(gitPath) {
   return (0, import_node_path3.dirname)(gitPath);
 }
 function packageVersion() {
-  if (true) return "0.6.1";
+  if (true) return "0.7.0";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -8085,20 +8088,13 @@ function readPreamble(repoRoot) {
   return { path, exists: true, text: trimmed.slice(0, PREAMBLE_MAX_CHARS).trimEnd(), chars: trimmed.length, truncated: true };
 }
 
-// src/lib/spawn.ts
-var import_node_crypto3 = require("node:crypto");
-var import_node_child_process2 = require("node:child_process");
-var import_node_fs8 = require("node:fs");
-var import_node_os2 = require("node:os");
-var import_node_path8 = require("node:path");
-
-// src/lib/config-layers.ts
+// src/lib/executors.ts
+var import_node_crypto2 = require("node:crypto");
 var import_node_fs7 = require("node:fs");
 var import_node_path7 = require("node:path");
 var import_yaml2 = __toESM(require_dist(), 1);
 
-// src/lib/executors.ts
-var import_node_crypto2 = require("node:crypto");
+// src/lib/config-layers.ts
 var import_node_fs6 = require("node:fs");
 var import_node_path6 = require("node:path");
 var import_yaml = __toESM(require_dist(), 1);
@@ -8351,6 +8347,386 @@ function codexUserAgentDir(options = {}) {
   return (0, import_node_path5.join)(env.CODEX_HOME?.trim() || (0, import_node_path5.join)(home, ".codex"), "agents");
 }
 
+// src/lib/config-layers.ts
+function mapping(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function parseLayer(path) {
+  let parsed;
+  try {
+    parsed = (0, import_yaml.parse)((0, import_node_fs6.readFileSync)(path, "utf8"));
+  } catch (err) {
+    throw new ExecutorProfileError(`${path} did not parse: ${err.message}`);
+  }
+  const doc = mapping(parsed);
+  if (!doc) throw new ExecutorProfileError(`${path} is not a mapping.`);
+  return doc;
+}
+var V4_MODEL_KEYS = /* @__PURE__ */ new Set(["provider", "id", "effort", "spellings", "harness"]);
+function repairLegacyRef(raw) {
+  if (typeof raw === "string") {
+    try {
+      return formatDialRef(parseDialRef(raw, "ref"));
+    } catch {
+      return raw;
+    }
+  }
+  const map = mapping(raw);
+  if (map == null || map.via === void 0) return raw;
+  const { via, ...rest } = map;
+  if (typeof via !== "string" || via.trim().length === 0) return rest;
+  return { ...rest, ...rest.harness === void 0 ? { harness: legacyDriverHarness(via.trim()) } : {} };
+}
+var V3_ROUTE_KEY_HARNESS = {
+  openai: "codex",
+  anthropic: "claude",
+  "anthropic-exec": "claude",
+  xai: "grok",
+  google: "agy",
+  "opencode-direct": "opencode",
+  openrouter: "opencode",
+  muse: "muse"
+};
+function legacyRouteHarness(route) {
+  return V3_ROUTE_KEY_HARNESS[route] ?? legacyDriverHarness(route);
+}
+function repairUserLayer(doc, path, repairs) {
+  const where = `user catalog ${path}`;
+  if (typeof doc.unregistered_model_driver === "string" && doc.unregistered_model_driver.trim().length > 0) {
+    const harness = legacyDriverHarness(doc.unregistered_model_driver.trim());
+    if (doc.unregistered_model_harness === void 0) doc.unregistered_model_harness = harness;
+    repairs.push(`${where}: \`unregistered_model_driver\` read as \`unregistered_model_harness: ${harness}\``);
+  }
+  for (const key of Object.keys(V4_REMOVED_CATALOG_KEYS)) {
+    if (doc[key] === void 0) continue;
+    delete doc[key];
+    if (key === "unregistered_model_driver") continue;
+    repairs.push(`${where}: \`${key}\` was removed in catalog v4 and was ignored \u2014 declare ${V4_REMOVED_CATALOG_KEYS[key]}`);
+  }
+  for (const section of ["dials", "bindings"]) {
+    const table = mapping(doc[section]);
+    if (table == null) continue;
+    for (const [name, raw] of Object.entries(table)) {
+      const repaired = repairLegacyRef(raw);
+      if (JSON.stringify(repaired) === JSON.stringify(raw)) continue;
+      table[name] = repaired;
+      repairs.push(`${where}: \`${section}.${name}\` read as "${typeof repaired === "string" ? repaired : JSON.stringify(repaired)}"`);
+    }
+  }
+  const models = mapping(doc.models);
+  if (models == null) {
+    if (doc.models !== void 0 && doc.models !== null) {
+      delete doc.models;
+      repairs.push(`${where}: \`models\` is not a mapping and was ignored`);
+    }
+    return;
+  }
+  const dropModel = (name, why) => {
+    delete models[name];
+    repairs.push(`${where}: model "${name}" dropped \u2014 ${why}`);
+  };
+  for (const [name, raw] of Object.entries(models)) {
+    if (name === "host") {
+      dropModel(name, '"host" is built in');
+      continue;
+    }
+    if (!BARE_IDENTIFIER_RE.test(name)) {
+      dropModel(name, "the name is not a bare lowercase identifier");
+      continue;
+    }
+    const entry = mapping(raw);
+    if (entry == null) {
+      dropModel(name, "the entry is not a mapping");
+      continue;
+    }
+    if (entry.delivery !== void 0) {
+      const delivery = mapping(entry.delivery);
+      const route = delivery != null ? delivery.route : void 0;
+      const deliveryId = delivery != null ? delivery.id : void 0;
+      if (typeof route !== "string" || !BARE_IDENTIFIER_RE.test(route.trim()) || typeof deliveryId !== "string" || deliveryId.trim().length === 0) {
+        dropModel(name, "its v3 `delivery:` has no usable `route`/`id` to translate");
+        continue;
+      }
+      const harness = legacyRouteHarness(route.trim());
+      const laneMoved = route.trim() === "opencode-direct";
+      delete entry.delivery;
+      if (entry.harness === void 0) entry.harness = harness;
+      const spellings = mapping(entry.spellings);
+      if (spellings != null) {
+        if (spellings[harness] === void 0) spellings[harness] = deliveryId.trim();
+      } else if (entry.spellings === void 0) {
+        entry.spellings = { [harness]: deliveryId.trim() };
+      }
+      repairs.push(
+        `${where}: model "${name}" \`delivery:\` read as \`harness: ${harness}\` plus \`spellings.${harness}\`` + (laneMoved ? " \u2014 the v3 direct lane has no v4 spelling, so this id now travels on the OpenRouter lane; re-add with `fadeno model add` to verify it" : "")
+      );
+    }
+    if (typeof entry.provider !== "string" || entry.provider.trim().length === 0) {
+      dropModel(name, "it declares no `provider`");
+      continue;
+    }
+    if (entry.harness !== void 0 && (typeof entry.harness !== "string" || !BARE_IDENTIFIER_RE.test(entry.harness.trim()))) {
+      delete entry.harness;
+      repairs.push(`${where}: model "${name}" \`harness\` is not a bare identifier and was ignored`);
+    }
+    for (const key of ["id", "effort"]) {
+      if (entry[key] !== void 0 && (typeof entry[key] !== "string" || entry[key].trim().length === 0)) {
+        delete entry[key];
+        repairs.push(`${where}: model "${name}" \`${key}\` is not a non-empty string and was ignored`);
+      }
+    }
+    if (entry.spellings !== void 0) {
+      const spellings = mapping(entry.spellings);
+      if (spellings == null) {
+        delete entry.spellings;
+        repairs.push(`${where}: model "${name}" \`spellings\` is not a mapping and was ignored`);
+      } else {
+        for (const [key, value] of Object.entries(spellings)) {
+          const harness = legacyDriverHarness(key);
+          if (typeof value !== "string" || value.trim().length === 0 || !BARE_IDENTIFIER_RE.test(harness)) {
+            delete spellings[key];
+            repairs.push(`${where}: model "${name}" spelling "${key}" is unusable and was ignored`);
+            continue;
+          }
+          if (harness === key) continue;
+          delete spellings[key];
+          if (spellings[harness] === void 0) spellings[harness] = value;
+          repairs.push(`${where}: model "${name}" spelling "${key}" read as harness "${harness}"`);
+        }
+      }
+    }
+    for (const key of Object.keys(entry)) {
+      if (V4_MODEL_KEYS.has(key)) continue;
+      delete entry[key];
+      repairs.push(`${where}: model "${name}" key \`${key}\` is not a catalog v4 model key and was ignored`);
+    }
+  }
+}
+var ENTRY_MERGED_KEYS = /* @__PURE__ */ new Set([
+  // Per harness id, so entry-merged: overriding one harness (its argv, its
+  // relay) in a project catalog must not silently drop the five beside it.
+  "harnesses",
+  "archetypes",
+  "bindings",
+  "models",
+  "dials"
+]);
+function validateLayerKeys(doc, path) {
+  refuseRemovedCatalogKeys(doc, path);
+  if (doc.harnesses !== void 0 && doc.schema_version !== 4) {
+    throw new ExecutorProfileError(
+      `${path}: \`harnesses:\` requires \`schema_version: 4\` (found ${JSON.stringify(doc.schema_version)}).`
+    );
+  }
+  const unknown = Object.keys(doc).filter((key) => !CATALOG_TOP_LEVEL_KEYS.includes(key));
+  if (unknown.length === 0) return;
+  if (unknown.some((key) => PRE_DIALS_CATALOG_KEYS.includes(key))) {
+    throw preDialsCatalogError(path);
+  }
+  const described = unknown.map((key) => {
+    const near = suggestCatalogKey(key);
+    return near != null ? `\`${key}\` (did you mean \`${near}\`?)` : `\`${key}\``;
+  });
+  throw new ExecutorProfileError(
+    `${path}: unknown top-level key${unknown.length === 1 ? "" : "s"} ${described.join(", ")}. Known keys: ${CATALOG_TOP_LEVEL_KEYS.join(", ")}.`
+  );
+}
+function mergeLayer(target, source, layer, path, provenance) {
+  if (layer !== "project" && mapping(source.dials) != null && Object.keys(mapping(source.dials)).length > 0) {
+    throw new ExecutorProfileError("repo pins live in the project catalog; user dials are state \u2014 use `fadeno dial <archetype> <model> --user`");
+  }
+  validateLayerKeys(source, path);
+  for (const key of CATALOG_TOP_LEVEL_KEYS) {
+    if (!ENTRY_MERGED_KEYS.has(key)) {
+      if (source[key] !== void 0) target[key] = source[key];
+      continue;
+    }
+    if (source[key] !== void 0 && source[key] !== null && mapping(source[key]) == null) {
+      throw new ExecutorProfileError(
+        `${path}: \`${key}\` must be a mapping; found ${Array.isArray(source[key]) ? "an array" : typeof source[key]}.`
+      );
+    }
+    const entries = mapping(source[key]);
+    if (entries == null) continue;
+    const current = mapping(target[key]) ?? {};
+    for (const [name, value] of Object.entries(entries)) {
+      if (key === "models" && layer === "user" && current[name] !== void 0) {
+        (provenance.shadowedModels ??= {})[name] = current[name];
+      }
+      if ((key === "harnesses" || key === "models") && mapping(value) != null && mapping(current[name]) != null) {
+        current[name] = { ...current[name], ...value };
+      } else {
+        current[name] = value;
+      }
+      if (key === "bindings") provenance.bindings[name] = layer;
+      if (key === "models") (provenance.models ??= {})[name] = layer;
+    }
+    target[key] = current;
+  }
+}
+function projectIsComplete(doc) {
+  const models = mapping(doc.models);
+  const harnesses = mapping(doc.harnesses);
+  if (models == null || Object.keys(models).length === 0) return false;
+  if (harnesses == null || Object.keys(harnesses).length === 0) return false;
+  return true;
+}
+function missingCanonArchetypes(builtinDoc, projectDoc) {
+  const builtin = builtinDoc != null ? mapping(builtinDoc.archetypes) : null;
+  if (builtin == null || projectDoc == null) return [];
+  const declared = mapping(projectDoc.archetypes) ?? {};
+  return Object.keys(builtin).filter((name) => !Object.hasOwn(declared, name)).sort();
+}
+function modelHomeClaim(entry) {
+  const map = mapping(entry);
+  if (map == null) return null;
+  if (typeof map.harness === "string" && map.harness.trim().length > 0) {
+    return { kind: "harness", value: map.harness.trim() };
+  }
+  const provider = map.provider;
+  if (typeof provider === "string" && provider.trim().length > 0) return { kind: "provider", value: provider.trim() };
+  return null;
+}
+function claimDeliverable(document, claim) {
+  const mergedHarnesses = mapping(document.harnesses) ?? {};
+  if (claim.kind === "harness") return mergedHarnesses[claim.value] != null;
+  return Object.values(mergedHarnesses).some((entry) => {
+    const harness = mapping(entry);
+    return harness != null && harness.provider === claim.value;
+  });
+}
+function dropUndeliverableUserModels(document, userDoc, provenance, repairs) {
+  const dropped = [];
+  const userModels = userDoc != null ? mapping(userDoc.models) : null;
+  const merged = mapping(document.models);
+  if (userModels == null || merged == null) return dropped;
+  for (const [alias, userEntry] of Object.entries(userModels)) {
+    if (!Object.hasOwn(merged, alias)) continue;
+    const suppliedByUser = provenance.models != null ? provenance.models[alias] === "user" : JSON.stringify(merged[alias]) === JSON.stringify(userEntry);
+    if (!suppliedByUser) continue;
+    pruneUndeliverableSpellings(document, merged[alias], alias, repairs);
+    const claim = modelHomeClaim(merged[alias]);
+    if (claim != null && claimDeliverable(document, claim)) continue;
+    const shadowed = provenance.shadowedModels?.[alias];
+    if (shadowed !== void 0) {
+      merged[alias] = shadowed;
+      repairs.push(
+        `user-catalog override of model "${alias}" discarded \u2014 nothing in this catalog can deliver harness/provider "${claim?.value ?? "?"}"; the ${provenance.models?.[alias] === "user" ? "lower layer" : "catalog"}'s "${alias}" is used instead`
+      );
+      if (provenance.models != null) delete provenance.models[alias];
+      continue;
+    }
+    delete merged[alias];
+    dropped.push({ alias, harness: claim?.value ?? "?" });
+  }
+  return dropped;
+}
+function pruneUndeliverableSpellings(document, entry, alias, repairs) {
+  const map = mapping(entry);
+  const spellings = map != null ? mapping(map.spellings) : null;
+  if (spellings == null) return;
+  const harnesses = mapping(document.harnesses) ?? {};
+  for (const key of Object.keys(spellings)) {
+    if (Object.hasOwn(harnesses, key)) continue;
+    delete spellings[key];
+    repairs.push(`user-catalog model "${alias}" spelling for harness "${key}" dropped \u2014 no such harness is declared`);
+  }
+}
+function applyUserModelFallback(document, userDoc, userPath, provenance, repairs) {
+  const outcome = { promoted: [], dropped: [], repairs };
+  const userModelEntries = userDoc != null ? mapping(userDoc.models) : null;
+  if (userModelEntries == null || Object.keys(userModelEntries).length === 0) return outcome;
+  const targetModels = mapping(document.models);
+  if (targetModels == null) return outcome;
+  for (const [alias, entry] of Object.entries(userModelEntries)) {
+    if (Object.hasOwn(targetModels, alias)) continue;
+    pruneUndeliverableSpellings(document, entry, alias, repairs);
+    const claim = modelHomeClaim(entry);
+    if (claim == null || !claimDeliverable(document, claim)) {
+      outcome.dropped.push({ alias, harness: claim?.value ?? "?" });
+      continue;
+    }
+    mergeLayer(document, { models: { [alias]: entry } }, "user", userPath, provenance);
+    outcome.promoted.push(alias);
+  }
+  return outcome;
+}
+function loadLayeredProfile(repoRoot, options = {}, host) {
+  const paths = userPaths(options);
+  const layers = [
+    { layer: "builtin", path: `${templatesDir()}/common/fadeno/executors.yaml` },
+    { layer: "user", path: paths.executorsFile },
+    { layer: "project", path: (0, import_node_path6.join)(repoRoot, ".fadeno", "executors.yaml") }
+  ];
+  const present = layers.filter((entry) => (0, import_node_fs6.existsSync)(entry.path));
+  if (present.length === 0) throw new ExecutorProfileError("No executor catalog is available.");
+  const repairs = [];
+  const parsedLayers = new Map(present.map((entry) => {
+    const parsed = parseLayer(entry.path);
+    if (entry.layer === "user") repairUserLayer(parsed, entry.path, repairs);
+    return [entry.layer, parsed];
+  }));
+  const project = present.find((entry) => entry.layer === "project");
+  const projectDoc = project ? parsedLayers.get("project") ?? null : null;
+  const suppressLayering = Boolean(projectDoc && projectIsComplete(projectDoc));
+  const effective = suppressLayering ? [{ layer: "project", path: project.path }] : present;
+  const document = {};
+  const provenance = { bindings: {} };
+  for (const entry of effective) mergeLayer(document, parsedLayers.get(entry.layer), entry.layer, entry.path, provenance);
+  const modelFallback = suppressLayering ? applyUserModelFallback(document, parsedLayers.get("user"), layers.find((entry) => entry.layer === "user")?.path ?? "", provenance, repairs) : { promoted: [], dropped: dropUndeliverableUserModels(document, parsedLayers.get("user") ?? null, provenance, repairs), repairs };
+  normalizeSchemaVersion(document);
+  const text = stringifyObject(document);
+  return {
+    profile: parseExecutorProfile(text, effective.map((entry) => entry.layer).join(" + "), host),
+    path: project?.path ?? present.find((entry) => entry.layer === "user")?.path ?? present[0].path,
+    layers: effective.map((entry) => entry.layer),
+    provenance,
+    paths,
+    selfContained: suppressLayering,
+    suppressedCanonArchetypes: suppressLayering ? missingCanonArchetypes(parsedLayers.get("builtin") ?? null, projectDoc) : [],
+    modelFallback
+  };
+}
+function loadGlobalProfile(options = {}, host) {
+  const paths = userPaths(options);
+  const layers = [
+    { layer: "builtin", path: `${templatesDir()}/common/fadeno/executors.yaml` },
+    { layer: "user", path: paths.executorsFile }
+  ];
+  const present = layers.filter((entry) => (0, import_node_fs6.existsSync)(entry.path));
+  if (present.length === 0) throw new ExecutorProfileError("No executor catalog is available.");
+  const document = {};
+  const provenance = { bindings: {} };
+  let userDoc = null;
+  const repairs = [];
+  for (const entry of present) {
+    const parsed = parseLayer(entry.path);
+    if (entry.layer === "user") {
+      repairUserLayer(parsed, entry.path, repairs);
+      userDoc = parsed;
+    }
+    mergeLayer(document, parsed, entry.layer, entry.path, provenance);
+  }
+  const dropped = dropUndeliverableUserModels(document, userDoc, provenance, repairs);
+  normalizeSchemaVersion(document);
+  return {
+    profile: parseExecutorProfile(stringifyObject(document), present.map((entry) => entry.layer).join(" + "), host),
+    path: present.find((entry) => entry.layer === "user")?.path ?? present[0].path,
+    layers: present.map((entry) => entry.layer),
+    provenance,
+    paths,
+    selfContained: false,
+    suppressedCanonArchetypes: [],
+    modelFallback: { promoted: [], dropped, repairs }
+  };
+}
+function stringifyObject(value) {
+  return (0, import_yaml.stringify)(value);
+}
+function normalizeSchemaVersion(document) {
+  document.schema_version = 4;
+}
+
 // src/lib/executors.ts
 var ExecutorProfileError = class extends Error {
 };
@@ -8561,7 +8937,7 @@ function withoutHarnessIdentity(env) {
   }
   return next;
 }
-var EXECUTORS_FILE = (0, import_node_path6.join)(".fadeno", "executors.yaml");
+var EXECUTORS_FILE = (0, import_node_path7.join)(".fadeno", "executors.yaml");
 var CATALOG_TOP_LEVEL_KEYS = [
   "schema_version",
   "models",
@@ -8666,7 +9042,7 @@ function nextArchetypeFallback(archetypes, name) {
 function parseExecutorProfile(text, source, host = "standalone") {
   let doc;
   try {
-    doc = (0, import_yaml.parse)(text);
+    doc = (0, import_yaml2.parse)(text);
   } catch (err) {
     throw new ExecutorProfileError(`${source} did not parse: ${err.message}`);
   }
@@ -9005,7 +9381,7 @@ function loadExecutorProfile(repoRoot, options = {}, harness) {
     throw new ExecutorProfileError(err.message);
   }
 }
-var DIALS_LOCAL_FILE = (0, import_node_path6.join)(".fadeno", "local", "dials");
+var DIALS_LOCAL_FILE = (0, import_node_path7.join)(".fadeno", "local", "dials");
 var LOCAL_DIALS_SCHEMA_VERSION = 1;
 function localDialPinError(detail) {
   return new ExecutorProfileError(
@@ -9013,9 +9389,9 @@ function localDialPinError(detail) {
   );
 }
 function readLocalDialState(repoRoot) {
-  const path = (0, import_node_path6.join)(repoRoot, DIALS_LOCAL_FILE);
-  if (!(0, import_node_fs6.existsSync)(path)) return { dials: {} };
-  const text = (0, import_node_fs6.readFileSync)(path, "utf8");
+  const path = (0, import_node_path7.join)(repoRoot, DIALS_LOCAL_FILE);
+  if (!(0, import_node_fs7.existsSync)(path)) return { dials: {} };
+  const text = (0, import_node_fs7.readFileSync)(path, "utf8");
   if (text.trim().length === 0) return { dials: {} };
   let doc;
   try {
@@ -9053,26 +9429,26 @@ function readLocalDialState(repoRoot) {
   return { dials };
 }
 function writeLocalDialState(repoRoot, state) {
-  const path = (0, import_node_path6.join)(repoRoot, DIALS_LOCAL_FILE);
+  const path = (0, import_node_path7.join)(repoRoot, DIALS_LOCAL_FILE);
   const keys = Object.keys(state.dials).sort();
   if (keys.length === 0) {
-    if ((0, import_node_fs6.existsSync)(path)) (0, import_node_fs6.unlinkSync)(path);
+    if ((0, import_node_fs7.existsSync)(path)) (0, import_node_fs7.unlinkSync)(path);
     return path;
   }
-  (0, import_node_fs6.mkdirSync)((0, import_node_path6.dirname)(path), { recursive: true });
+  (0, import_node_fs7.mkdirSync)((0, import_node_path7.dirname)(path), { recursive: true });
   const dials = {};
   for (const key of keys) {
     if (!BARE_IDENTIFIER_RE.test(key)) throw new ExecutorProfileError(`dial key "${key}" is not a bare identifier.`);
     dials[key] = serializeDialRef(state.dials[key]);
   }
   const tmp = `${path}.tmp-${process.pid}-${(0, import_node_crypto2.randomUUID)()}`;
-  (0, import_node_fs6.writeFileSync)(tmp, `${JSON.stringify({ schema_version: LOCAL_DIALS_SCHEMA_VERSION, dials })}
+  (0, import_node_fs7.writeFileSync)(tmp, `${JSON.stringify({ schema_version: LOCAL_DIALS_SCHEMA_VERSION, dials })}
 `, "utf8");
   try {
-    (0, import_node_fs6.renameSync)(tmp, path);
+    (0, import_node_fs7.renameSync)(tmp, path);
   } catch (err) {
     try {
-      (0, import_node_fs6.rmSync)(tmp, { force: true });
+      (0, import_node_fs7.rmSync)(tmp, { force: true });
     } catch {
     }
     throw err;
@@ -9336,387 +9712,12 @@ function resolveDelivery(ref, profile, host = profile.host ?? "standalone") {
   });
 }
 
-// src/lib/config-layers.ts
-function mapping(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
-}
-function parseLayer(path) {
-  let parsed;
-  try {
-    parsed = (0, import_yaml2.parse)((0, import_node_fs7.readFileSync)(path, "utf8"));
-  } catch (err) {
-    throw new ExecutorProfileError(`${path} did not parse: ${err.message}`);
-  }
-  const doc = mapping(parsed);
-  if (!doc) throw new ExecutorProfileError(`${path} is not a mapping.`);
-  return doc;
-}
-var V4_MODEL_KEYS = /* @__PURE__ */ new Set(["provider", "id", "effort", "spellings", "harness"]);
-function repairLegacyRef(raw) {
-  if (typeof raw === "string") {
-    try {
-      return formatDialRef(parseDialRef(raw, "ref"));
-    } catch {
-      return raw;
-    }
-  }
-  const map = mapping(raw);
-  if (map == null || map.via === void 0) return raw;
-  const { via, ...rest } = map;
-  if (typeof via !== "string" || via.trim().length === 0) return rest;
-  return { ...rest, ...rest.harness === void 0 ? { harness: legacyDriverHarness(via.trim()) } : {} };
-}
-var V3_ROUTE_KEY_HARNESS = {
-  openai: "codex",
-  anthropic: "claude",
-  "anthropic-exec": "claude",
-  xai: "grok",
-  google: "agy",
-  "opencode-direct": "opencode",
-  openrouter: "opencode",
-  muse: "muse"
-};
-function legacyRouteHarness(route) {
-  return V3_ROUTE_KEY_HARNESS[route] ?? legacyDriverHarness(route);
-}
-function repairUserLayer(doc, path, repairs) {
-  const where = `user catalog ${path}`;
-  if (typeof doc.unregistered_model_driver === "string" && doc.unregistered_model_driver.trim().length > 0) {
-    const harness = legacyDriverHarness(doc.unregistered_model_driver.trim());
-    if (doc.unregistered_model_harness === void 0) doc.unregistered_model_harness = harness;
-    repairs.push(`${where}: \`unregistered_model_driver\` read as \`unregistered_model_harness: ${harness}\``);
-  }
-  for (const key of Object.keys(V4_REMOVED_CATALOG_KEYS)) {
-    if (doc[key] === void 0) continue;
-    delete doc[key];
-    if (key === "unregistered_model_driver") continue;
-    repairs.push(`${where}: \`${key}\` was removed in catalog v4 and was ignored \u2014 declare ${V4_REMOVED_CATALOG_KEYS[key]}`);
-  }
-  for (const section of ["dials", "bindings"]) {
-    const table = mapping(doc[section]);
-    if (table == null) continue;
-    for (const [name, raw] of Object.entries(table)) {
-      const repaired = repairLegacyRef(raw);
-      if (JSON.stringify(repaired) === JSON.stringify(raw)) continue;
-      table[name] = repaired;
-      repairs.push(`${where}: \`${section}.${name}\` read as "${typeof repaired === "string" ? repaired : JSON.stringify(repaired)}"`);
-    }
-  }
-  const models = mapping(doc.models);
-  if (models == null) {
-    if (doc.models !== void 0 && doc.models !== null) {
-      delete doc.models;
-      repairs.push(`${where}: \`models\` is not a mapping and was ignored`);
-    }
-    return;
-  }
-  const dropModel = (name, why) => {
-    delete models[name];
-    repairs.push(`${where}: model "${name}" dropped \u2014 ${why}`);
-  };
-  for (const [name, raw] of Object.entries(models)) {
-    if (name === "host") {
-      dropModel(name, '"host" is built in');
-      continue;
-    }
-    if (!BARE_IDENTIFIER_RE.test(name)) {
-      dropModel(name, "the name is not a bare lowercase identifier");
-      continue;
-    }
-    const entry = mapping(raw);
-    if (entry == null) {
-      dropModel(name, "the entry is not a mapping");
-      continue;
-    }
-    if (entry.delivery !== void 0) {
-      const delivery = mapping(entry.delivery);
-      const route = delivery != null ? delivery.route : void 0;
-      const deliveryId = delivery != null ? delivery.id : void 0;
-      if (typeof route !== "string" || !BARE_IDENTIFIER_RE.test(route.trim()) || typeof deliveryId !== "string" || deliveryId.trim().length === 0) {
-        dropModel(name, "its v3 `delivery:` has no usable `route`/`id` to translate");
-        continue;
-      }
-      const harness = legacyRouteHarness(route.trim());
-      const laneMoved = route.trim() === "opencode-direct";
-      delete entry.delivery;
-      if (entry.harness === void 0) entry.harness = harness;
-      const spellings = mapping(entry.spellings);
-      if (spellings != null) {
-        if (spellings[harness] === void 0) spellings[harness] = deliveryId.trim();
-      } else if (entry.spellings === void 0) {
-        entry.spellings = { [harness]: deliveryId.trim() };
-      }
-      repairs.push(
-        `${where}: model "${name}" \`delivery:\` read as \`harness: ${harness}\` plus \`spellings.${harness}\`` + (laneMoved ? " \u2014 the v3 direct lane has no v4 spelling, so this id now travels on the OpenRouter lane; re-add with `fadeno model add` to verify it" : "")
-      );
-    }
-    if (typeof entry.provider !== "string" || entry.provider.trim().length === 0) {
-      dropModel(name, "it declares no `provider`");
-      continue;
-    }
-    if (entry.harness !== void 0 && (typeof entry.harness !== "string" || !BARE_IDENTIFIER_RE.test(entry.harness.trim()))) {
-      delete entry.harness;
-      repairs.push(`${where}: model "${name}" \`harness\` is not a bare identifier and was ignored`);
-    }
-    for (const key of ["id", "effort"]) {
-      if (entry[key] !== void 0 && (typeof entry[key] !== "string" || entry[key].trim().length === 0)) {
-        delete entry[key];
-        repairs.push(`${where}: model "${name}" \`${key}\` is not a non-empty string and was ignored`);
-      }
-    }
-    if (entry.spellings !== void 0) {
-      const spellings = mapping(entry.spellings);
-      if (spellings == null) {
-        delete entry.spellings;
-        repairs.push(`${where}: model "${name}" \`spellings\` is not a mapping and was ignored`);
-      } else {
-        for (const [key, value] of Object.entries(spellings)) {
-          const harness = legacyDriverHarness(key);
-          if (typeof value !== "string" || value.trim().length === 0 || !BARE_IDENTIFIER_RE.test(harness)) {
-            delete spellings[key];
-            repairs.push(`${where}: model "${name}" spelling "${key}" is unusable and was ignored`);
-            continue;
-          }
-          if (harness === key) continue;
-          delete spellings[key];
-          if (spellings[harness] === void 0) spellings[harness] = value;
-          repairs.push(`${where}: model "${name}" spelling "${key}" read as harness "${harness}"`);
-        }
-      }
-    }
-    for (const key of Object.keys(entry)) {
-      if (V4_MODEL_KEYS.has(key)) continue;
-      delete entry[key];
-      repairs.push(`${where}: model "${name}" key \`${key}\` is not a catalog v4 model key and was ignored`);
-    }
-  }
-}
-var ENTRY_MERGED_KEYS = /* @__PURE__ */ new Set([
-  // Per harness id, so entry-merged: overriding one harness (its argv, its
-  // relay) in a project catalog must not silently drop the five beside it.
-  "harnesses",
-  "archetypes",
-  "bindings",
-  "models",
-  "dials"
-]);
-function validateLayerKeys(doc, path) {
-  refuseRemovedCatalogKeys(doc, path);
-  if (doc.harnesses !== void 0 && doc.schema_version !== 4) {
-    throw new ExecutorProfileError(
-      `${path}: \`harnesses:\` requires \`schema_version: 4\` (found ${JSON.stringify(doc.schema_version)}).`
-    );
-  }
-  const unknown = Object.keys(doc).filter((key) => !CATALOG_TOP_LEVEL_KEYS.includes(key));
-  if (unknown.length === 0) return;
-  if (unknown.some((key) => PRE_DIALS_CATALOG_KEYS.includes(key))) {
-    throw preDialsCatalogError(path);
-  }
-  const described = unknown.map((key) => {
-    const near = suggestCatalogKey(key);
-    return near != null ? `\`${key}\` (did you mean \`${near}\`?)` : `\`${key}\``;
-  });
-  throw new ExecutorProfileError(
-    `${path}: unknown top-level key${unknown.length === 1 ? "" : "s"} ${described.join(", ")}. Known keys: ${CATALOG_TOP_LEVEL_KEYS.join(", ")}.`
-  );
-}
-function mergeLayer(target, source, layer, path, provenance) {
-  if (layer !== "project" && mapping(source.dials) != null && Object.keys(mapping(source.dials)).length > 0) {
-    throw new ExecutorProfileError("repo pins live in the project catalog; user dials are state \u2014 use `fadeno dial <archetype> <model> --user`");
-  }
-  validateLayerKeys(source, path);
-  for (const key of CATALOG_TOP_LEVEL_KEYS) {
-    if (!ENTRY_MERGED_KEYS.has(key)) {
-      if (source[key] !== void 0) target[key] = source[key];
-      continue;
-    }
-    if (source[key] !== void 0 && source[key] !== null && mapping(source[key]) == null) {
-      throw new ExecutorProfileError(
-        `${path}: \`${key}\` must be a mapping; found ${Array.isArray(source[key]) ? "an array" : typeof source[key]}.`
-      );
-    }
-    const entries = mapping(source[key]);
-    if (entries == null) continue;
-    const current = mapping(target[key]) ?? {};
-    for (const [name, value] of Object.entries(entries)) {
-      if (key === "models" && layer === "user" && current[name] !== void 0) {
-        (provenance.shadowedModels ??= {})[name] = current[name];
-      }
-      if ((key === "harnesses" || key === "models") && mapping(value) != null && mapping(current[name]) != null) {
-        current[name] = { ...current[name], ...value };
-      } else {
-        current[name] = value;
-      }
-      if (key === "bindings") provenance.bindings[name] = layer;
-      if (key === "models") (provenance.models ??= {})[name] = layer;
-    }
-    target[key] = current;
-  }
-}
-function projectIsComplete(doc) {
-  const models = mapping(doc.models);
-  const harnesses = mapping(doc.harnesses);
-  if (models == null || Object.keys(models).length === 0) return false;
-  if (harnesses == null || Object.keys(harnesses).length === 0) return false;
-  return true;
-}
-function missingCanonArchetypes(builtinDoc, projectDoc) {
-  const builtin = builtinDoc != null ? mapping(builtinDoc.archetypes) : null;
-  if (builtin == null || projectDoc == null) return [];
-  const declared = mapping(projectDoc.archetypes) ?? {};
-  return Object.keys(builtin).filter((name) => !Object.hasOwn(declared, name)).sort();
-}
-function modelHomeClaim(entry) {
-  const map = mapping(entry);
-  if (map == null) return null;
-  if (typeof map.harness === "string" && map.harness.trim().length > 0) {
-    return { kind: "harness", value: map.harness.trim() };
-  }
-  const provider = map.provider;
-  if (typeof provider === "string" && provider.trim().length > 0) return { kind: "provider", value: provider.trim() };
-  return null;
-}
-function claimDeliverable(document, claim) {
-  const mergedHarnesses = mapping(document.harnesses) ?? {};
-  if (claim.kind === "harness") return mergedHarnesses[claim.value] != null;
-  return Object.values(mergedHarnesses).some((entry) => {
-    const harness = mapping(entry);
-    return harness != null && harness.provider === claim.value;
-  });
-}
-function dropUndeliverableUserModels(document, userDoc, provenance, repairs) {
-  const dropped = [];
-  const userModels = userDoc != null ? mapping(userDoc.models) : null;
-  const merged = mapping(document.models);
-  if (userModels == null || merged == null) return dropped;
-  for (const [alias, userEntry] of Object.entries(userModels)) {
-    if (!Object.hasOwn(merged, alias)) continue;
-    const suppliedByUser = provenance.models != null ? provenance.models[alias] === "user" : JSON.stringify(merged[alias]) === JSON.stringify(userEntry);
-    if (!suppliedByUser) continue;
-    pruneUndeliverableSpellings(document, merged[alias], alias, repairs);
-    const claim = modelHomeClaim(merged[alias]);
-    if (claim != null && claimDeliverable(document, claim)) continue;
-    const shadowed = provenance.shadowedModels?.[alias];
-    if (shadowed !== void 0) {
-      merged[alias] = shadowed;
-      repairs.push(
-        `user-catalog override of model "${alias}" discarded \u2014 nothing in this catalog can deliver harness/provider "${claim?.value ?? "?"}"; the ${provenance.models?.[alias] === "user" ? "lower layer" : "catalog"}'s "${alias}" is used instead`
-      );
-      if (provenance.models != null) delete provenance.models[alias];
-      continue;
-    }
-    delete merged[alias];
-    dropped.push({ alias, harness: claim?.value ?? "?" });
-  }
-  return dropped;
-}
-function pruneUndeliverableSpellings(document, entry, alias, repairs) {
-  const map = mapping(entry);
-  const spellings = map != null ? mapping(map.spellings) : null;
-  if (spellings == null) return;
-  const harnesses = mapping(document.harnesses) ?? {};
-  for (const key of Object.keys(spellings)) {
-    if (Object.hasOwn(harnesses, key)) continue;
-    delete spellings[key];
-    repairs.push(`user-catalog model "${alias}" spelling for harness "${key}" dropped \u2014 no such harness is declared`);
-  }
-}
-function applyUserModelFallback(document, userDoc, userPath, provenance, repairs) {
-  const outcome = { promoted: [], dropped: [], repairs };
-  const userModelEntries = userDoc != null ? mapping(userDoc.models) : null;
-  if (userModelEntries == null || Object.keys(userModelEntries).length === 0) return outcome;
-  const targetModels = mapping(document.models);
-  if (targetModels == null) return outcome;
-  for (const [alias, entry] of Object.entries(userModelEntries)) {
-    if (Object.hasOwn(targetModels, alias)) continue;
-    pruneUndeliverableSpellings(document, entry, alias, repairs);
-    const claim = modelHomeClaim(entry);
-    if (claim == null || !claimDeliverable(document, claim)) {
-      outcome.dropped.push({ alias, harness: claim?.value ?? "?" });
-      continue;
-    }
-    mergeLayer(document, { models: { [alias]: entry } }, "user", userPath, provenance);
-    outcome.promoted.push(alias);
-  }
-  return outcome;
-}
-function loadLayeredProfile(repoRoot, options = {}, host) {
-  const paths = userPaths(options);
-  const layers = [
-    { layer: "builtin", path: `${templatesDir()}/common/fadeno/executors.yaml` },
-    { layer: "user", path: paths.executorsFile },
-    { layer: "project", path: (0, import_node_path7.join)(repoRoot, ".fadeno", "executors.yaml") }
-  ];
-  const present = layers.filter((entry) => (0, import_node_fs7.existsSync)(entry.path));
-  if (present.length === 0) throw new ExecutorProfileError("No executor catalog is available.");
-  const repairs = [];
-  const parsedLayers = new Map(present.map((entry) => {
-    const parsed = parseLayer(entry.path);
-    if (entry.layer === "user") repairUserLayer(parsed, entry.path, repairs);
-    return [entry.layer, parsed];
-  }));
-  const project = present.find((entry) => entry.layer === "project");
-  const projectDoc = project ? parsedLayers.get("project") ?? null : null;
-  const suppressLayering = Boolean(projectDoc && projectIsComplete(projectDoc));
-  const effective = suppressLayering ? [{ layer: "project", path: project.path }] : present;
-  const document = {};
-  const provenance = { bindings: {} };
-  for (const entry of effective) mergeLayer(document, parsedLayers.get(entry.layer), entry.layer, entry.path, provenance);
-  const modelFallback = suppressLayering ? applyUserModelFallback(document, parsedLayers.get("user"), layers.find((entry) => entry.layer === "user")?.path ?? "", provenance, repairs) : { promoted: [], dropped: dropUndeliverableUserModels(document, parsedLayers.get("user") ?? null, provenance, repairs), repairs };
-  normalizeSchemaVersion(document);
-  const text = stringifyObject(document);
-  return {
-    profile: parseExecutorProfile(text, effective.map((entry) => entry.layer).join(" + "), host),
-    path: project?.path ?? present.find((entry) => entry.layer === "user")?.path ?? present[0].path,
-    layers: effective.map((entry) => entry.layer),
-    provenance,
-    paths,
-    selfContained: suppressLayering,
-    suppressedCanonArchetypes: suppressLayering ? missingCanonArchetypes(parsedLayers.get("builtin") ?? null, projectDoc) : [],
-    modelFallback
-  };
-}
-function loadGlobalProfile(options = {}, host) {
-  const paths = userPaths(options);
-  const layers = [
-    { layer: "builtin", path: `${templatesDir()}/common/fadeno/executors.yaml` },
-    { layer: "user", path: paths.executorsFile }
-  ];
-  const present = layers.filter((entry) => (0, import_node_fs7.existsSync)(entry.path));
-  if (present.length === 0) throw new ExecutorProfileError("No executor catalog is available.");
-  const document = {};
-  const provenance = { bindings: {} };
-  let userDoc = null;
-  const repairs = [];
-  for (const entry of present) {
-    const parsed = parseLayer(entry.path);
-    if (entry.layer === "user") {
-      repairUserLayer(parsed, entry.path, repairs);
-      userDoc = parsed;
-    }
-    mergeLayer(document, parsed, entry.layer, entry.path, provenance);
-  }
-  const dropped = dropUndeliverableUserModels(document, userDoc, provenance, repairs);
-  normalizeSchemaVersion(document);
-  return {
-    profile: parseExecutorProfile(stringifyObject(document), present.map((entry) => entry.layer).join(" + "), host),
-    path: present.find((entry) => entry.layer === "user")?.path ?? present[0].path,
-    layers: present.map((entry) => entry.layer),
-    provenance,
-    paths,
-    selfContained: false,
-    suppressedCanonArchetypes: [],
-    modelFallback: { promoted: [], dropped, repairs }
-  };
-}
-function stringifyObject(value) {
-  return (0, import_yaml2.stringify)(value);
-}
-function normalizeSchemaVersion(document) {
-  document.schema_version = 4;
-}
-
 // src/lib/spawn.ts
+var import_node_crypto3 = require("node:crypto");
+var import_node_child_process2 = require("node:child_process");
+var import_node_fs8 = require("node:fs");
+var import_node_os2 = require("node:os");
+var import_node_path8 = require("node:path");
 var SpawnError = class extends Error {
 };
 var DISPATCH_ID_ENV = "FADENO_DISPATCH_ID";
@@ -9725,6 +9726,7 @@ var RELAY_DIR = (0, import_node_path8.join)(".fadeno", "local", "relay");
 var CANCEL_REQUESTS_DIR = (0, import_node_path8.join)(".fadeno", "local", "cancel-requests");
 var CANCEL_GRACE_MS = 5e3;
 var CANCEL_POLL_MS = 100;
+var DEFAULT_COMMAND_HEARTBEAT_MS = 5 * 6e4;
 var CANCEL_REQUEST_VERSION = 1;
 var CANCEL_SIGNAL_NAMES = new Set(Object.keys(import_node_os2.constants.signals));
 function cancellationPaths(repoRoot, id) {
@@ -10233,7 +10235,7 @@ function runCommandDispatch(input) {
       input.onEcho?.(
         `dispatch ${prepared.name} outlives this call \u2014 if it is killed, \`fadeno dispatch-wait ${prepared.name}\` recovers the report and \`fadeno cancel ${prepared.name}\` ends the executor.`
       );
-      const heartbeat = input.heartbeatMs && input.heartbeatMs > 0 ? setInterval(() => input.onEcho?.(`dispatch ${prepared.name}: still running (${formatElapsed(Date.now() - startedAt)})`), input.heartbeatMs) : null;
+      const heartbeat = input.heartbeatMs && input.heartbeatMs > 0 ? setInterval(() => input.onEcho?.(`dispatch ${prepared.name}: command process liveness echo \u2014 still running (${formatElapsed(Date.now() - startedAt)})`), input.heartbeatMs) : null;
       if (!readsFile && child.stdin != null) {
         child.stdin.on("error", () => {
         });
@@ -10710,6 +10712,37 @@ function lookup(repoRoot, ref) {
   if (!found.ok) throw new DispatchesError(found.message);
   return found.record;
 }
+function resolveDispatchSelector(opts) {
+  const selector = opts.selector.trim();
+  if (selector.length === 0) throw new DispatchesError("dispatch selector is empty \u2014 pass an archetype name or registered model reference.");
+  const repoRoot = rootOf(opts);
+  const described = describeArchetypes({ repoRoot, userPathOptions: opts.userPathOptions });
+  const isArchetype = described.archetypes.some((archetype) => archetype.name === selector);
+  let model = null;
+  let modelError = null;
+  try {
+    const parsed = parseDialRef(selector, "dispatch model selector");
+    const resolved = resolveRegisteredModelRef(parsed, described.profile);
+    model = formatDialRef(resolved.ref);
+  } catch (err) {
+    modelError = err instanceof Error ? err : new Error(String(err));
+  }
+  if (isArchetype && model != null) {
+    throw new DispatchesError(
+      `dispatch selector "${selector}" is ambiguous: it matches both the effective archetype "${selector}" and a registered model reference. Use --archetype ${selector} or --model ${selector}.`
+    );
+  }
+  if (isArchetype) return { kind: "archetype", archetype: selector, model: null };
+  if (model != null) return { kind: "model", archetype: null, model };
+  if (modelError != null && /ambiguous/i.test(modelError.message)) {
+    throw new DispatchesError(modelError.message);
+  }
+  const archetypes = described.archetypes.map((archetype) => archetype.name);
+  const models = registeredModelRefSpellings(described.profile);
+  throw new DispatchesError(
+    `dispatch selector "${selector}" matches neither an effective archetype nor a registered model reference. Archetypes: ${archetypes.join(", ") || "(none)"}. Models: ${models.join(", ") || "(none)"}.`
+  );
+}
 async function runDispatch(opts) {
   const policy = sharedFromRefusal(opts.shared, opts.from);
   if (policy != null) return { ok: false, refused: policy };
@@ -11052,7 +11085,8 @@ function renderDispatchDetail(d) {
     lines.push("", "--- what Fadeno measured ---", ...s.evidence === "durable" ? ["  not measured yet; replay `fadeno dispatch-stop` without `--durable` to gather worktree evidence."] : renderWorkMeasured(s.work, d.record.opened?.workspace?.branch ?? null));
     if (s.ignored === "unavailable") lines.push("  ignored paths: unreadable");
     else if (s.ignored != null && s.ignored.paths.length > 0) {
-      lines.push(`  ${s.ignored.paths.length}${s.ignored.truncated ? "+" : ""} ignored path(s) in the worktree \u2014 \`fadeno clean\` removes these: ${s.ignored.paths.join(", ")}`);
+      const shared = e.shared ? "in the shared tree \u2014 the shared checkout is retained; `fadeno clean` only removes eligible Fadeno scratch" : "in the worktree \u2014 `fadeno clean` removes these";
+      lines.push(`  ${s.ignored.paths.length}${s.ignored.truncated ? "+" : ""} ignored path(s) ${shared}: ${s.ignored.paths.join(", ")}`);
     }
     const needsStderr = s.exit != null && (s.exit.code !== 0 || s.exit.signal != null);
     if (s.stderr_excerpt != null && (needsStderr || s.final_message == null)) {
@@ -11061,6 +11095,12 @@ function renderDispatchDetail(d) {
     if (s.final_message != null) {
       lines.push("", "--- what the agent reported (a claim, not a finding) ---", s.final_message.trimEnd());
     } else lines.push("", "--- what the agent reported --- none recorded");
+    if (d.transcript != null) {
+      const reportState = d.record.stopped == null ? "output so far, not a report" : "the complete command-lane report";
+      lines.push(`  full report: \`fadeno dispatches --output ${e.name ?? d.record.id}\` prints ${reportState} verbatim (transcript: ${d.transcript})`);
+    } else if (e.lane === "command" && s.final_message != null) {
+      lines.push("  full report: command-lane stdout transcript unavailable; the text above is only the stopped row's bounded final-message excerpt.");
+    }
   }
   if (d.record.opened != null) lines.push("", `  prompt: ${d.record.opened.prompt}${d.transcript ? `   transcript: ${d.transcript}` : ""}${d.stderr ? `   stderr: ${d.stderr}` : ""}`);
   if (e.task) lines.push(`  task: ${e.task.split("\n")[0]}${d.record.opened?.task_truncated ? " \u2026" : ""}`);
@@ -11092,6 +11132,11 @@ function runDispatchOutput(opts) {
   }
   if (record.stopped?.final_message != null) return { record, text: record.stopped.final_message, source: "final_message" };
   return { record, text: null, source: null };
+}
+function runDispatchRead(opts = {}) {
+  if (opts.output != null) return { kind: "output", result: runDispatchOutput({ ...opts, ref: opts.output }) };
+  if (opts.ref != null) return { kind: "show", result: runDispatchShow({ ...opts, ref: opts.ref }) };
+  return { kind: "list", result: runDispatches(opts) };
 }
 var ABANDON_SETTLE_MS = 8e3;
 function settleFromEnv(env = process.env) {
@@ -11200,13 +11245,119 @@ function runContext(opts = {}) {
   const preamble = readPreamble(repoRoot);
   return { text: hostVocabulary({ archetypes, unclosed, preamble, host: profile.host ?? null, now: opts.now }), reminder: hostTurnReminder(unclosed), archetypes, preamble };
 }
+function processGroupIsLive(record) {
+  const processGroup = record.opened?.process_group;
+  return processGroup != null && groupAlive(processGroup);
+}
+function dispatchStillOwnsScratch(record) {
+  return record.opened != null && (record.stopped == null || processGroupIsLive(record));
+}
+function errnoCode(error) {
+  return typeof error === "object" && error != null && "code" in error && typeof error.code === "string" ? error.code : null;
+}
+function cleanIoError(action, path, error, fix) {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new DispatchesError(`clean: could not ${action} ${path}: ${detail}. ${fix}`);
+}
+function retireScratchFile(path) {
+  const retired = `${path}.cleanup-${(0, import_node_crypto5.randomUUID)()}`;
+  try {
+    (0, import_node_fs11.renameSync)(path, retired);
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return false;
+    throw cleanIoError("retire scratch file", path, error, "Fix the filesystem error and rerun `fadeno clean --force`.");
+  }
+  try {
+    (0, import_node_fs11.unlinkSync)(retired);
+    return true;
+  } catch (error) {
+    throw cleanIoError(
+      "remove retired scratch file",
+      retired,
+      error,
+      `The artifact is recoverable at ${retired}; inspect or remove that path after fixing the filesystem problem, then rerun cleanup.`
+    );
+  }
+}
+function staleByMtime(path, now) {
+  try {
+    const age = now - (0, import_node_fs11.statSync)(path).mtimeMs;
+    return Number.isFinite(age) && age > STAGED_PROMPT_TTL_MS;
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return false;
+    throw cleanIoError("read scratch modification time", path, error, "Fix the filesystem error and rerun `fadeno clean`.");
+  }
+}
+function snapshotDirectory(repoRoot, relativeDir, onSnapshot) {
+  const absolute = (0, import_node_path10.join)(repoRoot, relativeDir);
+  let entries;
+  try {
+    entries = (0, import_node_fs11.readdirSync)(absolute, { withFileTypes: true });
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return null;
+    throw cleanIoError("read scratch directory", absolute, error, "Restore the directory or fix its permissions, then rerun `fadeno clean`.");
+  }
+  onSnapshot?.(relativeDir);
+  return { absolute, entries };
+}
+function cleanSnapshotFiles(repoRoot, relativeDir, dryRun, selected, onSnapshot) {
+  const snapshot = snapshotDirectory(repoRoot, relativeDir, onSnapshot);
+  if (snapshot == null) return null;
+  const candidates = snapshot.entries.filter((entry) => selected(entry, (0, import_node_path10.join)(snapshot.absolute, entry.name)));
+  if (candidates.length === 0) return null;
+  const entries = dryRun ? candidates.map((entry) => entry.name) : candidates.filter((entry) => retireScratchFile((0, import_node_path10.join)(snapshot.absolute, entry.name))).map((entry) => entry.name);
+  return entries.length === 0 ? null : { directory: relativeDir, entries };
+}
+function selectedStoppedDispatches(records) {
+  return new Set(
+    [...records.values()].filter((record) => record.opened != null && record.stopped != null && !processGroupIsLive(record)).map((record) => record.id)
+  );
+}
+function readExpiresAt(path) {
+  try {
+    const parsed = JSON.parse((0, import_node_fs11.readFileSync)(path, "utf8"));
+    if (typeof parsed !== "object" || parsed == null || Array.isArray(parsed)) return null;
+    return typeof parsed.expiresAt === "number" && Number.isFinite(parsed.expiresAt) ? parsed.expiresAt : null;
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return null;
+    if (error instanceof SyntaxError) return null;
+    throw cleanIoError("read staged prompt expiry", path, error, "Fix or remove the unreadable scratch file, then rerun `fadeno clean`.");
+  }
+}
+function staleStagedPrompt(entry, path, now) {
+  if (!entry.isFile() || !/^[a-z0-9]{16}\.json(?:\.claimed-[0-9a-f-]+)?$/.test(entry.name)) return false;
+  const expiresAt = readExpiresAt(path);
+  return expiresAt != null ? expiresAt <= now : staleByMtime(path, now);
+}
+function cancelArtifactBelongsTo(name, ids) {
+  for (const id of ids) {
+    if (name === `${id}.request.json` || name === `${id}.ack.json` || name.startsWith(`${id}.request.json.`) || name.startsWith(`${id}.ack.json.`)) return true;
+  }
+  return false;
+}
 function runClean(opts = {}) {
   const repoRoot = rootOf(opts);
   const dryRun = !opts.force;
+  const ledgerRecords = readDispatches(repoRoot).records;
+  const records = new Map(ledgerRecords.map((record) => [record.id, record]));
   const result = { dryRun, worktrees: [], kept: [], outputs: null, relay: null, stagedPrompts: null, cancelRequests: null };
   for (const wt of runWorktrees({ repoRoot })) {
-    if (wt.dispatch?.state === "open") {
-      result.kept.push({ path: wt.path, reason: `dispatch ${wt.dispatch.name ?? wt.dispatch.id.slice(0, 8)} is open; stop it first` });
+    if (wt.dispatch == null) {
+      result.kept.push({ path: wt.path, reason: "no dispatch names this worktree; preserve unknown or preparing work" });
+      continue;
+    }
+    const dispatch = records.get(wt.dispatch.id);
+    if (dispatch == null) {
+      result.kept.push({ path: wt.path, reason: `dispatch ${wt.dispatch.name ?? wt.dispatch.id.slice(0, 8)} appeared during cleanup; preserve it` });
+      continue;
+    }
+    if (dispatchStillOwnsScratch(dispatch)) {
+      const name = dispatch.opened?.name ?? dispatch.id.slice(0, 8);
+      const reason = dispatch.stopped == null ? `dispatch ${name} is ${dispatch.closed == null ? "open" : "closed before it stopped"}; preserve it until the stopped receipt arrives` : `dispatch ${name} stopped, but its process group is still live; preserve it until it exits`;
+      result.kept.push({
+        path: wt.path,
+        reason
+      });
       continue;
     }
     if (wt.dirty === "unavailable" || wt.ignored === "unavailable" || wt.unmerged === "unavailable") {
@@ -11230,26 +11381,18 @@ function runClean(opts = {}) {
       truncated: wt.ignored.truncated
     });
   }
-  const outputs = (0, import_node_path10.join)(repoRoot, OUTPUTS_DIR);
-  if ((0, import_node_fs11.existsSync)(outputs)) {
-    result.outputs = (0, import_node_path10.relative)(repoRoot, outputs);
-    if (!dryRun) (0, import_node_fs11.rmSync)(outputs, { recursive: true, force: true });
+  const stopped = selectedStoppedDispatches(records);
+  const outputNames = /* @__PURE__ */ new Set();
+  for (const id of stopped) {
+    outputNames.add(`${id}.md`);
+    outputNames.add(`${id}.err`);
+    outputNames.add(`${id}.prompt.md`);
   }
-  const relay = (0, import_node_path10.join)(repoRoot, RELAY_DIR);
-  if ((0, import_node_fs11.existsSync)(relay)) {
-    result.relay = (0, import_node_path10.relative)(repoRoot, relay);
-    if (!dryRun) (0, import_node_fs11.rmSync)(relay, { recursive: true, force: true });
-  }
-  const stagedPrompts = (0, import_node_path10.join)(repoRoot, STAGED_PROMPTS_DIR);
-  if ((0, import_node_fs11.existsSync)(stagedPrompts)) {
-    result.stagedPrompts = (0, import_node_path10.relative)(repoRoot, stagedPrompts);
-    if (!dryRun) (0, import_node_fs11.rmSync)(stagedPrompts, { recursive: true, force: true });
-  }
-  const cancelRequests = (0, import_node_path10.join)(repoRoot, CANCEL_REQUESTS_DIR);
-  if ((0, import_node_fs11.existsSync)(cancelRequests)) {
-    result.cancelRequests = (0, import_node_path10.relative)(repoRoot, cancelRequests);
-    if (!dryRun) (0, import_node_fs11.rmSync)(cancelRequests, { recursive: true, force: true });
-  }
+  const now = Date.now();
+  result.outputs = cleanSnapshotFiles(repoRoot, OUTPUTS_DIR, dryRun, (entry) => entry.isFile() && outputNames.has(entry.name), opts.onScratchSnapshot);
+  result.relay = cleanSnapshotFiles(repoRoot, RELAY_DIR, dryRun, (entry, path) => entry.isFile() && staleByMtime(path, now), opts.onScratchSnapshot);
+  result.stagedPrompts = cleanSnapshotFiles(repoRoot, STAGED_PROMPTS_DIR, dryRun, (entry, path) => staleStagedPrompt(entry, path, now), opts.onScratchSnapshot);
+  result.cancelRequests = cleanSnapshotFiles(repoRoot, CANCEL_REQUESTS_DIR, dryRun, (entry) => entry.isFile() && cancelArtifactBelongsTo(entry.name, stopped), opts.onScratchSnapshot);
   return result;
 }
 function renderClean(result) {
@@ -11259,13 +11402,18 @@ function renderClean(result) {
     const carrying = w.ignored.length === 0 ? "" : ` \u2014 and with it ${w.ignored.length}${w.truncated ? "+" : ""} ignored path(s): ${w.ignored.join(", ")}`;
     lines.push(`${verb} worktree ${w.path} (branch kept)${carrying}`);
   }
-  if (result.outputs != null) lines.push(`${verb} ${result.outputs}/ (command-lane transcripts)`);
-  if (result.relay != null) lines.push(`${verb} ${result.relay}/ (staged relay prompts)`);
-  if (result.stagedPrompts != null) lines.push(`${verb} ${result.stagedPrompts}/ (staged Codex prompts)`);
-  if (result.cancelRequests != null) lines.push(`${verb} ${result.cancelRequests}/ (cooperative cancellation scratch)`);
+  const scratch = (artifact, label) => {
+    if (artifact == null) return;
+    const paths = artifact.entries.map((entry) => `${artifact.directory}/${entry}`);
+    lines.push(`${verb} ${paths.join(", ")} (${label}; directory kept)`);
+  };
+  scratch(result.outputs, "selected command-lane transcript files");
+  scratch(result.relay, "selected stale relay prompt files");
+  scratch(result.stagedPrompts, "selected expired staged Codex prompt files");
+  scratch(result.cancelRequests, "selected cooperative cancellation files");
   for (const k of result.kept) lines.push(`kept ${k.path}: ${k.reason}`);
   if (lines.length === 0) lines.push("Nothing to clean.");
-  else if (result.dryRun) lines.push("Re-run with --force to remove. Recorded prompts and the ledger are never touched.");
+  else if (result.dryRun) lines.push("Re-run with --force to remove. Fresh pending handoffs, unknown scratch, recorded prompts, and the ledger are never touched.");
   return lines;
 }
 
@@ -12741,13 +12889,41 @@ function activityError(source, record) {
     `dispatch ${name} (${record.id}) has no Fadeno internal activity recorded yet; expected ${relativePath}. The command-lane activity file may appear while it is running; use \`fadeno logs ` + name + " --follow` to wait for it."
   );
 }
+function readRange(fd, offset, length) {
+  const bytes = Buffer.allocUnsafe(length);
+  let read = 0;
+  while (read < length) {
+    try {
+      const count = (0, import_node_fs15.readSync)(fd, bytes, read, length - read, offset + read);
+      if (count === 0) break;
+      read += count;
+    } catch (error) {
+      const code = error.code;
+      if (code === "EINTR" || code === "EAGAIN") continue;
+      throw error;
+    }
+  }
+  return read === length ? bytes : bytes.subarray(0, read);
+}
 function readActivity(path) {
+  let fd = null;
   try {
-    const stats = (0, import_node_fs15.statSync)(path);
-    return { bytes: (0, import_node_fs15.readFileSync)(path), identity: identity(stats) };
+    fd = (0, import_node_fs15.openSync)(path, "r");
+    const stats = (0, import_node_fs15.fstatSync)(fd);
+    return { bytes: readRange(fd, 0, stats.size), identity: identity(stats) };
   } catch (error) {
     if (error.code === "ENOENT") return null;
     throw new LogsError(`cannot read Fadeno internal activity at ${path}: ${error.message}`);
+  } finally {
+    if (fd != null) (0, import_node_fs15.closeSync)(fd);
+  }
+}
+function activityStats(path) {
+  try {
+    return (0, import_node_fs15.statSync)(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw new LogsError(`cannot inspect Fadeno internal activity at ${path}: ${error.message}`);
   }
 }
 function currentRecord(source) {
@@ -12778,55 +12954,63 @@ function runLogs(opts) {
     repoRoot,
     id: record.id,
     activityPath,
-    ledgerDir: (0, import_node_path14.join)(repoRoot, ".fadeno"),
     follow,
     tail,
     initial: tail == null ? bytes : tailActivity(bytes, tail),
     record,
     offset: bytes.length,
-    identity: initial?.identity ?? null
+    identity: initial?.identity ?? null,
+    progressToken: null
   };
 }
 function readLogsProgress(source) {
   const record = currentRecord(source);
-  const current = readActivity(source.activityPath);
-  if (current == null) {
+  const progressToken = stateToken(record, activityStats(source.activityPath));
+  source.progressToken = progressToken;
+  let fd = null;
+  try {
+    fd = (0, import_node_fs15.openSync)(source.activityPath, "r");
+    const stats = (0, import_node_fs15.fstatSync)(fd);
+    const currentIdentity = identity(stats);
+    if (!sameIdentity(source.identity, currentIdentity) || stats.size < source.offset) source.offset = 0;
+    source.identity = currentIdentity;
+    const chunk = readRange(fd, source.offset, stats.size - source.offset);
+    source.offset += chunk.length;
+    return { chunk, stopped: record.stopped != null, drained: record.stopped != null && source.offset >= stats.size, token: progressToken };
+  } catch (error) {
+    if (error.code !== "ENOENT") throw new LogsError(`cannot read Fadeno internal activity at ${source.activityPath}: ${error.message}`);
+    if (source.identity != null) throw new LogsError(`Fadeno internal activity at ${source.activityPath} disappeared while following dispatch ${source.id}.`);
     source.identity = null;
     source.offset = 0;
-    return { chunk: Buffer.alloc(0), stopped: record.stopped != null, drained: record.stopped != null };
+    return { chunk: Buffer.alloc(0), stopped: record.stopped != null, drained: record.stopped != null, token: progressToken };
+  } finally {
+    if (fd != null) (0, import_node_fs15.closeSync)(fd);
   }
-  if (!sameIdentity(source.identity, current.identity) || current.bytes.length < source.offset) source.offset = 0;
-  source.identity = current.identity;
-  const chunk = current.bytes.subarray(source.offset);
-  source.offset = current.bytes.length;
-  return { chunk, stopped: record.stopped != null, drained: record.stopped != null && source.offset >= current.bytes.length };
+}
+function stateToken(record, stats) {
+  const file = stats == null ? "missing" : `${stats.dev}:${stats.ino}:${stats.size}`;
+  return `${record.stopped?.at ?? ""}|${file}`;
 }
 function token(source) {
   const record = currentRecord(source);
-  const current = readActivity(source.activityPath);
-  const file = current == null ? "missing" : `${current.identity.dev}:${current.identity.ino}:${current.bytes.length}`;
-  return `${record.stopped?.at ?? ""}|${file}`;
+  return stateToken(record, activityStats(source.activityPath));
 }
-function watchDirectory(source) {
-  const outputDir = (0, import_node_path14.dirname)(source.activityPath);
-  const localDir = (0, import_node_path14.join)(source.repoRoot, ".fadeno", "local");
-  const candidates = [(0, import_node_fs15.existsSync)(outputDir) ? outputDir : (0, import_node_fs15.existsSync)(localDir) ? localDir : source.ledgerDir, source.ledgerDir];
-  return [...new Set(candidates)];
-}
-async function waitForLogsChange(source) {
-  const before = token(source);
-  const watchers = [];
+async function waitForLogsChange(source, expectedToken) {
+  const before = expectedToken ?? source.progressToken ?? token(source);
+  source.progressToken = null;
   return new Promise((resolvePromise, rejectPromise) => {
     let settled = false;
+    const paths = [source.activityPath, (0, import_node_path14.join)(source.repoRoot, LEDGER_FILE)];
+    const changed = () => finish();
     const finish = (error) => {
       if (settled) return;
       settled = true;
-      for (const watcher of watchers) watcher.close();
+      for (const path of paths) (0, import_node_fs15.unwatchFile)(path, changed);
       if (error == null) resolvePromise();
       else rejectPromise(error);
     };
     try {
-      for (const path of watchDirectory(source)) watchers.push((0, import_node_fs15.watch)(path, { persistent: true }, () => finish()));
+      for (const path of paths) (0, import_node_fs15.watchFile)(path, { persistent: true, interval: 250 }, changed);
       if (token(source) !== before) finish();
     } catch (error) {
       finish(new LogsError(`cannot watch Fadeno activity for dispatch ${source.id}: ${error.message}`));
@@ -12975,6 +13159,7 @@ function runPlugin(opts = {}) {
     stampRelayModel(stampSurfaceVersion((0, import_node_fs17.readFileSync)((0, import_node_path16.join)(tpl, "claude", "claude-agents", "dispatch.md"), "utf8")), relayModel),
     force
   );
+  emitBundledBin(results, outDir, tpl, "plugin", force);
   emitHooks(results, outDir, tpl, "spawn-claude.mjs", "hooks-claude.json", force);
   return { outDir, results };
 }
@@ -12998,8 +13183,16 @@ function runCodexPlugin(opts = {}) {
       skills: "./skills/",
       interface: {
         displayName: "Fadeno",
-        shortDescription: "Route delegated work by archetype, in worktrees, with a ledger.",
-        category: "Engineering"
+        shortDescription: "Route delegated work by archetype in scaffolded worktrees.",
+        longDescription: "Fadeno is a meta-harness for subagent workflows. It routes archetypes to models, gives each dispatch a scaffolded git worktree and contract, and records the lifecycle in a ledger.",
+        developerName: "Fadeno",
+        category: "Engineering",
+        capabilities: ["Archetype routing", "Worktree scaffolding", "Dispatch ledger"],
+        defaultPrompt: [
+          "Route this task to a Fadeno archetype.",
+          "Show the open Fadeno dispatches.",
+          "Explain the current Fadeno dial."
+        ]
       }
     },
     null,
@@ -13068,6 +13261,30 @@ var globalOptions = () => ({ ...GLOBAL_OPTIONS });
 var command = (options, positionals = [], subcommands, repeatLast = false) => ({ options: { ...globalOptions(), ...options }, positionals, subcommands, repeatLast });
 var NONE = { kind: "none" };
 var PATH = { kind: "path" };
+var DISPATCH_LAUNCH_OPTIONS = {
+  "--archetype": { kind: "archetype" },
+  "--model": { kind: "free" },
+  "--name": { kind: "free" },
+  "--prompt-file": PATH,
+  "--shared": NONE,
+  "--from": { kind: "free" },
+  "--session-id": { kind: "free" },
+  "--parent": { kind: "free" },
+  "--heartbeat": { kind: "free" }
+};
+var DISPATCH_SPEC = command(
+  {
+    ...DISPATCH_LAUNCH_OPTIONS,
+    "--all": NONE,
+    "--tail": { kind: "free" },
+    "--json": NONE,
+    "--output": { kind: "free" }
+  },
+  ["dispatch-selector"],
+  {
+    run: command(DISPATCH_LAUNCH_OPTIONS, ["dispatch-selector"])
+  }
+);
 var MODELS_SPEC = command(
   { "--harness": { kind: "free" }, "--json": NONE },
   ["executor"],
@@ -13095,17 +13312,7 @@ var COMMANDS = {
     }
   ),
   clean: command({ "--force": NONE }),
-  dispatch: command({
-    "--archetype": { kind: "archetype" },
-    "--model": { kind: "free" },
-    "--name": { kind: "free" },
-    "--prompt-file": PATH,
-    "--shared": NONE,
-    "--from": { kind: "free" },
-    "--session-id": { kind: "free" },
-    "--parent": { kind: "free" },
-    "--heartbeat": { kind: "free" }
-  }),
+  dispatch: DISPATCH_SPEC,
   "dispatch-open": command({
     "--archetype": { kind: "archetype" },
     "--model": { kind: "free" },
@@ -13287,6 +13494,13 @@ function dynamicValues(kind, prefix, repoRoot, cwd) {
       const profile = readProfile(repoRoot);
       return startsWith(profile == null ? [] : registeredModelRefSpellings(profile), prefix);
     }
+    case "dispatch-selector": {
+      const profile = readProfile(repoRoot);
+      if (profile == null) return [];
+      const local = readLocalDialState(repoRoot);
+      const archetypes = archetypeDisplaySort(knownArchetypes(profile.archetypes, profile.dials, local.dials, readUserDials()));
+      return startsWith([...archetypes, ...registeredModelRefSpellings(profile)], prefix);
+    }
     default:
       return [];
   }
@@ -13317,7 +13531,7 @@ function runCompletionCandidates(opts) {
     );
   }
   const base = COMMANDS[context.name];
-  if (base?.subcommands != null && context.spec === base) {
+  if (base?.subcommands != null && context.spec === base && !current.startsWith("-")) {
     const first = firstPositionalIndex(words, context.start, cword, base);
     if (first == null || first === cword) return startsWith(Object.keys(base.subcommands), current);
   }
@@ -13953,10 +14167,22 @@ var TOP_LEVEL = {
     "The preview names the ignored paths that would go with each worktree, because those are invisible to git and are where a worker's receipts land when a prompt did not give it an absolute path.",
     "It also removes `.fadeno/local/` relay files, cooperative cancellation requests, and staged Codex prompt handoffs; recorded prompts under `.fadeno/prompts/` remain evidence and are never touched."
   ]),
-  dispatch: page("Run one dispatch on the command lane: resolve the archetype, cut a worktree, run the executor, record it.", ["fadeno dispatch --archetype <name> [--from <dispatch-name|id|ref|sha>] [options]", "fadeno dispatch --model <ref> [options]"], [
-    "Reads the prompt from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted, and an explicit model is recorded as a one-dispatch override.",
+  dispatch: page("List, inspect, or run a dispatch.", [
+    "fadeno dispatch [--all] [--tail <count>] [--json]",
+    "fadeno dispatch <name|id> [--json]",
+    "fadeno dispatch --output <name|id>",
+    "fadeno dispatch --archetype <name> [launch options]",
+    "fadeno dispatch --model <ref> [launch options]",
+    "fadeno dispatch run <archetype-or-model> [launch options]",
+    "fadeno dispatch run --archetype <name> [launch options]",
+    "fadeno dispatch run --model <ref> [launch options]"
+  ], [
+    "The plural `fadeno dispatches` spelling remains a compatibility alias for the read forms. Both namespaces use the same list, detail, and report reader.",
+    "A launch reads the prompt from stdin or `--prompt-file`. In the legacy flag form, `--archetype` is required unless `--model` is supplied; both are accepted. `dispatch run` adds a positional selector, which must resolve exactly as one effective archetype or registered model reference.",
+    "If a positional selector matches both an effective archetype and a registered model reference, Fadeno refuses rather than guessing \u2014 use `--archetype` or `--model`. Unknown selectors name the effective archetypes and registered model references available.",
     "The executor runs in a worktree cut from HEAD. `--from <dispatch-name|id>` follows the ledger only to that dispatch's reachable isolated branch; it never substitutes the opening base, and a shared-tree dispatch cannot supply a retained result. If the branch/result is unavailable, commit the desired state and pass that Git ref or commit SHA. Literal Git refs and SHAs also work. A cross-namespace match, or an exact name that is another dispatch id prefix, is refused; qualify a Git ref such as `refs/heads/main` or use the dispatch full UUID. `--shared` works in the live tree on your explicit request, but cannot be combined with `--from`. An invalid explicit `--from` is refused, and a worktree failure never falls back to shared for an explicit baseline.",
     "Every dispatch must be closed afterwards: `fadeno dispatch-close <name> --merged|--kept|--discarded|--failed|--reviewed`. Fadeno performs no merge.",
+    "The command lane emits a command-process liveness echo to stderr every five minutes by default while its executor is running; this is not a host progress update. Use `--heartbeat 0` to disable it or `--heartbeat <seconds>` to override it. It never emits when no command dispatch is in flight.",
     "The launcher returns the executor's stdout verbatim even if a close row was written early by an older client; the later stop row still records the report observation."
   ]),
   "dispatch-open": page("The spawn wrapper for a spawn the host is about to make: open it on the host lane, or hand it to the command lane.", "fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <dispatch-name|id|ref|sha>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] [--agent-id <id>] (--prompt-file <path> | stdin | --prompt-sealed <reason> | --dry-run) [--json]", [
@@ -14005,7 +14231,8 @@ var TOP_LEVEL = {
   ]),
   dispatches: page("List dispatches, show one, or print a report.", ["fadeno dispatches [--all] [--tail <count>] [--json]", "fadeno dispatches <name|id> [--json]", "fadeno dispatches --output <name|id>"], [
     "Unclosed dispatches by default; `--all` includes closed ones. A name resolves when it is unique, a unique id prefix too; ambiguity is refused rather than guessed.",
-    "`--output` prints the command-lane transcript, or the final message the stop row recorded."
+    "`--output` prints the command-lane transcript, or the final message the stop row recorded.",
+    "This plural spelling is retained as a compatibility alias; the same read forms are also available under `fadeno dispatch`."
   ]),
   worktrees: page("Report every Fadeno worktree holding work that is not on HEAD.", "fadeno worktrees [--json]", [
     "The cross-session safety net: uncommitted paths, unmerged commits and ignored paths per worktree, joined to the dispatch that owns it. A tree that cannot be read is reported as such, never as clean.",
@@ -14078,6 +14305,14 @@ var NESTED = {
     "fadeno model run <ref[@effort][ on <harness>]> [<prompt>...] [--prompt-file <path>]",
     "`fadeno model run` is an alias for `fadeno models run`."
   ),
+  "dispatch run": page("Run one dispatch using a positional archetype or registered model selector.", [
+    "fadeno dispatch run <archetype-or-model> [launch options]",
+    "fadeno dispatch run --archetype <name> [launch options]",
+    "fadeno dispatch run --model <ref> [launch options]"
+  ], [
+    "A positional selector is resolved against the effective archetype names and registered model aliases, provider IDs, and delivered IDs. An exact match in both categories is refused; use the corresponding explicit flag.",
+    "Model selectors preserve the accepted `model[@effort][ on <harness>]` syntax."
+  ]),
   "dial clear": page("Clear one or more dial layers.", "fadeno dial clear [<archetype>] [--session|--user|--repo]"),
   "dial resolve": page("Print what one archetype resolves to right now.", "fadeno dial resolve --archetype <name>", [
     "The inspection escape hatch: model, effort, harness and lane, answered by the same resolver a spawn takes."
@@ -14104,7 +14339,7 @@ var OPTION_HINTS = {
   "--finalize": "Finalize a staged task after its handoff succeeds",
   "--grok": "Target Grok Build",
   "--harness": "Executor harness",
-  "--heartbeat": "Seconds between still-running echoes",
+  "--heartbeat": "Seconds between command-process liveness echoes (0 disables)",
   "--help": "Show this command help",
   "--json": "Emit structured JSON output",
   "--kept": "Close: keep the branch for later",
@@ -14156,6 +14391,8 @@ var OPTION_FORMS = {
   "--parent-transcript": "--parent-transcript <path>",
   "--prompt-sealed": "--prompt-sealed <reason>",
   "--bind": "--bind <role=executor>",
+  "--parent": "--parent <id>",
+  "--session-id": "--session-id <id>",
   "--tool": "--tool <name>",
   "--input": "--input <name=path>",
   "--host-executor": "--host-executor <name>",
@@ -14209,7 +14446,8 @@ var PAGE_OPTIONS = {
   model: withGlobals("--harness", "--json"),
   dial: withGlobals("--harness", "--session", "--user", "--repo", "--json"),
   clean: withGlobals("--force"),
-  dispatch: withGlobals("--archetype", "--model", "--name", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--heartbeat"),
+  dispatch: withGlobals("--archetype", "--model", "--name", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--heartbeat", "--all", "--tail", "--json", "--output"),
+  "dispatch run": withGlobals("--archetype", "--model", "--name", "--prompt-file", "--shared", "--from", "--session-id", "--parent", "--heartbeat"),
   "dispatch-open": withGlobals("--archetype", "--model", "--name", "--lane", "--prompt-file", "--prompt-sealed", "--agent-id", "--dry-run", "--shared", "--from", "--session-id", "--parent", "--parent-transcript", "--harness", "--json"),
   "dispatch-stop": withGlobals("--agent-id", "--transcript", "--message-file", "--agent-cwd", "--durable", "--json"),
   "dispatch-wait": withGlobals("--wait-seconds", "--json"),
@@ -14247,7 +14485,8 @@ var PATH_OPTION_HINTS = {
 var PATH_OPTION_FORMS = {
   dispatches: { "--output": "--output <name|id>", "--tail": "--tail <count>" },
   logs: { "--tail": "--tail <lines>" },
-  dispatch: { "--name": "--name <name>", "--from": "--from <dispatch-name|id|ref|sha>", "--heartbeat": "--heartbeat <seconds>" },
+  dispatch: { "--name": "--name <name>", "--from": "--from <dispatch-name|id|ref|sha>", "--heartbeat": "--heartbeat <seconds>", "--output": "--output <name|id>", "--tail": "--tail <count>" },
+  "dispatch run": { "--name": "--name <name>", "--from": "--from <dispatch-name|id|ref|sha>", "--heartbeat": "--heartbeat <seconds>" },
   "dispatch-open": { "--name": "--name <name>", "--from": "--from <dispatch-name|id|ref|sha>", "--session-id": "--session-id <id>", "--parent": "--parent <id>" },
   "dispatch-stop": { "--message-file": "--message-file <path>", "--agent-cwd": "--agent-cwd <dir>" },
   "dispatch-close": { "--note": "--note <text>" },
@@ -14305,7 +14544,8 @@ Routing
   feedback    Record friction with Fadeno itself
 
 Dispatches
-  dispatch, dispatch-wait, dispatch-close, cancel, dispatches, logs, worktrees
+  dispatch (read or run), dispatches (read alias), dispatch-wait, dispatch-close,
+  cancel, logs, worktrees
   dispatch-open, dispatch-stop  (the hooks' entry points)
   prompt-stage  (stage a Codex prompt before an archetype spawn)
 
@@ -14393,6 +14633,19 @@ function lastStderrLine(excerpt, max = 160) {
   const line = excerpt.split("\n").map((l) => l.trim()).filter((l) => l !== "").at(-1);
   if (line == null) return null;
   return line.length <= max ? line : `${line.slice(0, max)}\u2026`;
+}
+function executorFailureStatus(stopped) {
+  const exit = stopped?.exit;
+  if (exit?.code == null || exit.code === 0) return null;
+  return exit.code;
+}
+function executorFailureContext(name, id, stopped) {
+  const status = executorFailureStatus(stopped);
+  if (status == null || stopped?.reconstructed === true) return null;
+  const exit = stopped?.exit;
+  const ending = exit?.signal != null ? `killed by ${exit.signal}` : `exit ${exit?.code ?? 1}`;
+  const cause = lastStderrLine(stopped?.stderr_excerpt);
+  return `${name} failed: ${ending}` + (cause != null ? `; stderr ends: ${cause}` : "") + (stopped?.stderr_excerpt != null ? `; full stderr at ${outputPaths(id).stderr}` : "");
 }
 function ageOf(record) {
   const at = record.opened?.at;
@@ -14529,6 +14782,84 @@ function printDispatchPreparing(values) {
   console.error(
     `dispatch${target}: preparation underway \u2014 this dispatch has not opened a ledger row or started an executor yet.`
   );
+}
+async function runDispatchLaunch(options) {
+  const policy = sharedFromRefusal(Boolean(options.shared), options.from ?? null);
+  if (policy != null) {
+    console.error(policy);
+    return 3;
+  }
+  printDispatchPreparing({ name: options.name, archetype: options.archetype, model: options.model });
+  const promptFile = options.promptFile;
+  const outcome = await runDispatch({
+    archetype: options.archetype ?? null,
+    model: options.model ?? null,
+    name: options.name ?? null,
+    shared: Boolean(options.shared),
+    from: options.from ?? null,
+    promptFile,
+    prompt: promptFile == null ? readStdin() : void 0,
+    session: options.session ?? null,
+    parent: options.parent,
+    onEcho: (line) => console.error(line),
+    heartbeatMs: options.heartbeat != null ? Number(options.heartbeat) * 1e3 : DEFAULT_COMMAND_HEARTBEAT_MS
+  });
+  if (!outcome.ok) {
+    console.error(outcome.refused);
+    return 3;
+  }
+  const r = outcome.result;
+  if (r.stdout.length > 0) process.stdout.write(r.stdout.endsWith("\n") ? r.stdout : `${r.stdout}
+`);
+  const ending = r.signal != null ? `killed by ${r.signal}` : `exit ${r.exitCode}`;
+  const where = r.opened.workspace?.branch != null ? `branch ${r.opened.workspace.branch}` : "shared tree";
+  const empty = r.stdout.trim().length === 0;
+  const bad = r.exitCode !== 0 || r.signal != null || empty;
+  const lastWords = bad ? lastStderrLine(r.stopped.stderr_excerpt) : null;
+  console.error(
+    `dispatch ${r.name} (${r.id}) stopped: ${ending}; ${where}` + (empty ? "; NO OUTPUT \u2014 the executor wrote nothing" : "") + (lastWords != null ? `; stderr ends: ${lastWords}` : "") + (r.stderrBytes > 0 ? `; full stderr at ${r.stderrPath}` : "") + `. Close it: fadeno dispatch-close ${r.name} --merged|--kept|--discarded|--failed|--reviewed`
+  );
+  if (r.exitCode === 0 && empty) return 1;
+  return r.exitCode ?? 1;
+}
+function printDispatchRead(read, json, readCommand) {
+  if (read.kind === "output") {
+    const out = read.result;
+    const name = out.record.opened?.name ?? out.record.id;
+    const failureStatus = executorFailureStatus(out.record.stopped);
+    if (out.text == null) {
+      const failure = executorFailureContext(name, out.record.id, out.record.stopped);
+      console.error(
+        `${name}: no report recorded${out.record.state === "open" ? " \u2014 it is still open" : ""}.` + (failure == null ? "" : ` ${failure}.`)
+      );
+      return 1;
+    }
+    if (out.record.stopped == null) {
+      console.error(
+        `${name} has not stopped: what follows is its output so far, not a report. Run this again when it stops (\`fadeno ${readCommand}\` shows the state).`
+      );
+    }
+    if (out.source === "final_message" && out.record.opened?.lane === "command") {
+      console.error(
+        `${name}: the retained command-lane stdout transcript is unavailable; the following text is only the stopped row's bounded final-message excerpt, not the complete report. The full report cannot be recovered from this ledger excerpt.`
+      );
+    }
+    if (failureStatus != null) {
+      const failure = executorFailureContext(name, out.record.id, out.record.stopped);
+      if (failure != null) console.error(`${failure}; report follows.`);
+    }
+    process.stdout.write(out.text.endsWith("\n") ? out.text : `${out.text}
+`);
+    return out.record.stopped == null ? 2 : failureStatus ?? 0;
+  }
+  if (read.kind === "show") {
+    if (json) console.log(JSON.stringify(read.result.record));
+    else for (const line of renderDispatchDetail(read.result)) console.log(line);
+    return 0;
+  }
+  if (json) console.log(JSON.stringify(read.result));
+  else for (const line of renderDispatches(read.result)) console.log(line);
+  return 0;
 }
 async function writeStdoutBytes(bytes) {
   if (bytes.length === 0) return;
@@ -14981,43 +15312,76 @@ async function main(argv) {
       throw new Error("Usage: fadeno dial [<archetype> [<model>[@effort] [--harness <id>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | resolve --archetype <name>]");
     }
     case "dispatch": {
-      const policy = sharedFromRefusal(Boolean(values.shared), values.from ?? null);
-      if (policy != null) {
-        console.error(policy);
-        return 3;
+      const [, first, selector] = positionals;
+      const isRun = first === "run";
+      const launchOptionsPresent = [
+        values.name,
+        values["prompt-file"],
+        values.shared,
+        values.from,
+        values["session-id"],
+        values.parent,
+        values.heartbeat
+      ].some((value) => value != null && value !== false);
+      const launchSelectorPresent = values.archetype != null || values.model != null;
+      const readOptionsPresent = values.all === true || values.tail != null || values.output != null || values.json === true;
+      if (isRun) {
+        if (positionals.length > 3) {
+          throw new Error("Usage: fadeno dispatch run <archetype-or-model> [launch options], or fadeno dispatch run --archetype|--model <selector> [launch options].");
+        }
+        if (selector != null && launchSelectorPresent) {
+          throw new Error("fadeno dispatch run cannot combine a positional selector with --archetype or --model; use one selector form.");
+        }
+        if (readOptionsPresent) {
+          throw new Error("fadeno dispatch run accepts launch options, not --all, --tail, --json, or --output; use `fadeno dispatch` for reads.");
+        }
+        let launch = {
+          archetype: values.archetype ?? null,
+          model: values.model ?? null,
+          name: values.name ?? null,
+          shared: Boolean(values.shared),
+          from: values.from ?? null,
+          promptFile: values["prompt-file"] ?? null,
+          session: values["session-id"] ?? null,
+          parent: values.parent ?? null,
+          heartbeat: values.heartbeat ?? null
+        };
+        if (selector != null) {
+          const resolved = resolveDispatchSelector({ selector });
+          launch = resolved.kind === "archetype" ? { ...launch, archetype: resolved.archetype, model: null } : { ...launch, archetype: null, model: resolved.model };
+        } else if (!launchSelectorPresent) {
+          throw new Error("Usage: fadeno dispatch run <archetype-or-model> [launch options], or fadeno dispatch run --archetype|--model <selector> [launch options].");
+        }
+        return runDispatchLaunch(launch);
       }
-      printDispatchPreparing({ name: values.name, archetype: values.archetype, model: values.model });
-      const promptFile = values["prompt-file"];
-      const outcome = await runDispatch({
-        archetype: values.archetype ?? null,
-        model: values.model ?? null,
-        name: values.name ?? null,
-        shared: Boolean(values.shared),
-        from: values.from ?? null,
-        promptFile,
-        prompt: promptFile == null ? readStdin() : void 0,
-        session: values["session-id"] ?? null,
-        parent: values.parent,
-        onEcho: (line) => console.error(line),
-        heartbeatMs: values.heartbeat != null ? Number(values.heartbeat) * 1e3 : 3e4
-      });
-      if (!outcome.ok) {
-        console.error(outcome.refused);
-        return 3;
+      if (launchSelectorPresent || launchOptionsPresent) {
+        if (first != null) {
+          throw new Error(`fadeno dispatch cannot combine positional read selector "${first}" with launch selectors or launch options; use fadeno dispatch run ${first} for a positional launch.`);
+        }
+        if (readOptionsPresent) {
+          throw new Error("fadeno dispatch launch forms cannot combine --all, --tail, --json, or --output; use `fadeno dispatch` without --archetype/--model for reads.");
+        }
+        return runDispatchLaunch({
+          archetype: values.archetype ?? null,
+          model: values.model ?? null,
+          name: values.name ?? null,
+          shared: Boolean(values.shared),
+          from: values.from ?? null,
+          promptFile: values["prompt-file"] ?? null,
+          session: values["session-id"] ?? null,
+          parent: values.parent ?? null,
+          heartbeat: values.heartbeat ?? null
+        });
       }
-      const r = outcome.result;
-      if (r.stdout.length > 0) process.stdout.write(r.stdout.endsWith("\n") ? r.stdout : `${r.stdout}
-`);
-      const ending = r.signal != null ? `killed by ${r.signal}` : `exit ${r.exitCode}`;
-      const where = r.opened.workspace?.branch != null ? `branch ${r.opened.workspace.branch}` : "shared tree";
-      const empty = r.stdout.trim().length === 0;
-      const bad = r.exitCode !== 0 || r.signal != null || empty;
-      const lastWords = bad ? lastStderrLine(r.stopped.stderr_excerpt) : null;
-      console.error(
-        `dispatch ${r.name} (${r.id}) stopped: ${ending}; ${where}` + (empty ? "; NO OUTPUT \u2014 the executor wrote nothing" : "") + (lastWords != null ? `; stderr ends: ${lastWords}` : "") + (r.stderrBytes > 0 ? `; full stderr at ${r.stderrPath}` : "") + `. Close it: fadeno dispatch-close ${r.name} --merged|--kept|--discarded|--failed|--reviewed`
-      );
-      if (r.exitCode === 0 && empty) return 1;
-      return r.exitCode ?? 1;
+      if (positionals.length > 2) {
+        throw new Error("Usage: fadeno dispatch [--all] [--tail <count>] [--json], fadeno dispatch <name|id> [--json], or fadeno dispatch --output <name|id>.");
+      }
+      return printDispatchRead(runDispatchRead({
+        ref: first ?? null,
+        output: values.output ?? null,
+        tail: values.tail != null ? Number(values.tail) : void 0,
+        all: Boolean(values.all)
+      }), Boolean(values.json), "dispatch");
     }
     case "dispatch-open": {
       if (!values.archetype) {
@@ -15197,6 +15561,8 @@ async function main(argv) {
       if (outcome.state === "stopped") {
         const s = outcome.record.stopped;
         const how = s?.reconstructed === true ? " (its launcher was killed before it could record the stop, so how it ended is unknown)" : s?.exit == null ? "" : s.exit.signal != null ? ` (killed by ${s.exit.signal})` : ` (exit ${s.exit.code})`;
+        const failureStatus = executorFailureStatus(s);
+        const failure = executorFailureContext(name, outcome.record.id, s);
         if (outcome.text == null) {
           if (!values.json) {
             const why = lastStderrLine(s?.stderr_excerpt);
@@ -15210,11 +15576,12 @@ async function main(argv) {
         }
         if (!values.json) {
           if (s?.reconstructed === true) console.error(`${name} stopped${how}; its report was recovered from what it left on disk, and follows.${stillWaiting}`);
+          else if (failure != null) console.error(`${failure}; its report follows.${stillWaiting}`);
           else if (refs.length > 1) console.error(`${name} stopped; its report follows.${stillWaiting}`);
           process.stdout.write(outcome.text.endsWith("\n") ? outcome.text : `${outcome.text}
 `);
         }
-        return 0;
+        return failureStatus ?? 0;
       }
       if (!values.json) {
         const which = outcome.waiting.length > 1 ? `${outcome.waiting.length} dispatches are still running (${others.join(", ")})` : `${name} is still running (${ageOf(outcome.record)} in)`;
@@ -15249,38 +15616,17 @@ async function main(argv) {
         const progress = readLogsProgress(source);
         await writeStdoutBytes(progress.chunk);
         if (progress.stopped && progress.drained) return 0;
-        await waitForLogsChange(source);
+        await waitForLogsChange(source, progress.token);
       }
     }
     case "dispatches": {
       const [, ref] = positionals;
-      if (values.output != null) {
-        const out = runDispatchOutput({ ref: values.output });
-        if (out.text == null) {
-          const name = out.record.opened?.name ?? out.record.id;
-          console.error(`${name}: no report recorded${out.record.state === "open" ? " \u2014 it is still open" : ""}.`);
-          return 1;
-        }
-        if (out.record.stopped == null) {
-          const name = out.record.opened?.name ?? out.record.id.slice(0, 8);
-          console.error(
-            `${name} has not stopped: what follows is its output so far, not a report. Run this again when it stops (\`fadeno dispatches\` shows the state).`
-          );
-        }
-        process.stdout.write(out.text.endsWith("\n") ? out.text : `${out.text}
-`);
-        return out.record.stopped == null ? 2 : 0;
-      }
-      if (ref != null) {
-        const detail = runDispatchShow({ ref });
-        if (values.json) console.log(JSON.stringify(detail.record));
-        else for (const line of renderDispatchDetail(detail)) console.log(line);
-        return 0;
-      }
-      const result = runDispatches({ tail: values.tail != null ? Number(values.tail) : void 0, all: Boolean(values.all) });
-      if (values.json) console.log(JSON.stringify(result));
-      else for (const line of renderDispatches(result)) console.log(line);
-      return 0;
+      return printDispatchRead(runDispatchRead({
+        ref: ref ?? null,
+        output: values.output ?? null,
+        tail: values.tail != null ? Number(values.tail) : void 0,
+        all: Boolean(values.all)
+      }), Boolean(values.json), "dispatches");
     }
     default:
       console.error(`Unknown command: ${command2}

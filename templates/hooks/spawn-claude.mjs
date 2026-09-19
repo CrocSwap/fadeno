@@ -113,7 +113,7 @@ function agentType(bare) {
   return existsSync(join(cwd, '.claude', 'agents', `${bare}.md`)) ? bare : `fadeno:${bare}`;
 }
 
-const closeLine = (n) => `When it stops, read its report and close it: \`fadeno dispatch-close ${n} --merged|--kept|--discarded|--failed\`.`;
+const closeLine = (n) => `When it stops, read its report and close it: \`fadeno dispatch-close ${n} --merged|--kept|--discarded|--failed|--reviewed\`.`;
 
 if (answer.opened === true) {
   const o = answer;

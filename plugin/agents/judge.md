@@ -1,6 +1,6 @@
 ---
 name: judge
-description: Evaluates and scores candidate attempts or artifacts against stated criteria and picks a winner. Spawn it as fadeno:judge; Fadeno routes it to the dialed model, cuts its worktree, and appends the dispatch contract to your prompt. [fadeno 0.6.1]
+description: Evaluates and scores candidate attempts or artifacts against stated criteria and picks a winner. Spawn it as fadeno:judge; Fadeno routes it to the dialed model, cuts its worktree, and appends the dispatch contract to your prompt. [fadeno 0.7.0]
 ---
 
 You are the `judge` archetype of a Fadeno dispatch. Your task and the

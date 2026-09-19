@@ -6,10 +6,10 @@
  * names, id prefixes, and renamed worktrees.
  */
 
-import { existsSync, readFileSync, statSync, watch, type FSWatcher, type Stats } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { closeSync, fstatSync, openSync, readSync, statSync, unwatchFile, watchFile, type Stats } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { findRepoRoot } from '../lib/paths.ts';
-import { findDispatch, readDispatches, type DispatchRecord } from '../lib/ledger.ts';
+import { findDispatch, LEDGER_FILE, readDispatches, type DispatchRecord } from '../lib/ledger.ts';
 import { outputPaths } from '../lib/spawn.ts';
 
 export class LogsError extends Error {}
@@ -34,13 +34,14 @@ export interface LogsProgress {
   stopped: boolean;
   /** True when the current stopped row has no bytes left to read. */
   drained: boolean;
+  /** Filesystem/ledger state observed before this read began. */
+  token: string;
 }
 
 export interface LogsSource {
   readonly repoRoot: string;
   readonly id: string;
   readonly activityPath: string;
-  readonly ledgerDir: string;
   readonly follow: boolean;
   readonly tail: number | null;
   /** Existing bytes, already reduced to `tail` when requested. */
@@ -49,6 +50,8 @@ export interface LogsSource {
   record: DispatchRecord;
   offset: number;
   identity: FileIdentity | null;
+  /** State captured by the last progress read, before it consumed bytes. */
+  progressToken: string | null;
 }
 
 function rootOf(opts: Pick<LogsOptions, 'cwd' | 'repoRoot'>): string {
@@ -107,13 +110,43 @@ function activityError(source: { activityPath: string }, record: DispatchRecord)
   );
 }
 
+function readRange(fd: number, offset: number, length: number): Buffer {
+  const bytes = Buffer.allocUnsafe(length);
+  let read = 0;
+  while (read < length) {
+    try {
+      const count = readSync(fd, bytes, read, length - read, offset + read);
+      if (count === 0) break;
+      read += count;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EINTR' || code === 'EAGAIN') continue;
+      throw error;
+    }
+  }
+  return read === length ? bytes : bytes.subarray(0, read);
+}
+
 function readActivity(path: string): { bytes: Buffer; identity: FileIdentity } | null {
+  let fd: number | null = null;
   try {
-    const stats = statSync(path);
-    return { bytes: readFileSync(path), identity: identity(stats) };
+    fd = openSync(path, 'r');
+    const stats = fstatSync(fd);
+    return { bytes: readRange(fd, 0, stats.size), identity: identity(stats) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw new LogsError(`cannot read Fadeno internal activity at ${path}: ${(error as Error).message}`);
+  } finally {
+    if (fd != null) closeSync(fd);
+  }
+}
+
+function activityStats(path: string): Stats | null {
+  try {
+    return statSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new LogsError(`cannot inspect Fadeno internal activity at ${path}: ${(error as Error).message}`);
   }
 }
 
@@ -149,66 +182,79 @@ export function runLogs(opts: LogsOptions): LogsSource {
     repoRoot,
     id: record.id,
     activityPath,
-    ledgerDir: join(repoRoot, '.fadeno'),
     follow,
     tail,
     initial: tail == null ? bytes : tailActivity(bytes, tail),
     record,
     offset: bytes.length,
     identity: initial?.identity ?? null,
+    progressToken: null,
   };
 }
 
 /** Read bytes appended since the last progress call, handling replacement. */
 export function readLogsProgress(source: LogsSource): LogsProgress {
   const record = currentRecord(source);
-  const current = readActivity(source.activityPath);
-  if (current == null) {
+  // Capture the state before opening/reading the stream. If bytes or a stopped
+  // row arrive after this point but before the caller installs its watcher,
+  // waitForLogsChange can compare against this token instead of treating the
+  // late state as the new baseline.
+  const progressToken = stateToken(record, activityStats(source.activityPath));
+  source.progressToken = progressToken;
+  let fd: number | null = null;
+  try {
+    fd = openSync(source.activityPath, 'r');
+    const stats = fstatSync(fd);
+    const currentIdentity = identity(stats);
+    // A replacement gets a fresh identity. A truncation gets a smaller size.
+    // Either means the cursor must start at zero so the new stream is not lost.
+    if (!sameIdentity(source.identity, currentIdentity) || stats.size < source.offset) source.offset = 0;
+    source.identity = currentIdentity;
+    const chunk = readRange(fd, source.offset, stats.size - source.offset);
+    source.offset += chunk.length;
+    return { chunk, stopped: record.stopped != null, drained: record.stopped != null && source.offset >= stats.size, token: progressToken };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new LogsError(`cannot read Fadeno internal activity at ${source.activityPath}: ${(error as Error).message}`);
+    if (source.identity != null) throw new LogsError(`Fadeno internal activity at ${source.activityPath} disappeared while following dispatch ${source.id}.`);
     source.identity = null;
     source.offset = 0;
-    return { chunk: Buffer.alloc(0), stopped: record.stopped != null, drained: record.stopped != null };
+    return { chunk: Buffer.alloc(0), stopped: record.stopped != null, drained: record.stopped != null, token: progressToken };
+  } finally {
+    if (fd != null) closeSync(fd);
   }
-  // A replacement gets a fresh identity. A truncation gets a smaller size.
-  // Either means the cursor must start at zero so the new stream is not lost.
-  if (!sameIdentity(source.identity, current.identity) || current.bytes.length < source.offset) source.offset = 0;
-  source.identity = current.identity;
-  const chunk = current.bytes.subarray(source.offset);
-  source.offset = current.bytes.length;
-  return { chunk, stopped: record.stopped != null, drained: record.stopped != null && source.offset >= current.bytes.length };
+}
+
+function stateToken(record: DispatchRecord, stats: Stats | null): string {
+  const file = stats == null ? 'missing' : `${stats.dev}:${stats.ino}:${stats.size}`;
+  return `${record.stopped?.at ?? ''}|${file}`;
 }
 
 function token(source: LogsSource): string {
   const record = currentRecord(source);
-  const current = readActivity(source.activityPath);
-  const file = current == null ? 'missing' : `${current.identity.dev}:${current.identity.ino}:${current.bytes.length}`;
-  return `${record.stopped?.at ?? ''}|${file}`;
+  return stateToken(record, activityStats(source.activityPath));
 }
 
-function watchDirectory(source: LogsSource): string[] {
-  const outputDir = dirname(source.activityPath);
-  const localDir = join(source.repoRoot, '.fadeno', 'local');
-  const candidates = [existsSync(outputDir) ? outputDir : existsSync(localDir) ? localDir : source.ledgerDir, source.ledgerDir];
-  return [...new Set(candidates)];
-}
-
-/** Wait for a ledger or activity-file event, with a token check closing the race before watch setup. */
-export async function waitForLogsChange(source: LogsSource): Promise<void> {
-  const before = token(source);
-  const watchers: FSWatcher[] = [];
+/** Wait for a ledger or activity-file change, with a token check closing the setup race. */
+export async function waitForLogsChange(source: LogsSource, expectedToken?: string): Promise<void> {
+  const before = expectedToken ?? source.progressToken ?? token(source);
+  source.progressToken = null;
   return new Promise<void>((resolvePromise, rejectPromise) => {
     let settled = false;
+    const paths = [source.activityPath, join(source.repoRoot, LEDGER_FILE)];
+    const changed = (): void => finish();
     const finish = (error?: Error): void => {
       if (settled) return;
       settled = true;
-      for (const watcher of watchers) watcher.close();
+      for (const path of paths) unwatchFile(path, changed);
       if (error == null) resolvePromise();
       else rejectPromise(error);
     };
     try {
-      for (const path of watchDirectory(source)) watchers.push(watch(path, { persistent: true }, () => finish()));
+      // stat-based watching avoids consuming a file descriptor for every
+      // follower and also works before either file exists.
+      for (const path of paths) watchFile(path, { persistent: true, interval: 250 }, changed);
       // The append or stop row can land after the first read but before the
-      // watcher exists. Re-read once after setup; this is synchronization, not
-      // polling, and closes the only event-registration race.
+      // watchers exist. Re-read once after setup to close that race.
       if (token(source) !== before) finish();
     } catch (error) {
       finish(new LogsError(`cannot watch Fadeno activity for dispatch ${source.id}: ${(error as Error).message}`));

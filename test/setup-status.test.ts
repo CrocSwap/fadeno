@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { runSetup, SetupError } from '../src/commands/setup.ts';
+import { runCodexAgentBootstrap, runSetup, SetupError } from '../src/commands/setup.ts';
 import { runStatus } from '../src/commands/status.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { catalogV4, gitRepo, tempRepo } from './helpers.ts';
@@ -117,7 +117,7 @@ test('setup replaces its own agent files, sweeps the ones it no longer writes, a
   const result = runSetup({ repoRoot: root, userPathOptions: user, source, target: 'codex' });
   assert.equal(existsSync(join(projectAgents, 'worker.toml')), false);
   assert.equal(existsSync(join(projectAgents, 'reviewer.toml')), true, 'a hand-written agent file is the user\'s');
-  assert.match(result.notices.join('\n'), /worker\.toml, which an earlier Fadeno materialized/s);
+  assert.match(result.notices.join('\n'), /obsolete managed agent file .*worker\.toml/s);
 
   // The stale user-scope file survives as a file and dies as a routing
   // decision: this version's content, and no `model` key to beat the dial.
@@ -132,6 +132,41 @@ test('setup replaces its own agent files, sweeps the ones it no longer writes, a
     assert.ok(result.codexAgents.some((path) => path.endsWith(`fadeno-${archetype}.toml`)), archetype);
     assert.equal(existsSync(join(userAgents, `fadeno-${archetype}.toml`)), true, archetype);
   }
+});
+
+test('Codex first-use bootstrap is idempotent and dial changes never rewrite agent files', (t) => {
+  const { root, user } = seed(t);
+  const first = runCodexAgentBootstrap({ repoRoot: root, userPathOptions: user });
+  assert.equal(first.changed, true);
+  assert.ok(first.agents.every((agent) => agent.action === 'created'));
+  const before = new Map(first.agents.map((agent) => [agent.path, readFileSync(agent.path, 'utf8')]));
+
+  // Routing changed completely. The files remain stable because they declare
+  // archetype names, never the model or effort selected by a dial.
+  writeFileSync(
+    join(root, '.fadeno', 'executors.yaml'),
+    catalogV4({ archetypes: { worker: {}, reviewer: {} }, bindings: { worker: 'opus', reviewer: 'sol@high' } }),
+  );
+  const second = runCodexAgentBootstrap({ repoRoot: root, userPathOptions: user });
+  assert.equal(second.changed, false);
+  assert.ok(second.agents.every((agent) => agent.action === 'unchanged'));
+  for (const agent of second.agents) assert.equal(readFileSync(agent.path, 'utf8'), before.get(agent.path));
+  assert.match(second.notices.join('\n'), /changing a dial never requires another bootstrap/);
+});
+
+test('Codex first-use bootstrap refuses a same-named user agent before changing managed files', (t) => {
+  const { root, user } = seed(t);
+  const agents = join(root, 'home', '.codex', 'agents');
+  mkdirSync(agents, { recursive: true });
+  const owned = join(agents, 'fadeno-worker.toml');
+  writeFileSync(owned, 'name = "my-worker"\nmodel = "my-model"\n', 'utf8');
+
+  assert.throws(
+    () => runCodexAgentBootstrap({ repoRoot: root, userPathOptions: user }),
+    (err: unknown) => err instanceof SetupError && err.message.includes(owned) && /will not overwrite a user agent/.test(err.message),
+  );
+  assert.equal(readFileSync(owned, 'utf8'), 'name = "my-worker"\nmodel = "my-model"\n');
+  assert.equal(existsSync(join(agents, 'fadeno-reviewer.toml')), false);
 });
 
 test('setup --claude grants the CLI permission once, in the user\'s own settings', (t) => {

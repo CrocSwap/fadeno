@@ -81,11 +81,11 @@ test('prepareDispatch reads it, so both lanes carry it without either one rememb
 
 test('the host is told the file exists and not to repeat it — and told to start one when it does not', (t) => {
   const archetypes = [{ name: 'worker', description: 'd', model: 'sol', effort: null, source: 'base' }];
-  const without = hostVocabulary({ archetypes, unclosed: [], unclosedLimit: 5, preamble: readPreamble(repo(t)) });
+  const without = hostVocabulary({ archetypes, unclosed: [], preamble: readPreamble(repo(t)) });
   assert.match(without, /belong in `\.fadeno\/preamble\.md`/);
   assert.doesNotMatch(without, /This repository states conventions/);
 
-  const with_ = hostVocabulary({ archetypes, unclosed: [], unclosedLimit: 5, preamble: readPreamble(repo(t, 'use uv')) });
+  const with_ = hostVocabulary({ archetypes, unclosed: [], preamble: readPreamble(repo(t, 'use uv')) });
   assert.match(with_, /This repository states conventions for every dispatch in `\.fadeno\/preamble\.md`/);
   assert.match(with_, /Do not repeat them in a brief/);
 });
@@ -117,6 +117,8 @@ test('every delegate is told the archetype names, because one that decided to fa
   assert.ok(outcome.ok);
   const contract = outcome.ok ? outcome.prepared.contract : '';
   assert.match(contract, /\*\*If you delegate\.\*\*/);
+  assert.match(contract, /Never close the dispatch you are currently running in/);
+  assert.match(contract, /Only close dispatches you opened/);
   assert.match(contract, /Name a Fadeno archetype as the agent type/);
   assert.match(contract, /A generic subagent is refused/);
   // The catalog's own names, not a hardcoded list that can drift from it.

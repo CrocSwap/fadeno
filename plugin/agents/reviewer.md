@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Reviews a change, diff, or artifact for correctness, edge cases, safety, and tests; reports findings and changes nothing. Spawn it as fadeno:reviewer; Fadeno routes it to the dialed model, cuts its worktree, and appends the dispatch contract to your prompt. [fadeno 0.6.1]
+description: Reviews a change, diff, or artifact for correctness, edge cases, safety, and tests; reports findings and changes nothing. Spawn it as fadeno:reviewer; Fadeno routes it to the dialed model, cuts its worktree, and appends the dispatch contract to your prompt. [fadeno 0.7.0]
 ---
 
 You are the `reviewer` archetype of a Fadeno dispatch. Your task and the

@@ -594,8 +594,8 @@ export interface ExecutorProfile {
   archetypes: Record<string, ArchetypePolicy>;
   unregisteredModelHarness: string;
   /**
-   * How many unclosed dispatches this repository tolerates before the next
-   * spawn is refused (spec §05). Repo-scoped policy; `null` means the default.
+   * Legacy `unclosed_limit` value, read for compatibility but ignored. Spawn
+   * admission is unlimited; the ledger remains advisory state.
    */
   unclosedLimit: number | null;
   /** The HOST: the harness this call is running inside. */
@@ -1145,7 +1145,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
     }
   }
 
-  // unclosed_limit
+  // unclosed_limit (legacy compatibility; no longer affects spawning)
   let unclosedLimit: number | null = null;
   if (doc.unclosed_limit !== undefined && doc.unclosed_limit !== null) {
     const raw = doc.unclosed_limit;
@@ -1153,6 +1153,7 @@ export function parseExecutorProfile(text: string, source: string, host: Harness
       throw new ExecutorProfileError(`${source}: \`unclosed_limit\` must be a positive integer; found ${JSON.stringify(raw)}.`);
     }
     unclosedLimit = raw;
+    notes.push(`${source}: \`unclosed_limit\` is retired and ignored — spawning is unlimited; ledger reminders remain repository-wide.`);
   }
   // unregistered_model_harness
   if (doc.unregistered_model_driver !== undefined) throw v4MigrationError(source, 'unregistered_model_driver');
@@ -1506,6 +1507,177 @@ export function homeHarnessOf(profile: ExecutorProfile, provider: string): strin
 /** Every harness id the catalog declares, sorted — for "did you mean" lists. */
 export function declaredHarnesses(profile: ExecutorProfile): string[] {
   return Object.keys(profile.harnesses ?? {}).sort();
+}
+
+export type RegisteredModelRefMatch = 'alias' | 'identity' | 'delivery';
+
+export interface RegisteredModelRefResolution {
+  /** The canonical registered alias selected by the reference. */
+  alias: string;
+  /** The reference normalized to that alias, with an inferred harness when a
+   * harness-specific delivered id was used. */
+  ref: DialRef;
+  matchedBy: RegisteredModelRefMatch;
+}
+
+function modelAliases(profile: ExecutorProfile): string[] {
+  return Object.keys(profile.models).filter((alias) => alias !== 'host').sort();
+}
+
+/**
+ * Every useful registry spelling accepted by the model-management surfaces.
+ *
+ * This is deliberately derived from the same compiler as dispatch rather than
+ * maintaining a second table of ids: a harness spelling, effort suffix, or
+ * future delivery rule must be matchable wherever a model ref is accepted.
+ * Stale entries are retained in the registry listing but contribute no
+ * compiled delivery identity; the alias and canonical provider/id identities
+ * are still present so callers can report the stale delivery clearly.
+ */
+export function registeredModelRefSpellings(profile: ExecutorProfile): string[] {
+  const values = new Set<string>();
+  for (const alias of modelAliases(profile)) {
+    const entry = profile.models[alias]!;
+    values.add(alias);
+    values.add(entry.id);
+    values.add(`${entry.provider}/${entry.id}`);
+    for (const spelling of Object.values(entry.spellings)) values.add(spelling);
+    try {
+      values.add(resolveDelivery({ model: alias }, profile, 'standalone').modelId);
+    } catch {
+      // The canonical identities above are still useful for a stale entry.
+    }
+    for (const harness of declaredHarnesses(profile)) {
+      try {
+        values.add(resolveDelivery({ model: alias, harness }, profile, 'standalone').modelId);
+      } catch {
+        // A stale or otherwise undeliverable entry is reported by resolution,
+        // not silently presented as a compiled delivery.
+      }
+    }
+  }
+  return [...values].sort();
+}
+
+/**
+ * Resolve a model ref against the merged registry, not against the current
+ * archetype dials. Canonical aliases and provider/id identities identify a
+ * registry entry; a harness-facing delivered id identifies the entry and, if
+ * unambiguous, the harness whose delivery produced it.
+ *
+ * Model run and model verify both call this function. Keeping the matching
+ * here is important: the compiler owns effort suffixes and per-harness
+ * spellings, so command surfaces must not grow subtly different registries.
+ */
+export function resolveRegisteredModelRef(
+  ref: DialRef,
+  profile: ExecutorProfile,
+): RegisteredModelRefResolution {
+  if (ref.harness != null && !Object.hasOwn(profile.harnesses ?? {}, ref.harness)) {
+    throw new ExecutorProfileError(
+      `unknown harness "${ref.harness}" — declared harnesses: ${declaredHarnesses(profile).join(', ') || '(none)'}`,
+    );
+  }
+
+  // A literal alias wins over an identity collision. This is what makes an
+  // explicitly named alias a stable escape hatch when another model happens
+  // to share its provider/id or delivered spelling.
+  if (Object.hasOwn(profile.models, ref.model)) {
+    return { alias: ref.model, ref, matchedBy: 'alias' };
+  }
+
+  const aliases = modelAliases(profile);
+  const identityMatches = aliases.filter((alias) => {
+    const entry = profile.models[alias]!;
+    return entry.id === ref.model || `${entry.provider}/${entry.id}` === ref.model;
+  });
+  if (identityMatches.length > 1) {
+    throw new ExecutorProfileError(
+      `model reference "${ref.model}" is ambiguous — registered aliases: ${identityMatches.join(', ')}. ` +
+        'Use one of those aliases to choose exactly one model.',
+    );
+  }
+  if (identityMatches.length === 1) {
+    const alias = identityMatches[0]!;
+    return { alias, ref: { ...ref, model: alias }, matchedBy: 'identity' };
+  }
+
+  const candidateHarnesses = ref.harness != null
+    ? [ref.harness]
+    : [undefined, ...declaredHarnesses(profile)];
+  const findDeliveryMatches = (harnessesToSearch: readonly (string | undefined)[]): Array<{ alias: string; harness: string }> => {
+    const matches: Array<{ alias: string; harness: string }> = [];
+    for (const alias of aliases) {
+      const entry = profile.models[alias]!;
+      for (const requestedHarness of harnessesToSearch) {
+        try {
+          const compiled = resolveDelivery(
+            requestedHarness == null ? { model: alias } : { model: alias, harness: requestedHarness },
+            profile,
+            'standalone',
+          );
+          const rawSpelling = compiled.harness == null ? null : entry.spellings[compiled.harness] ?? null;
+          if (compiled.modelId === ref.model || rawSpelling === ref.model) {
+            if (compiled.harness != null && !matches.some((match) => match.alias === alias && match.harness === compiled.harness)) {
+              matches.push({ alias, harness: compiled.harness });
+            }
+          }
+        } catch {
+          // Canonical identities already received a direct, actionable match.
+          // For delivered-id search, an entry that cannot compile is not a
+          // candidate and the eventual unknown message names the valid
+          // registry identities instead of pretending it is dialed.
+        }
+      }
+    }
+    return matches;
+  };
+  const deliveryMatches = findDeliveryMatches(candidateHarnesses);
+  const deliveryAliases = [...new Set(deliveryMatches.map((match) => match.alias))];
+  if (deliveryAliases.length > 1) {
+    throw new ExecutorProfileError(
+      `model reference "${ref.model}" is ambiguous — registered aliases: ${deliveryAliases.sort().join(', ')}. ` +
+        'Use an alias to choose exactly one model.',
+    );
+  }
+  if (deliveryAliases.length === 1) {
+    const alias = deliveryAliases[0]!;
+    const harnesses = [...new Set(deliveryMatches.filter((match) => match.alias === alias).map((match) => match.harness))].sort();
+    if (ref.harness == null && harnesses.length > 1) {
+      throw new ExecutorProfileError(
+        `model reference "${ref.model}" is ambiguous across harness deliveries for "${alias}" — ` +
+          `choose one with --harness (${harnesses.join(', ')}).`,
+      );
+    }
+    // Preserve the harness selected by the user. If the delivered id itself
+    // names one harness, carry that identity into the compiler so verify and
+    // model run do not silently fall back to the model's home harness.
+    const inferredHarness = ref.harness == null && harnesses.length === 1 ? harnesses[0] : ref.harness;
+    return {
+      alias,
+      ref: { ...ref, model: alias, ...(inferredHarness != null ? { harness: inferredHarness } : {}) },
+      matchedBy: 'delivery',
+    };
+  }
+
+  if (ref.harness != null) {
+    const elsewhere = findDeliveryMatches(declaredHarnesses(profile).filter((harness) => harness !== ref.harness));
+    const elsewhereAliases = [...new Set(elsewhere.map((match) => match.alias))].sort();
+    if (elsewhereAliases.length > 0) {
+      const elsewhereHarnesses = [...new Set(elsewhere.map((match) => match.harness))].sort();
+      throw new ExecutorProfileError(
+        `model reference "${ref.model}" does not match harness "${ref.harness}" — its registered delivery is on ` +
+          `${elsewhereHarnesses.join(', ')} for ${elsewhereAliases.join(', ')}. Use that harness or the model alias with --harness.`,
+      );
+    }
+  }
+
+  const known = registeredModelRefSpellings(profile);
+  throw new ExecutorProfileError(
+    `unknown model reference "${ref.model}" — registered aliases: ${aliases.join(', ') || '(none)'}. ` +
+      `Valid registry identities: ${known.join(', ') || '(none)'}. ` +
+      'Register it with `fadeno model add <alias> <provider/id>` or repair the catalog.',
+  );
 }
 
 /**

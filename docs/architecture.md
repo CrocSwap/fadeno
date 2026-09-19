@@ -64,8 +64,14 @@ A dispatch is delivered one of two ways, and the difference is one bit —
 For ordinary Codex delegation, start with the archetype spawn and the live
 model and effort from `fadeno dial <archetype> --json`. The inability to rewrite
 `PreToolUse` input does not make Codex command-only. Calling `fadeno dispatch`
-directly explicitly selects the command lane; it is appropriate when that lane
-is requested or the resolver sends the work there. `--shared` additionally
+directly explicitly selects the command lane; its read namespace also lists,
+shows, and reports dispatches. The plural `fadeno dispatches` spelling calls
+the same read command for compatibility. Launches may use the legacy
+`--archetype`/`--model` forms or `fadeno dispatch run <archetype-or-model>`;
+the positional selector is resolved once against the effective archetype list
+and registered model-reference resolver, and an exact collision is refused.
+It is appropriate when that lane is requested or the resolver sends the work
+there. `--shared` additionally
 selects the current working tree, including uncommitted changes; it cannot be
 combined with `--from`. An isolated worktree starts from HEAD unless `--from`
 names a baseline. `--from` first resolves a dispatch name or id through the
@@ -120,7 +126,7 @@ ledger, worktree, branch, prompt evidence, or dispatch name is involved.
 |------|-----------------|
 | `src/cli.ts` | Entry point: `node:util.parseArgs`, command dispatch, shared stdin consumption, and **all** stdout and exit codes. The view layer. |
 | `src/commands/dial.ts` | Show, set, clear and resolve archetype bindings; the model probe. |
-| `src/commands/dispatches.ts` | `dispatch`, `dispatch-open`, `dispatch-stop`, `dispatch-close`, `cancel`, `dispatches`, `worktrees`, `context`, `clean` (including scratch cleanup). |
+| `src/commands/dispatches.ts` | `dispatch` launch/read namespace, compatibility `dispatches` reads, `dispatch-open`, `dispatch-stop`, `dispatch-close`, `cancel`, `worktrees`, `context`, `clean` (including scratch cleanup). |
 | `src/commands/logs.ts` | Resolves a dispatch and reads/follows its command-lane internal activity stream from the identity-derived stderr path. |
 | `src/commands/prompt-stage.ts` | The Codex staged-prompt handshake: stage expiring plaintext and consume one task name. |
 | `src/commands/models.ts`, `models-verify.ts` | The registry: list, add, remove, verify against a backend listing. |
@@ -215,7 +221,12 @@ surface that prints one.
    `.fadeno/local/cancel-requests/<id>.request.json` scratch file while the
    executor is alive. `cancel` signals directly first; on `EPERM` it writes
    that request and waits for the launcher acknowledgement and group exit.
-   No timer: nothing is killed on a clock.
+   While that process group is alive, the launcher emits a command-process
+   liveness echo to stderr every five minutes by default; `--heartbeat 0`
+   disables it and an explicit seconds value overrides it. This operational
+   echo is distinct from user-facing host progress, and the timer is cleared
+   when the command exits, so no heartbeat is emitted without a command in
+   flight. Nothing is killed on a clock.
 
 `fadeno logs <name|id>` reads the command-lane stderr stream at the
 identity-derived `.fadeno/local/outputs/<id>.err` path and writes its bytes

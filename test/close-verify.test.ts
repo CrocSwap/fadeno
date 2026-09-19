@@ -180,11 +180,23 @@ test('close --merged is refused while git says the branch is not in HEAD, and --
   );
   assert.equal(readDispatches(root).records[0]!.closed, null, 'a refused close appends nothing');
 
-  // The other three verbs state the host's intent, and an intent cannot be
-  // false — so nothing is checked and nothing is refused.
+  // The other verbs state the host's intent, and an intent cannot be false —
+  // so nothing is checked and nothing is refused. `reviewed` is explicitly
+  // report-only: it makes no claim about where the work landed.
   const kept = runDispatchClose({ repoRoot: root, ref: 'fix-login', verb: 'kept' });
   assert.equal(kept.merge, null);
   assert.equal(kept.forced, null);
+});
+
+test('close --reviewed records a neutral report-only disposition without consulting git', (t) => {
+  const { root, worktree } = dispatched(t);
+  writeFileSync(join(worktree, 'uncommitted.txt'), 'report only\n');
+  const closed = runDispatchClose({ repoRoot: root, ref: 'fix-login', verb: 'reviewed', note: 'report read' });
+  assert.equal(closed.merge, null);
+  assert.equal(closed.forced, null);
+  assert.equal(closed.verb, 'reviewed');
+  assert.equal(readDispatches(root).records[0]!.closed?.verb, 'reviewed');
+  assert.equal(readDispatches(root).records[0]!.closed?.note, 'report read');
 });
 
 test('close --merged passes once the merge is real, and a squash closes with --force and a note', (t) => {
@@ -246,6 +258,27 @@ test('a shared-tree dispatch closes --merged unchecked, and the CLI says it was 
   const result = cli(root, ['dispatch-close', 'in-place', '--merged']);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /\(not verified: the dispatch worked in the shared tree, so it has no branch to look for\)/);
+});
+
+test('shared-tree dispatch details do not claim fadeno clean removes ignored files from the caller tree', (t) => {
+  const root = gitRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({ archetypes: { worker: {} } }));
+  writeFileSync(join(root, '.gitignore'), '.fadeno/\n');
+  git(root, ['add', '.gitignore']);
+  git(root, ['commit', '-q', '-m', 'ignore local fadeno state']);
+  appendRow(root, {
+    row: 'opened', id: ID, name: 'shared-report', at: new Date().toISOString(), session: null, parent: null, archetype: 'worker',
+    model: 'sol', effort: null, explicit_model: null, lane: 'command', harness: 'codex',
+    workspace: { path: '.', branch: null, base: 'abc' }, task: 'x', prompt: 'p',
+  });
+
+  recordStopped(root, ID, { finalMessage: 'partial shared work', cwd: root, branch: null });
+  const row = readDispatches(root).records[0]!.stopped!;
+  assert.deepEqual(row.ignored, { paths: ['.fadeno/'], truncated: false });
+  const detail = renderDispatchDetail(runDispatchShow({ repoRoot: root, ref: 'shared-report' })).join('\n');
+  assert.match(detail, /1 ignored path\(s\) in the shared tree — the shared checkout is retained; `fadeno clean` only removes eligible Fadeno scratch: \.fadeno\//);
+  assert.doesNotMatch(detail, /shared-report[\s\S]*`fadeno clean` removes these/);
 });
 
 test('ignored paths are recorded and named: git does not count them and `fadeno clean` does remove them', (t) => {

@@ -2,7 +2,8 @@
  * Codex agent files — the archetype vocabulary, and nothing else.
  *
  * Codex has no plugin-shipped agents: a custom agent is a user-scoped TOML in
- * `$CODEX_HOME/agents/`, so `fadeno setup --codex` writes them. Without them
+ * `$CODEX_HOME/agents/`, so `$fadeno-host` reconciles them on first use (the
+ * narrow CLI operation is also reused by `fadeno setup --codex`). Without them
  * `agent_type` is not a parameter of Codex's spawn tool at all — measured on
  * 0.153.4, where a spawn with no agent files in reach reports "this tool has no
  * `agent_type` parameter" and every subagent starts as `default`. A host that

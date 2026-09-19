@@ -211,6 +211,7 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
     force,
   );
 
+  emitBundledBin(results, outDir, tpl, 'plugin', force);
   emitHooks(results, outDir, tpl, 'spawn-claude.mjs', 'hooks-claude.json', force);
   return { outDir, results };
 }
@@ -249,8 +250,17 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
         skills: './skills/',
         interface: {
           displayName: 'Fadeno',
-          shortDescription: 'Route delegated work by archetype, in worktrees, with a ledger.',
+          shortDescription: 'Route delegated work by archetype in scaffolded worktrees.',
+          longDescription:
+            'Fadeno is a meta-harness for subagent workflows. It routes archetypes to models, gives each dispatch a scaffolded git worktree and contract, and records the lifecycle in a ledger.',
+          developerName: 'Fadeno',
           category: 'Engineering',
+          capabilities: ['Archetype routing', 'Worktree scaffolding', 'Dispatch ledger'],
+          defaultPrompt: [
+            'Route this task to a Fadeno archetype.',
+            'Show the open Fadeno dispatches.',
+            'Explain the current Fadeno dial.',
+          ],
         },
       },
       null,
@@ -278,7 +288,10 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
 // omp plugin skills keep their full `fadeno-` names (the Codex convention):
 // omp deduplicates skills by name across providers and hands every skill a
 // native `/skill:<name>` command. `fadeno-setup` is absent: `<cli> setup`
-// supports only --codex/--claude.
+// supports only --codex/--claude. There is no commands/ directory either;
+// the `/fadeno:host` short handle is registered by the extension itself
+// (templates/omp/extensions/fadeno.ts), which reads this same SKILL.md, so
+// the policy keeps one source.
 const OMP_SKILLS = ['fadeno-host'] as const;
 
 /**

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { templatesDir } from '../src/lib/paths.ts';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { join, relative } from 'node:path';
 import test from 'node:test';
 import { roleAgentDefinition, runPlugin, stampSurfaceVersion } from '../src/commands/plugin.ts';
 import { BUILTIN_ARCHETYPE_DESCRIPTIONS } from '../src/lib/contracts.ts';
@@ -36,6 +36,11 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   const manifest = JSON.parse(readFileSync(join(outDir, '.claude-plugin/plugin.json'), 'utf8'));
   assert.equal(manifest.name, 'fadeno');
   assert.equal(typeof manifest.version, 'string');
+  assert.equal(
+    execFileSync(process.execPath, [join(outDir, 'skills/host/scripts/fadeno.cjs'), '--version'], { encoding: 'utf8' }).trim(),
+    manifest.version,
+    'a freshly generated plugin has a working, matching CLI launcher',
+  );
 
   // skills use short dir names → /fadeno:host, /fadeno:setup
   assert.ok(exists(outDir, 'skills/host/SKILL.md'));
@@ -96,13 +101,9 @@ test('the committed plugin/ matches a fresh generation (no drift)', { skip: SKIP
   const { outDir } = runPlugin({ cwd: root, outDir: join(root, 'plugin') });
   const committedDir = join(import.meta.dirname, '..', 'plugin');
 
-  // `runPlugin` emits the whole plugin surface EXCEPT bin/ (the esbuild bundle +
-  // its bundled templates), which `npm run build:bin` produces — so diff
-  // everything else, in both directions, file by file.
+  // The generator carries the standalone runtime alongside the hook surface.
   const generated = listFilesRel(outDir).sort();
-  const committed = listFilesRel(committedDir)
-    .filter((f) => !f.startsWith(`bin${sep}`))
-    .sort();
+  const committed = listFilesRel(committedDir).sort();
 
   // Same file set: catches an added/removed/renamed template, not just edits.
   assert.deepEqual(

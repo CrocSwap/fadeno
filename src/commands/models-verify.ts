@@ -2,7 +2,10 @@ import { loadLayeredProfile, type LayeredProfile } from '../lib/config-layers.ts
 import {
   activeHarness,
   ExecutorProfileError,
+  parseDialRef,
   qualifyListedModelId,
+  resolveDelivery,
+  resolveRegisteredModelRef,
   type ExecutorProfile,
 } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
@@ -16,7 +19,7 @@ import { DialError, probeModel, runDialShow, type ProbeOptions } from './dial.ts
 export class ModelsVerifyError extends Error {}
 
 /**
- * What re-probing one dialed `(harness, model id)` pair concluded.
+ * What re-probing one `(harness, model id)` pair concluded.
  *
  * `not_listed` is the only DEFINITIVE negative: the listing ran, exited zero,
  * and did not name the id. `unavailable` means the question could not be
@@ -82,15 +85,15 @@ interface Target {
   model_id: string;
   harness: string;
   archetypes: string[];
-  /** Alternate spellings a `<ref>` may name this target by. */
-  aliases: Set<string>;
   /** Every registry name dialed onto this pair — several may share one. */
   models: Set<string>;
 }
 
 /**
- * Re-probe the models the dials actually point at, against the harness's own
- * `models_command`, ignoring the verification cache.
+ * Re-probe selected model deliveries against the harness's own
+ * `models_command`, ignoring the verification cache. With no explicit refs,
+ * selection comes from effective archetype dials; with refs, it comes from
+ * the merged registry and delivery compiler.
  *
  * The cache is existence-only: `probeModel` returns `cached` for any row that
  * exists, whatever its age, so a model a backend has since retired stays
@@ -117,75 +120,117 @@ export function runModelsVerify(opts: ModelsVerifyOptions = {}): ModelsVerifyRes
     }
   }
 
-  const show = (() => {
-    try {
-      return runDialShow({
-        repoRoot,
-        userPathOptions,
-        ...(opts.cwd != null ? { cwd: opts.cwd } : {}),
-        ...(opts.env != null ? { env: opts.env } : {}),
-      });
-    } catch (err) {
-      if (err instanceof DialError) throw new ModelsVerifyError(err.message);
-      throw err;
-    }
-  })();
-
   // One target per distinct (harness, delivered id); several archetypes may
   // share it, and probing the same pair once per dial would just be slower.
   const targets = new Map<string, Target>();
-  for (const row of show.rows) {
-    if (row.harness == null || row.model_id === 'host') continue;
-    const key = `${row.harness} ${row.model_id}`;
-    let target = targets.get(key);
-    if (target == null) {
-      target = { model: row.model, model_id: row.model_id, harness: row.harness, archetypes: [], aliases: new Set<string>(), models: new Set<string>() };
-      targets.set(key, target);
+  const refs = (opts.refs ?? []).map((ref) => ref.trim()).filter((ref) => ref.length > 0);
+  if (refs.length === 0) {
+    // No refs intentionally remains dial-based. It answers "what named model
+    // deliveries are currently selected by the effective archetype table?"
+    // and therefore retains the existing skip behavior for unlistable dials.
+    const show = (() => {
+      try {
+        return runDialShow({
+          repoRoot,
+          userPathOptions,
+          ...(opts.cwd != null ? { cwd: opts.cwd } : {}),
+          ...(opts.env != null ? { env: opts.env } : {}),
+        });
+      } catch (err) {
+        if (err instanceof DialError) throw new ModelsVerifyError(err.message);
+        throw err;
+      }
+    })();
+    for (const row of show.rows) {
+      if (row.harness == null || row.model_id === 'host') continue;
+      const key = `${row.harness} ${row.model_id}`;
+      let target = targets.get(key);
+      if (target == null) {
+        target = { model: row.model, model_id: row.model_id, harness: row.harness, archetypes: [], models: new Set<string>() };
+        targets.set(key, target);
+      }
+      target.models.add(row.model);
+      target.model = [...target.models].sort()[0]!;
+      if (!target.archetypes.includes(row.archetype)) target.archetypes.push(row.archetype);
     }
-    // EVERY row's spellings, not just the first one's. Two dialed aliases can
-    // deliver the same id on the same harness (`alpha` and `beta` both
-    // resolving to `same` on codex); collecting names only when the target is
-    // created left whichever row happened to come first as the only matchable
-    // spelling, and `models verify beta` then threw "no dialed model matches"
-    // for a model that is plainly dialed.
-    //
-    // Still deliberately NOT every `spellings:` value: a spelling belongs to
-    // one harness, and letting `<ref> anthropic/claude-opus` also select the
-    // same model's delivery on a DIFFERENT harness verifies a pair the user
-    // did not name. `model_id` is already this target's spelling.
-    target.models.add(row.model);
-    target.aliases.add(row.model);
-    target.aliases.add(row.model_id);
-    const entry = profile.models[row.model];
-    if (entry != null) {
-      target.aliases.add(`${entry.provider}/${entry.id}`);
-      target.aliases.add(entry.id);
+  } else {
+    // Explicit refs are registry queries, not filters over the dial table.
+    // Resolve and validate every ref before probing any of them so one typo or
+    // stale delivery cannot turn a multi-ref invocation into partial success.
+    for (const raw of refs) {
+      let parsed;
+      try {
+        parsed = parseDialRef(raw, 'model verification reference');
+      } catch (err) {
+        if (err instanceof ExecutorProfileError) throw new ModelsVerifyError(err.message);
+        throw err;
+      }
+      if (harnessFilter != null) {
+        if (parsed.harness != null && parsed.harness !== harnessFilter) {
+          throw new ModelsVerifyError(
+            `model verification reference "${raw}" harness mismatch: "${parsed.harness}" vs "${harnessFilter}". ` +
+              'Use one harness selection, either in the reference or with --harness.',
+          );
+        }
+        parsed = { ...parsed, harness: harnessFilter };
+      }
+
+      let resolved;
+      try {
+        resolved = resolveRegisteredModelRef(parsed, profile);
+      } catch (err) {
+        if (err instanceof ExecutorProfileError) throw new ModelsVerifyError(err.message);
+        throw err;
+      }
+      let compiled;
+      try {
+        // Verification is host-free. In particular, running this command from
+        // a host that could deliver the model in-session must not turn it into
+        // a host-only target with no backend listing to probe.
+        compiled = resolveDelivery(resolved.ref, profile, 'standalone');
+      } catch (err) {
+        if (err instanceof ExecutorProfileError) throw new ModelsVerifyError(err.message);
+        throw err;
+      }
+      if (resolved.alias === 'host' || compiled.model === 'host' || compiled.harness == null) {
+        throw new ModelsVerifyError(
+          `model reference "${raw}" resolves to the host session, which has no externally listable model delivery — ` +
+            'choose a registered command-lane model alias.',
+        );
+      }
+      const entry = profile.harnesses?.[compiled.harness] ?? null;
+      if (entry?.command == null) {
+        throw new ModelsVerifyError(
+          `model reference "${raw}" resolves to host-only harness "${compiled.harness}" — ` +
+            'models verify requires a command-lane harness with a models_command.',
+        );
+      }
+      if (entry.models_command == null || entry.models_command.length === 0) {
+        throw new ModelsVerifyError(
+          `model reference "${raw}" resolves to unlistable harness "${compiled.harness}" — it declares no models_command. ` +
+            'Choose a listable harness or verify without an explicit ref to use dial-based skipping.',
+        );
+      }
+
+      const key = `${compiled.harness} ${compiled.modelId}`;
+      let target = targets.get(key);
+      if (target == null) {
+        target = {
+          model: resolved.alias,
+          model_id: compiled.modelId,
+          harness: compiled.harness,
+          archetypes: [],
+          models: new Set<string>(),
+        };
+        targets.set(key, target);
+      }
+      target.models.add(resolved.alias);
+      target.model = [...target.models].sort()[0]!;
     }
-    // Which of several aliases labels a shared delivery is arbitrary, so pick
-    // it by sort order rather than by dial-iteration order — a name that moves
-    // between runs is a diff nobody can read.
-    target.model = [...target.models].sort()[0]!;
-    if (!target.archetypes.includes(row.archetype)) target.archetypes.push(row.archetype);
   }
 
   let selected = [...targets.values()];
-  if (harnessFilter != null) selected = selected.filter((target) => target.harness === harnessFilter);
-  const refs = (opts.refs ?? []).map((ref) => ref.trim()).filter((ref) => ref.length > 0);
-  if (refs.length > 0) {
-    // An unmatched ref is an error, not an empty result. Verifying nothing and
-    // exiting 0 on a typo is the exact shape of answer this command exists to
-    // stop producing.
-    const unmatched = refs.filter((ref) => !selected.some((target) => target.aliases.has(ref)));
-    if (unmatched.length > 0) {
-      const known = [...new Set(selected.flatMap((target) => [...target.models]))].sort();
-      throw new ModelsVerifyError(
-        `no dialed model matches ${unmatched.map((ref) => `"${ref}"`).join(', ')}` +
-          (harnessFilter != null ? ` on harness ${harnessFilter}` : '') +
-          ` — dialed models: ${known.join(', ') || '(none)'}. \`fadeno dial\` shows the effective table.`,
-      );
-    }
-    selected = selected.filter((target) => refs.some((ref) => target.aliases.has(ref)));
-  }
+  if (refs.length === 0 && harnessFilter != null) selected = selected.filter((target) => target.harness === harnessFilter);
   selected.sort((a, b) => (a.harness !== b.harness ? a.harness.localeCompare(b.harness) : a.model_id.localeCompare(b.model_id)));
 
   const rows: ModelVerifyRow[] = [];

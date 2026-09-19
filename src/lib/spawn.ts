@@ -19,17 +19,16 @@
 
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { constants as osConstants } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { loadLayeredProfile } from './config-layers.ts';
 import {
-  DEFAULT_UNCLOSED_LIMIT,
   composeWorkerPrompt,
   describeArchetype,
   hostVocabulary,
   nagText,
   spawnRefusedAsDispatchCommand,
-  spawnRefusedByLimit,
   workerContract,
   type ArchetypeLine,
 } from './contracts.ts';
@@ -53,9 +52,11 @@ import {
 } from './executors.ts';
 import {
   appendRow,
+  appendRowDurable,
   excerptFinalMessage,
   excerptStderr,
   excerptTask,
+  findDispatch,
   newDispatchId,
   nowIso,
   readDispatches,
@@ -85,8 +86,83 @@ export const OUTPUTS_DIR = join('.fadeno', 'local', 'outputs');
  * record, and `clean` may remove this directory.
  */
 export const RELAY_DIR = join('.fadeno', 'local', 'relay');
+/** Scratch requests that a command-lane launcher consumes from its own context. */
+export const CANCEL_REQUESTS_DIR = join('.fadeno', 'local', 'cancel-requests');
 /** How long `cancel` waits for a signalled group to die before writing the stop itself. */
 export const CANCEL_GRACE_MS = 5_000;
+/** The launcher polls only while the command it launched is still alive. */
+export const CANCEL_POLL_MS = 100;
+/** Default interval for the command-process liveness echo; zero disables it. */
+export const DEFAULT_COMMAND_HEARTBEAT_MS = 5 * 60_000;
+
+const CANCEL_REQUEST_VERSION = 1;
+const CANCEL_SIGNAL_NAMES = new Set(Object.keys(osConstants.signals));
+
+interface CancelRequest {
+  version: 1;
+  dispatch_id: string;
+  process_group: number;
+  signal: NodeJS.Signals;
+}
+
+interface CancelAck {
+  version: 1;
+  dispatch_id: string;
+  process_group: number;
+  signal: NodeJS.Signals;
+  result: 'signalled' | 'failed';
+  error?: string;
+}
+
+export function cancellationPaths(repoRoot: string, id: string): { request: string; ack: string } {
+  const base = join(repoRoot, CANCEL_REQUESTS_DIR);
+  return { request: join(base, `${id}.request.json`), ack: join(base, `${id}.ack.json`) };
+}
+
+function allowedCancelSignal(value: unknown): value is NodeJS.Signals {
+  return typeof value === 'string' && CANCEL_SIGNAL_NAMES.has(value) && value !== 'SIG0';
+}
+
+function removeScratch(path: string): void {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // Scratch cleanup is best effort. A later cancel or the next launcher
+    // startup will make another attempt; it is never ledger evidence.
+  }
+}
+
+function readJson<T>(path: string): T | null {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as T;
+  } catch {
+    return null;
+  }
+}
+
+function writeCancelAck(path: string, ack: CancelAck): void {
+  const temporary = `${path}.${process.pid}.${shortHex()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(ack)}\n`, { encoding: 'utf8', mode: 0o600 });
+    // The launcher is the only writer for this dispatch. Rename makes the
+    // small acknowledgement visible as one complete JSON document.
+    renameSync(temporary, path);
+  } finally {
+    removeScratch(temporary);
+  }
+}
+
+function writeExclusiveCancelRequest(path: string, request: CancelRequest): void {
+  const temporary = `${path}.${process.pid}.${shortHex()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(request)}\n`, { encoding: 'utf8', mode: 0o600 });
+    // Hard-link creation is exclusive and atomic, unlike rename which would
+    // let two concurrent cancel callers replace one another's request.
+    linkSync(temporary, path);
+  } finally {
+    removeScratch(temporary);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 1. Resolve
@@ -108,7 +184,6 @@ export interface Resolution {
   source: RoleResolutionSource | 'explicit';
   explicitModel: string | null;
   profile: ExecutorProfile;
-  unclosedLimit: number;
 }
 
 export interface ResolveInput {
@@ -175,7 +250,6 @@ export function resolveArchetype(input: ResolveInput): Resolution {
       source,
       explicitModel: explicit,
       profile,
-      unclosedLimit: profile.unclosedLimit ?? DEFAULT_UNCLOSED_LIMIT,
     };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SpawnError(err.message);
@@ -256,12 +330,14 @@ export function stageRelay(
   repoRoot: string,
   input: { prompt: string; archetype: string; name?: string | null; explicitModel?: string | null; shared?: boolean; from?: string | null; parent?: string | null; now?: Date },
 ): Relay {
+  const policy = sharedFromRefusal(input.shared, input.from);
+  if (policy != null) throw new SpawnError(policy);
   const dir = join(repoRoot, RELAY_DIR);
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   const stamp = (input.now ?? new Date()).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
   const label = sanitizeName(input.name?.trim() || input.archetype);
   const promptFile = join(dir, `${stamp}-${label}-${shortHex()}.md`);
-  writeFileSync(promptFile, input.prompt);
+  writeFileSync(promptFile, input.prompt, { encoding: 'utf8', mode: 0o600 });
   const args = ['dispatch', '--archetype', input.archetype];
   if (input.name?.trim()) args.push('--name', input.name.trim());
   if (input.explicitModel?.trim()) args.push('--model', input.explicitModel.trim());
@@ -336,8 +412,111 @@ export interface Prepared {
 
 export type PrepareOutcome = { ok: true; prepared: Prepared } | { ok: false; refused: string };
 
+export interface FromBaseline {
+  /** The exact value the caller supplied to `--from`. */
+  requested: string;
+  /** The Git ref or commit Fadeno will hand to `git worktree add`. */
+  ref: string;
+  /** How the baseline was found, useful to callers that need to explain it. */
+  source: 'dispatch-branch' | 'git-ref';
+}
+
+export type FromBaselineOutcome =
+  | { ok: true; baseline: FromBaseline | null }
+  | { ok: false; refused: string };
+
+/** `--shared` and `--from` choose incompatible workspace policies. */
+export function sharedFromRefusal(shared: boolean | null | undefined, from: string | null | undefined): string | null {
+  if (!shared || from == null) return null;
+  return (
+    '`--shared` cannot be combined with `--from`: they express incompatible workspace policies. ' +
+    'Remove `--shared` to cut an isolated worktree from the named baseline, or remove `--from` to use the shared tree.'
+  );
+}
+
 function shortHex(): string {
   return randomBytes(2).toString('hex');
+}
+
+function commitAt(repoRoot: string, ref: string): string | null {
+  const resolved = git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  return resolved.ok && resolved.stdout.trim() !== '' ? resolved.stdout.trim() : null;
+}
+
+/**
+ * Resolve an explicit `--from` once, before a worktree can be cut or a relay
+ * can be staged. A dispatch name/id is a ledger reference first; otherwise
+ * the value remains a literal Git ref so existing branch names and SHAs keep
+ * working. A retained dispatch must still have a reachable branch: its
+ * recorded base is only the opening snapshot and is never a safe substitute
+ * for the dispatch's result.
+ */
+export function resolveFromBaseline(repoRoot: string, from?: string | null): FromBaselineOutcome {
+  if (from == null) return { ok: true, baseline: null };
+  const requested = from.trim();
+  if (requested === '') {
+    return { ok: false, refused: '--from was supplied without a dispatch name, Git ref, or commit SHA.' };
+  }
+
+  const records = readDispatches(repoRoot).records;
+  const dispatch = findDispatch(records, requested);
+  const gitCommit = commitAt(repoRoot, requested);
+  if (gitCommit != null && (dispatch.ok || dispatch.reason === 'ambiguous')) {
+    return {
+      ok: false,
+      refused:
+        `--from "${requested}" matches both a dispatch reference and a Git commit/ref, so Fadeno refuses to guess between namespaces. ` +
+        (dispatch.ok ? `The dispatch is ${dispatch.record.id}. ` : `${dispatch.message} `) +
+        'To select Git, qualify the ref (for example `refs/heads/main` or another fully qualified ref); to select the dispatch, use its full UUID.',
+    };
+  }
+  if (dispatch.ok) {
+    const opened = dispatch.record.opened;
+    const workspace = opened?.workspace;
+    if (opened == null || workspace == null) {
+      return {
+        ok: false,
+        refused:
+          `--from "${requested}" resolved to dispatch ${dispatch.record.id}, but its opened row has no recorded workspace. ` +
+          'Its result cannot be recovered safely. Commit the desired state and pass that Git ref or commit SHA with `--from`, or repair the ledger row before retrying.',
+      };
+    }
+
+    if (workspace.branch === null) {
+      return {
+        ok: false,
+        refused:
+          `--from "${requested}" resolved to dispatch ${opened.name} (${dispatch.record.id}), but that dispatch used the shared tree and has no retained branch. ` +
+          'Its result cannot be attributed to a retained ref. Commit the desired state and pass that Git ref or commit SHA with `--from`, or use an isolated dispatch branch.',
+      };
+    }
+
+    const branch = workspace.branch?.trim() || null;
+    if (branch != null && commitAt(repoRoot, branch) != null) {
+      return { ok: true, baseline: { requested, ref: branch, source: 'dispatch-branch' } };
+    }
+
+    return {
+      ok: false,
+      refused:
+        `--from "${requested}" resolved to dispatch ${opened.name} (${dispatch.record.id}), but its recorded branch/result ` +
+        `${branch == null ? 'is missing' : `"${branch}" is unavailable`} and cannot be recovered safely. ` +
+        'The dispatch opening base is not used as a substitute. Commit the desired state and pass that Git ref or commit SHA with `--from`, or restore the recorded branch before retrying.',
+    };
+  }
+  if (dispatch.reason === 'ambiguous') {
+    return { ok: false, refused: `--from "${requested}" is ambiguous: ${dispatch.message}` };
+  }
+
+  if (commitAt(repoRoot, requested) != null) {
+    return { ok: true, baseline: { requested, ref: requested, source: 'git-ref' } };
+  }
+  return {
+    ok: false,
+    refused:
+      `--from "${requested}" did not match a dispatch name/id or a Git commit/ref. ` +
+      `${dispatch.message} No dispatch was opened; use a retained dispatch name/id, an existing branch/ref, or a commit SHA.`,
+  };
 }
 
 /** Every name the ledger or git already uses, so a fresh one is fresh everywhere. */
@@ -350,11 +529,13 @@ export function takenNames(repoRoot: string): Set<string> {
 }
 
 /**
- * Everything a spawn needs short of writing the row: the nag check, the
+ * Everything a spawn needs short of writing the row: the reminder, the
  * resolution, a unique name, the worktree (or the shared tree and why), the
  * recorded prompt, and the contract-bearing prompt the agent will read.
  */
 export function prepareDispatch(input: PrepareInput): PrepareOutcome {
+  const policy = sharedFromRefusal(input.shared, input.from);
+  if (policy != null) return { ok: false, refused: policy };
   const repoRoot = resolve(input.repoRoot);
   const prompt = input.prompt;
   if (prompt.trim().length === 0) throw new SpawnError('empty prompt: nothing to dispatch.');
@@ -369,10 +550,10 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
     explicitModel: input.explicitModel,
     userPathOptions: input.userPathOptions,
   });
+  const baseline = resolveFromBaseline(repoRoot, input.from);
+  if (!baseline.ok) return baseline;
   if (input.lane === 'command') requireCommand(resolution);
   const unclosed = unclosedDispatches(repoRoot);
-  const refused = spawnRefusedByLimit(unclosed, resolution.unclosedLimit);
-  if (refused != null) return { ok: false, refused };
 
   const base = sanitizeName(input.name?.trim() || `${resolution.archetype}-${shortHex()}`);
   const name = uniqueName(base, takenNames(repoRoot));
@@ -385,13 +566,21 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
   let sharedReason: string | null = null;
   let contractWorktree: Parameters<typeof workerContract>[0]['worktree'];
   if (!shared) {
-    const cut = cutWorktree({ repoRoot, name, from: input.from });
+    const cut = cutWorktree({ repoRoot, name, from: baseline.baseline?.ref ?? null });
     if (cut.ok) {
       const wt = cut.worktree;
       workspace = { path: wt.path, branch: wt.branch, base: wt.base };
       cwd = wt.absolute;
       contractWorktree = { kind: 'worktree', absolute: wt.absolute, branch: wt.branch, base: wt.base, upstream: wt.upstream };
     } else {
+      if (baseline.baseline != null) {
+        return {
+          ok: false,
+          refused:
+            `--from "${baseline.baseline.requested}" resolved to "${baseline.baseline.ref}", but Fadeno could not create an isolated worktree: ${cut.reason} ` +
+            'Refusing the shared-tree fallback because it would abandon the requested baseline or isolation. Fix the worktree error and retry.',
+        };
+      }
       shared = true;
       sharedReason = cut.reason;
     }
@@ -410,7 +599,6 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
     ? hostVocabulary({
         archetypes: describeArchetypes({ repoRoot, userPathOptions: input.userPathOptions }).archetypes,
         unclosed,
-        unclosedLimit: resolution.unclosedLimit,
         now,
       })
     : null;
@@ -443,7 +631,7 @@ export function prepareDispatch(input: PrepareInput): PrepareOutcome {
       contract,
       composedPrompt,
       promptPath: promptRel,
-      nag: nagText(unclosed, resolution.unclosedLimit, now),
+      nag: nagText(unclosed, now),
       session: input.session ?? null,
       parent,
       at: nowIso(now),
@@ -514,9 +702,30 @@ export function recordStopped(
     stderr?: string | null;
     /** True when this row is reconstructed after the fact — see `StoppedRow`. */
     reconstructed?: boolean;
+    /** Append the essential receipt durably before inspecting Git. */
+    durableFirst?: boolean;
+    /** Stop after the durable receipt; used by the harness stop hook. */
+    inspect?: boolean;
     now?: Date;
   },
 ): StoppedRow {
+  const stderrExcerpt = excerptStderr(input.stderr);
+  const base: StoppedRow = {
+    row: 'stopped',
+    id,
+    at: nowIso(input.now),
+    ...(input.durableFirst || input.inspect === false ? { evidence: 'durable' as const } : { evidence: 'inspected' as const }),
+    final_message: excerptFinalMessage(input.finalMessage),
+    dirty: 'unavailable',
+    cwd: input.cwd,
+    ...(input.exit != null ? { exit: input.exit } : {}),
+    ...(input.reconstructed === true ? { reconstructed: true as const } : {}),
+    ...(input.modelObserved != null ? { model_observed: input.modelObserved } : {}),
+    ...(stderrExcerpt != null ? { stderr_excerpt: stderrExcerpt } : {}),
+  };
+  if (input.durableFirst || input.inspect === false) appendRowDurable(repoRoot, base);
+  if (input.inspect === false) return base;
+
   const readable = input.cwd != null && existsSync(input.cwd);
   const dirty = readable ? dirtyPaths(input.cwd!) : 'unavailable';
   // Ignored paths are invisible to `dirty` and are the ones `clean` removes,
@@ -527,19 +736,37 @@ export function recordStopped(
   // stopped. What the agent SAID about it arrives separately, in
   // `final_message`, and the two are never rendered as one thing.
   const work = measureWork({ repoRoot, branch: input.branch });
-  const stderrExcerpt = excerptStderr(input.stderr);
   const row: StoppedRow = {
-    row: 'stopped',
-    id,
-    at: nowIso(input.now),
-    final_message: excerptFinalMessage(input.finalMessage),
+    ...base,
+    evidence: 'inspected',
     dirty,
-    cwd: input.cwd,
     ...(ignored === 'unavailable' || ignored.paths.length > 0 ? { ignored } : {}),
-    ...(input.exit != null ? { exit: input.exit } : {}),
-    ...(input.reconstructed === true ? { reconstructed: true as const } : {}),
-    ...(input.modelObserved != null ? { model_observed: input.modelObserved } : {}),
-    ...(stderrExcerpt != null ? { stderr_excerpt: stderrExcerpt } : {}),
+    ...(work != null ? { work } : {}),
+  };
+  appendRow(repoRoot, row);
+  return row;
+}
+
+/**
+ * Finish a durable stop receipt with the optional Git evidence. The first
+ * row remains authoritative for the outside observation; the ledger reader
+ * merges this append-only enrichment only into its optional evidence fields.
+ */
+export function enrichStopped(
+  repoRoot: string,
+  existing: StoppedRow,
+  input: { cwd: string | null; branch?: string | null },
+): StoppedRow {
+  if (existing.evidence !== 'durable') return existing;
+  const readable = input.cwd != null && existsSync(input.cwd);
+  const dirty = readable ? dirtyPaths(input.cwd!) : 'unavailable';
+  const ignored = readable ? ignoredPaths(input.cwd!) : 'unavailable';
+  const work = measureWork({ repoRoot, branch: input.branch });
+  const row: StoppedRow = {
+    ...existing,
+    evidence: 'inspected',
+    dirty,
+    ...(ignored === 'unavailable' || ignored.paths.length > 0 ? { ignored } : {}),
     ...(work != null ? { work } : {}),
   };
   appendRow(repoRoot, row);
@@ -555,7 +782,7 @@ export interface RunInput {
   prepared: Prepared;
   env?: NodeJS.ProcessEnv;
   onEcho?: (line: string) => void;
-  /** Heartbeat interval for the "still running" echo; 0 disables. */
+  /** Command-process liveness echo interval; 0 disables. */
   heartbeatMs?: number;
 }
 
@@ -591,6 +818,72 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`;
 }
 
+function validCancelRequest(request: unknown, id: string, pgid: number): request is CancelRequest {
+  if (request == null || typeof request !== 'object') return false;
+  const candidate = request as Partial<CancelRequest>;
+  return candidate.version === CANCEL_REQUEST_VERSION && candidate.dispatch_id === id && candidate.process_group === pgid && allowedCancelSignal(candidate.signal);
+}
+
+/**
+ * Consume one request from the launcher's own process context. The request
+ * names both the dispatch and group, so a stale or hand-written file cannot
+ * make a launcher signal another group. The acknowledgement lets the caller
+ * distinguish "the launcher consumed it" from "the file was merely cleaned".
+ */
+function consumeCancelRequest(repoRoot: string, id: string, pgid: number): void {
+  const paths = cancellationPaths(repoRoot, id);
+  if (!existsSync(paths.request)) return;
+  const request = readJson<CancelRequest>(paths.request);
+  if (!validCancelRequest(request, id, pgid)) {
+    removeScratch(paths.request);
+    return;
+  }
+  let result: CancelAck['result'] = 'signalled';
+  let error: string | undefined;
+  try {
+    process.kill(-pgid, request.signal);
+  } catch (err) {
+    result = 'failed';
+    error = (err as Error).message;
+  }
+  try {
+    try {
+      writeCancelAck(paths.ack, {
+        version: CANCEL_REQUEST_VERSION,
+        dispatch_id: id,
+        process_group: pgid,
+        signal: request.signal,
+        result,
+        ...(error == null ? {} : { error }),
+      });
+    } catch {
+      // The signal attempt still consumed the request. Without an ack the
+      // caller will fail safely rather than claim that cancellation succeeded.
+    }
+  } finally {
+    removeScratch(paths.request);
+  }
+}
+
+function watchCancelRequests(repoRoot: string, id: string, pgid: number): (preserveAck?: boolean) => void {
+  const paths = cancellationPaths(repoRoot, id);
+  // A UUID is not reused. Preserve a request that raced with the opened row;
+  // normal launcher exit and the cancel caller clean leftovers.
+  removeScratch(paths.ack);
+  let active = true;
+  const poll = () => {
+    if (active) consumeCancelRequest(repoRoot, id, pgid);
+  };
+  poll();
+  const timer = setInterval(poll, CANCEL_POLL_MS);
+  return (preserveAck = false) => {
+    active = false;
+    clearInterval(timer);
+    removeScratch(paths.request);
+    if (!preserveAck) removeScratch(paths.ack);
+  };
+}
+
 /**
  * Launch the executor for a prepared dispatch in its worktree, in its own
  * process group, with the composed prompt on stdin (or at `{prompt_file}`),
@@ -618,7 +911,7 @@ export function runCommandDispatch(input: RunInput): Promise<RunResult> {
   const stderrAbs = join(repoRoot, paths.stderr);
   const promptAbs = join(repoRoot, paths.prompt);
   mkdirSync(dirname(stdoutAbs), { recursive: true });
-  writeFileSync(promptAbs, prepared.composedPrompt);
+  writeFileSync(promptAbs, prepared.composedPrompt, { encoding: 'utf8', mode: 0o600 });
   const argv = substitutePromptFile(command, promptAbs);
   const readsFile = argv.join('\0') !== command.join('\0');
 
@@ -653,6 +946,7 @@ export function runCommandDispatch(input: RunInput): Promise<RunResult> {
     child.once('spawn', () => {
       const pgid = child.pid!;
       const opened = recordOpened(repoRoot, prepared, { lane: 'command', processGroup: pgid });
+      const stopWatchingCancel = watchCancelRequests(repoRoot, prepared.id, pgid);
       input.onEcho?.(`dispatch ${prepared.name} (${prepared.id}) → ${prepared.resolution.model} on ${prepared.resolution.harness ?? '?'}; process group ${pgid}; ${prepared.shared ? 'shared tree' : prepared.workspace.branch}`);
       // Said at launch, while there is certainly someone to hear it: if this
       // call is killed, the line is already on screen, where a message sent at
@@ -661,7 +955,7 @@ export function runCommandDispatch(input: RunInput): Promise<RunResult> {
         `dispatch ${prepared.name} outlives this call — if it is killed, \`fadeno dispatch-wait ${prepared.name}\` recovers the report and \`fadeno cancel ${prepared.name}\` ends the executor.`,
       );
       const heartbeat = input.heartbeatMs && input.heartbeatMs > 0
-        ? setInterval(() => input.onEcho?.(`dispatch ${prepared.name}: still running (${formatElapsed(Date.now() - startedAt)})`), input.heartbeatMs)
+        ? setInterval(() => input.onEcho?.(`dispatch ${prepared.name}: command process liveness echo — still running (${formatElapsed(Date.now() - startedAt)})`), input.heartbeatMs)
         : null;
       if (!readsFile && child.stdin != null) {
         child.stdin.on('error', () => {
@@ -670,6 +964,10 @@ export function runCommandDispatch(input: RunInput): Promise<RunResult> {
         child.stdin.end(prepared.composedPrompt);
       }
       child.once('close', (code, signal) => {
+        // Keep a successful cooperative acknowledgement visible until the
+        // cancel caller has correlated it with the dead group. Normal exits
+        // with no request still leave no scratch behind.
+        stopWatchingCancel(true);
         if (heartbeat != null) clearInterval(heartbeat);
         closeSync(outFd);
         closeSync(errFd);
@@ -720,8 +1018,8 @@ export function runCommandDispatch(input: RunInput): Promise<RunResult> {
 // ---------------------------------------------------------------------------
 
 export type CancelOutcome =
-  | { ok: true; processGroup: number; signalled: true; stoppedRecorded: boolean }
-  | { ok: false; reason: 'host_lane' | 'no_process' | 'not_running' | 'closed'; message: string };
+  | { ok: true; processGroup: number; signalled: true; stoppedRecorded: boolean; method: 'direct' | 'cooperative' }
+  | { ok: false; reason: 'host_lane' | 'no_process' | 'not_running' | 'closed' | 'invalid_signal' | 'signal_failed' | 'not_stopped'; message: string };
 
 export function groupAlive(pgid: number): boolean {
   try {
@@ -736,6 +1034,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function placeCancelRequest(repoRoot: string, id: string, pgid: number, signal: NodeJS.Signals): { ok: true } | { ok: false; message: string } {
+  const paths = cancellationPaths(repoRoot, id);
+  const request: CancelRequest = { version: CANCEL_REQUEST_VERSION, dispatch_id: id, process_group: pgid, signal };
+  try {
+    mkdirSync(dirname(paths.request), { recursive: true, mode: 0o700 });
+    try {
+      writeExclusiveCancelRequest(paths.request, request);
+      return { ok: true };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      // Concurrent cancels share one request. A malformed leftover is stale
+      // scratch and can be removed once before retrying the exclusive create.
+      const existing = readJson<CancelRequest>(paths.request);
+      if (validCancelRequest(existing, id, pgid)) return { ok: true };
+      removeScratch(paths.request);
+      writeExclusiveCancelRequest(paths.request, request);
+      return { ok: true };
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      message:
+        'could not place the cooperative cancellation request for process group ' + pgid + ': ' + (err as Error).message + '. ' +
+        'The Codex app sandbox denied the direct signal; rerun the command with unsandboxed/elevated command permission.',
+    };
+  }
+}
+
+function cooperativeCancelFailure(name: string, pgid: number, graceMs: number, detail: string): string {
+  return (
+    'could not cancel ' + name + ': ' + detail + ' Process group ' + pgid + ' is still running after ' + graceMs + 'ms. ' +
+    'The Codex app sandbox denied the signal; rerun the command with unsandboxed/elevated command permission.'
+  );
+}
+
 /**
  * Stop a running command-lane dispatch by signalling its process group. A
  * host-lane dispatch is refused: the subagent belongs to the harness. Writes
@@ -744,7 +1077,7 @@ function sleep(ms: number): Promise<void> {
 export async function cancelDispatch(
   repoRoot: string,
   record: DispatchRecord,
-  opts: { signal?: NodeJS.Signals; graceMs?: number; now?: Date } = {},
+  opts: { signal?: NodeJS.Signals; graceMs?: number; now?: Date; kill?: (pid: number, signal: NodeJS.Signals) => void } = {},
 ): Promise<CancelOutcome> {
   const opened = record.opened;
   if (opened == null) return { ok: false, reason: 'no_process', message: `dispatch ${record.id} has no opened row to cancel.` };
@@ -753,24 +1086,55 @@ export async function cancelDispatch(
     return {
       ok: false,
       reason: 'host_lane',
-      message: `dispatch ${opened.name} runs inside a host session; it is the harness's to stop. Cancel it there, then close it with \`fadeno dispatch-close ${opened.name} --failed\`.`,
+      message: `dispatch ${opened.name} runs inside a host session; it is the harness's to stop. Cancel it there, then close it with \`fadeno dispatch-close ${opened.name} --failed|--kept|--discarded|--reviewed\`.`,
     };
   }
   const pgid = opened.process_group;
+  const scratch = cancellationPaths(repoRoot, record.id);
+  const signal = opts.signal ?? 'SIGTERM';
+  if (!allowedCancelSignal(signal)) {
+    return { ok: false, reason: 'invalid_signal', message: 'cannot cancel ' + opened.name + ': "' + String(signal) + '" is not an allowed process signal.' };
+  }
   if (record.stopped != null || !groupAlive(pgid)) {
+    removeScratch(scratch.request);
+    removeScratch(scratch.ack);
     return {
       ok: false,
       reason: 'not_running',
-      message: `dispatch ${opened.name} is not running (process group ${pgid} is gone${record.stopped ? '; it stopped at ' + record.stopped.at : ''}). Close it with \`fadeno dispatch-close ${opened.name} --failed|--kept|--discarded\`.`,
+      message: `dispatch ${opened.name} is not running (process group ${pgid} is gone${record.stopped ? '; it stopped at ' + record.stopped.at : ''}). Close it with \`fadeno dispatch-close ${opened.name} --failed|--kept|--discarded|--reviewed\`.`,
     };
   }
+  let method: 'direct' | 'cooperative' = 'direct';
   try {
-    process.kill(-pgid, opts.signal ?? 'SIGTERM');
+    (opts.kill ?? process.kill)(-pgid, signal);
   } catch (err) {
-    return { ok: false, reason: 'not_running', message: `could not signal process group ${pgid}: ${(err as Error).message}` };
+    if ((err as NodeJS.ErrnoException).code !== 'EPERM') {
+      return { ok: false, reason: 'signal_failed', message: `could not signal process group ${pgid}: ${(err as Error).message}` };
+    }
+    method = 'cooperative';
+    const request = placeCancelRequest(repoRoot, record.id, pgid, signal);
+    if (!request.ok) return { ok: false, reason: 'signal_failed', message: request.message };
   }
-  const deadline = Date.now() + (opts.graceMs ?? CANCEL_GRACE_MS);
+  const graceMs = opts.graceMs ?? CANCEL_GRACE_MS;
+  const deadline = Date.now() + graceMs;
   while (Date.now() < deadline && groupAlive(pgid)) await sleep(100);
+  const alive = groupAlive(pgid);
+  const paths = scratch;
+  if (method === 'cooperative') {
+    const ack = readJson<CancelAck>(paths.ack);
+    if (!alive && ack?.result === 'signalled') {
+      removeScratch(paths.ack);
+    } else {
+      removeScratch(paths.request);
+      removeScratch(paths.ack);
+      const detail = ack?.result === 'failed'
+        ? 'the command-lane launcher consumed the request but could not signal it (' + (ack.error ?? 'unknown signal error') + ').'
+        : 'the command-lane launcher did not consume its cooperative cancellation request; it may already be gone.';
+      return { ok: false, reason: alive ? 'not_stopped' : 'signal_failed', message: cooperativeCancelFailure(opened.name, pgid, graceMs, detail) };
+    }
+  } else if (alive) {
+    return { ok: false, reason: 'not_stopped', message: `could not cancel ${opened.name}: process group ${pgid} is still running after ${graceMs}ms.` };
+  }
   // The launching CLI writes the stop when the child exits. If it is gone too,
   // nobody will, so say what happened here.
   const fresh = readDispatches(repoRoot).records.find((r) => r.id === record.id);
@@ -781,12 +1145,12 @@ export async function cancelDispatch(
       finalMessage: null,
       cwd,
       branch: opened.workspace?.branch ?? null,
-      exit: { code: null, signal: opts.signal ?? 'SIGTERM' },
+      exit: { code: null, signal },
       now: opts.now,
     });
     stoppedRecorded = true;
   }
-  return { ok: true, processGroup: pgid, signalled: true, stoppedRecorded };
+  return { ok: true, processGroup: pgid, signalled: true, stoppedRecorded, method };
 }
 
 /** Absolute working directory a dispatch was given, from its row. */

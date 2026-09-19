@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -33,6 +33,7 @@ export interface HookPlugin {
   removeCli(): void;
   hostMode(sessionId: string, on: boolean): void;
   run(hook: string, event: unknown, options?: { cwd?: string; env?: Record<string, string | undefined> }): HookRun;
+  runAsync(hook: string, event: unknown, options?: { cwd?: string; env?: Record<string, string | undefined> }): Promise<HookRun>;
 }
 
 export interface HookRun {
@@ -93,6 +94,36 @@ export function hookPlugin(t: TestContext): HookPlugin {
       let out: Record<string, any> | null = null;
       if (stdout.trim() !== '') out = JSON.parse(stdout) as Record<string, any>;
       return { status: result.status, stdout, stderr: result.stderr ?? '', out };
+    },
+    runAsync(hook, event, options = {}) {
+      const env: Record<string, string | undefined> = {
+        ...process.env,
+        CLAUDE_PLUGIN_ROOT: root,
+        PLUGIN_ROOT: root,
+        CLAUDE_PLUGIN_DATA: data,
+        PLUGIN_DATA: data,
+        FADENO_HOOK_TIMEOUT_MS: '8000',
+        ...options.env,
+      };
+      delete env.FADENO_HARNESS;
+      delete env.FADENO_DISPATCH_ID;
+      return new Promise((resolve) => {
+        const child = spawn(process.execPath, [join(hooksDir, hook)], {
+          cwd: options.cwd ?? root,
+          env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+        child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+        child.on('close', (status) => {
+          let out: Record<string, any> | null = null;
+          if (stdout.trim() !== '') out = JSON.parse(stdout) as Record<string, any>;
+          resolve({ status, stdout, stderr, out });
+        });
+        child.stdin.end(JSON.stringify(event));
+      });
     },
   };
 }

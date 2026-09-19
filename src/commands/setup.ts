@@ -35,6 +35,26 @@ export interface SetupOptions {
   force?: boolean;
 }
 
+export interface CodexAgentBootstrapOptions {
+  cwd?: string;
+  repoRoot?: string;
+  userPathOptions?: UserPathOptions;
+}
+
+export interface CodexAgentChange {
+  path: string;
+  action: 'created' | 'updated' | 'unchanged';
+}
+
+export interface CodexAgentBootstrapResult {
+  repoRoot: string;
+  directory: string;
+  agents: CodexAgentChange[];
+  removed: string[];
+  changed: boolean;
+  notices: string[];
+}
+
 export interface CommandProbe {
   name: string;
   command: string;
@@ -58,7 +78,7 @@ export interface SetupResult {
   link: SetupLink;
   /** Retired state this setup swept, if any. */
   removed: string[];
-  /** Codex agent files written: the archetype vocabulary a Codex host spawns by. */
+  /** Codex agent files reconciled: the archetype vocabulary a Codex host spawns by. */
   codexAgents: string[];
   permission: { path: string; rule: string } | null;
   notices: string[];
@@ -101,40 +121,54 @@ function ourCodexAgentFiles(): Set<string> {
 /**
  * Write the archetype vocabulary Codex reads agent types from.
  *
- * Runs after the sweep, so the files that exist afterwards are this version's.
- * A failure here is a notice, never a thrown setup: linking the CLI is what
- * `setup` promised, and a home directory Fadeno cannot write to should not
- * cost the user that.
+ * Exact matches are left untouched, so checking on every host activation does
+ * not rewrite the user's home. Same-named user files are refused before any
+ * managed file changes: they may pin a model, and neither overwriting nor
+ * silently accepting that override is honest.
  */
-function writeCodexAgents(options: UserPathOptions | undefined, notices: string[]): string[] {
+function writeCodexAgents(options: UserPathOptions | undefined): CodexAgentChange[] {
   const dir = codexUserAgentDir(options);
-  const written: string[] = [];
+  const desired = Object.entries(BUILTIN_ARCHETYPE_DESCRIPTIONS).map(([archetype, description]) => ({
+    path: join(dir, codexAgentFilename(archetype)),
+    text: codexAgentFile(archetype, description),
+  }));
+
+  for (const item of desired) {
+    if (!existsSync(item.path)) continue;
+    let current: string;
+    try {
+      current = readFileSync(item.path, 'utf8');
+    } catch (err) {
+      throw new SetupError(`cannot read Codex agent file ${item.path}: ${(err as Error).message}. Fix its permissions and activate Fadeno host mode again.`);
+    }
+    if (current !== item.text && !current.startsWith(MANAGED_AGENT_MARKER)) {
+      throw new SetupError(
+        `${item.path} already exists and Fadeno did not write it. Move or rename it, then activate Fadeno host mode again; ` +
+          'Fadeno will not overwrite a user agent or pretend its model cannot override the dial.',
+      );
+    }
+  }
+
   try {
     mkdirSync(dir, { recursive: true });
-    for (const [archetype, description] of Object.entries(BUILTIN_ARCHETYPE_DESCRIPTIONS)) {
-      const path = join(dir, codexAgentFilename(archetype));
-      writeFileSync(path, codexAgentFile(archetype, description), 'utf8');
-      written.push(path);
-    }
+    return desired.map((item) => {
+      const current = existsSync(item.path) ? readFileSync(item.path, 'utf8') : null;
+      if (current === item.text) return { path: item.path, action: 'unchanged' as const };
+      writeFileSync(item.path, item.text, 'utf8');
+      return { path: item.path, action: current == null ? 'created' as const : 'updated' as const };
+    });
   } catch (err) {
-    notices.push(
-      `could not write the Codex agent files under ${dir} (${(err as Error).message}). ` +
-        'Codex spawns cannot name an archetype without them, so host mode there will route every spawn to the command lane.',
+    throw new SetupError(
+      `could not reconcile the Codex agent files under ${dir}: ${(err as Error).message}. ` +
+        'Fix the directory and activate Fadeno host mode again.',
     );
-    return written;
   }
-  notices.push(
-    `Codex archetype vocabulary written to ${dir} (${written.length} agents, spawned as \`fadeno-<archetype>\`). ` +
-      'They declare no model: the dial rides the spawn, so routing stays live.',
-  );
-  return written;
 }
 
 /**
  * Managed agent files this version does not write, in the two places Fadeno
  * has written them. The user-scope files it DOES write are left for
- * `writeCodexAgents` to overwrite: sweeping them would make every setup report
- * removing the files it is about to put back.
+ * `writeCodexAgents` to reconcile.
  */
 function sweepManagedAgents(repoRoot: string, options: UserPathOptions | undefined): string[] {
   const removed: string[] = [];
@@ -161,6 +195,40 @@ function sweepManagedAgents(repoRoot: string, options: UserPathOptions | undefin
     }
   }
   return removed;
+}
+
+function validateCatalog(repoRoot: string, options: UserPathOptions | undefined): void {
+  try {
+    loadExecutorProfile(repoRoot, options).profile;
+  } catch (err) {
+    throw new SetupError((err as Error).message);
+  }
+}
+
+/**
+ * Reconcile only the model-neutral Codex archetype vocabulary.
+ *
+ * This is the first-use path invoked by the Codex host skill. It deliberately
+ * does not link a CLI, probe harnesses, edit Claude settings, or touch retired
+ * runtime state. Agent definitions are session-static in Codex, so a changed
+ * result takes effect in the next session; model routing remains live because
+ * these files contain neither a model nor an effort.
+ */
+export function runCodexAgentBootstrap(opts: CodexAgentBootstrapOptions = {}): CodexAgentBootstrapResult {
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  validateCatalog(repoRoot, opts.userPathOptions);
+  const agents = writeCodexAgents(opts.userPathOptions);
+  const removed = sweepManagedAgents(repoRoot, opts.userPathOptions);
+  const changed = removed.length > 0 || agents.some((agent) => agent.action !== 'unchanged');
+  const directory = codexUserAgentDir(opts.userPathOptions);
+  const notices = [
+    changed
+      ? `Codex archetype vocabulary reconciled at ${directory}. Start a fresh Codex session before using the host lane.`
+      : `Codex archetype vocabulary checked at ${directory}; it is already current.`,
+    'The files declare no model or reasoning effort. Dials resolve at each spawn, so changing a dial never requires another bootstrap.',
+  ];
+  for (const path of removed) notices.push(`Removed obsolete Fadeno-managed Codex agent file ${path}.`);
+  return { repoRoot, directory, agents, removed, changed, notices };
 }
 
 /**
@@ -321,11 +389,7 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
 
   // The catalog is read before anything is written: a setup that links a CLI
   // which then refuses to load this repo's config has helped nobody.
-  try {
-    loadExecutorProfile(repoRoot, opts.userPathOptions).profile;
-  } catch (err) {
-    throw new SetupError((err as Error).message);
-  }
+  validateCatalog(repoRoot, opts.userPathOptions);
 
   const source = opts.source !== undefined ? opts.source : runningCli(env);
   if (source == null || !existsSync(source)) {
@@ -334,10 +398,11 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
     );
   }
   const link = linkCli(paths, source, opts.userPathOptions, opts.force ?? false);
-  const removed = [...sweepRetiredState(paths), ...sweepManagedAgents(repoRoot, opts.userPathOptions)];
-  // After the sweep, never before: the sweep takes every managed file, and
-  // these are the ones this version stands behind.
-  const codexAgents = writeCodexAgents(opts.userPathOptions, notices);
+  const removed = sweepRetiredState(paths);
+  const codexBootstrap = runCodexAgentBootstrap({ repoRoot, userPathOptions: opts.userPathOptions });
+  removed.push(...codexBootstrap.removed);
+  const codexAgents = codexBootstrap.agents.map((agent) => agent.path);
+  notices.push(...codexBootstrap.notices);
   const permission = opts.target === 'claude' ? ensureClaudePermission(opts.userPathOptions, notices) : null;
 
   // Name the target, and say what it means rather than what it usually means:
@@ -356,7 +421,7 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
   for (const path of removed) {
     notices.push(
       path.endsWith('.toml')
-        ? `Removed the agent file ${path}, which an earlier Fadeno materialized and this one does not write. On Codex a stale file that declares a model overrides the dial.`
+        ? `Removed the obsolete managed agent file ${path}. On Codex a stale file that declares a model overrides the dial.`
         : `Removed retired state ${path} (nothing reads it).`,
     );
   }

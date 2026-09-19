@@ -76,10 +76,22 @@ const TOP_LEVEL: Record<string, PageSeed> = {
     'The preview names the ignored paths that would go with each worktree, because those are invisible to git and are where a worker\'s receipts land when a prompt did not give it an absolute path.',
     'It also removes `.fadeno/local/` relay files, cooperative cancellation requests, and staged Codex prompt handoffs; recorded prompts under `.fadeno/prompts/` remain evidence and are never touched.',
   ]),
-  dispatch: page('Run one dispatch on the command lane: resolve the archetype, cut a worktree, run the executor, record it.', ['fadeno dispatch --archetype <name> [--from <dispatch-name|id|ref|sha>] [options]', 'fadeno dispatch --model <ref> [options]'], [
-    'Reads the prompt from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted, and an explicit model is recorded as a one-dispatch override.',
+  dispatch: page('List, inspect, or run a dispatch.', [
+    'fadeno dispatch [--all] [--tail <count>] [--json]',
+    'fadeno dispatch <name|id> [--json]',
+    'fadeno dispatch --output <name|id>',
+    'fadeno dispatch --archetype <name> [launch options]',
+    'fadeno dispatch --model <ref> [launch options]',
+    'fadeno dispatch run <archetype-or-model> [launch options]',
+    'fadeno dispatch run --archetype <name> [launch options]',
+    'fadeno dispatch run --model <ref> [launch options]',
+  ], [
+    'The plural `fadeno dispatches` spelling remains a compatibility alias for the read forms. Both namespaces use the same list, detail, and report reader.',
+    'A launch reads the prompt from stdin or `--prompt-file`. In the legacy flag form, `--archetype` is required unless `--model` is supplied; both are accepted. `dispatch run` adds a positional selector, which must resolve exactly as one effective archetype or registered model reference.',
+    'If a positional selector matches both an effective archetype and a registered model reference, Fadeno refuses rather than guessing — use `--archetype` or `--model`. Unknown selectors name the effective archetypes and registered model references available.',
     'The executor runs in a worktree cut from HEAD. `--from <dispatch-name|id>` follows the ledger only to that dispatch\'s reachable isolated branch; it never substitutes the opening base, and a shared-tree dispatch cannot supply a retained result. If the branch/result is unavailable, commit the desired state and pass that Git ref or commit SHA. Literal Git refs and SHAs also work. A cross-namespace match, or an exact name that is another dispatch id prefix, is refused; qualify a Git ref such as `refs/heads/main` or use the dispatch full UUID. `--shared` works in the live tree on your explicit request, but cannot be combined with `--from`. An invalid explicit `--from` is refused, and a worktree failure never falls back to shared for an explicit baseline.',
     'Every dispatch must be closed afterwards: `fadeno dispatch-close <name> --merged|--kept|--discarded|--failed|--reviewed`. Fadeno performs no merge.',
+    'The command lane emits a command-process liveness echo to stderr every five minutes by default while its executor is running; this is not a host progress update. Use `--heartbeat 0` to disable it or `--heartbeat <seconds>` to override it. It never emits when no command dispatch is in flight.',
     'The launcher returns the executor\'s stdout verbatim even if a close row was written early by an older client; the later stop row still records the report observation.',
   ]),
   'dispatch-open': page('The spawn wrapper for a spawn the host is about to make: open it on the host lane, or hand it to the command lane.', 'fadeno dispatch-open --archetype <name> [--name <n>] [--model <ref>] [--lane auto|host|command] [--shared] [--from <dispatch-name|id|ref|sha>] [--session-id <id>] [--parent <id> | --parent-transcript <path>] [--harness <id>] [--agent-id <id>] (--prompt-file <path> | stdin | --prompt-sealed <reason> | --dry-run) [--json]', [
@@ -129,6 +141,7 @@ const TOP_LEVEL: Record<string, PageSeed> = {
   dispatches: page('List dispatches, show one, or print a report.', ['fadeno dispatches [--all] [--tail <count>] [--json]', 'fadeno dispatches <name|id> [--json]', 'fadeno dispatches --output <name|id>'], [
     'Unclosed dispatches by default; `--all` includes closed ones. A name resolves when it is unique, a unique id prefix too; ambiguity is refused rather than guessed.',
     '`--output` prints the command-lane transcript, or the final message the stop row recorded.',
+    'This plural spelling is retained as a compatibility alias; the same read forms are also available under `fadeno dispatch`.',
   ]),
   worktrees: page('Report every Fadeno worktree holding work that is not on HEAD.', 'fadeno worktrees [--json]', [
     'The cross-session safety net: uncommitted paths, unmerged commits and ignored paths per worktree, joined to the dispatch that owns it. A tree that cannot be read is reported as such, never as clean.',
@@ -202,6 +215,14 @@ const NESTED: Record<string, PageSeed> = {
     'fadeno model run <ref[@effort][ on <harness>]> [<prompt>...] [--prompt-file <path>]',
     '`fadeno model run` is an alias for `fadeno models run`.',
   ),
+  'dispatch run': page('Run one dispatch using a positional archetype or registered model selector.', [
+    'fadeno dispatch run <archetype-or-model> [launch options]',
+    'fadeno dispatch run --archetype <name> [launch options]',
+    'fadeno dispatch run --model <ref> [launch options]',
+  ], [
+    'A positional selector is resolved against the effective archetype names and registered model aliases, provider IDs, and delivered IDs. An exact match in both categories is refused; use the corresponding explicit flag.',
+    'Model selectors preserve the accepted `model[@effort][ on <harness>]` syntax.',
+  ]),
   'dial clear': page('Clear one or more dial layers.', 'fadeno dial clear [<archetype>] [--session|--user|--repo]'),
   'dial resolve': page('Print what one archetype resolves to right now.', 'fadeno dial resolve --archetype <name>', [
     'The inspection escape hatch: model, effort, harness and lane, answered by the same resolver a spawn takes.',
@@ -229,7 +250,7 @@ const OPTION_HINTS: Record<string, string> = {
   '--finalize': 'Finalize a staged task after its handoff succeeds',
   '--grok': 'Target Grok Build',
   '--harness': 'Executor harness',
-  '--heartbeat': 'Seconds between still-running echoes',
+  '--heartbeat': 'Seconds between command-process liveness echoes (0 disables)',
   '--help': 'Show this command help',
   '--json': 'Emit structured JSON output',
   '--kept': 'Close: keep the branch for later',
@@ -268,6 +289,7 @@ const OPTION_FORMS: Record<string, string> = {
   '--format': '--format <format>', '--schema': '--schema <kind>',
   '--archetype': '--archetype <name>', '--model': '--model <ref>', '--harness': '--harness <id>', '--claim': '--claim <task_name>', '--claim-id': '--claim-id <id>', '--consume': '--consume <task_name>',
   '--dispatch': '--dispatch <ref>', '--wait-seconds': '--wait-seconds <n>', '--prompt-file': '--prompt-file <path>', '--output': '--output <path>', '--lane': '--lane <auto|host|command>', '--transcript': '--transcript <path>', '--parent-transcript': '--parent-transcript <path>', '--prompt-sealed': '--prompt-sealed <reason>', '--bind': '--bind <role=executor>',
+  '--parent': '--parent <id>', '--session-id': '--session-id <id>',
   '--tool': '--tool <name>', '--input': '--input <name=path>',
   '--host-executor': '--host-executor <name>', '--native-executor': '--native-executor <name>',
   '--role': '--role <name>', '--run': '--run <id>', '--dispatch-id': '--dispatch-id <id>',
@@ -299,7 +321,8 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   model: withGlobals('--harness', '--json'),
   dial: withGlobals('--harness', '--session', '--user', '--repo', '--json'),
   clean: withGlobals('--force'),
-  dispatch: withGlobals('--archetype', '--model', '--name', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--heartbeat'),
+  dispatch: withGlobals('--archetype', '--model', '--name', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--heartbeat', '--all', '--tail', '--json', '--output'),
+  'dispatch run': withGlobals('--archetype', '--model', '--name', '--prompt-file', '--shared', '--from', '--session-id', '--parent', '--heartbeat'),
   'dispatch-open': withGlobals('--archetype', '--model', '--name', '--lane', '--prompt-file', '--prompt-sealed', '--agent-id', '--dry-run', '--shared', '--from', '--session-id', '--parent', '--parent-transcript', '--harness', '--json'),
   'dispatch-stop': withGlobals('--agent-id', '--transcript', '--message-file', '--agent-cwd', '--durable', '--json'),
   'dispatch-wait': withGlobals('--wait-seconds', '--json'),
@@ -339,7 +362,8 @@ const PATH_OPTION_HINTS: Record<string, Record<string, string>> = {
 const PATH_OPTION_FORMS: Record<string, Record<string, string>> = {
   dispatches: { '--output': '--output <name|id>', '--tail': '--tail <count>' },
   logs: { '--tail': '--tail <lines>' },
-  dispatch: { '--name': '--name <name>', '--from': '--from <dispatch-name|id|ref|sha>', '--heartbeat': '--heartbeat <seconds>' },
+  dispatch: { '--name': '--name <name>', '--from': '--from <dispatch-name|id|ref|sha>', '--heartbeat': '--heartbeat <seconds>', '--output': '--output <name|id>', '--tail': '--tail <count>' },
+  'dispatch run': { '--name': '--name <name>', '--from': '--from <dispatch-name|id|ref|sha>', '--heartbeat': '--heartbeat <seconds>' },
   'dispatch-open': { '--name': '--name <name>', '--from': '--from <dispatch-name|id|ref|sha>', '--session-id': '--session-id <id>', '--parent': '--parent <id>' },
   'dispatch-stop': { '--message-file': '--message-file <path>', '--agent-cwd': '--agent-cwd <dir>' },
   'dispatch-close': { '--note': '--note <text>' },
@@ -407,7 +431,8 @@ Routing
   feedback    Record friction with Fadeno itself
 
 Dispatches
-  dispatch, dispatch-wait, dispatch-close, cancel, dispatches, logs, worktrees
+  dispatch (read or run), dispatches (read alias), dispatch-wait, dispatch-close,
+  cancel, logs, worktrees
   dispatch-open, dispatch-stop  (the hooks' entry points)
   prompt-stage  (stage a Codex prompt before an archetype spawn)
 

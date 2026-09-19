@@ -108,7 +108,7 @@ p { max-width: 68ch; }
   <div class="fig keep"><span class="n">4</span><div class="l">surviving pillars:<br>route · spawn · log · context</div></div>
   <div class="fig"><span class="n">5</span><div class="l">canonical archetypes<br>(set is open)</div></div>
   <div class="fig"><span class="n">2</span><div class="l">lanes, invisible<br>to the host</div></div>
-  <div class="fig keep"><span class="n">34</span><div class="l">decisions,<br>none open</div></div>
+  <div class="fig keep"><span class="n">40</span><div class="l">decisions,<br>none open</div></div>
 </div>
 
 <section>
@@ -188,8 +188,8 @@ p { max-width: 68ch; }
   <h2>Agent files and lanes</h2>
 
   <div class="d"><div class="num">14</div><div>
-    <h3>Materialized agent files are cut entirely<span class="tag measured">measured 2026-09-07</span></h3>
-    <p class="why">The experiment that decided it: in an isolated <code>CODEX_HOME</code> with <em>no agent file anywhere</em>, a parent on <code>gpt-6-astra/medium</code> spawned a subagent that ran on <code>gpt-5.6-luna/xhigh</code> — both halves of the identity, set at spawn time via <code>collaboration.spawn_agent</code>. The documented precedence is explicit spawn value → <code>[agents]</code> default → parent; a file overrides all of it <em>only when a file exists</em>. So don't write files.</p>
+    <h3>Materialized agent files are cut entirely<span class="tag cut">superseded by 36</span></h3>
+    <p class="why">The experiment proved the routing half: in an isolated <code>CODEX_HOME</code> with <em>no agent file anywhere</em>, a parent on <code>gpt-6-astra/medium</code> spawned a subagent that ran on <code>gpt-5.6-luna/xhigh</code> — both halves of the identity, set at spawn time via <code>collaboration.spawn_agent</code>. It did not test discoverability. A later clean-session probe found that without user agent files Codex omits <code>agent_type</code> from the spawn tool and exposes only <code>default</code>. Decision 36 keeps the proven part — never write model or effort — while supplying the vocabulary the tool schema requires.</p>
   </div></div>
 
   <div class="d"><div class="num">15</div><div>
@@ -262,13 +262,13 @@ p { max-width: 68ch; }
   </div></div>
 
   <div class="d"><div class="num">24</div><div>
-    <h3>Close is required, and nagged into existence<span class="tag new">decided</span></h3>
-    <p class="why">Verbs: <code>merged</code> / <code>kept</code> / <code>discarded</code> / <code>failed</code>. At each spawn the host is reminded of every unclosed dispatch and pressed to review, evaluate and close; at <em>five</em> unclosed the next spawn is refused until it does. Threshold is wired for config but not exposed. Why the ritual matters: nine dispatches this session were opened and closed with zero forgotten, against five August orphans from a path that never forced the question. <em>The value was never the merge logic — it was the mandatory question.</em></p>
+    <h3>Close is required, and nagged into existence<span class="tag keep">amended</span></h3>
+    <p class="why">Verbs: <code>merged</code> / <code>kept</code> / <code>discarded</code> / <code>failed</code> / <code>reviewed</code>. <code>reviewed</code> is a neutral, report-only acknowledgement: it makes no Git claim and is not inferred from repository state. At each spawn the host is reminded of every unclosed dispatch and pressed to review, evaluate and close; every host user turn gets a compact reminder derived from the live ledger. The earlier five-dispatch refusal is retired: unclosed rows are advisory state and never cap fan-out. <em>The value was never merge logic — it was keeping the mandatory question visible.</em></p>
   </div></div>
 
   <div class="d"><div class="num">25</div><div>
-    <h3>The nag is repo-wide, and grandparents inherit orphans<span class="tag new">decided</span></h3>
-    <p class="why">A director that spawns three workers and exits leaves dispatches with no owner. Session-scoped nagging would make them invisible forever — exactly where nesting happens. Repo-wide scope surfaces them to whoever spawns next; orphans are reported at subagent stop where the harness allows it, and at nag time regardless.</p>
+    <h3>The nag is repo-wide, and grandparents inherit orphans<span class="tag keep">amended</span></h3>
+    <p class="why">A director that spawns three workers and exits leaves dispatches with no owner. Session-scoped nagging would make them invisible forever — exactly where nesting happens. Repo-wide scope surfaces them to whoever spawns next and to every host user turn; the latter is a compact ledger-derived reminder. Orphans are still reported at subagent stop where the harness allows it, but stop-time notification remains best effort and is never the recovery path.</p>
   </div></div>
 
   <div class="d"><div class="num">26</div><div>
@@ -335,7 +335,8 @@ p { max-width: 68ch; }
     <table class="tbl">
       <thead><tr><th>Fact</th><th>Consequence</th></tr></thead>
       <tbody>
-        <tr><td>Codex: a fileless spawn honours explicit <code>model</code> AND <code>reasoning_effort</code>. Parent astra/medium spawned luna/xhigh.</td><td>Agent files are unnecessary — decision 14</td></tr>
+        <tr><td>Codex: a fileless spawn honours explicit <code>model</code> AND <code>reasoning_effort</code>. Parent astra/medium spawned luna/xhigh.</td><td>Agent files must never carry routing — decisions 14 and 36</td></tr>
+        <tr><td>Codex 0.153.4: with no user agent files, the spawn tool has no <code>agent_type</code> parameter and every subagent starts as <code>default</code>.</td><td>Minimal user-scoped archetype files are required for native host-lane vocabulary — decision 36</td></tr>
         <tr><td>Codex: <em>a custom agent file overrides an explicit spawn value.</em> Two spawns passing sol both ran the file's luna.</td><td>A hand-created file silently defeats routing — decision 16</td></tr>
         <tr><td>Codex: <code>spawn_agent</code> takes only <code>fork_turns</code>, <code>message</code>, <code>model</code>, <code>reasoning_effort</code>, <code>task_name</code>. No cwd, no worktree tool.</td><td>The prompt carries the worktree contract — decision 27</td></tr>
         <tr><td>Codex: the tool schema says <em>"inherited parent model is preferred"</em>.</td><td>Guidance points away from our design; a spawn with no explicit model drifts to the parent silently — how three basanos workers landed on astra</td></tr>
@@ -358,8 +359,8 @@ p { max-width: 68ch; }
   </div></div>
 
   <div class="d"><div class="num">32</div><div>
-    <h3>Post-agent reporting targets the stop hook, but never depends on it<span class="tag new">decided</span></h3>
-    <p class="why">Whether <code>SubagentStop</code> can surface a message back to the parent is unverified on both harnesses — <code>PreToolUse</code>'s <code>systemMessage</code> is proven, the stop contract is a different one. So the spec plans for it: <em>report at stop where the harness allows, and into the nag regardless.</em> The nag is the load-bearing channel; stop-time reporting is an optimisation that makes the news arrive sooner. Designing it the other way round would put the whole close ritual on an unverified capability.</p>
+    <h3>Post-agent reporting targets the stop hook, but never depends on it<span class="tag keep">amended</span></h3>
+    <p class="why">Whether <code>SubagentStop</code> can surface a message back to the parent is unverified on both harnesses — <code>PreToolUse</code>'s <code>systemMessage</code> is proven, the stop contract is a different one. So the stop hook remains best effort, while every host user turn asks the CLI for a fresh ledger-derived reminder. The reminder is the recovery channel; stop-time reporting is an optimisation that makes the news arrive sooner.</p>
   </div></div>
 
   <div class="d"><div class="num">33</div><div>
@@ -375,6 +376,42 @@ p { max-width: 68ch; }
     <h3><code>cancel</code> stays, for the command lane only<span class="tag keep">keep</span></h3>
     <p class="why">Surfaced 2026-09-07 during test triage, when the old cancel verb landed in the delete bucket and the question became whether the need died with the mechanism. The mechanism dies: the supervisor, its inflight claim files and the run-scoped <code>fadeno cancel</code> all belong to drive. The need does not. The spec forbids killing on a timer, and the closing verbs of decisions 21 and 27 are decisions made after the fact; neither is a way for a person to stop a process Fadeno launched. Without one, stopping a command-lane worker means finding the pid by hand, and the ledger did not record it.
     <br><br>So the opened row gains one field, <code>process_group</code>, present only on the command lane, and one verb signals it. On a host-lane dispatch <code>cancel</code> refuses and says the subagent is the harness's to stop. That reveals the lane, and that is fine: the lane is already on the ledger row, and decision 18's invisibility is about the spawn, not the record. Cancel writes a <code>stopped</code> row, because a signalled process is an outside observation rather than a decision; the dispatch still needs closing. Never automatic: Fadeno never decides to stop anything on its own.</p>
+  </div></div>
+
+  <div class="d"><div class="num">35</div><div>
+    <h3>Safe stopped-worktree cleanup is independent of close<span class="tag new">decided</span></h3>
+    <p class="why">Closure is an acknowledgement, not a deletion trigger. A stopped dispatch has already crossed the observation boundary, so <code>clean</code> may remove its registered worktree when tracked status is clean and readable; the branch remains. Open/running, dirty, unreadable, and unregistered paths remain protected, and ignored paths are reported before removal. This lets a host reclaim machine-local scratch while a neutral <code>reviewed</code> record or a later disposition is still pending.</p>
+  </div></div>
+
+  <div class="d"><div class="num">36</div><div>
+    <h3>Codex host activation owns model-neutral archetype vocabulary<span class="tag measured">measured 2026-09-12</span></h3>
+    <p class="why">Decision 14 measured that an explicit spawn can carry model and effort without an agent file, but not whether a host can name an archetype in the first place. On Codex 0.153.4, a clean <code>CODEX_HOME</code> with no agent files removes <code>agent_type</code> from the spawn schema and exposes only <code>default</code>. Native Fadeno archetypes are therefore unreachable until user-scoped names exist.
+    <br><br>The smallest honest correction is five managed files containing only name, description and a thin contract bootstrap — never model or effort. <code>$fadeno-host</code> reconciles them idempotently on activation, so installation has no follow-up setup command. Codex loads agent definitions at session start, so a changed first activation names the one unavoidable fresh-session boundary. A same-named file without Fadeno's marker is refused, not overwritten and not ignored.
+    <br><br>This also fixes the model-churn boundary. The stable file says <em>worker</em>; the live dial says which model worker means today. <code>host</code> follows the current Codex session model automatically. Named models resolve from the current catalog on every spawn, and <code>models verify</code> catches a backend that removed or renamed one. A plugin upgrade may reconcile vocabulary shape; an ordinary dial change never touches these files.</p>
+  </div></div>
+
+  <div class="d"><div class="num">37</div><div>
+    <h3>An explicit <code>--from</code> is a ledger baseline, never a silent shared-tree fallback<span class="tag new">decided 2026-09-13</span></h3>
+    <p class="why">The Basanos reproduction exposed a gap in decision 19: callers naturally named the retained dispatch <code>i5-handoff--revision</code>, but the worktree cutter treated that plain name as a literal Git ref. The failed cut then invoked decision 29's environmental fallback and sent two sibling follow-ups into the retained source worktree, where their reviewer and worker writes could collide.
+    <br><br>So <code>--from</code> is resolved in one shared preparation path: first as a unique dispatch name, id, or id prefix through the repository ledger, and only an available recorded branch of an isolated dispatch may be used. The opening <code>workspace.base</code> is not a result and is never a fallback; a shared-tree dispatch has no attributable retained ref. If the branch/result is unavailable, the caller must commit the desired state and pass that Git ref or commit SHA. A value that matches both a dispatch reference and a Git ref is refused, as is an exact dispatch name that is another dispatch's id prefix; qualify the Git ref (for example <code>refs/heads/main</code>) or use the dispatch's full UUID. An explicit value that resolves to neither is refused before prompt evidence, a relay, a row, or a process exists, and <code>--shared --from</code> is rejected before prompt handling. A later <code>git worktree add</code> failure is also refused because falling back would abandon the requested baseline or isolation. The old shared-tree fallback remains only for an omitted <code>--from</code>, where it reports the environmental reason. Two valid follow-ups therefore get two new <code>fadeno/&lt;name&gt;</code> branches and two registered worktrees, regardless of host or command lane.</p>
+  </div></div>
+
+  <div class="d"><div class="num">38</div><div>
+    <h3>Closing belongs to the caller, and waiting trusts the stop row<span class="tag new">decided 2026-09-13</span></h3>
+    <p class="why">Basanos supplied the failure shape: a command-lane worker, reviewer, or scout wrote <code>closed</code> from inside itself, then its launcher wrote <code>stopped</code> and the report 17–20 seconds later. Treating close as terminal made <code>dispatch-wait</code> return exit 5 with no report during that window. The contract wording was not enough, so <code>dispatch-close</code> now refuses when <code>FADENO_DISPATCH_ID</code> equals the target: the dispatch must return its report and its caller/host decides; a parent may still close a child it opened.
+    <br><br>The ledger remains append-only and accepts <code>closed</code> before <code>stopped</code>. Wait uses only <code>stopped</code> as report-ready, continues while a close-only process group is alive, and gives a dead group the normal settle window before reconstructing the stop from stdout, stderr and the worktree. The direct launcher returns executor stdout independently of ledger state, so an older client or unexpected writer cannot erase a completed report.</p>
+  </div></div>
+
+  <div class="d"><div class="num">39</div><div>
+    <h3>The stop hook writes the durable receipt before Git inspection<span class="tag new">decided 2026-09-13</span></h3>
+    <p class="why">A host-lane <code>SubagentStop</code> had a four-second CLI budget, while the stopped row gathered dirty paths, ignored paths, and branch measurement through several Git calls. A completed agent could therefore remain <code>open</code> solely because optional inspection outlived the hook. The stop path now flushes the essential outside observation — final response, working directory, and observed model — first, then appends optional Git evidence when it can. <code>--durable</code> is the stop hook's cheap path; a normal idempotent replay enriches a durable receipt. The ledger reader merges the second <code>stopped</code> row only into optional evidence, so old readers still understand the first row and replays cannot replace the original report.</p>
+    <br><br><p class="why">A stop-recording failure is visible and actionable in the hook's system message. An ordinary subagent without a Fadeno contract remains silent, but a failed CLI, timeout, or malformed stop response tells the host to verify the ledger and replay <code>dispatch-stop</code> with the received final response before inspection and closure.</p>
+  </div></div>
+
+  <div class="d"><div class="num">40</div><div>
+    <h3>CLI stdin retries transient descriptor errors at one boundary<span class="tag new">decided 2026-09-14</span></h3>
+    <p class="why">Codex can expose a temporarily nonblocking stdin descriptor. A direct <code>readFileSync(0, 'utf8')</code> then surfaced <code>EAGAIN</code> after the durable stop receipt already existed, so a replay intended only to enrich Git evidence failed twice. Every CLI stdin consumer now goes through one reader that accumulates bytes with <code>fs.readSync</code>, retries <code>EAGAIN</code>/<code>EINTR</code> with a short sleep and no arbitrary deadline, and leaves permanent errors visible. It decodes only after EOF, preserving partial reads and multibyte boundaries; the durable-first stop and idempotent enrichment design do not change.</p>
+    <br><br><p class="why">Recovery guidance for Codex and Claude saves the final response to a file and passes <code>--message-file</code>. Stdin remains a supported one-shot input, but the documented default does not put two live processes in a response pipe where a transient descriptor state can strand an already-recorded stop.</p>
   </div></div>
 </section>
 

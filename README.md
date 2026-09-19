@@ -49,8 +49,10 @@ records the dispatch. When the agent stops, the stop hook records that too. You
 close it when you have decided what to do with the work:
 
 ```bash
-fadeno dispatches                   # what is still open
-fadeno dispatches csv-export        # the detail, including the report
+fadeno dispatch                       # what is still open
+fadeno dispatch csv-export             # the detail, including the report
+fadeno dispatch run sol                # launch by registered model ref
+fadeno dispatches                      # compatibility spelling for reads
 fadeno logs csv-export              # the command-lane internal activity stream
 fadeno dispatch-close csv-export --merged
 ```
@@ -131,9 +133,14 @@ guess: qualify the Git ref (for example `refs/heads/main`) or use the
 dispatch's full UUID. An exact dispatch name that is another dispatch's id
 prefix is likewise ambiguous and requires a full UUID. `--shared` and `--from`
 are incompatible; choose the shared tree without `--from`, or remove
-`--shared` to cut the named baseline. The agent is told where it is, what branch
-it owns, and that its final message must say what it did and where the work
-lives. Two agents never share a tree.
+`--shared` to cut the named baseline. The agent is told where it is, which
+modifications and commits belong in that assigned tree, and that its final
+message must say what it did and where the work lives. A caller-authorized
+read-only inspection outside the assigned tree is allowed; modifications and
+commits stay in the assigned tree.
+Implementation and integration tasks carry commit and upstream duties; review,
+scouting, judging, and other report-only tasks change nothing and recommend
+`reviewed`. Two agents never share a tree.
 
 If a task needs uncommitted work, commit it first — or ask for the live tree
 explicitly (`--shared` on the command lane), and the agent is told it is sharing
@@ -195,9 +202,9 @@ it. A tree it cannot read is reported as unreadable, never as clean.
 | `dial` | Show, set, clear and resolve archetype bindings. With no arguments, the reference to read before delegating. |
 | `models` | Inspect the model registry; verify dialed deliveries or explicit registry refs against their backends. |
 | `model run` / `models run` | Run one registered model directly with a positional, stdin, or file prompt in temporary scratch. |
-| `dispatch` | Run one dispatch on the command lane, start to finish. |
+| `dispatch` | List or inspect dispatches, or run one on the command lane. Launch with the legacy `--archetype`/`--model` flags or `dispatch run <archetype-or-model>`; the launcher emits a command-process liveness echo to stderr every five minutes by default while the executor is in flight (`--heartbeat 0` disables it, and `--heartbeat <seconds>` overrides it). |
 | `dispatch-wait` | Block until a dispatch stops, then print its report — for work that outruns the caller's shell timeout. Only a `stopped` row is report-ready; a close-only command dispatch remains running until its process stops or is reconstructed after the settle window. |
-| `dispatches` | List dispatches, show one, print a report. |
+| `dispatches` | Compatibility alias for the `dispatch` list, detail, and report reads. |
 | `logs` | Read a command-lane dispatch's internal activity stream; `--tail <lines>` selects the latest lines and `--follow` streams until it stops. |
 | `dispatch-close` | Record the terminal decision. |
 | `cancel` | Stop a running command-lane dispatch by signalling its process group. |

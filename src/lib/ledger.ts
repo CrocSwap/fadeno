@@ -20,7 +20,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { sanitizeName, type WorkMeasured } from './worktree.ts';
 
@@ -43,8 +43,8 @@ export const DIRTY_PATH_LIMIT = 200;
 export const STDERR_EXCERPT_CHARS = 600;
 
 export type Lane = 'host' | 'command';
-export type CloseVerb = 'merged' | 'kept' | 'discarded' | 'failed';
-export const CLOSE_VERBS: readonly CloseVerb[] = ['merged', 'kept', 'discarded', 'failed'];
+export type CloseVerb = 'merged' | 'kept' | 'discarded' | 'failed' | 'reviewed';
+export const CLOSE_VERBS: readonly CloseVerb[] = ['merged', 'kept', 'discarded', 'failed', 'reviewed'];
 
 export interface Workspace {
   /** Repo-relative worktree path, or the repo root itself (`.`) for a shared tree. */
@@ -109,6 +109,13 @@ export interface StoppedRow {
   row: 'stopped';
   id: string;
   at: string;
+  /**
+   * `durable` is the cheap first receipt written before Git inspection;
+   * `inspected` is an optional follow-up carrying the worktree evidence.
+   * Rows without this field are the single, fully inspected shape written by
+   * older Fadeno versions and remain complete for compatibility.
+   */
+  evidence?: 'durable' | 'inspected';
   /** Excerpt of the agent's final message; null when the harness supplied none. */
   final_message: string | null;
   dirty: DirtyPaths;
@@ -206,6 +213,25 @@ export function appendRow(repoRoot: string, row: LedgerRow): void {
   appendFileSync(file, `${JSON.stringify(row)}\n`);
 }
 
+/**
+ * Append a row and flush it before returning. Stop hooks use this for the
+ * first receipt so a later Git inspection cannot leave a finished dispatch
+ * looking open when the harness cuts the hook off.
+ */
+export function appendRowDurable(repoRoot: string, row: LedgerRow): void {
+  const file = join(repoRoot, LEDGER_FILE);
+  mkdirSync(dirname(file), { recursive: true });
+  const fd = openSync(file, 'a', 0o600);
+  try {
+    const bytes = Buffer.from(`${JSON.stringify(row)}\n`, 'utf8');
+    let written = 0;
+    while (written < bytes.length) written += writeSync(fd, bytes, written, bytes.length - written);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 const KNOWN_ROWS = new Set(['opened', 'stopped', 'closed']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -260,6 +286,18 @@ export function correlate(rows: readonly LedgerRow[]): DispatchRecord[] {
     }
     if (row.row === 'opened' && record.opened == null) record.opened = row;
     else if (row.row === 'stopped' && record.stopped == null) record.stopped = row;
+    else if (row.row === 'stopped' && record.stopped?.evidence === 'durable' && row.evidence === 'inspected') {
+      // The durable receipt is intentionally first. A later inspected row is
+      // an append-only enrichment, not a replay that may replace the report,
+      // timestamp, model, or cwd from the outside observation.
+      record.stopped = {
+        ...record.stopped,
+        evidence: 'inspected',
+        dirty: row.dirty,
+        ...(row.ignored !== undefined ? { ignored: row.ignored } : {}),
+        ...(row.work !== undefined ? { work: row.work } : {}),
+      };
+    }
     else if (row.row === 'closed' && record.closed == null) record.closed = row;
   }
   for (const record of byId.values()) {
@@ -285,7 +323,9 @@ export type DispatchLookup =
 /**
  * Resolve a dispatch by full id, unique id prefix, or unique name. A name
  * that several dispatches share is ambiguous rather than "the newest": the
- * caller has an id for exactly this case.
+ * caller has an id for exactly this case. An exact name that is also another
+ * dispatch's id prefix is ambiguous too; namespace-like spellings must not
+ * make this function silently choose one dispatch.
  *
  * The name is matched as GIVEN and as RECORDED. `--name 'Fix the row_base
  * hazard'` is stored as the branch-safe `fix-the-row_base-hazard`, so a proxy
@@ -301,7 +341,7 @@ export function findDispatch(records: readonly DispatchRecord[], query: string):
   if (exact != null) return { ok: true, record: exact, by: 'id' };
   const sanitized = sanitizeName(q);
   const byName = records.filter((record) => record.opened?.name === q || record.opened?.name === sanitized);
-  if (byName.length === 1) return { ok: true, record: byName[0]!, by: 'name' };
+  const byPrefix = q.length >= 4 ? records.filter((record) => record.id.startsWith(q)) : [];
   if (byName.length > 1) {
     return {
       ok: false,
@@ -309,7 +349,17 @@ export function findDispatch(records: readonly DispatchRecord[], query: string):
       message: `${byName.length} dispatches are named "${q}": ${byName.map((r) => r.id).join(', ')} — use an id.`,
     };
   }
-  const byPrefix = q.length >= 4 ? records.filter((record) => record.id.startsWith(q)) : [];
+  const otherPrefixMatches = byPrefix.filter((record) => byName[0]?.id !== record.id);
+  if (byName.length === 1 && otherPrefixMatches.length > 0) {
+    return {
+      ok: false,
+      reason: 'ambiguous',
+      message:
+        `"${q}" is both the exact name of dispatch ${byName[0]!.id} and an id prefix for dispatch${otherPrefixMatches.length === 1 ? '' : 'es'} ${otherPrefixMatches.map((r) => r.id).join(', ')} — ` +
+        'use the full UUID of the dispatch you intend.',
+    };
+  }
+  if (byName.length === 1) return { ok: true, record: byName[0]!, by: 'name' };
   if (byPrefix.length === 1) return { ok: true, record: byPrefix[0]!, by: 'prefix' };
   if (byPrefix.length > 1) {
     return {
@@ -376,7 +426,7 @@ export function writePrompt(repoRoot: string, id: string, prompt: string): strin
   const rel = promptPath(id);
   const file = join(repoRoot, rel);
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, prompt);
+  writeFileSync(file, prompt, { encoding: 'utf8', mode: 0o600 });
   return rel;
 }
 

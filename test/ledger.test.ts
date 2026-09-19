@@ -106,6 +106,45 @@ test('the first row of each kind wins: a replayed close cannot overturn the reco
   assert.equal(records[0]!.closed?.verb, 'merged');
 });
 
+test('closed-before-stopped is a legal ledger order and remains readable', (t) => {
+  const root = tempRepo(t);
+  const id = newDispatchId();
+  appendRow(root, opened(id));
+  appendRow(root, { row: 'closed', id, at: '2026-09-07T10:01:00.000Z', verb: 'kept', note: 'caller decided early' });
+  appendRow(root, stopped(id, { at: '2026-09-07T10:02:00.000Z', final_message: 'late report' }));
+
+  const raw = readLedger(root);
+  assert.equal(raw.unreadable, 0);
+  assert.equal(raw.unknown, 0);
+  assert.deepEqual(raw.rows.map((row) => row.row), ['opened', 'closed', 'stopped']);
+  const record = readDispatches(root).records[0]!;
+  assert.equal(record.state, 'closed');
+  assert.equal(record.closed?.verb, 'kept');
+  assert.equal(record.stopped?.final_message, 'late report');
+});
+
+test('a durable stopped row merges later optional inspection without replacing the original evidence', (t) => {
+  const root = tempRepo(t);
+  const id = newDispatchId();
+  appendRow(root, opened(id));
+  appendRow(root, {
+    row: 'stopped', id, at: '2026-09-07T10:01:00.000Z', evidence: 'durable',
+    final_message: 'the original report', dirty: 'unavailable', cwd: '/repo/worktree', model_observed: 'sol',
+  });
+  appendRow(root, {
+    row: 'stopped', id, at: '2026-09-07T10:01:01.000Z', evidence: 'inspected',
+    final_message: 'a replay must not replace this', dirty: { paths: ['notes.md'], truncated: false },
+    cwd: '/repo/worktree', model_observed: 'other', work: { head: 'abc', commits: 1, files: 1, insertions: 1, deletions: 0, binary: 0, conflicts: [] },
+  });
+
+  const record = readDispatches(root).records[0]!;
+  assert.equal(record.stopped?.evidence, 'inspected');
+  assert.equal(record.stopped?.final_message, 'the original report');
+  assert.equal(record.stopped?.model_observed, 'sol');
+  assert.deepEqual(record.stopped?.dirty, { paths: ['notes.md'], truncated: false });
+  assert.equal(record.stopped?.work?.commits, 1);
+});
+
 test('closeDispatch replays the same verb and refuses a different one', (t) => {
   const root = tempRepo(t);
   const id = newDispatchId();
@@ -148,6 +187,15 @@ test('findDispatch resolves by id, by unique prefix, and by unique name; ambigui
   assert.match(dupName.ok ? '' : dupName.message, /use an id/);
   const dupPrefix = findDispatch(records, '11111111');
   assert.ok(!dupPrefix.ok && dupPrefix.reason === 'ambiguous');
+  const namePrefix = findDispatch(
+    correlate([
+      opened('aaaaaaa1-aaaa-aaaa-aaaa-aaaaaaaaaaaa', { name: 'bbbbbbbb' }),
+      opened('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', { name: 'other' }),
+    ]),
+    'bbbbbbbb',
+  );
+  assert.ok(!namePrefix.ok && namePrefix.reason === 'ambiguous');
+  assert.match(namePrefix.ok ? '' : namePrefix.message, /exact name.*id prefix/);
   const unknown = findDispatch(records, 'nope');
   assert.ok(!unknown.ok && unknown.reason === 'unknown');
   assert.match(unknown.ok ? '' : unknown.message, /known names: fix-login, docs/);

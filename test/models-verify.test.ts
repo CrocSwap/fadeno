@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { ModelsVerifyError, runModelsVerify } from '../src/commands/models-verify.ts';
 import { unknownFlagsFor } from '../src/commands/completion.ts';
-import { readVerifiedModels, recordVerifiedModel, type UserPathOptions } from '../src/lib/user-paths.ts';
+import { readVerifiedModels, recordVerifiedModel, type UserPathOptions, userPaths } from '../src/lib/user-paths.ts';
 import { catalogV4, tempRepo } from './helpers.ts';
 
 const CLI = join(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -38,6 +38,23 @@ const CATALOG = catalogV4({
   },
   archetypes: { worker: {}, reviewer: {}, judge: {} },
   dials: { worker: 'sol', reviewer: 'opus on opencode', judge: 'opus' },
+  unregistered_model_harness: 'opencode',
+});
+
+const EXPLICIT_CATALOG = catalogV4({
+  models: {
+    undialed: { provider: 'openai', id: 'undialed-id', effort: 'default' },
+    pinned: { provider: 'openai', id: 'pinned-id', effort: 'default' },
+    alternate: { provider: 'openai', id: 'alternate-id', effort: 'default', spellings: { opencode: 'openai/alternate-delivered' } },
+    unlistable: { provider: 'anthropic', id: 'unlistable-id', effort: 'default' },
+  },
+  harnesses: {
+    codex: { provider: 'openai', command: ['codex', 'exec', '--model', '{model}', '-'], models_command: ['codex-models'], effort_encoding: 'model-suffix' },
+    opencode: { command: ['opencode', 'run', '-m', '{model}'], models_command: ['opencode-models'] },
+    claude: { provider: 'anthropic', command: ['claude', '-p', '--model', '{model}'] },
+  },
+  archetypes: { worker: {} },
+  dials: { worker: 'undialed' },
   unregistered_model_harness: 'opencode',
 });
 
@@ -80,7 +97,7 @@ test('models verify: a still-listed model is re-probed past the cache and gets a
   const row = result.rows[0]!;
   assert.equal(row.outcome, 'verified');
   assert.equal(row.model, 'sol');
-  assert.deepEqual(row.archetypes, ['worker']);
+  assert.deepEqual(row.archetypes, [], 'an explicit registry ref is not presented as a dialed archetype');
   assert.ok(row.verified_at != null && row.verified_at > '2020-01-01T00:00:00Z');
   assert.equal(result.ok, true);
 
@@ -168,8 +185,8 @@ test('models verify: refs and --harness narrow, and an unmatched ref is an error
     () => runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['sol', 'nope'], spawn: backends(listings).spawn }),
     (err: unknown) => {
       assert.ok(err instanceof ModelsVerifyError);
-      assert.match(err.message, /no dialed model matches "nope"/);
-      assert.match(err.message, /dialed models: opus, sol/);
+      assert.match(err.message, /unknown model reference "nope"/);
+      assert.match(err.message, /registered aliases: opus, sol/);
       return true;
     },
   );
@@ -208,21 +225,92 @@ test('models verify: aliases sharing one delivery all stay matchable', (t) => {
   assert.equal(all.rows.length, 1, 'one pair, probed once');
   assert.deepEqual(all.rows[0]!.archetypes, ['reviewer', 'worker']);
 
-  // Collecting spellings only when the target was CREATED left whichever dial
-  // came first as the sole matchable name, and the other alias — plainly
-  // dialed, right there in `fadeno dial` — threw "no dialed model matches".
-  for (const ref of ['alpha', 'beta', 'alpha-id', 'beta-id', 'openai/alpha-id', 'openai/beta-id', 'same']) {
+  // The aliases and their canonical identities each resolve to the shared
+  // delivery. A delivered id shared by two registered models is ambiguous in
+  // the registry and must not be guessed.
+  for (const ref of ['alpha', 'beta', 'alpha-id', 'beta-id', 'openai/alpha-id', 'openai/beta-id']) {
     const narrowed = runModelsVerify({ repoRoot: root, userPathOptions: user, refs: [ref], spawn: backends(listings).spawn });
     assert.deepEqual(byPair(narrowed), { 'codex same': 'verified' }, `ref ${ref} must select the shared pair`);
   }
 
   assert.throws(
+    () => runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['same'], spawn: backends(listings).spawn }),
+    (err: unknown) => {
+      assert.ok(err instanceof ModelsVerifyError);
+      assert.match(err.message, /registered aliases: alpha, beta/, 'both names are reported, not just the first');
+      return true;
+    },
+  );
+  assert.throws(
     () => runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['nope'], spawn: backends(listings).spawn }),
     (err: unknown) => {
       assert.ok(err instanceof ModelsVerifyError);
-      assert.match(err.message, /dialed models: alpha, beta/, 'both names are reported, not just the first');
+      assert.match(err.message, /registered aliases: alpha, beta/, 'unknown refs name the registry, not only dials');
       return true;
     },
+  );
+});
+
+test('models verify: explicit refs resolve undialed registry entries, efforts, identities, harnesses, and deduplicate', (t) => {
+  const { root, user } = seed(t);
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), EXPLICIT_CATALOG);
+  const listings = {
+    'codex-models': { stdout: 'undialed-id\npinned-id-high\nalternate-id\n' },
+    'opencode-models': { stdout: 'openai/alternate-delivered\nundialed-id\n' },
+  };
+  const { spawn, seen } = backends(listings);
+
+  const result = runModelsVerify({
+    repoRoot: root,
+    userPathOptions: user,
+    refs: ['undialed', 'undialed-id', 'openai/undialed-id', 'pinned@high', 'alternate'],
+    spawn,
+  });
+  assert.deepEqual(byPair(result), {
+    'codex alternate-id': 'verified',
+    'codex undialed-id': 'verified',
+    'codex pinned-id-high': 'verified',
+  });
+  assert.deepEqual(seen.sort(), ['codex-models', 'codex-models', 'codex-models'], 'duplicate refs share one delivered harness/model probe');
+  assert.deepEqual(result.rows.map((row) => row.archetypes), [[], [], []]);
+
+  const byProvider = runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['openai/undialed-id'], spawn: backends(listings).spawn });
+  assert.deepEqual(byPair(byProvider), { 'codex undialed-id': 'verified' });
+
+  const byDeliveredId = runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['openai/alternate-delivered'], spawn: backends(listings).spawn });
+  assert.deepEqual(byPair(byDeliveredId), { 'opencode openai/alternate-delivered': 'verified' });
+
+  const byHarness = runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['undialed'], harness: 'opencode', spawn: backends(listings).spawn });
+  assert.deepEqual(byPair(byHarness), { 'opencode undialed-id': 'verified' });
+});
+
+test('models verify: an explicit user-catalog alias works immediately after it is added, and invalid explicit deliveries fail loudly', (t) => {
+  const { root, user } = seed(t);
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), EXPLICIT_CATALOG);
+  mkdirSync(join(userPaths(user).executorsFile, '..'), { recursive: true });
+  writeFileSync(userPaths(user).executorsFile, catalogV4({
+    models: { justadded: { provider: 'openai', id: 'just-added-id', effort: 'default' } },
+    harnesses: {},
+  }));
+  const listings = { 'codex-models': { stdout: 'just-added-id\n' } };
+  const added = runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['justadded'], spawn: backends(listings).spawn });
+  assert.deepEqual(byPair(added), { 'codex just-added-id': 'verified' });
+
+  assert.throws(
+    () => runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['host'], spawn: backends(listings).spawn }),
+    /host session.*no externally listable model delivery/,
+  );
+  assert.throws(
+    () => runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['unlistable'], spawn: backends(listings).spawn }),
+    /unlistable harness "claude"/,
+  );
+  assert.throws(
+    () => runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['justadded on codex'], harness: 'opencode', spawn: backends(listings).spawn }),
+    /harness mismatch/,
+  );
+  assert.throws(
+    () => runModelsVerify({ repoRoot: root, userPathOptions: user, refs: ['openai/alternate-delivered'], harness: 'codex', spawn: backends(listings).spawn }),
+    /does not match harness "codex".*opencode/,
   );
 });
 
@@ -257,6 +345,10 @@ test('models verify: the CLI exits non-zero only on a definitive miss, under bot
   const listed = runCli(['models', 'verify', 'sol', '--json']);
   assert.equal(listed.status, 0);
   assert.equal(JSON.parse(listed.stdout).rows[0].outcome, 'verified');
+
+  const singular = runCli(['model', 'verify', 'sol', '--json']);
+  assert.equal(singular.status, 0);
+  assert.equal(JSON.parse(singular.stdout).rows[0].outcome, 'verified');
 
   // Same handler under the singular spelling, and the miss is what fails.
   const missing = runCli(['model', 'verify', '--harness', 'opencode']);

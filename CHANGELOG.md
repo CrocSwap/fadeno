@@ -4,10 +4,54 @@ All notable changes to Fadeno are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [Unreleased] — 0.7.0 candidate
+
+This candidate completes the rewrite of Fadeno as a meta-harness for subagent
+work. It routes archetypes to models, gives every dispatch a contract and an
+isolated worktree, and records the lifecycle without pretending to be a
+workflow engine.
 
 ### Changed
 
+- **Command reports preserve failure context.** Report reads carry nonzero
+  executor status and stderr cause even when partial stdout exists. Proxy and
+  host guidance name full-report retrieval and the no-live-inbox follow-up
+  workflow; shared-tree reports distinguish retained checkout data from
+  eligible Fadeno scratch.
+- **Lifecycle ownership and contracts are explicit.** Worker and director
+  contracts make commit and upstream-merge duties conditional on implementation
+  or integration work. Report-only tasks recommend `reviewed`; authorized
+  inspection outside the assigned tree is allowed. A dispatch cannot close
+  itself, while its caller may close child dispatches.
+- **Cleanup preserves live handoffs and dispatch artifacts.** Cleanup retires
+  eligible files individually, keeps scratch directories, protects concurrent
+  starts and live cancellation/report files, and reports unexpected filesystem
+  errors with recoverable paths.
+- **Codex staged relay prompts survive failed handoffs.** Command-lane relay
+  creation uses claim/finalize/rollback, allowing an identical retry after a
+  staging failure without exposing plaintext.
+- **Log following closes the progress-to-watcher gap.** Bytes and stop rows
+  arriving between a read and watcher setup are observed without another write.
+- **Command-lane close/report races are now fail-safe.** A dispatch refuses to
+  close itself, while its caller/host may close child dispatches. `dispatch-wait`
+  trusts only `stopped` as report-ready, waits through a close-only live process,
+  settles and reconstructs a dead one, and the direct launcher still returns
+  executor stdout when an older client wrote `closed` early. Worker and director
+  contracts now state the ownership rule explicitly.
+- **Codex first use no longer has a setup step.** `$fadeno-host` invokes a
+  narrow, idempotent bootstrap that reconciles the user-scoped `fadeno-*`
+  archetype names Codex requires. The files contain no model or reasoning
+  effort, so dials and future Codex model changes stay live at spawn time;
+  `host` follows the current session and `models verify` detects removed named
+  models. Codex loads agent definitions at session start, so a changed first
+  activation still requires one fresh session.
+- **Dispatch lifecycle reminders and cleanup were revised.** Unclosed rows are
+  now advisory and never cap spawning. A compact reminder is derived from the
+  ledger on every host user turn, while `SubagentStop` remains best-effort.
+  `dispatch-close` accepts neutral `--reviewed`, and `clean` may remove a
+  stopped dispatch's clean, readable worktree without closing it; branches,
+  dirty trees, unreadable trees, and live dispatches remain protected. The
+  legacy `unclosed_limit` catalog key is read and ignored.
 - **The reserved model `current-host` is now `host`.** One word for one
   referent — host mode, the host lane, the harness table's `host:` block — and
   a bare identifier at last, so the reserved name is no longer the single model
@@ -17,13 +61,11 @@ All notable changes to Fadeno are documented here. The format follows
   name, so the layer it writes stops carrying the old one. Ledger rows keep
   whatever they were written with — history is not rewritten.
 
-## [0.7.0] — the rewrite
+## 0.7.0 candidate details
 
-Fadeno was a playbook engine that had grown a dispatch layer. It is now the
-dispatch layer, and nothing else. Sixty thousand lines across eighty files
-became ten thousand across twenty-one; the surviving behaviour is specified in
-`docs/redesign/spec.html` and every call in it is argued in
-`docs/redesign/decisions.html`.
+The candidate establishes Fadeno as the dispatch layer, and nothing else.
+The surviving behaviour is specified in `docs/redesign/spec.html` and every
+call in it is argued in `docs/redesign/decisions.html`.
 
 **This is a clean break.** There is no migration path from 0.6, by decision:
 0.6.0 is published and two repositories run it, and designing around that past
@@ -44,35 +86,28 @@ would have cost more than fixing those projects when it bites.
   relay; `dispatch-stop` reads the agent's transcript, finds the dispatch by the
   contract header in its prompt, and records the last message and the model the
   agent actually ran on.
-- **A real Codex host lane.** A Codex `PreToolUse` hook can refuse a spawn and
-  not rewrite one, so the wrapper hands the corrected spawn back instead of
-  applying it: the first archetype spawn is refused with the dispatch already
-  open and the exact call to make — agent type, model, reasoning effort, and the
-  path to the contract-bearing prompt — and the retry, which carries that
-  contract, is checked against the dispatch it names and passes in silence.
-  `dispatch-open --stage-prompt` writes the prompt where the host can read it;
-  `--reuse-open` returns the dispatch already open for that archetype and name,
-  so a fumbled retry cannot cut a second worktree. Previously every Codex
-  archetype spawn was pushed to the command lane.
+- **A real Codex host lane.** `prompt-stage` carries plaintext through Codex's
+  sealed spawn messages with a one-use task name. `PreToolUse` checks routing
+  and reserves the handoff; `SubagentStart` opens the dispatch and delivers its
+  contract. Failed handoffs roll back the claim so the same task can be retried.
+  Host capacity overflow uses the same model through a command dispatch.
 - **`model_observed`** on the stopped row: what the agent reported running on,
   beside what the dial asked for. The only way to catch a harness that ignored
   the model a spawn passed. `model_id` joins the opened row beside it, so that
   comparison is exact rather than a substring guess.
 - **`context`** — one source for the host vocabulary, delivered both to a host
   session's hook and into a spawned director's prompt, so the two cannot drift.
-- **The nag.** At every spawn the session is reminded of every unclosed dispatch
-  in the repository; at five, the next spawn is refused. Repository-wide, not
-  session-wide, so grandparents inherit orphans.
+- **The nag.** At every spawn and host user turn the session is reminded of
+  unclosed dispatches in the repository. Repository-wide, not session-wide, so
+  grandparents inherit orphans; reminders never refuse a spawn.
 - **`worktrees`** as its own verb: the cross-session safety net, listing every
   Fadeno worktree holding uncommitted paths or unmerged commits.
-- **`setup` sweeps the agent files an earlier Fadeno materialized** — anything
-  carrying the `# fadeno:managed` marker under `~/.codex/agents` or
-  `.codex/agents`. Nothing writes one now, and on Codex a stale one silently
-  overrides the dial it was meant to serve. A file without the marker is the
-  user's and is never touched.
+- **Codex archetype files carry vocabulary, never routing.** Fadeno sweeps old
+  managed files and reconciles `fadeno-*` user agents containing no model or
+  effort. A same-named file without the marker is the user's and is never
+  overwritten.
 - **`status` reports a hand-written agent file** whose name Fadeno also routes.
-  Fadeno materializes none itself, so such a file is the user's — and on Codex
-  it silently overrides the dial.
+  On Codex its model can silently override the dial.
 
 ### Changed — BREAKING
 
@@ -106,9 +141,9 @@ would have cost more than fixing those projects when it bites.
   routability predicate, blinded judging, and the `mkdir` lock in
   `.fadeno/local/dials` that existed only so two processes could not
   oversubscribe an attachment. No locks anywhere now.
-- **Steering apply.** Nothing is written to `~/.codex/agents` or
-  `.claude/agents`, so nothing goes stale. Model and effort are applied at spawn
-  time.
+- **Steering apply.** Model and effort are resolved at spawn time rather than
+  persisted in agent files. Codex still receives managed, model-neutral
+  archetype definitions at explicit host activation.
 - **Run snapshots**, the caller-prompt digest and relay attestation, the writer
   lease and the concurrent-write window log, deadlines, and the
   `FADENO_IN_DISPATCH` provenance family.

@@ -3,10 +3,11 @@
  *
  * One rule set, both lanes (spec §04): cut from HEAD or a named ref, never
  * from dirty state; on a branch named `fadeno/<name>` so git and the ledger
- * agree on one identifier; if `git worktree add` fails the spawn proceeds in
- * the shared tree and says so, because an environment problem must not cost
- * a turn. Nothing here consults or creates repo-wide state: two cuts never
- * collide, and cutting reads nothing but git.
+ * agree on one identifier. The spawn wrapper owns the distinction between an
+ * omitted baseline (where an environmental add failure may proceed shared)
+ * and an explicit baseline (where that failure refuses). Nothing here
+ * consults or creates repo-wide state: two cuts never collide, and cutting
+ * reads nothing but git.
  *
  * Removal never destroys a worktree holding uncommitted work. The branch is
  * left behind on purpose — the merge was real, and history survives.
@@ -153,8 +154,9 @@ export function currentBranch(dir: string): string | null {
 }
 
 /**
- * Cut a worktree for `name` from `from` (default HEAD). The name must already
- * be unique — see `uniqueName` — because this consults nothing but git.
+ * Cut a worktree for `name` from the literal Git ref in `from` (default HEAD).
+ * The spawn wrapper resolves dispatch names through the ledger before calling
+ * this Git-only primitive. The name must already be unique — see `uniqueName`.
  */
 export function cutWorktree(opts: { repoRoot: string; name: string; from?: string | null }): CutOutcome {
   const { repoRoot, name } = opts;

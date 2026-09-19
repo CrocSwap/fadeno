@@ -1,3 +1,5 @@
-name: fadeno-setup
-description: Set up Fadeno's user-scoped catalog and host integration.
-allow_implicit_invocation: false
+interface:
+  display_name: "Fadeno Setup"
+  short_description: "Set up Fadeno's user-scoped catalog and host integration."
+policy:
+  allow_implicit_invocation: false

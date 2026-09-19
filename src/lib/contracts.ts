@@ -7,7 +7,7 @@
  * once, deterministically, at the right moment: the worker's contract goes
  * into every dispatched prompt; the host vocabulary goes into a host session
  * at activation and into a spawned director's prompt; the nag goes to the
- * host at every spawn. None of it is stored in the ledger — injected text is
+ * host at every spawn and the compact reminder goes to every host turn. None of it is stored in the ledger — injected text is
  * identical every time, so recording it would make the log describe Fadeno
  * instead of the work.
  */
@@ -15,9 +15,6 @@
 import type { DispatchRecord } from './ledger.ts';
 import { ageMinutes } from './ledger.ts';
 import type { Preamble } from './preamble.ts';
-
-/** Refused at this many unclosed dispatches unless the catalog says otherwise. */
-export const DEFAULT_UNCLOSED_LIMIT = 5;
 
 /**
  * The canonical five, in the order a director should read them. The set is
@@ -70,25 +67,27 @@ export const CONTRACT_FOOTER = '## End of Fadeno dispatch contract';
  */
 export function workerContract(input: WorkerContractInput): string {
   const lines: string[] = [];
+  const upstream = input.worktree.kind === 'worktree' ? `\`${input.worktree.upstream}\`` : 'its upstream branch';
   lines.push(`${CONTRACT_HEADER} ${input.id} (${input.name})`, '');
   lines.push(`You are the \`${input.archetype}\` for this dispatch. Fadeno recorded it; your caller will read your report and decide what to do with your work.`, '');
   if (input.worktree.kind === 'worktree') {
     const wt = input.worktree;
     lines.push('**Where to work.**');
-    lines.push(`- Your worktree is \`${wt.absolute}\`, on branch \`${wt.branch}\`, cut from \`${wt.upstream}\` at \`${wt.base.slice(0, 12)}\`. Work there and nowhere else; the repository at \`${input.repoRoot}\` is someone else's tree.`);
+    lines.push(`- Your assigned worktree is \`${wt.absolute}\`, on branch \`${wt.branch}\`, cut from \`${wt.upstream}\` at \`${wt.base.slice(0, 12)}\`. Put modifications and commits there; the repository at \`${input.repoRoot}\` is someone else's tree.`);
+    lines.push('- Assigned-worktree containment applies to modifications and commits. A caller-authorized read-only inspection outside the assigned tree, including the main repository or another source tree, is allowed; do not write or commit outside the assigned tree.');
     lines.push('- The worktree checks out tracked content only. If a build environment (`node_modules`, `.venv`, `target`, `vendor`) is missing and a check you were asked to run cannot run, say so and report the work as unverified. Never substitute a weaker check and call it a pass.', '');
-    lines.push('**You own the work.**');
-    lines.push('- Make the change and commit it on your branch, with a message that says what and why.');
-    lines.push(`- Before you finish, merge \`${wt.upstream}\` into your branch and resolve any conflicts in your own worktree, the way a pull-request author would. Leave the tree clean: no conflict markers, nothing uncommitted you meant to keep.`, '');
   } else {
     lines.push('**Where to work.**');
     lines.push(
       `- You are working in the shared tree at \`${input.repoRoot}\`${input.worktree.reason ? ` (no worktree was cut: ${input.worktree.reason})` : ''}. Other agents may have uncommitted work here.`,
     );
     lines.push('- Never run `git checkout`, `switch`, `restore`, `reset`, `stash` or `clean` in a shared tree: they throw away work that is not yours with no way back. If your own edit was wrong, edit the file to what it should be. If the tree is in a state you cannot work from, stop and report it.', '');
-    lines.push('**You own the work.**');
-    lines.push('- Make the change and commit it, with a message that says what and why.', '');
+    lines.push('- Assigned-tree containment applies to modifications and commits. A caller-authorized read-only inspection outside the assigned tree is allowed; do not write or commit in another source tree.', '');
   }
+  lines.push('**You own the assigned task and report end to end.**');
+  lines.push(`- Let the caller's task and your assigned archetype decide whether this is implementation/integration work or report-only work. For implementation or integration, make the requested changes in the assigned tree, commit them with a message that says what and why, and, when you have an isolated branch, merge ${upstream} into your own tree before finalising and resolve conflicts there.`);
+  lines.push('- For a report-only task (such as review, exploration, or judging), inspect what the caller authorized, change nothing, and do not fabricate a commit or merge. Report the findings and recommend `reviewed`.');
+  lines.push('- A director coordinates delegated work: it does not implement a child\'s delegated feature itself, but it does integrate accepted child changes in its assigned tree when the task calls for integration, then reports that result. Custom archetypes follow their declared role and the caller\'s task.', '');
   lines.push(...preambleSection(input.preamble, input.repoRoot));
   // A worker handed "do BPW1 and BPA1" refused both because one of them was
   // impossible, and the dispatch produced nothing. Deciding how much of a task
@@ -100,10 +99,10 @@ export function workerContract(input: WorkerContractInput): string {
   lines.push('**Your final message.**');
   lines.push('- State what is in the tree: every file you changed, added or deleted, and anything untracked you left behind on purpose.');
   lines.push('- Say what you verified and how, and what you could not verify.');
-  lines.push('- Recommend whether your work should be merged or discarded, in one line, and why. It is a recommendation: your caller reaches their own conclusion.');
+  lines.push('- For implementation or integration work, recommend whether the result should be merged, kept, discarded, or failed, in one line, and why. For report-only work, recommend `reviewed` in one line. It is a recommendation: your caller reaches their own conclusion.');
   lines.push('- Do not ask questions you cannot get answered; make a reasonable call, state the assumption, and continue.', '');
   if (input.vocabulary != null && input.vocabulary.trim() !== '') {
-    lines.push('**You may spawn.** The dispatches you open are recorded under yours; close every one before you finish, and report each by name. What follows is what a host session is told.', '');
+    lines.push('**You may spawn.** Never close the dispatch you are currently running in: it must return its report, and your caller/host closes it. Only close dispatches you opened (for a director, these are child dispatches), after reading their reports, and report each by name. What follows is what a host session is told.', '');
     lines.push(input.vocabulary.trim(), '');
   } else {
     // Everything a delegate needs that only a director was being told.
@@ -116,7 +115,8 @@ export function workerContract(input: WorkerContractInput): string {
     const names = (input.archetypes ?? Object.keys(BUILTIN_ARCHETYPE_DESCRIPTIONS).sort()).map((n) => `\`${n}\``).join(', ');
     lines.push('**If you delegate.**');
     lines.push(`- Name a Fadeno archetype as the agent type — ${names}. A generic subagent is refused; the name is the whole interface, and Fadeno routes it. \`fadeno context\` prints the rest.`);
-    lines.push('- Every dispatch you open is yours to close before you finish (`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed`), and to report by name.', '');
+    lines.push('- Never close the dispatch you are currently running in. It must return its report; its caller/host closes it.');
+    lines.push('- Only close dispatches you opened, after reading their reports (`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed|--reviewed`), and report each by name.', '');
   }
   lines.push('**If Fadeno itself gets in your way.**');
   lines.push(`- A message that misled you, a refusal you could not act on, a step you had to guess at: \`fadeno feedback "<what happened>" --dispatch ${input.name}\`. It appends to \`.fadeno/feedback.md\` in the main checkout — not your worktree — with the harness and version attached, and that file is what whoever maintains Fadeno reads.`);
@@ -163,7 +163,6 @@ export interface ArchetypeLine {
 export interface HostVocabularyInput {
   archetypes: ArchetypeLine[];
   unclosed: DispatchRecord[];
-  unclosedLimit: number;
   /** `.fadeno/preamble.md`, so the host knows what its dispatches already carry. */
   preamble?: Preamble | null;
   /**
@@ -219,6 +218,11 @@ export function hostVocabulary(input: HostVocabularyInput): string {
         'A spawn carrying no model, or a different one, is REFUSED: a Codex hook can refuse a spawn but cannot rewrite one, so an unrouted subagent ' +
         "would silently run on this session's model.",
     );
+    lines.push(
+      '- Before every Codex archetype spawn, stage the exact task so Fadeno can record it even when Codex encrypts `message`: use the resolved launcher from the host skill and run `<cli> prompt-stage --name <semantic-name> --prompt-file <file> --json` (or pipe it to `<cli> prompt-stage --name <semantic-name> --json`). Put the returned `task_name` on the spawn exactly; it is a one-use, ten-minute handoff carrying a readable lowercase slug and opaque lowercase token. If the message is readable, staging is still the deterministic path, while an unstaged readable prompt remains supported for older Codex versions.',
+      '- Codex native subagent threads have a runtime concurrency limit; command-lane processes do not consume native slots. Keep the host lane for interactive work and use the command lane for planned overflow or broad fan-out.',
+      '- If a correctly routed Codex spawn fails before opening with `agent thread limit reached`, retry the identical archetype, model, effort, prompt, and worktree policy through a direct `fadeno dispatch` using the resolved launcher, carrying the same `--model <model>@<effort>` ref and the same shared/worktree options. Do not substitute a model. Run it through a managed foreground shell, never `nohup` or a manually invoked executor argv; if the shell yields while it continues, use `fadeno dispatch-wait <name>`. A native capacity refusal creates no dispatch, so when `--dispatch` cannot resolve the attempted name, record repository-level friction with `fadeno feedback "<what happened>"` without `--dispatch`.',
+    );
     lines.push('- Nothing else has to be added to the spawn. Fadeno opens the dispatch and hands the agent its contract as it starts, so write the prompt as the task alone.');
   } else {
     lines.push('- Spawn through your harness\'s subagent tool with the archetype as the agent type (`fadeno:worker` on Claude Code). Where no Fadeno hook can observe a spawn, run `fadeno dispatch --archetype <name> --prompt-file <file>` instead; it does the same thing as a process.');
@@ -229,7 +233,7 @@ export function hostVocabulary(input: HostVocabularyInput): string {
       ? '- This repository states conventions for every dispatch in `.fadeno/preamble.md`, and Fadeno delivers them to every agent it dispatches. Do not repeat them in a brief; read the file if you need to know what your workers were already told, and add to it rather than to a prompt when something turns out to hold for all of them.'
       : '- Conventions that hold for EVERY dispatch here — the interpreter, the shared build directory, where receipts belong, what is forbidden — belong in `.fadeno/preamble.md`, which Fadeno appends to every dispatched prompt when it exists. Putting one there beats retyping it into each brief, and makes a brief that forgets it impossible.',
   );
-  lines.push('- Every dispatch gets a worktree cut from HEAD on a branch named `fadeno/<name>`. If the work needs uncommitted changes, commit them first, or ask for the shared tree by saying so in the spawn (`--shared` on the command lane). Two agents must never share one tree.');
+  lines.push('- Every dispatch gets a worktree on a branch named `fadeno/<name>`, cut from HEAD unless the spawn names a Git ref/SHA or a retained dispatch with `--from`. A retained dispatch must still have a reachable isolated branch; a shared dispatch or missing branch cannot supply a baseline, so commit the desired state and pass that Git ref/SHA. `--shared` and `--from` are incompatible. If the work needs uncommitted changes, ask for the shared tree (`--shared`) without `--from`. Two agents must never share one tree.');
   // Escalation had one sentence of policy and no mechanics, and a host that
   // wanted to use it had to guess three things: where the model goes, what a
   // model is called, and what happens when the name is wrong. The mechanics
@@ -247,9 +251,11 @@ export function hostVocabulary(input: HostVocabularyInput): string {
   lines.push('It owns the change: it commits on its branch, merges from upstream before finishing, and its final message states what is in the tree and recommends merge or discard. That recommendation is a claim, not a finding: read the diff, run what you can, and reach your own conclusion.', '');
   lines.push('`fadeno dispatches <name>` prints the two apart: what Fadeno measured from git — commits the branch carries that HEAD does not, the diffstat, and any conflict markers it committed — and, below it, what the agent said. The measured half is safe to trust because no agent had a hand in it. A report claiming a test suite passed is worth exactly as much as the sentence; run it yourself, or send a reviewer.', '');
   lines.push('## Closing', '');
-  lines.push('Every dispatch must be closed with exactly one decision: `fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed [--note <text>]`. Fadeno performs no merge; you do (`git merge fadeno/<name>`), or you delegate it. `--kept` means the branch stays for later; `--discarded` and `--failed` leave the branch too, so nothing is lost by closing.', '');
+  lines.push('Never close the dispatch you are currently running in: it must return its report, and its caller/host closes it. Only close dispatches you opened — for a director, these are child dispatches — after reading their reports.', '');
+  lines.push('After a Fadeno host agent returns a final response, inspect its dispatch. If it is still `open`, or if it is `awaiting close` with worktree inspection pending, save the already-received final response to a file and replay the idempotent stop with `fadeno dispatch-stop <name|id> --message-file <path>`; then inspect the report and close it normally. Stdin remains supported for a one-shot invocation, but a live two-process pipeline is not the default recovery path. The stop hook\'s durable receipt makes this replay safe even when its optional worktree inspection was interrupted.', '');
+  lines.push('Every dispatch must be closed with exactly one decision: `fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed|--reviewed [--note <text>]`. Fadeno performs no merge; you do (`git merge fadeno/<name>`), or you delegate it. `--kept` means the branch stays for later; `--discarded`, `--failed`, and `--reviewed` leave the branch too, so nothing is lost by closing.', '');
   lines.push('`--merged` is checked. It is the only verb that asserts something about the repository rather than about your intent, so Fadeno refuses it while the branch still carries commits HEAD does not have, or while its worktree holds uncommitted tracked changes. If the work landed another way — a squash, a rebase, a reimplementation — close with `--force` and say how in `--note`.', '');
-  lines.push(`Fadeno reminds you of unclosed dispatches at every spawn and refuses a new one at ${input.unclosedLimit} unclosed. \`fadeno dispatches\` lists them, \`fadeno dispatches --output <name>\` shows a report, \`fadeno worktrees\` shows every worktree still holding unmerged work, \`fadeno dispatch-wait <name>...\` blocks until one of them stops (several names answer on the first, so a fan-out needs one call rather than a poll per dispatch), and \`fadeno cancel <name>\` stops a running command-lane dispatch.`, '');
+  lines.push('Fadeno reminds you of unclosed dispatches at every spawn and every host turn, but never refuses a spawn because work is unclosed. `fadeno dispatches` lists them, `fadeno dispatches --output <name>` shows a report, `fadeno worktrees` shows every worktree still holding unmerged work, `fadeno dispatch-wait <name>...` blocks until one of them stops (several names answer on the first, so a fan-out needs one call rather than a poll per dispatch), and `fadeno cancel <name>` stops a running command-lane dispatch.', '');
   lines.push('## When Fadeno fails', '');
   lines.push('A refused spawn, a dispatch that exits non-zero or returns nothing, or a resolver error is a user-facing event. Report it with the dispatch id and the error text, and do not substitute a generic subagent, another model, or your own hands for the delegated work without being told to.', '');
   // The channel from the agents USING Fadeno to the people changing it. It
@@ -261,7 +267,7 @@ export function hostVocabulary(input: HostVocabularyInput): string {
       'It appends to `.fadeno/feedback.md` with the harness and version attached, and that file is what whoever maintains Fadeno reads. Report the friction to your user as well; the file is for the maintainer, not for them.',
     '',
   );
-  lines.push(nagText(input.unclosed, input.unclosedLimit, input.now));
+  lines.push(nagText(input.unclosed, input.now));
   return lines.join('\n').replace(/\n{3,}/g, '\n\n');
 }
 
@@ -284,39 +290,44 @@ export function describeUnclosed(record: DispatchRecord, now?: Date): string {
   return `- \`${opened?.name ?? record.id}\` ${record.id.slice(0, 8)} — ${opened?.archetype ?? '?'}${where}, ${state}, ${formatAge(ageMinutes(record, now))} old${parent}`;
 }
 
-/**
- * What the limit counts: dispatches whose agent has STOPPED and whose
- * decision has not been made.
- *
- * Not everything unclosed. A running dispatch has no report to read and
- * nothing to decide, so counting it produced a refusal whose only instruction
- * — close some — the recipient could not carry out. In Basanos a reviewer was
- * refused because the host's five dispatches were all still executing, and it
- * narrowed its own audit instead. A refusal must name an action its recipient
- * can take; this one named waiting.
- *
- * The hygiene the limit exists for is unaffected: unread reports still pile up
- * and still refuse the next spawn. Fan-out is a judgement, and Fadeno does not
- * cap judgement.
- */
+/** Dispatches whose agent stopped and whose decision has not been made. */
 export function awaitingDecision(unclosed: readonly DispatchRecord[]): DispatchRecord[] {
   return unclosed.filter((record) => record.stopped != null);
 }
 
 /** The reminder that keeps the ledger honest: nothing is forgotten silently. */
-export function nagText(unclosed: readonly DispatchRecord[], limit: number, now?: Date): string {
+export function nagText(unclosed: readonly DispatchRecord[], now?: Date): string {
   if (unclosed.length === 0) return 'No unclosed dispatches in this repository.';
   const waiting = awaitingDecision(unclosed);
   const lines = [
-    `## Unclosed dispatches (${unclosed.length}; ${waiting.length} of ${limit} allowed are waiting on you)`,
+    `## Unclosed dispatches (${unclosed.length}; ${waiting.length} stopped and waiting on you)`,
     '',
   ];
-  lines.push('Review each and close it; a stopped dispatch is waiting for you to read its report and decide. A running one is not counted against the limit — there is nothing yet to decide.');
+  lines.push('Review each and close it; a stopped dispatch is waiting for you to read its report and decide. A running one has no report to decide yet.');
   for (const record of unclosed) lines.push(describeUnclosed(record, now));
-  if (waiting.length >= limit) {
-    lines.push('', `**At the limit.** The next spawn is refused until some of the STOPPED ones are closed (\`fadeno dispatch-close <name> --merged|--kept|--discarded|--failed\`).`);
-  }
   return lines.join('\n');
+}
+
+/**
+ * Compact, ledger-derived reminder for a host user turn. It deliberately
+ * names only stopped dispatches that need a decision, while still saying when
+ * work is running so a host does not mistake an empty reminder for an empty
+ * ledger.
+ */
+export function hostTurnReminder(unclosed: readonly DispatchRecord[]): string {
+  const waiting = awaitingDecision(unclosed);
+  const running = unclosed.length - waiting.length;
+  if (waiting.length === 0) {
+    return running === 0
+      ? 'Fadeno: no dispatches are waiting for your decision.'
+      : `Fadeno: ${running} dispatch${running === 1 ? '' : 'es'} still running; none is waiting for a decision.`;
+  }
+  const names = waiting.map((record) => `\`${record.opened?.name ?? record.id.slice(0, 8)}\``).join(', ');
+  return (
+    `Fadeno: ${waiting.length} stopped dispatch${waiting.length === 1 ? '' : 'es'} waiting for your decision: ${names}. ` +
+    'Read each report and close it with `fadeno dispatch-close <name|id> --merged|--kept|--discarded|--failed|--reviewed`.' +
+    (running > 0 ? ` ${running} other dispatch${running === 1 ? ' is' : 'es are'} still running.` : '')
+  );
 }
 
 /**
@@ -364,15 +375,5 @@ export function spawnRefusedAsDispatchCommand(prompt: string): string | null {
     'A prompt that tells an agent to dispatch opens two: this one, whose recorded task is the command, and the one the agent then runs. ' +
     'Give the dispatch its name through the spawn itself (the description on a Claude spawn, `--name` on the command line), not through a line inside the brief. ' +
     'Report this refusal to the user instead of routing around it.'
-  );
-}
-
-export function spawnRefusedByLimit(unclosed: readonly DispatchRecord[], limit: number): string | null {
-  const waiting = awaitingDecision(unclosed);
-  if (waiting.length < limit) return null;
-  return (
-    `Fadeno refuses this spawn: ${waiting.length} dispatches have stopped and are waiting for your decision, and the limit is ${limit}. ` +
-    `Read their reports and close them — ${waiting.slice(0, 5).map((r) => `\`${r.opened?.name ?? r.id.slice(0, 8)}\``).join(', ')}${waiting.length > 5 ? ', …' : ''} — ` +
-    'with `fadeno dispatch-close <name> --merged|--kept|--discarded|--failed`. Report this refusal to the user instead of routing around it.'
   );
 }

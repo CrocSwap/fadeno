@@ -9,7 +9,7 @@
 //   - when the archetype resolves to a model that runs as a process, the task
 //     is retargeted to the `dispatch` proxy, whose prompt is the one `fadeno
 //     dispatch` command that runs the staged task;
-//   - when Fadeno refuses (the unclosed limit, a resolver error), the task's
+//   - when Fadeno refuses (a resolver error), the task's
 //     text becomes the refusal and nothing else, so the agent reports it and
 //     stops rather than doing unrecorded work.
 //
@@ -17,15 +17,15 @@
 // (`identity: session` in the catalog), so no model is ever set here. The
 // extension writes nothing; the CLI writes the ledger.
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 
 const CANON_ARCHETYPES = new Set(['director', 'judge', 'reviewer', 'scout', 'worker']);
 const PROXY_AGENT = 'dispatch';
-const CLI_TIMEOUT_MS = 20_000;
 const REPORT_REFUSAL = 'Report this refusal to the user instead of routing around it.';
 const BUNDLED_CLI = join(import.meta.dirname, '..', 'bin', 'fadeno');
+const HOST_SKILL = join(import.meta.dirname, '..', 'skills', 'fadeno-host', 'SKILL.md');
 
 // Task agents' bash calls inherit the omp process environment. Export the
 // plugin's bundled CLI once so the proxy runs the same build this extension
@@ -103,8 +103,11 @@ function proxyPrompt(relay: { command: string }, detail: string): string {
     '```',
     '',
     `It dispatches ${detail}. The prompt is already in the file the command names; do not read it, describe it, or write any file.`,
+    'The command lane has no live inbox or mid-run messaging. Do not try to send it a follow-up or steer it while it runs; put requirements in the original prompt. To change course, let it stop, read the complete report, and start a new dispatch with a new prompt (use `--from <name|id>` only for a retained isolated branch).',
+    'The command\'s stdout is the report channel; stderr and a non-zero exit are failure context. Preserve stdout verbatim even when it is partial or the executor exits non-zero — do not replace it with a success or failure summary.',
+    'The detail view `fadeno dispatches <name>` may show only the bounded ledger preview. It is not the complete report. Use `fadeno dispatches --output <name>` after the dispatch stops to print retained command-lane stdout in full; relay that output verbatim.',
     'If the command exits non-zero, relay its stdout and stderr and say the dispatch failed; do not attempt the task yourself.',
-    'If the bash call is killed or times out, the dispatch is still running and its report is still coming: do not report yet. Run `FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatch-wait <name>` with the `--name` above — it blocks until the dispatch stops and prints the report, exits 2 with "still running" when it reaches its own bound (not an error: run it again), and exits 5 only when the dispatch left no report at all.',
+    'If the bash call is killed or times out, the dispatch is still running and its report is still coming: do not report yet. Run `FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatch-wait <name>` with the `--name` above — it blocks until the dispatch stops and prints the full report, exits 2 with "still running" when it reaches its own bound (not an error: run it again), and a stopped dispatch may still exit non-zero with stdout and an stderr cause that must be relayed. Use `fadeno dispatches --output <name>` if you need to retrieve the complete retained report directly.',
     'Report only what the command printed. Nothing else is yours to claim.',
   ].join('\n');
 }
@@ -159,10 +162,46 @@ async function wrap(input: Record<string, unknown>, cwd: string): Promise<Record
   return changed ? { ...input, tasks } : null;
 }
 
-export default function fadeno(pi: { on: (event: string, handler: (event: any, ctx: any) => any) => void }) {
+/**
+ * The `/fadeno:host` slash handle, byte-faithful to what omp's native
+ * `/skill:fadeno-host` injects: the skill's own body, read from the shipped
+ * SKILL.md at invocation time so the policy has one source. The envelope here
+ * mirrors omp's user-invocation template; if that template ever changes
+ * wording, this copy is a display nicety, not a second policy.
+ */
+function hostSkillMessage(args: string): string {
+  if (!existsSync(HOST_SKILL)) {
+    throw new Error(`Fadeno plugin is missing ${HOST_SKILL} — reinstall or rebuild plugin-omp.`);
+  }
+  const body = readFileSync(HOST_SKILL, 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
+  const userArgs = args.trim();
+  return (
+    `[IMPORTANT: User invoked the "fadeno-host" skill; follow its instructions. Full skill below.]\n` +
+    `${body}\n` +
+    `[Skill directory: ${join(import.meta.dirname, '..', 'skills', 'fadeno-host')}]\n` +
+    `Resolve relative paths in this skill (e.g. \`scripts/foo.js\`, \`templates/config.yaml\`) against this absolute directory; read referenced assets and templates; run scripts with the terminal tool when skill instructions call for it.\n` +
+    (userArgs ? `\nUser: ${userArgs}` : '')
+  ).trim();
+}
+
+export default function fadeno(pi: {
+  on: (event: string, handler: (event: any, ctx: any) => any) => void;
+  registerCommand: (name: string, command: { description?: string; handler: (args: string, ctx: unknown) => void | Promise<void> }) => void;
+  sendUserMessage: (content: string, options?: { deliverAs?: 'steer' | 'followUp' | 'nextTurn' }) => void;
+}) {
   pi.on('tool_call', async (event, ctx) => {
     if (event.toolName !== 'task' || event.input == null || typeof event.input !== 'object') return;
     const input = await wrap(event.input, ctx?.cwd ?? process.cwd());
     return input == null ? undefined : { input };
+  });
+  // The short slash handle. omp names skill commands `skill:<name>`, which no
+  // fuzzy prefix like `/fad` surfaces, so the extension registers the
+  // Claude-style name itself. Prompt-flow delivery: a normal prompt when
+  // idle, a steer while streaming — the same contract as `/skill:`.
+  pi.registerCommand('fadeno:host', {
+    description: 'Enable or disable session-scoped Fadeno host-coordinator mode.',
+    handler: async (args) => {
+      pi.sendUserMessage(hostSkillMessage(args ?? ''));
+    },
   });
 }

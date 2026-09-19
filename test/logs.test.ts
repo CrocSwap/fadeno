@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, unwatchFile, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type ChildProcessWithoutNullStreams } from 'node:test';
 import { outputPaths } from '../src/lib/spawn.ts';
 import { LEDGER_FILE } from '../src/lib/ledger.ts';
+import { readLogsProgress, runLogs, waitForLogsChange } from '../src/commands/logs.ts';
 import { gitRepo } from './helpers.ts';
 
 const CLI = join(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -144,18 +145,105 @@ test('logs --follow preserves appended partial chunks and stops only after the s
   });
   const chunks: Buffer[] = [await waitForData(child)];
 
+  let next = waitForData(child);
   appendFileSync(activity(root, id), 'second');
-  chunks.push(await waitForData(child));
+  chunks.push(await next);
+  next = waitForData(child);
   appendFileSync(activity(root, id), '\nthird');
-  chunks.push(await waitForData(child));
+  chunks.push(await next);
+  next = waitForData(child);
   appendFileSync(activity(root, id), '\n');
-  chunks.push(await waitForData(child));
+  chunks.push(await next);
   // The row is deliberately written only after the last partial chunk. The
   // follower must emit that byte and then observe the stop before exiting.
+  const endedPromise = waitForClose(child);
   stop(root, id);
-  const ended = await waitForClose(child);
+  const ended = await endedPromise;
   assert.equal(ended.code, 0, `stderr: ${stderr}`);
   assert.equal(Buffer.concat(chunks).toString('utf8'), 'first\nsecond\nthird\n');
+});
+
+test('logs progress reads appended bytes and restarts after truncation or replacement', (t) => {
+  const root = gitRepo(t);
+  const id = '66666666-6666-4666-8666-666666666666';
+  dispatch(root, id, 'rotating');
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  const path = activity(root, id);
+  writeFileSync(path, 'first\n');
+  const source = runLogs({ repoRoot: root, ref: 'rotating', follow: true });
+
+  appendFileSync(path, 'second\n');
+  assert.equal(readLogsProgress(source).chunk.toString('utf8'), 'second\n');
+
+  writeFileSync(path, 'short\n');
+  assert.equal(readLogsProgress(source).chunk.toString('utf8'), 'short\n');
+
+  renameSync(path, `${path}.old`);
+  writeFileSync(path, 'replacement\n');
+  assert.equal(readLogsProgress(source).chunk.toString('utf8'), 'replacement\n');
+});
+
+test('logs --follow does not lose bytes appended between progress and watcher setup', async (t) => {
+  const root = gitRepo(t);
+  const id = '77777777-7777-4777-8777-777777777777';
+  dispatch(root, id, 'late-bytes');
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  const path = activity(root, id);
+  writeFileSync(path, 'first\n');
+  const source = runLogs({ repoRoot: root, ref: 'late-bytes', follow: true });
+  t.after(() => {
+    unwatchFile(path);
+    unwatchFile(join(root, LEDGER_FILE));
+  });
+
+  const progress = readLogsProgress(source);
+  assert.equal(progress.chunk.length, 0);
+  appendFileSync(path, 'second\n');
+  await waitForLogsChange(source);
+  assert.equal(readLogsProgress(source).chunk.toString('utf8'), 'second\n');
+});
+
+test('logs --follow notices a stopped row written between progress and watcher setup', async (t) => {
+  const root = gitRepo(t);
+  const id = '88888888-8888-4888-8888-888888888888';
+  dispatch(root, id, 'late-stop');
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  const path = activity(root, id);
+  writeFileSync(path, 'done\n');
+  const source = runLogs({ repoRoot: root, ref: 'late-stop', follow: true });
+  t.after(() => {
+    unwatchFile(path);
+    unwatchFile(join(root, LEDGER_FILE));
+  });
+
+  const progress = readLogsProgress(source);
+  assert.equal(progress.chunk.length, 0);
+  stop(root, id);
+  await waitForLogsChange(source);
+  const ended = readLogsProgress(source);
+  assert.equal(ended.chunk.length, 0);
+  assert.equal(ended.stopped, true);
+  assert.equal(ended.drained, true);
+});
+
+test('logs --follow wakes when activity is removed and reports the read error', async (t) => {
+  const root = gitRepo(t);
+  const id = '99999999-9999-4999-8999-999999999999';
+  dispatch(root, id, 'removed');
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  const path = activity(root, id);
+  writeFileSync(path, 'will disappear\n');
+  const source = runLogs({ repoRoot: root, ref: 'removed', follow: true });
+  t.after(() => {
+    unwatchFile(path);
+    unwatchFile(join(root, LEDGER_FILE));
+  });
+
+  readLogsProgress(source);
+  const waiting = waitForLogsChange(source);
+  rmSync(path);
+  await waiting;
+  assert.throws(() => readLogsProgress(source), /disappeared while following/);
 });
 
 test('logs activity remains readable until clean --force removes command-lane scratch', (t) => {

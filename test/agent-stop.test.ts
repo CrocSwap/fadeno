@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { readDispatches } from '../src/lib/ledger.ts';
@@ -33,11 +33,13 @@ test('a dispatched agent\'s stop is recorded from its transcript, with the messa
     record({ type: 'assistant', message: { role: 'assistant', model: 'claude-sonnet-4-7', content: [{ type: 'text', text: 'Looks fine; merge it.' }] } }));
   const run = plugin.run(HOOK, stopEvent(root, transcript, { last_assistant_message: 'Looks fine; merge it.' }));
   assert.equal(run.status, 0, run.stderr);
-  assert.match(run.out!.systemMessage, /fadeno: dispatch rev stopped; 1 uncommitted path\(s\); ran on claude-sonnet-4-7, not the dialed opus\. Close it: fadeno dispatch-close rev --merged\|--kept\|--discarded\|--failed/);
+  assert.match(run.out!.systemMessage, /fadeno: dispatch rev stopped; stop recorded durably; worktree inspection deferred; ran on claude-sonnet-4-7, not the dialed opus\. Close it: fadeno dispatch-close rev --merged\|--kept\|--discarded\|--failed\|--reviewed/);
   const stopped = readDispatches(root).records[0]!.stopped!;
   assert.equal(stopped.final_message, 'Looks fine; merge it.');
   assert.equal(stopped.model_observed, 'claude-sonnet-4-7');
-  assert.deepEqual(stopped.dirty, { paths: ['notes.md'], truncated: false });
+  const enriched = cli(root, ['dispatch-stop', 'rev', '--json'], 'Looks fine; merge it.');
+  assert.equal(enriched.status, 0, enriched.stderr);
+  assert.deepEqual(readDispatches(root).records[0]!.stopped!.dirty, { paths: ['notes.md'], truncated: false });
   // A second stop for the same agent is a replay, said so.
   assert.match(plugin.run(HOOK, stopEvent(root, transcript, { last_assistant_message: 'again' })).out!.systemMessage, /already recorded/);
 });
@@ -52,10 +54,53 @@ test('on the interrupted path the harness passes no message; the transcript\'s l
     record({ type: 'assistant', message: { role: 'assistant', model: 'claude-fable-5-1', content: [{ type: 'text', text: 'Halfway through the comparison' }] } }));
   const run = plugin.run(HOOK, stopEvent(root, transcript, { turn_id: 'codex-turn' }));
   assert.equal(run.status, 0, run.stderr);
-  assert.match(run.out!.systemMessage, /dispatch jj stopped; tree clean\. Close it/);
+  assert.match(run.out!.systemMessage, /dispatch jj stopped; stop recorded durably; worktree inspection deferred\. Close it/);
   const stopped = readDispatches(root).records[0]!.stopped!;
   assert.equal(stopped.final_message, 'Halfway through the comparison');
   assert.equal(stopped.model_observed, 'claude-fable-5-1');
+});
+
+test('a durable stop is fast and replay enriches its worktree evidence idempotently', (t) => {
+  const plugin = hookPlugin(t);
+  const root = hookRepo(t);
+  const opened = JSON.parse(cli(root, ['dispatch-open', '--archetype', 'reviewer', '--lane', 'host', '--name', 'deferred', '--json'], 'Review.').stdout) as { prompt: string };
+  const transcript = join(plugin.root, 'agent-deferred.jsonl');
+  writeFileSync(transcript, record({ type: 'user', message: { role: 'user', content: opened.prompt } }));
+
+  const first = plugin.run(HOOK, stopEvent(root, transcript, { last_assistant_message: 'final response' }));
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.out?.systemMessage ?? '', /stop recorded durably; worktree inspection deferred/);
+  const durable = readDispatches(root).records[0]!.stopped!;
+  assert.equal(durable.evidence, 'durable');
+  assert.equal(durable.final_message, 'final response');
+  assert.equal(durable.dirty, 'unavailable');
+  assert.deepEqual(readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line).row), ['opened', 'stopped']);
+
+  const replay = cli(root, ['dispatch-stop', 'deferred', '--json'], 'final response');
+  assert.equal(replay.status, 0, replay.stderr);
+  assert.equal(JSON.parse(replay.stdout).replayed, true);
+  const enriched = readDispatches(root).records[0]!.stopped!;
+  assert.equal(enriched.evidence, 'inspected');
+  assert.deepEqual(enriched.dirty, { paths: [], truncated: false });
+  assert.deepEqual(readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line).row), ['opened', 'stopped', 'stopped']);
+});
+
+test('a stop-recording failure is visible and gives an idempotent replay command', (t) => {
+  const plugin = hookPlugin(t);
+  const root = hookRepo(t);
+  plugin.fakeCli('#!/bin/sh\nsleep 0.05\nprintf "%s\\n" "ledger is not writable" >&2\nexit 1\n');
+  const transcript = join(plugin.root, 'agent-failing-stop.jsonl');
+  writeFileSync(transcript, record({ type: 'user', message: { role: 'user', content: 'not enough to identify a dispatch' } }));
+  const run = plugin.run(HOOK, stopEvent(root, transcript, { last_assistant_message: 'the final response' }), {
+    // Other hooks inherit this budget. The stop receipt deliberately does
+    // not: the harness owns its lifetime, so this delayed CLI still answers.
+    env: { FADENO_HOOK_TIMEOUT_MS: '1' },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.out?.systemMessage ?? '', /could not record the stopped dispatch/);
+  assert.match(run.out?.systemMessage ?? '', /ledger is not writable/);
+  assert.match(run.out?.systemMessage ?? '', /save the received final response to a file and replay idempotently with/);
+  assert.match(run.out?.systemMessage ?? '', /fadeno.*dispatch-stop.*--agent-id.*a1/);
 });
 
 test('an agent with no contract, a missing transcript, a missing cwd, and a foreign event all leave nothing behind', (t) => {

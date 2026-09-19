@@ -54,7 +54,11 @@ test('focused help uses semantic options and preserves safety-critical modes', (
   assert.match(renderFocusedHelp('dispatch'), /--name <name>/);
   assert.match(renderFocusedHelp('dispatch'), /required unless `--model` is\s+supplied; both are accepted/);
   assert.match(renderFocusedHelp('dispatch'), /--shared\s+Work in the live tree/);
+  assert.match(renderFocusedHelp('dispatch'), /command-process liveness echo.*five minutes by default.*not a host progress update/s);
+  assert.match(renderFocusedHelp('dispatch'), /`--heartbeat 0` to disable.*`--heartbeat <seconds>` to override/s);
   assert.match(renderFocusedHelp('dispatches'), /--output <name\|id>/);
+  assert.match(renderFocusedHelp('dispatch run'), /<archetype-or-model>/);
+  assert.match(renderFocusedHelp('dispatch run'), /--archetype.*--model/s);
   assert.match(renderFocusedHelp('dispatch-close'), /--merged\|--kept\|--discarded\|--failed/);
   assert.match(renderFocusedHelp('cancel'), /process group/);
   assert.match(renderFocusedHelp('models add'), /direct OpenCode.*OpenCode\/OpenRouter/s);
@@ -105,6 +109,8 @@ test('source and every bundled CLI render representative focused and global help
     const prefix = bin === process.execPath ? [SOURCE] : [];
     const global = run(bin, [...prefix, '--help'], root);
     assert.match(global, /Routing/);
+    const dispatch = run(bin, [...prefix, 'dispatch', '--help'], root);
+    assert.match(dispatch, /command-process liveness echo.*five minutes by default.*not a host progress update/s);
     const nested = run(bin, [...prefix, 'dial', 'resolve', '--help'], root);
     assert.match(nested, /fadeno dial resolve/);
     const alias = run(bin, [...prefix, 'model', 'add', '--help'], root);

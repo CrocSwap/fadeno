@@ -1,6 +1,6 @@
 {
   "name": "fadeno",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.",
   "author": {
     "name": "Fadeno"
@@ -18,7 +18,19 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Fadeno",
-    "shortDescription": "Route delegated work by archetype, in worktrees, with a ledger.",
-    "category": "Engineering"
+    "shortDescription": "Route delegated work by archetype in scaffolded worktrees.",
+    "longDescription": "Fadeno is a meta-harness for subagent workflows. It routes archetypes to models, gives each dispatch a scaffolded git worktree and contract, and records the lifecycle in a ledger.",
+    "developerName": "Fadeno",
+    "category": "Engineering",
+    "capabilities": [
+      "Archetype routing",
+      "Worktree scaffolding",
+      "Dispatch ledger"
+    ],
+    "defaultPrompt": [
+      "Route this task to a Fadeno archetype.",
+      "Show the open Fadeno dispatches.",
+      "Explain the current Fadeno dial."
+    ]
   }
 }

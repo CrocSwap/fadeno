@@ -114,10 +114,11 @@ decision it was recording.
   an unlistable harness is silence, not a finding; current-host is never
   checked against a listing; a failed listing for a harness nobody dials is
   silent. (doctor-model-listing)
-- `models verify` re-probes past the cache; a listing that omits the model
-  deletes its cached rows and fails; an unreachable listing leaves the cache
-  alone and passes unless `--strict`; an unmatched ref is an error, never an
-  empty pass. (models-verify)
+- `models verify` re-probes past the cache; with no refs it checks the effective
+  dial table, while explicit aliases and registry identities also verify
+  undialed models. A listing that omits the model deletes its cached rows and
+  fails; an unreachable listing leaves the cache alone and passes unless
+  `--strict`; an unmatched ref is an error, never an empty pass. (models-verify)
 - `models remove` preserves comments and siblings, names a lower-layer file
   rather than touching it, refuses while a dial names the alias, and
   `--force` says what it strands. (models-remove)
@@ -320,6 +321,15 @@ spawn wrapper. What they got right:
 - Structured output (`--json`) is the same data the text view renders, so a
   script never parses the line. (dispatches-cli; steering-refusal, deleted)
 
+- A `closed` row is not proof that a command-lane process stopped. A worker may
+  be running while an older client writes close, and its launcher may append
+  the report's `stopped` row seconds later. Only `stopped` is report-ready:
+  `dispatch-wait` keeps a live close-only group running, settles a dead group,
+  and reconstructs the stop from output/stderr when the writer is gone. The
+  process running a dispatch must return its report; only its caller/host
+  closes it, while a parent may close a child it opened. (Basanos feedback,
+  2026-09-13)
+
 **Terminal decisions**
 
 - The terminal-receipt list is the single reading of "is it over?"; every
@@ -328,8 +338,10 @@ spawn wrapper. What they got right:
   decision is refused. (dispatch-adhoc; dispatches-withdraw)
 - Close refuses a name it cannot resolve and says how to name one.
   (dispatch-adhoc)
-- Closing a dispatch whose process is still live is refused. (dispatches-
-  withdraw)
+- A dispatch refuses to close itself, but its caller may close a live child;
+  liveness is a wait/report concern, not a blanket close refusal. The stop row,
+  not the close row, is what makes a report ready. (Basanos feedback,
+  2026-09-13)
 
 ## Cancel (decision 34)
 

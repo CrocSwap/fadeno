@@ -1,7 +1,7 @@
 /**
- * The dispatch family of commands (spec §08): `dispatch` (the command lane,
- * end to end), `dispatch-open` and `dispatch-stop` (the host lane's halves,
- * driven by the hooks), `dispatch-close`, `cancel`, `dispatches`,
+ * The dispatch family of commands (spec §08): `dispatch` (the command-lane
+ * launch and unified read namespace), `dispatch-open` and `dispatch-stop` (the
+ * host lane's halves, driven by the hooks), `dispatch-close`, `cancel`, `dispatches`,
  * `worktrees`, `context` and `clean`. Each returns data; `cli.ts` prints.
  *
  * Everything here reads the ledger through `lib/ledger.ts` and writes it
@@ -9,9 +9,11 @@
  * reader for every surface.
  */
 
-import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
-import { DEFAULT_UNCLOSED_LIMIT, formatAge, hostVocabulary, nagText, spawnRefusedAsDispatchCommand, spawnRefusedByLimit, type ArchetypeLine } from '../lib/contracts.ts';
+import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import type { Dirent } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { formatAge, hostVocabulary, hostTurnReminder, nagText, spawnRefusedAsDispatchCommand, type ArchetypeLine } from '../lib/contracts.ts';
 import {
   ageMinutes,
   closeDispatch,
@@ -31,8 +33,16 @@ import {
 import { findRepoRoot } from '../lib/paths.ts';
 import { readPreamble, type Preamble } from '../lib/preamble.ts';
 import {
+  formatDialRef,
+  parseDialRef,
+  registeredModelRefSpellings,
+  resolveRegisteredModelRef,
+} from '../lib/executors.ts';
+import {
   OUTPUTS_DIR,
+  CANCEL_REQUESTS_DIR,
   RELAY_DIR,
+  DISPATCH_ID_ENV,
   SpawnError,
   cancelDispatch,
   describeArchetypes,
@@ -41,16 +51,20 @@ import {
   prepareDispatch,
   recordOpened,
   recordStopped,
+  enrichStopped,
   commandLaneAvailable,
   requireCommand,
   resolveArchetype,
+  resolveFromBaseline,
   runCommandDispatch,
+  sharedFromRefusal,
   stageRelay,
   workspaceDir,
   type CancelOutcome,
   type Relay,
   type RunResult,
 } from '../lib/spawn.ts';
+import { repositoryKey, STAGED_PROMPT_TTL_MS, STAGED_PROMPTS_DIR } from '../lib/staged-prompts.ts';
 import { readTranscriptFacts } from '../lib/transcript.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
 import {
@@ -129,7 +143,63 @@ export interface DispatchOptions extends CommonOptions {
 
 export type DispatchOutcome = { ok: true; result: RunResult } | { ok: false; refused: string };
 
+export type DispatchSelectorResolution =
+  | { kind: 'archetype'; archetype: string; model: null }
+  | { kind: 'model'; archetype: null; model: string };
+
+/**
+ * Resolve the positional selector accepted by `dispatch run`.
+ *
+ * Archetype names come from the same effective list shown to directors. Model
+ * selectors go through the model-management resolver, then are rendered back
+ * to the canonical alias spelling because `resolveDelivery` deliberately
+ * accepts a DialRef whose model member is a registry alias. This keeps the
+ * positional form from growing a second model registry or a second compiler.
+ */
+export function resolveDispatchSelector(opts: CommonOptions & { selector: string }): DispatchSelectorResolution {
+  const selector = opts.selector.trim();
+  if (selector.length === 0) throw new DispatchesError('dispatch selector is empty — pass an archetype name or registered model reference.');
+
+  const repoRoot = rootOf(opts);
+  const described = describeArchetypes({ repoRoot, userPathOptions: opts.userPathOptions });
+  const isArchetype = described.archetypes.some((archetype) => archetype.name === selector);
+
+  let model: string | null = null;
+  let modelError: Error | null = null;
+  try {
+    const parsed = parseDialRef(selector, 'dispatch model selector');
+    const resolved = resolveRegisteredModelRef(parsed, described.profile);
+    model = formatDialRef(resolved.ref);
+  } catch (err) {
+    modelError = err instanceof Error ? err : new Error(String(err));
+  }
+
+  if (isArchetype && model != null) {
+    throw new DispatchesError(
+      `dispatch selector "${selector}" is ambiguous: it matches both the effective archetype "${selector}" and a registered model reference. ` +
+        `Use --archetype ${selector} or --model ${selector}.`,
+    );
+  }
+  if (isArchetype) return { kind: 'archetype', archetype: selector, model: null };
+  if (model != null) return { kind: 'model', archetype: null, model };
+
+  // A model resolver ambiguity is more actionable than the generic neither
+  // message: it already names the aliases or harnesses the caller can choose.
+  if (modelError != null && /ambiguous/i.test(modelError.message)) {
+    throw new DispatchesError(modelError.message);
+  }
+  const archetypes = described.archetypes.map((archetype) => archetype.name);
+  const models = registeredModelRefSpellings(described.profile);
+  throw new DispatchesError(
+    `dispatch selector "${selector}" matches neither an effective archetype nor a registered model reference. ` +
+      `Archetypes: ${archetypes.join(', ') || '(none)'}. ` +
+      `Models: ${models.join(', ') || '(none)'}.`,
+  );
+}
+
 export async function runDispatch(opts: DispatchOptions): Promise<DispatchOutcome> {
+  const policy = sharedFromRefusal(opts.shared, opts.from);
+  if (policy != null) return { ok: false, refused: policy };
   const repoRoot = rootOf(opts);
   const archetype = opts.archetype?.trim();
   if (!archetype && !opts.model) throw new DispatchesError('pass --archetype <name> (or --model <ref> to bypass the dials).');
@@ -209,7 +279,7 @@ export interface DispatchOpenOptions extends CommonOptions {
    * spawn hook opens at `SubagentStart`, where the agent id makes the binding
    * exact, but the call it has to refuse arrives one event earlier — and a
    * refusal that reasoned from its own copy of the rules would be a second
-   * source of truth for the lane and the unclosed limit. This is the same code
+   * source of truth for the lane and the ledger-derived reminder. This is the same code
    * path, stopped one step short of writing.
    */
   dryRun?: boolean;
@@ -275,6 +345,8 @@ export interface DispatchWouldOpen {
   modelId: string;
   effort: string | null;
   harness: string | null;
+  /** Canonical repository identity used by the Codex pre-start handoff. */
+  repoKey: string;
   /** Whether this archetype can be delivered at all from here. */
   deliverable: boolean;
   nag: string;
@@ -283,6 +355,8 @@ export interface DispatchWouldOpen {
 export type DispatchOpenOutcome = DispatchOpened | DispatchRelayed | DispatchWouldOpen | { ok: false; refused: string };
 
 export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome {
+  const policy = sharedFromRefusal(opts.shared, opts.from);
+  if (policy != null) return { ok: false, refused: policy };
   const repoRoot = rootOf(opts);
   const sealed = opts.promptSealed?.trim() || null;
   const dryRun = opts.dryRun === true;
@@ -299,13 +373,13 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
   const wanted = opts.lane ?? 'auto';
   if (!OPEN_LANES.includes(wanted)) throw new DispatchesError(`--lane ${String(wanted)}: expected one of ${OPEN_LANES.join(', ')}.`);
   const lane = wanted === 'auto' ? resolution.lane : wanted;
+  // Validate an explicit baseline before a command-lane relay is staged. The
+  // eventual `dispatch` call repeats this through prepareDispatch, but the
+  // hook surface must not turn a bad --from into a seemingly healthy relay.
+  const baseline = resolveFromBaseline(repoRoot, opts.from);
+  if (!baseline.ok) return { ok: false, refused: baseline.refused };
   if (dryRun) {
     const unclosed = unclosedDispatches(repoRoot);
-    // The limit first, and by the same call the real open uses: a hook that
-    // counted unclosed rows itself would be a second reader of one rule, which
-    // is how the two ever come to disagree.
-    const refused = spawnRefusedByLimit(unclosed, resolution.unclosedLimit);
-    if (refused != null) return { ok: false, refused };
     return {
       ok: true,
       opened: false,
@@ -316,8 +390,9 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
       modelId: resolution.modelId,
       effort: resolution.effort,
       harness: opts.harness ?? resolution.harness,
+      repoKey: repositoryKey(repoRoot),
       deliverable: lane === 'host' || commandLaneAvailable(resolution),
-      nag: nagText(unclosed, resolution.unclosedLimit),
+      nag: nagText(unclosed),
     };
   }
   const parentTranscript = opts.parentTranscript?.trim() ? resolve(opts.cwd ?? process.cwd(), opts.parentTranscript.trim()) : null;
@@ -329,8 +404,6 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
   if (lane === 'command') {
     requireCommand(resolution);
     const unclosed = unclosedDispatches(repoRoot);
-    const refused = spawnRefusedByLimit(unclosed, resolution.unclosedLimit);
-    if (refused != null) return { ok: false, refused };
     const relay: Relay = stageRelay(repoRoot, {
       prompt,
       archetype: resolution.archetype,
@@ -351,7 +424,7 @@ export function runDispatchOpen(opts: DispatchOpenOptions): DispatchOpenOutcome 
       effort: resolution.effort,
       harness: resolution.harness,
       relay: { prompt_file: relay.promptFile, args: relay.args, command: relay.command },
-      nag: nagText(unclosed, resolution.unclosedLimit),
+      nag: nagText(unclosed),
     };
   }
   const outcome = prepareDispatch({
@@ -421,6 +494,8 @@ export interface DispatchStopOptions extends CommonOptions {
    * the wait path, which writes the row nobody was left alive to write.
    */
   reconstructed?: boolean;
+  /** Stop after the durable receipt; the harness stop hook uses this cheap path. */
+  durableOnly?: boolean;
 }
 
 export interface DispatchStopped {
@@ -459,7 +534,17 @@ export function runDispatchStop(opts: DispatchStopOptions): DispatchStopped {
   const assigned = workspaceDir(repoRoot, record.opened);
   const agentCwd = opts.agentCwd?.trim() || null;
   const mismatchedCwd = agentCwd != null && assigned != null && canonical(agentCwd) !== canonical(assigned) ? agentCwd : null;
-  if (record.stopped != null) return { record, row: record.stopped, replayed: true, mismatchedCwd };
+  if (record.stopped != null) {
+    const row = opts.durableOnly === true || record.stopped.evidence !== 'durable'
+      ? record.stopped
+      : enrichStopped(repoRoot, record.stopped, { cwd: assigned, branch: record.opened.workspace?.branch ?? null });
+    return {
+      record: row === record.stopped ? record : { ...record, stopped: row, state: record.closed ? 'closed' : 'stopped' },
+      row,
+      replayed: true,
+      mismatchedCwd,
+    };
+  }
   let message: string | null = null;
   if (opts.messageFile != null && opts.messageFile.trim() !== '') {
     const path = resolve(opts.cwd ?? process.cwd(), opts.messageFile);
@@ -473,6 +558,8 @@ export function runDispatchStop(opts: DispatchStopOptions): DispatchStopped {
     modelObserved: facts?.model ?? null,
     stderr: opts.stderr ?? null,
     reconstructed: opts.reconstructed === true,
+    durableFirst: true,
+    inspect: opts.durableOnly !== true,
   });
   return { record: { ...record, stopped: row, state: record.closed ? 'closed' : 'stopped' }, row, replayed: false, mismatchedCwd };
 }
@@ -495,7 +582,7 @@ export interface DispatchClosed {
   replayed: boolean;
   worktree: string | null;
   branch: string | null;
-  /** The `--merged` check, when one was made; null for the other three verbs. */
+  /** The `--merged` check, when one was made; null for the other close verbs. */
   merge: MergeCheck | null;
   /** What `--force` closed over, when it did. */
   forced: string | null;
@@ -536,12 +623,24 @@ function mergeRefusal(name: string, branch: string, check: MergeCheck): string |
 
 export function runDispatchClose(opts: DispatchCloseOptions): DispatchClosed {
   const repoRoot = rootOf(opts);
-  if (!isCloseVerb(opts.verb)) throw new DispatchesError(`close needs exactly one of --merged, --kept, --discarded, --failed; got "${opts.verb}".`);
+  if (!isCloseVerb(opts.verb)) throw new DispatchesError(`close needs exactly one of --merged, --kept, --discarded, --failed, --reviewed; got "${opts.verb}".`);
   const record = lookup(repoRoot, opts.ref);
   const opened = record.opened;
   const branch = opened?.workspace?.branch ?? null;
   const worktree = opened?.workspace != null && opened.workspace.path !== '.' ? opened.workspace.path : null;
   const name = opened?.name ?? record.id.slice(0, 8);
+
+  // A dispatch must return its report before anyone decides what to do with
+  // it. The command lane's executor inherits this id, so refusing here is
+  // the one enforcement point that covers every close verb and both name/id
+  // lookup forms. A parent agent may still close a child: its environment id
+  // differs from the child's record id.
+  const currentDispatchId = opts.env?.[DISPATCH_ID_ENV] ?? process.env[DISPATCH_ID_ENV];
+  if (currentDispatchId === record.id) {
+    throw new DispatchesError(
+      `refusing to close ${name}: this is the dispatch you are currently running in; this dispatch must return its report, and its caller/host closes it. Close only a child dispatch you opened.`,
+    );
+  }
 
   // Not on a replay: the decision was already recorded, and re-litigating it
   // now would make an idempotent command fail on its second run.
@@ -588,6 +687,7 @@ export interface DispatchEntry {
   branch: string | null;
   shared: boolean;
   dirty: number | 'unavailable' | null;
+  inspectionPending: boolean;
   exit: { code: number | null; signal: string | null } | null;
   verb: CloseVerb | null;
   note: string | null;
@@ -620,6 +720,7 @@ export function entryOf(record: DispatchRecord, now?: Date): DispatchEntry {
     branch: o?.workspace?.branch ?? null,
     shared: o?.workspace != null && o.workspace.branch == null,
     dirty: s == null ? null : s.dirty === 'unavailable' ? 'unavailable' : s.dirty.paths.length,
+    inspectionPending: s?.evidence === 'durable',
     exit: s?.exit ?? null,
     verb: record.closed?.verb ?? null,
     note: record.closed?.note ?? null,
@@ -644,33 +745,30 @@ export function runDispatches(opts: CommonOptions & { tail?: number | null; all?
 }
 
 export function renderDispatchLine(e: DispatchEntry): string {
-  const state = e.state === 'closed' ? `closed: ${e.verb}` : e.state === 'stopped' ? 'stopped — awaiting close' : 'open';
-  const where = e.branch ?? (e.shared ? 'shared tree' : '-');
+  const state = e.state === 'closed' ? `closed: ${e.verb}` : e.state === 'stopped' ? 'awaiting close' : 'open';
   const route = e.model == null ? '?' : `${e.model}${e.effort ? `@${e.effort}` : ''}${e.harness ? ` on ${e.harness}` : ''}`;
-  const dirty = e.dirty == null ? '' : e.dirty === 'unavailable' ? '; tree unreadable' : e.dirty > 0 ? `; ${e.dirty} dirty path(s)` : '';
-  const exit = e.exit == null ? '' : e.exit.signal ? `; killed by ${e.exit.signal}` : e.exit.code === 0 ? '' : `; exit ${e.exit.code}`;
+  const details = [
+    e.shared ? 'shared tree' : null,
+    e.inspectionPending ? 'worktree inspection pending' : e.dirty === 'unavailable' ? 'tree unreadable' : typeof e.dirty === 'number' && e.dirty > 0 ? `${e.dirty} dirty path(s)` : null,
+    e.exit?.signal ? `killed by ${e.exit.signal}` : e.exit?.code != null && e.exit.code !== 0 ? `exit ${e.exit.code}` : null,
+  ].filter((detail): detail is string => detail != null);
+  const name = `${e.name ?? '?'}${details.length > 0 ? ` (${details.join('; ')})` : ''}`;
   return [
-    e.id.slice(0, 8),
-    (e.name ?? '?').padEnd(24),
-    (e.archetype ?? '?').padEnd(9),
-    (e.lane ?? '?').padEnd(7),
-    route.padEnd(22),
-    where.padEnd(24),
-    `${state}${dirty}${exit}`.padEnd(26),
-    e.age,
+    e.age.padEnd(4),
+    state.padEnd(17),
+    (e.archetype ?? '?').padEnd(12),
+    route.padEnd(28),
+    name,
   ].join('  ');
 }
 
 /** The column names for `renderDispatchLine`, in the same widths. */
 export const DISPATCH_LINE_HEADER = [
-  'ID'.padEnd(8),
-  'NAME'.padEnd(24),
-  'ARCHETYPE'.padEnd(9),
-  'LANE'.padEnd(7),
-  'ROUTE'.padEnd(22),
-  'WHERE'.padEnd(24),
-  'STATE'.padEnd(26),
-  'AGE',
+  'AGE'.padEnd(4),
+  'STATE'.padEnd(17),
+  'ARCHETYPE'.padEnd(12),
+  'ROUTE'.padEnd(28),
+  'NAME',
 ].join('  ');
 
 export function renderDispatches(result: DispatchesResult): string[] {
@@ -730,7 +828,7 @@ export function renderDispatchDetail(d: DispatchDetail): string[] {
   if (d.record.stopped != null) {
     const s = d.record.stopped;
     const dirty = s.dirty === 'unavailable' ? 'unreadable' : s.dirty.paths.length === 0 ? 'clean' : `${s.dirty.paths.length}${s.dirty.truncated ? '+' : ''} path(s): ${s.dirty.paths.slice(0, 8).join(', ')}`;
-    lines.push(`  stopped:   ${s.at}${s.exit ? ` — ${s.exit.signal ? `killed by ${s.exit.signal}` : `exit ${s.exit.code}`}` : ''}; tree ${dirty}`);
+    lines.push(`  stopped:   ${s.at}${s.exit ? ` — ${s.exit.signal ? `killed by ${s.exit.signal}` : `exit ${s.exit.code}`}` : ''}; ${s.evidence === 'durable' ? 'worktree inspection pending — replay dispatch-stop to gather Git evidence' : `tree ${dirty}`}`);
     if (s.model_observed != null) {
       const asked = d.record.opened?.model ?? null;
       lines.push(`  ran on:    ${s.model_observed}${modelAgrees(asked, s.model_observed, d.record.opened?.model_id) ? '' : `  (the dial asked for ${asked})`}`);
@@ -738,13 +836,19 @@ export function renderDispatchDetail(d: DispatchDetail): string[] {
     // The two halves, labelled. A report is a claim and the measurement is
     // not, and the single most useful thing this view can do is make it
     // impossible to read one and think you read the other.
-    lines.push('', '--- what Fadeno measured ---', ...renderWorkMeasured(s.work, d.record.opened?.workspace?.branch ?? null));
+    lines.push('', '--- what Fadeno measured ---', ...(s.evidence === 'durable'
+      ? ['  not measured yet; replay `fadeno dispatch-stop` without `--durable` to gather worktree evidence.']
+      : renderWorkMeasured(s.work, d.record.opened?.workspace?.branch ?? null)));
     // Ignored paths belong here and not in `tree clean` above: git does not
-    // count them, `fadeno clean` deletes them, and a worker's receipts have
-    // twice been exactly this.
+    // count them. An isolated worktree is removed by `fadeno clean`, but a
+    // shared dispatch is the caller's tree and clean must never claim it can
+    // remove the caller's ignored files.
     if (s.ignored === 'unavailable') lines.push('  ignored paths: unreadable');
     else if (s.ignored != null && s.ignored.paths.length > 0) {
-      lines.push(`  ${s.ignored.paths.length}${s.ignored.truncated ? '+' : ''} ignored path(s) in the worktree — \`fadeno clean\` removes these: ${s.ignored.paths.join(', ')}`);
+      const shared = e.shared
+        ? 'in the shared tree — the shared checkout is retained; `fadeno clean` only removes eligible Fadeno scratch'
+        : 'in the worktree — `fadeno clean` removes these';
+      lines.push(`  ${s.ignored.paths.length}${s.ignored.truncated ? '+' : ''} ignored path(s) ${shared}: ${s.ignored.paths.join(', ')}`);
     }
     // The tail of stderr, when the ending needs explaining: a non-zero exit,
     // a signal, or a dispatch that stopped and said nothing.
@@ -755,6 +859,12 @@ export function renderDispatchDetail(d: DispatchDetail): string[] {
     if (s.final_message != null) {
       lines.push('', '--- what the agent reported (a claim, not a finding) ---', s.final_message.trimEnd());
     } else lines.push('', '--- what the agent reported --- none recorded');
+    if (d.transcript != null) {
+      const reportState = d.record.stopped == null ? 'output so far, not a report' : 'the complete command-lane report';
+      lines.push(`  full report: \`fadeno dispatches --output ${e.name ?? d.record.id}\` prints ${reportState} verbatim (transcript: ${d.transcript})`);
+    } else if (e.lane === 'command' && s.final_message != null) {
+      lines.push('  full report: command-lane stdout transcript unavailable; the text above is only the stopped row\'s bounded final-message excerpt.');
+    }
   }
   if (d.record.opened != null) lines.push('', `  prompt: ${d.record.opened.prompt}${d.transcript ? `   transcript: ${d.transcript}` : ''}${d.stderr ? `   stderr: ${d.stderr}` : ''}`);
   if (e.task) lines.push(`  task: ${e.task.split('\n')[0]}${d.record.opened?.task_truncated ? ' …' : ''}`);
@@ -822,6 +932,18 @@ export function runDispatchOutput(opts: CommonOptions & { ref: string }): Dispat
   }
   if (record.stopped?.final_message != null) return { record, text: record.stopped.final_message, source: 'final_message' };
   return { record, text: null, source: null };
+}
+
+export type DispatchReadResult =
+  | { kind: 'list'; result: DispatchesResult }
+  | { kind: 'show'; result: DispatchDetail }
+  | { kind: 'output'; result: DispatchOutput };
+
+/** Shared read command for both `dispatch` and compatibility `dispatches`. */
+export function runDispatchRead(opts: CommonOptions & { ref?: string | null; output?: string | null; tail?: number | null; all?: boolean } = {}): DispatchReadResult {
+  if (opts.output != null) return { kind: 'output', result: runDispatchOutput({ ...opts, ref: opts.output }) };
+  if (opts.ref != null) return { kind: 'show', result: runDispatchShow({ ...opts, ref: opts.ref }) };
+  return { kind: 'list', result: runDispatches(opts) };
 }
 
 // ---------------------------------------------------------------------------
@@ -910,15 +1032,18 @@ export async function runDispatchWait(opts: DispatchWaitOptions): Promise<WaitOu
     const until = Date.now() + Math.max(0, opts.settleMs ?? settleFromEnv(opts.env) ?? ABANDON_SETTLE_MS);
     for (;;) {
       const record = reread(id);
-      if (record.stopped != null || record.closed != null || Date.now() >= until) return record;
+      if (record.stopped != null || Date.now() >= until) return record;
       await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(1, until - Date.now()))));
     }
   };
 
   for (;;) {
     const records = ids.map(reread);
-    const running = records.filter((r) => r.stopped == null && r.closed == null);
-    const done = records.find((r) => r.stopped != null || r.closed != null);
+    // A close is the host's decision, not the executor's report. In
+    // particular, a command-lane process can still be alive after an older
+    // client wrote a close row, so only a stopped row is report-ready.
+    const running = records.filter((r) => r.stopped == null);
+    const done = records.find((r) => r.stopped != null);
     if (done != null) {
       return { state: 'stopped', record: done, text: report(done.id), waitedMs: Date.now() - started, waiting: running };
     }
@@ -930,8 +1055,8 @@ export async function runDispatchWait(opts: DispatchWaitOptions): Promise<WaitOu
       const pgid = record.opened?.process_group;
       if (pgid == null || groupAlive(pgid)) continue;
       const settled = await settle(record.id);
-      const others = records.filter((r) => r.id !== settled.id && r.stopped == null && r.closed == null);
-      if (settled.stopped != null || settled.closed != null) {
+      const others = records.filter((r) => r.id !== settled.id && r.stopped == null);
+      if (settled.stopped != null) {
         return { state: 'stopped', record: settled, text: report(settled.id), waitedMs: Date.now() - started, waiting: others };
       }
       // Nobody is left to write the stop row, so write it here from what the
@@ -1026,13 +1151,12 @@ export function renderWorktrees(entries: WorktreeEntry[]): string[] {
 // context — what a host or a spawned director is told
 // ---------------------------------------------------------------------------
 
-export function runContext(opts: CommonOptions & { now?: Date } = {}): { text: string; archetypes: ArchetypeLine[]; preamble: Preamble } {
+export function runContext(opts: CommonOptions & { now?: Date } = {}): { text: string; reminder: string; archetypes: ArchetypeLine[]; preamble: Preamble } {
   const repoRoot = rootOf(opts);
   const { archetypes, profile } = describeArchetypes({ repoRoot, userPathOptions: opts.userPathOptions });
   const unclosed = unclosedDispatches(repoRoot);
-  const limit = profile.unclosedLimit ?? DEFAULT_UNCLOSED_LIMIT;
   const preamble = readPreamble(repoRoot);
-  return { text: hostVocabulary({ archetypes, unclosed, unclosedLimit: limit, preamble, host: profile.host ?? null, now: opts.now }), archetypes, preamble };
+  return { text: hostVocabulary({ archetypes, unclosed, preamble, host: profile.host ?? null, now: opts.now }), reminder: hostTurnReminder(unclosed), archetypes, preamble };
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,26 +1174,194 @@ export interface CleanResult {
   worktrees: Array<{ path: string; ignored: string[]; truncated: boolean }>;
   /** Worktrees left alone, and why. */
   kept: Array<{ path: string; reason: string }>;
-  outputs: string | null;
-  /** Staged relay prompts removed, or that would be. */
-  relay: string | null;
+  /** Individually selected command-lane files removed, or that would be. */
+  outputs: CleanArtifactResult | null;
+  /** Individually selected stale relay files removed, or that would be. */
+  relay: CleanArtifactResult | null;
+  /** Individually selected expired prompt files removed, or that would be. */
+  stagedPrompts: CleanArtifactResult | null;
+  /** Individually selected cancellation files removed, or that would be. */
+  cancelRequests: CleanArtifactResult | null;
+}
+
+export interface CleanArtifactResult {
+  /** The directory is retained; only `entries` are selected. */
+  directory: string;
+  entries: string[];
+}
+
+/** A dispatch still owns scratch until its stopped receipt exists and its process group is gone. */
+function processGroupIsLive(record: DispatchRecord): boolean {
+  const processGroup = record.opened?.process_group;
+  return processGroup != null && groupAlive(processGroup);
+}
+
+function dispatchStillOwnsScratch(record: DispatchRecord): boolean {
+  return record.opened != null && (record.stopped == null || processGroupIsLive(record));
+}
+
+function errnoCode(error: unknown): string | null {
+  return typeof error === 'object' && error != null && 'code' in error && typeof error.code === 'string' ? error.code : null;
+}
+
+function cleanIoError(action: string, path: string, error: unknown, fix: string): DispatchesError {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new DispatchesError(`clean: could not ${action} ${path}: ${detail}. ${fix}`);
+}
+
+/** Retire one snapshot file; never recursively remove a scratch directory. */
+function retireScratchFile(path: string): boolean {
+  const retired = `${path}.cleanup-${randomUUID()}`;
+  try {
+    renameSync(path, retired);
+  } catch (error) {
+    // A concurrent claimant or another cleanup won the race. Do not retry the
+    // original path: it may now be a fresh artifact.
+    if (errnoCode(error) === 'ENOENT') return false;
+    throw cleanIoError('retire scratch file', path, error, 'Fix the filesystem error and rerun `fadeno clean --force`.');
+  }
+  try {
+    unlinkSync(retired);
+    return true;
+  } catch (error) {
+    // The rename made the artifact ours. If unlink cannot finish, leave the
+    // uniquely named moved path visible so a person can recover it rather than
+    // reporting a healthy cleanup that silently lost track of it.
+    throw cleanIoError(
+      'remove retired scratch file',
+      retired,
+      error,
+      `The artifact is recoverable at ${retired}; inspect or remove that path after fixing the filesystem problem, then rerun cleanup.`,
+    );
+  }
+}
+
+function staleByMtime(path: string, now: number): boolean {
+  try {
+    const age = now - statSync(path).mtimeMs;
+    return Number.isFinite(age) && age > STAGED_PROMPT_TTL_MS;
+  } catch (error) {
+    // An unreadable age is not proof of staleness.
+    if (errnoCode(error) === 'ENOENT') return false;
+    throw cleanIoError('read scratch modification time', path, error, 'Fix the filesystem error and rerun `fadeno clean`.');
+  }
+}
+
+type CleanScratchSnapshotHook = (relativeDir: string) => void;
+
+function snapshotDirectory(
+  repoRoot: string,
+  relativeDir: string,
+  onSnapshot?: CleanScratchSnapshotHook,
+): { absolute: string; entries: Dirent[] } | null {
+  const absolute = join(repoRoot, relativeDir);
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(absolute, { withFileTypes: true });
+  } catch (error) {
+    // A directory disappearing between cleanup's scan and this read is the
+    // one benign race. A file in its place, or an unreadable directory, must
+    // be visible instead of becoming "Nothing to clean."
+    if (errnoCode(error) === 'ENOENT') return null;
+    throw cleanIoError('read scratch directory', absolute, error, 'Restore the directory or fix its permissions, then rerun `fadeno clean`.');
+  }
+  onSnapshot?.(relativeDir);
+  return { absolute, entries };
+}
+
+function cleanSnapshotFiles(
+  repoRoot: string,
+  relativeDir: string,
+  dryRun: boolean,
+  selected: (entry: Dirent, path: string) => boolean,
+  onSnapshot?: CleanScratchSnapshotHook,
+): CleanArtifactResult | null {
+  const snapshot = snapshotDirectory(repoRoot, relativeDir, onSnapshot);
+  if (snapshot == null) return null;
+  const candidates = snapshot.entries.filter((entry) => selected(entry, join(snapshot.absolute, entry.name)));
+  if (candidates.length === 0) return null;
+  const entries = dryRun
+    ? candidates.map((entry) => entry.name)
+    : candidates.filter((entry) => retireScratchFile(join(snapshot.absolute, entry.name))).map((entry) => entry.name);
+  return entries.length === 0 ? null : { directory: relativeDir, entries };
+}
+
+function selectedStoppedDispatches(records: ReadonlyMap<string, DispatchRecord>): Set<string> {
+  return new Set(
+    [...records.values()]
+      .filter((record) => record.opened != null && record.stopped != null && !processGroupIsLive(record))
+      .map((record) => record.id),
+  );
+}
+
+function readExpiresAt(path: string): number | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { expiresAt?: unknown };
+    if (typeof parsed !== 'object' || parsed == null || Array.isArray(parsed)) return null;
+    return typeof parsed.expiresAt === 'number' && Number.isFinite(parsed.expiresAt) ? parsed.expiresAt : null;
+  } catch (error) {
+    if (errnoCode(error) === 'ENOENT') return null;
+    if (error instanceof SyntaxError) return null;
+    throw cleanIoError('read staged prompt expiry', path, error, 'Fix or remove the unreadable scratch file, then rerun `fadeno clean`.');
+  }
+}
+
+function staleStagedPrompt(entry: Dirent, path: string, now: number): boolean {
+  if (!entry.isFile() || !/^[a-z0-9]{16}\.json(?:\.claimed-[0-9a-f-]+)?$/.test(entry.name)) return false;
+  const expiresAt = readExpiresAt(path);
+  // A valid claim remains private and usable until its own expiration. A
+  // malformed or partially-written artifact is only stale once its mtime is
+  // old enough that it cannot be a fresh pending handoff.
+  return expiresAt != null ? expiresAt <= now : staleByMtime(path, now);
+}
+
+function cancelArtifactBelongsTo(name: string, ids: ReadonlySet<string>): boolean {
+  for (const id of ids) {
+    if (name === `${id}.request.json` || name === `${id}.ack.json` || name.startsWith(`${id}.request.json.`) || name.startsWith(`${id}.ack.json.`)) return true;
+  }
+  return false;
 }
 
 /**
- * Remove worktrees whose dispatch is closed (or unknown to the ledger) and
- * that hold no uncommitted work, plus the command-lane transcripts. Never
- * prompts, never the ledger, never a tree with uncommitted changes.
+ * Remove worktrees whose known dispatch has a stopped receipt and that hold no
+ * uncommitted work, plus individually selected scratch files. Unknown or
+ * preparing worktrees remain protected. A closed row without a stopped row,
+ * or a stopped row with a live process group, remains protected. Never
+ * recorded prompts, never the ledger, never a tree with uncommitted changes.
+ * Expired staged Codex handoffs are scratch and may be removed.
  */
-export function runClean(opts: CommonOptions & { force?: boolean } = {}): CleanResult {
+export function runClean(opts: CommonOptions & { force?: boolean; onScratchSnapshot?: CleanScratchSnapshotHook } = {}): CleanResult {
   const repoRoot = rootOf(opts);
   const dryRun = !opts.force;
-  const result: CleanResult = { dryRun, worktrees: [], kept: [], outputs: null, relay: null };
+  const ledgerRecords = readDispatches(repoRoot).records;
+  const records = new Map(ledgerRecords.map((record) => [record.id, record]));
+  const result: CleanResult = { dryRun, worktrees: [], kept: [], outputs: null, relay: null, stagedPrompts: null, cancelRequests: null };
   for (const wt of runWorktrees({ repoRoot })) {
-    if (wt.dispatch != null && wt.dispatch.state !== 'closed') {
-      result.kept.push({ path: wt.path, reason: `dispatch ${wt.dispatch.name ?? wt.dispatch.id.slice(0, 8)} is ${wt.dispatch.state}; close it first` });
+    if (wt.dispatch == null) {
+      // A worktree is cut before its opened row is appended. It may therefore
+      // be a live preparing dispatch rather than stale debris.
+      result.kept.push({ path: wt.path, reason: 'no dispatch names this worktree; preserve unknown or preparing work' });
       continue;
     }
-    if (wt.dirty === 'unavailable') {
+    const dispatch = records.get(wt.dispatch.id);
+    if (dispatch == null) {
+      // The worktree listing can observe a newly opened row after the ledger
+      // snapshot above. Unknown state is never permission to delete it.
+      result.kept.push({ path: wt.path, reason: `dispatch ${wt.dispatch.name ?? wt.dispatch.id.slice(0, 8)} appeared during cleanup; preserve it` });
+      continue;
+    }
+    if (dispatchStillOwnsScratch(dispatch)) {
+      const name = dispatch.opened?.name ?? dispatch.id.slice(0, 8);
+      const reason = dispatch.stopped == null
+        ? `dispatch ${name} is ${dispatch.closed == null ? 'open' : 'closed before it stopped'}; preserve it until the stopped receipt arrives`
+        : `dispatch ${name} stopped, but its process group is still live; preserve it until it exits`;
+      result.kept.push({
+        path: wt.path,
+        reason,
+      });
+      continue;
+    }
+    if (wt.dirty === 'unavailable' || wt.ignored === 'unavailable' || wt.unmerged === 'unavailable') {
       result.kept.push({ path: wt.path, reason: 'status unreadable; not removing a tree that may hold work' });
       continue;
     }
@@ -1086,20 +1378,22 @@ export function runClean(opts: CommonOptions & { force?: boolean } = {}): CleanR
     }
     result.worktrees.push({
       path: wt.path,
-      ignored: wt.ignored === 'unavailable' ? [] : wt.ignored.paths,
-      truncated: wt.ignored !== 'unavailable' && wt.ignored.truncated,
+      ignored: wt.ignored.paths,
+      truncated: wt.ignored.truncated,
     });
   }
-  const outputs = join(repoRoot, OUTPUTS_DIR);
-  if (existsSync(outputs)) {
-    result.outputs = relative(repoRoot, outputs);
-    if (!dryRun) rmSync(outputs, { recursive: true, force: true });
+  const stopped = selectedStoppedDispatches(records);
+  const outputNames = new Set<string>();
+  for (const id of stopped) {
+    outputNames.add(`${id}.md`);
+    outputNames.add(`${id}.err`);
+    outputNames.add(`${id}.prompt.md`);
   }
-  const relay = join(repoRoot, RELAY_DIR);
-  if (existsSync(relay)) {
-    result.relay = relative(repoRoot, relay);
-    if (!dryRun) rmSync(relay, { recursive: true, force: true });
-  }
+  const now = Date.now();
+  result.outputs = cleanSnapshotFiles(repoRoot, OUTPUTS_DIR, dryRun, (entry) => entry.isFile() && outputNames.has(entry.name), opts.onScratchSnapshot);
+  result.relay = cleanSnapshotFiles(repoRoot, RELAY_DIR, dryRun, (entry, path) => entry.isFile() && staleByMtime(path, now), opts.onScratchSnapshot);
+  result.stagedPrompts = cleanSnapshotFiles(repoRoot, STAGED_PROMPTS_DIR, dryRun, (entry, path) => staleStagedPrompt(entry, path, now), opts.onScratchSnapshot);
+  result.cancelRequests = cleanSnapshotFiles(repoRoot, CANCEL_REQUESTS_DIR, dryRun, (entry) => entry.isFile() && cancelArtifactBelongsTo(entry.name, stopped), opts.onScratchSnapshot);
   return result;
 }
 
@@ -1112,11 +1406,18 @@ export function renderClean(result: CleanResult): string[] {
       : ` — and with it ${w.ignored.length}${w.truncated ? '+' : ''} ignored path(s): ${w.ignored.join(', ')}`;
     lines.push(`${verb} worktree ${w.path} (branch kept)${carrying}`);
   }
-  if (result.outputs != null) lines.push(`${verb} ${result.outputs}/ (command-lane transcripts)`);
-  if (result.relay != null) lines.push(`${verb} ${result.relay}/ (staged relay prompts)`);
+  const scratch = (artifact: CleanArtifactResult | null, label: string): void => {
+    if (artifact == null) return;
+    const paths = artifact.entries.map((entry) => `${artifact.directory}/${entry}`);
+    lines.push(`${verb} ${paths.join(', ')} (${label}; directory kept)`);
+  };
+  scratch(result.outputs, 'selected command-lane transcript files');
+  scratch(result.relay, 'selected stale relay prompt files');
+  scratch(result.stagedPrompts, 'selected expired staged Codex prompt files');
+  scratch(result.cancelRequests, 'selected cooperative cancellation files');
   for (const k of result.kept) lines.push(`kept ${k.path}: ${k.reason}`);
   if (lines.length === 0) lines.push('Nothing to clean.');
-  else if (result.dryRun) lines.push('Re-run with --force to remove. Prompts and the ledger are never touched.');
+  else if (result.dryRun) lines.push('Re-run with --force to remove. Fresh pending handoffs, unknown scratch, recorded prompts, and the ledger are never touched.');
   return lines;
 }
 

@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Link the Fadeno CLI onto PATH for this user. Use when the user asks to set up Fadeno, install its local integration, or when `fadeno` is not found on PATH. [fadeno 0.6.1]
+description: Link the Fadeno CLI onto PATH for this user. Use when the user asks to set up Fadeno, install its local integration, or when `fadeno` is not found on PATH. [fadeno 0.7.0]
 ---
 
 # Fadeno setup
@@ -18,10 +18,14 @@ matching the host you are in, and never install another harness's integration:
 <cli> setup --claude  # from Claude Code
 ```
 
-Setup does one thing: it links the CLI at `~/.local/bin/fadeno` (or
+Setup's user-facing purpose is optional shell convenience: it links the CLI at `~/.local/bin/fadeno` (or
 `FADENO_BIN_DIR`) pointing at the plugin's own bundled binary. A symlink, not a
 copy — so the command always runs whatever the installed plugin holds, and
 there is no second CLI to keep in step.
+
+On Codex it also performs the same model-neutral archetype-vocabulary check
+that `$fadeno-host` runs automatically. It is not a prerequisite for host mode,
+and dial changes never require it.
 
 Report what it prints, and act on these three cases:
 

@@ -9,8 +9,8 @@ import {
   describeArchetype,
   formatAge,
   hostVocabulary,
+  hostTurnReminder,
   nagText,
-  spawnRefusedByLimit,
   workerContract,
 } from '../src/lib/contracts.ts';
 import { correlate, type OpenedRow } from '../src/lib/ledger.ts';
@@ -26,15 +26,16 @@ function opened(id: string, overrides: Partial<OpenedRow> = {}): OpenedRow {
 
 const WT = { kind: 'worktree' as const, absolute: '/repo/.fadeno/local/worktrees/fix-login', branch: 'fadeno/fix-login', base: 'abcdef1234567890', upstream: 'main' };
 
-test('the worker contract names the worktree, the branch, what to merge from, and what the final message must say', () => {
+test('the common contract names the worktree and makes implementation duties task-conditional', () => {
   const text = workerContract({ id: 'id-1', name: 'fix-login', archetype: 'worker', repoRoot: '/repo', worktree: WT });
   assert.ok(text.startsWith(`${CONTRACT_HEADER} id-1 (fix-login)`));
   assert.ok(text.trimEnd().endsWith(CONTRACT_FOOTER));
-  assert.match(text, /`\/repo\/\.fadeno\/local\/worktrees\/fix-login`, on branch `fadeno\/fix-login`, cut from `main` at `abcdef123456`/);
-  assert.match(text, /merge `main` into your branch and resolve any conflicts in your own worktree/);
-  assert.match(text, /commit it on your branch/);
+  assert.match(text, /assigned worktree is `\/repo\/\.fadeno\/local\/worktrees\/fix-login`, on branch `fadeno\/fix-login`, cut from `main` at `abcdef123456`/);
+  assert.match(text, /For implementation or integration, make the requested changes in the assigned tree, commit them/);
+  assert.match(text, /when you have an isolated branch, merge `main` into your own tree/);
+  assert.match(text, /A caller-authorized read-only inspection outside the assigned tree, including the main repository or another source tree, is allowed/);
   assert.match(text, /anything untracked/);
-  assert.match(text, /Recommend whether your work should be merged or discarded/);
+  assert.match(text, /For implementation or integration work, recommend whether the result should be merged, kept, discarded, or failed/);
   assert.match(text, /report the work as unverified/, 'the tracked-content-only lesson travels with the worktree');
   assert.doesNotMatch(text, /git checkout/, 'the shared-tree git rules are not preached to an agent that owns its tree');
 });
@@ -46,9 +47,28 @@ test('a shared-tree dispatch is told so, told why, and told the git rules that p
   });
   assert.match(text, /shared tree at `\/repo` \(no worktree was cut: git worktree add failed: not a git repository\)/);
   assert.match(text, /Never run `git checkout`, `switch`, `restore`, `reset`, `stash` or `clean` in a shared tree/);
+  assert.match(text, /Assigned-tree containment applies to modifications and commits/);
+  assert.match(text, /caller-authorized read-only inspection outside the assigned tree/);
   assert.doesNotMatch(text, /merge `.*` into your branch/);
   const requested = workerContract({ id: 'id-3', name: 'hot', archetype: 'worker', repoRoot: '/repo', worktree: { kind: 'shared', reason: null } });
   assert.match(requested, /shared tree at `\/repo`\. Other agents/);
+});
+
+test('the common contract gives report-only roles a reviewed completion and preserves director and custom duties', () => {
+  for (const archetype of ['reviewer', 'scout', 'judge']) {
+    const text = workerContract({ id: `id-${archetype}`, name: archetype, archetype, repoRoot: '/repo', worktree: WT });
+    assert.match(text, /For a report-only task \(such as review, exploration, or judging\), inspect what the caller authorized, change nothing/);
+    assert.match(text, /do not fabricate a commit or merge/);
+    assert.match(text, /recommend `reviewed`/);
+    assert.match(text, /For report-only work, recommend `reviewed` in one line/);
+  }
+  const director = workerContract({ id: 'id-director', name: 'lead', archetype: 'director', repoRoot: '/repo', worktree: WT });
+  assert.match(director, /A director coordinates delegated work: it does not implement a child's delegated feature itself/);
+  assert.match(director, /integrate accepted child changes in its assigned tree/);
+  const custom = workerContract({ id: 'id-custom', name: 'auditor', archetype: 'auditor', repoRoot: '/repo', worktree: WT });
+  assert.match(custom, /Custom archetypes follow their declared role and the caller's task/);
+  assert.match(custom, /For implementation or integration/);
+  assert.match(custom, /For a report-only task \(such as review, exploration, or judging\)/);
 });
 
 test('the contract is appended after the caller\'s prompt, never before it', () => {
@@ -74,7 +94,6 @@ test('the host vocabulary carries the archetype list, the spawn rules, the close
       { name: 'reviewer', description: 'Reviews.', model: 'host', effort: null, source: 'base' },
     ],
     unclosed,
-    unclosedLimit: 5,
     now: new Date('2026-09-07T10:30:00Z'),
   });
   assert.match(text, /- \*\*worker\*\* — Implements\.$/m);
@@ -92,15 +111,19 @@ test('the host vocabulary carries the archetype list, the spawn rules, the close
   assert.match(text, /fadeno dispatch --archetype <name> --prompt-file <file>/, 'a director with no hook still knows the command lane');
   assert.match(text, /Two agents must never share one tree/);
   assert.match(text, /That recommendation is a claim, not a finding/);
-  assert.match(text, /fadeno dispatch-close <name\|id> --merged\|--kept\|--discarded\|--failed/);
+  assert.match(text, /fadeno dispatch-close <name\|id> --merged\|--kept\|--discarded\|--failed\|--reviewed/);
+  assert.match(text, /Never close the dispatch you are currently running in/);
+  assert.match(text, /Only close dispatches you opened/);
+  assert.match(text, /If it is still `open`, or if it is `awaiting close` with worktree inspection pending/);
+  assert.match(text, /save the already-received final response to a file and replay the idempotent stop with `fadeno dispatch-stop <name\|id> --message-file <path>`/);
   assert.match(text, /Fadeno performs no merge; you do/);
-  assert.match(text, /refuses a new one at 5 unclosed/);
+  assert.match(text, /never refuses a spawn because work is unclosed/);
   assert.match(text, /Report it with the dispatch id and the error text, and do not substitute/);
-  assert.match(text, /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)/);
+  assert.match(text, /## Unclosed dispatches \(1; 0 stopped and waiting on you\)/);
   assert.match(text, /- `fix-login` a — worker on `fadeno\/worker-a`, open, 30m old/);
 });
 
-test('the nag names every unclosed dispatch, says which are stopped and awaiting a decision, and announces the limit', () => {
+test('the nag names every unclosed dispatch and says which are stopped and awaiting a decision', () => {
   const now = new Date('2026-09-08T12:00:00Z');
   const rows = [
     opened('1', { name: 'one', at: '2026-09-08T11:50:00Z' }),
@@ -108,38 +131,27 @@ test('the nag names every unclosed dispatch, says which are stopped and awaiting
     { row: 'stopped' as const, id: '2', at: '2026-09-08T10:00:00Z', final_message: 'done', dirty: { paths: [], truncated: false } },
   ];
   const unclosed = correlate(rows);
-  const text = nagText(unclosed, 5, now);
-  // Two unclosed; ONE of them has stopped, and only that one is waiting on a
-  // person. The count the limit uses says so rather than making the reader
-  // work it out from the rows.
-  assert.match(text, /## Unclosed dispatches \(2; 1 of 5 allowed are waiting on you\)/);
+  const text = nagText(unclosed, now);
+  assert.match(text, /## Unclosed dispatches \(2; 1 stopped and waiting on you\)/);
   assert.match(text, /- `one` 1 — worker on `fadeno\/worker-1`, open, 10m old/);
   assert.match(text, /- `two` 2 — scout, stopped, awaiting your decision, 3h old \(spawned by 11111111\)/);
   assert.doesNotMatch(text, /At the limit/);
-  assert.match(nagText(unclosed, 1, now), /\*\*At the limit\.\*\* The next spawn is refused until some of the STOPPED ones are closed/);
-  assert.equal(nagText([], 5, now), 'No unclosed dispatches in this repository.');
+  assert.equal(nagText([], now), 'No unclosed dispatches in this repository.');
 });
 
-test('the limit counts work awaiting a decision, not work in flight', () => {
+test('the host-turn reminder is compact, ledger-derived, and never a spawn refusal', () => {
   const running = correlate(['1', '2', '3', '4', '5', '6'].map((id) => opened(id, { name: `job-${id}` })));
-  // Six dispatches, all still executing. The old rule refused here and told
-  // the caller to close them, which is not something you can do to work that
-  // has not finished — in Basanos it stopped a reviewer from fanning out
-  // while the host's five were running.
-  assert.equal(spawnRefusedByLimit(running, 5), null);
+  assert.match(hostTurnReminder(running), /6 dispatches still running; none is waiting for a decision/);
 
   const stopped = correlate(['1', '2', '3', '4', '5', '6'].flatMap((id) => [
     opened(id, { name: `job-${id}` }),
     { row: 'stopped' as const, id, at: '2026-09-08T10:00:00Z', final_message: 'done', dirty: { paths: [], truncated: false } },
   ]));
-  assert.equal(spawnRefusedByLimit(stopped.slice(0, 4), 5), null);
-  const refused = spawnRefusedByLimit(stopped, 5);
-  assert.match(refused ?? '', /6 dispatches have stopped and are waiting for your decision, and the limit is 5/);
-  assert.match(refused ?? '', /`job-1`, `job-2`, `job-3`, `job-4`, `job-5`, …/);
-  assert.match(refused ?? '', /Report this refusal to the user instead of routing around it\./);
+  const reminder = hostTurnReminder(stopped);
+  assert.match(reminder, /6 stopped dispatches waiting for your decision/);
+  assert.match(reminder, /`job-1`, `job-2`, `job-3`, `job-4`, `job-5`, `job-6`/);
+  assert.match(reminder, /--reviewed/);
 
-  // And a report that has been read still counts until it is CLOSED: the
-  // hygiene the limit exists for is untouched.
   assert.equal(awaitingDecision(stopped).length, 6);
   assert.equal(awaitingDecision(running).length, 0);
 });
@@ -153,12 +165,14 @@ test('formatAge reads like a clock at every magnitude', () => {
 
 test('the spawn instruction differs by harness, because what a hook can do to a spawn differs', () => {
   const archetypes = [{ name: 'worker', description: 'd', model: 'sol', effort: 'high', source: 'base' }];
-  const base = { archetypes, unclosed: [], unclosedLimit: 5 };
+  const base = { archetypes, unclosed: [] };
 
   // Claude's wrapper rewrites the spawn, so naming the archetype is enough.
   const claude = hostVocabulary({ ...base, host: 'claude' });
   assert.match(claude, /`fadeno:worker` on Claude Code/);
   assert.doesNotMatch(claude, /reasoning_effort/);
+  assert.match(claude, /reachable isolated branch/);
+  assert.match(claude, /`--shared` and `--from` are incompatible/);
 
   // Codex's can only refuse one, so the spawn has to carry the dialed model.
   // A host that learned this from a refusal paid a round trip for every first

@@ -3,7 +3,8 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { templatesDir } from '../src/lib/paths.ts';
-import { cli, hookPlugin, hookRepo, type HookPlugin } from './hook-helpers.ts';
+import { cli, denial, hookPlugin, hookRepo, type HookPlugin } from './hook-helpers.ts';
+import { readDispatches } from '../src/lib/ledger.ts';
 
 /**
  * Session-scoped host mode: the marker, what each event injects, and the
@@ -35,12 +36,20 @@ test('Claude: the host command enables the session, injects the vocabulary, remi
   assert.match(activation ?? '', /^# Fadeno\n/);
   assert.match(activation ?? '', /- \*\*reviewer\*\* — Reviews /);
   assert.doesNotMatch(activation ?? '', /routes to/, 'no routing snapshot to go stale in a long session');
-  assert.match(activation ?? '', /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)[\s\S]*`pending`/);
+  assert.match(activation ?? '', /## Unclosed dispatches \(1; 0 stopped and waiting on you\)[\s\S]*`pending`/);
+  assert.match(activation ?? '', /If it is still `open`, or if it is `awaiting close` with worktree inspection pending/);
+  assert.match(activation ?? '', /save the already-received final response to a file and replay the idempotent stop with `fadeno dispatch-stop <name\|id> --message-file <path>`/);
   assert.doesNotMatch(activation ?? '', /Fadeno host mode \(session-scoped\)/);
 
   const later = context(plugin, { hook_event_name: 'UserPromptSubmit', session_id: 'claude-session', prompt: 'Continue' }, root);
   assert.match(later ?? '', /^Fadeno host mode is on for this session: delegate through archetypes/);
+  assert.match(later ?? '', /1 dispatch still running; none is waiting for a decision/);
   assert.doesNotMatch(later ?? '', /## Archetypes/, 'an ordinary turn gets the reminder, not the whole vocabulary');
+
+  cli(root, ['dispatch-stop', 'pending'], 'The report is ready.');
+  const afterStop = context(plugin, { hook_event_name: 'UserPromptSubmit', session_id: 'claude-session', prompt: 'Review the report' }, root);
+  assert.match(afterStop ?? '', /1 stopped dispatch waiting for your decision: `pending`/);
+  assert.match(afterStop ?? '', /dispatch-close <name\|id> --merged\|--kept\|--discarded\|--failed\|--reviewed/);
 
   const compacted = context(plugin, { hook_event_name: 'SessionStart', session_id: 'claude-session', source: 'compact' }, root);
   assert.match(compacted ?? '', /^# Fadeno host mode \(session-scoped\)/);
@@ -55,9 +64,64 @@ test('Codex: $fadeno-host enables with policy and vocabulary together, survives 
   const { plugin, root } = setup(t);
   const activation = context(plugin, { hook_event_name: 'UserPromptSubmit', session_id: 'codex-session', prompt: '$fadeno-host Fix the recovery path' }, root);
   assert.match(activation ?? '', /^# Fadeno host mode \(session-scoped\)[\s\S]*\n# Fadeno\n[\s\S]*## Unclosed dispatches/);
+  // Codex provides PLUGIN_ROOT alongside the Claude-compatible alias. The
+  // fixture sets both, so this must still deliver Codex's spawn instructions.
+  assert.match(activation ?? '', /model and effort ON THE SPAWN/);
+  assert.match(activation ?? '', /fadeno dial <archetype> --json/);
+  assert.match(activation ?? '', /command-lane process liveness echo.*not a user-facing host progress update/s);
+  assert.match(activation ?? '', /report host progress only when something materially changes/i);
+  assert.match(activation ?? '', /Codex desktop app.*thread heartbeat\/scheduled follow-up facility/s);
+  assert.match(activation ?? '', /Keep the scheduled check quiet.*end it when no dispatch remains in flight/s);
+  assert.match(activation ?? '', /Fadeno itself cannot call a Codex app API/s);
+  assert.match(activation ?? '', /Outside an environment with scheduled thread heartbeats.*not hold a foreground assistant turn open solely to emit chat updates/s);
+  assert.match(context(plugin, { hook_event_name: 'SessionStart', session_id: 'codex-session', source: 'compact' }, root) ?? '', /model and effort ON THE SPAWN/);
   assert.match(context(plugin, { hook_event_name: 'SessionStart', session_id: 'codex-session', source: 'compact' }, root) ?? '', /session-scoped/);
+  assert.match(context(plugin, { hook_event_name: 'SessionStart', session_id: 'codex-session', source: 'compact' }, root) ?? '', /inspect the report and close it normally/);
   assert.equal(context(plugin, { hook_event_name: 'SessionEnd', session_id: 'codex-session' }, root), null);
   assert.equal(context(plugin, { hook_event_name: 'SessionStart', session_id: 'codex-session', source: 'resume' }, root), null);
+});
+
+test('Codex: qualified skill activation enables spawn scaffolding and qualified off disables it', (t) => {
+  const plugin = hookPlugin(t);
+  const root = hookRepo(t);
+  const session_id = 'qualified-session';
+  const activation = context(plugin, { hook_event_name: 'UserPromptSubmit', session_id, prompt: '$fadeno:fadeno-host' }, root);
+  assert.match(activation ?? '', /^# Fadeno host mode/);
+  const event = { hook_event_name: 'PreToolUse', session_id, cwd: root, tool_name: 'collaborationspawn_agent' };
+  assert.match(denial(plugin.run('spawn-codex.mjs', { ...event, tool_input: { agent_type: 'explorer', message: 'x' } })) ?? '', /refuses generic/);
+  const passed = plugin.run('spawn-codex.mjs', { ...event, tool_input: {
+    agent_type: 'fadeno-worker', task_name: 'qualified-worker', message: 'Inspect only.', model: 'gpt-5.6-sol', reasoning_effort: 'high',
+  } });
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.equal(denial(passed), null);
+  const started = plugin.run('spawn-codex.mjs', {
+    hook_event_name: 'SubagentStart', session_id, cwd: root, agent_id: 'qualified-agent', agent_type: 'fadeno-worker', model: 'gpt-5.6-sol',
+  });
+  assert.equal(started.status, 0, started.stderr);
+  assert.match(started.out?.hookSpecificOutput?.additionalContext ?? '', /Fadeno dispatch/);
+  assert.equal(readDispatches(root).records.length, 1);
+  assert.ok(existsSync(join(root, '.fadeno/local/worktrees/qualified-worker')));
+  assert.equal(context(plugin, { hook_event_name: 'UserPromptSubmit', session_id, prompt: '$fadeno:fadeno-host off' }, root), null);
+  assert.equal(plugin.run('spawn-codex.mjs', { ...event, tool_input: { agent_type: 'explorer', message: 'x' } }).out, null);
+});
+
+test('Claude-only plugin environment keeps Claude spawn guidance', (t) => {
+  const plugin = hookPlugin(t);
+  const root = hookRepo(t);
+  const run = plugin.run(HOOK, { hook_event_name: 'UserPromptExpansion', session_id: 'claude-only', command_name: 'fadeno:host' }, {
+    cwd: root, env: { PLUGIN_ROOT: undefined, PLUGIN_DATA: undefined },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const text = run.out?.hookSpecificOutput?.additionalContext ?? '';
+  assert.match(text, /fadeno:worker/);
+  assert.doesNotMatch(text, /model and effort ON THE SPAWN/);
+});
+
+test('Codex: similarly named skills do not activate host mode', (t) => {
+  const plugin = hookPlugin(t);
+  for (const prompt of ['$fadeno-host-extra', '$fadeno:fadeno-host-extra', '$other:fadeno-host']) {
+    assert.equal(context(plugin, { hook_event_name: 'UserPromptSubmit', session_id: 'unrelated', prompt }, plugin.root), null, prompt);
+  }
 });
 
 test('when `fadeno context` cannot answer, the hook says so instead of inventing a vocabulary', (t) => {
@@ -95,6 +159,10 @@ test('every sentence of the hook policy survives in the fadeno-host skill', (t) 
     assert.match(readFileSync(path, 'utf8'), /Fadeno failing is a user-facing event/, path);
   }
   assert.match(readFileSync(SKILL, 'utf8'), /Report this refusal to the user/);
+  assert.match(readFileSync(SKILL, 'utf8'), /The managed foreground shell requirement for the command launcher itself remains unchanged/);
+  assert.match(readFileSync(SKILL, 'utf8'), /no live inbox or mid-run messaging/);
+  assert.match(readFileSync(SKILL, 'utf8'), /fadeno dispatches --output <name>/);
+  assert.match(readFileSync(SKILL, 'utf8'), /shared-tree dispatch cannot provide a follow-up baseline/);
 });
 
 test('the host skill keeps a live foreground dispatch session instead of duplicating an empty initial chunk', () => {

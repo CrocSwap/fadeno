@@ -3,6 +3,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import test from 'node:test';
+import { parse as parseYaml } from 'yaml';
 import { runCodexPlugin } from '../src/commands/plugin.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
@@ -26,7 +27,7 @@ function listFilesRel(dir: string, base = dir): string[] {
   return out;
 }
 
-test('codex plugin: manifest is spec-minimal with a single-sourced version', (t) => {
+test('codex plugin: manifest advertises the supported Fadeno surface', (t) => {
   const root = tempRepo(t);
   const { outDir } = runCodexPlugin({ cwd: root, outDir: join(root, 'plugin-codex') });
 
@@ -35,9 +36,18 @@ test('codex plugin: manifest is spec-minimal with a single-sourced version', (t)
   assert.equal(manifest.name, 'fadeno');
   assert.equal(manifest.skills, './skills/');
   assert.equal(manifest.interface.displayName, 'Fadeno');
-  // "Engineering" is a capitalized marketplace category — confirmed accepted by
-  // `codex plugin add` (the docs' free-text "code review and security" was wrong).
+  assert.match(manifest.interface.shortDescription, /archetype/);
+  assert.match(manifest.interface.longDescription, /worktree/);
+  assert.equal(manifest.interface.developerName, 'Fadeno');
   assert.equal(manifest.interface.category, 'Engineering');
+  assert.ok(Array.isArray(manifest.interface.capabilities));
+  assert.ok(manifest.interface.capabilities.length > 0);
+  assert.ok(manifest.interface.capabilities.every((value: unknown) => typeof value === 'string' && value.length > 0));
+  assert.ok(Array.isArray(manifest.interface.defaultPrompt));
+  assert.ok(manifest.interface.defaultPrompt.length <= 3);
+  assert.ok(manifest.interface.defaultPrompt.every((value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 128));
+  assert.ok(!('apps' in manifest));
+  assert.ok(!('mcpServers' in manifest));
 
   // Version is single-sourced from package.json (like the Claude manifest), so the
   // no-drift guard keeps a bumped bundle from shipping stale.
@@ -69,17 +79,29 @@ test('codex plugin: skills are the shared bodies + in-plugin invocation policy',
     assert.notEqual(statSync(launcher).mode & 0o111, 0, `${skill} CLI launcher must be executable`);
   }
 
-  // Policy correctness: host mode is explicit-only.
-  assert.match(read(outDir, 'skills/fadeno-host/agents/openai.yaml'), /allow_implicit_invocation:\s*false/);
+  // Both skill manifests use the accepted schema, and host mode is explicit-only.
+  for (const skill of SKILLS) {
+    const agent = parseYaml(read(outDir, `skills/${skill}/agents/openai.yaml`)) as {
+      interface?: { display_name?: string; short_description?: string };
+      policy?: { allow_implicit_invocation?: boolean };
+      [key: string]: unknown;
+    };
+    assert.ok(agent.interface?.display_name);
+    assert.ok(agent.interface?.short_description);
+    assert.equal(agent.policy?.allow_implicit_invocation, false);
+    assert.ok(!('allow_implicit_invocation' in agent));
+    assert.ok(!('name' in agent));
+    assert.ok(!('description' in agent));
+  }
 });
 
 test('codex plugin: carries setup, the hook family, bundled CLI, and built-in definitions', (t) => {
   const root = tempRepo(t);
   const { outDir } = runCodexPlugin({ cwd: root, outDir: join(root, 'plugin-codex') });
 
-  // No agents: Codex custom agents live outside a plugin, and a Codex hook can
-  // refuse a spawn but not rewrite one, so archetype work goes through the
-  // command lane. No commands either.
+  // No plugin-shipped agents: Codex custom agents live in user scope. The host
+  // skill reconciles model-neutral `fadeno-*` names there on first use. No
+  // commands component either.
   assert.ok(!exists(outDir, 'agents'), 'codex plugin must not ship subagents');
   assert.ok(!exists(outDir, 'commands'), 'codex plugin has no commands component');
   assert.ok(exists(outDir, 'skills/fadeno-setup/SKILL.md'));

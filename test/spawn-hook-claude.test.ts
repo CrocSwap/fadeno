@@ -64,7 +64,7 @@ test('an archetype the session can deliver opens on the host lane: contract in t
   // decision Fadeno made for this one spawn, which is how a host came to
   // report it as a possible substitution.
   assert.match(out.hookSpecificOutput.additionalContext, new RegExp(`Per the reviewer dial, Fadeno opened dispatch \`review-retry-logic\` \\(${opened.id}\\) for this spawn on the host lane: opus@xhigh`));
-  assert.match(out.hookSpecificOutput.additionalContext, /fadeno dispatch-close review-retry-logic --merged\|--kept\|--discarded\|--failed/);
+  assert.match(out.hookSpecificOutput.additionalContext, /fadeno dispatch-close review-retry-logic --merged\|--kept\|--discarded\|--failed\|--reviewed/);
   assert.match(out.hookSpecificOutput.additionalContext, /No unclosed dispatches in this repository\./);
 
   // An undialed archetype runs on the session's own model: no model is set,
@@ -73,7 +73,7 @@ test('an archetype the session can deliver opens on the host lane: contract in t
   assert.equal(judge.hookSpecificOutput.updatedInput.subagent_type, 'fadeno:judge');
   assert.equal('model' in judge.hookSpecificOutput.updatedInput, false);
   assert.match(judge.systemMessage, /on this session's model, host lane/);
-  assert.match(judge.hookSpecificOutput.additionalContext, /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)/, 'the second spawn is nagged about the first');
+  assert.match(judge.hookSpecificOutput.additionalContext, /## Unclosed dispatches \(1; 0 stopped and waiting on you\)/, 'the second spawn is nagged about the first');
 
   // A repo-local agent of the same name shadows the plugin's.
   mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
@@ -95,6 +95,9 @@ test('an archetype that resolves to a process is retargeted to the dispatch prox
   assert.ok(command, updated.prompt);
   assert.match(command, /^fadeno dispatch --archetype reviewer --name 'Fix login bug' --model sol --prompt-file \S+\.fadeno\/local\/relay\/\S+\.md$/);
   assert.match(updated.prompt, /relay its stdout verbatim/);
+  assert.match(updated.prompt, /no live inbox or mid-run messaging/);
+  assert.match(updated.prompt, /`fadeno dispatches --output 'Fix login bug'`/);
+  assert.match(updated.prompt, /bounded ledger preview/);
   // The proxy raises the Bash tool's own two-minute default to the largest
   // value it accepts. Saying whose limit it is matters: Fadeno imposes no
   // deadline on a dispatch, and a bare number read as one.
@@ -119,16 +122,16 @@ test('an archetype that resolves to a process is retargeted to the dispatch prox
   assert.equal(record.opened?.session, null, 'the relay carries no session: the proxy is a different process');
 });
 
-test('the limit, a resolver error, a missing CLI, a timeout and an unreadable answer each refuse with their own diagnosis', (t) => {
+test('a resolver error, a missing CLI, a timeout and an unreadable answer each refuse with their own diagnosis', (t) => {
   const plugin = hookPlugin(t);
   const root = hookRepo(t);
   for (let i = 0; i < 5; i += 1) {
     assert.equal(cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--name', `j${i}`], `job ${i}`).status, 0);
     cli(root, ['dispatch-stop', `j${i}`], 'done');
   }
-  const limited = denial(plugin.run(HOOK, agentEvent(root, { prompt: 'x', description: 'six', subagent_type: 'fadeno:reviewer' })));
-  assert.match(limited ?? '', /5 dispatches have stopped and are waiting for your decision, and the limit is 5/);
-  assert.ok(limited!.endsWith(REPORT_REFUSAL_SENTENCE));
+  const available = plugin.run(HOOK, agentEvent(root, { prompt: 'x', description: 'six', subagent_type: 'fadeno:reviewer' }));
+  assert.equal(available.out?.hookSpecificOutput.permissionDecision, undefined, 'stopped dispatches remain advisory');
+  assert.equal(readDispatches(root).records.length, 6, 'the advisory spawn is opened');
 
   const broken = hookRepo(t);
   writeFileSync(join(broken, '.fadeno', 'executors.yaml'), 'schema_version: 4\nmodels: {}\nharnesses: {}\nunknown_key: 1\n');

@@ -1,16 +1,16 @@
 {
   "name": "fadeno",
-  "version": "0.6.1",
-  "description": "Portable, repo-native playbook layer for AI coding agents (Codex, Claude Code, Grok Build, OpenCode, omp).",
+  "version": "0.7.0",
+  "description": "A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.",
   "keywords": [
     "ai",
     "agents",
     "codex",
     "claude-code",
-    "grok-build",
     "omp",
-    "playbook",
-    "workflow",
+    "subagents",
+    "dispatch",
+    "worktrees",
     "skills"
   ],
   "license": "MIT",
@@ -21,6 +21,9 @@
   "files": [
     "dist",
     "templates",
+    "plugin/bin",
+    "plugin-codex/bin",
+    "plugin-omp/bin",
     "README.md",
     "LICENSE"
   ],

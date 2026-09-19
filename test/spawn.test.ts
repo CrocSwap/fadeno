@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test, { type TestContext } from 'node:test';
@@ -9,6 +9,7 @@ import { CONTRACT_HEADER } from '../src/lib/contracts.ts';
 import { LEDGER_FILE, appendRow, readDispatches, type OpenedRow } from '../src/lib/ledger.ts';
 import {
   DISPATCH_ID_ENV,
+  cancellationPaths,
   SpawnError,
   cancelDispatch,
   groupAlive,
@@ -16,9 +17,11 @@ import {
   prepareDispatch,
   recordOpened,
   resolveArchetype,
+  resolveFromBaseline,
   runCommandDispatch,
 } from '../src/lib/spawn.ts';
 import { git, gitRepo, tempRepo } from './helpers.ts';
+import { cli } from './hook-helpers.ts';
 
 // A bare shell: no host frame, so `host` has nothing to deliver.
 const ISOLATED = { env: { FADENO_HARNESS: 'standalone' } } as const;
@@ -73,7 +76,6 @@ test('resolveArchetype: a dialed archetype resolves to a command lane; an undial
   assert.equal(worker.lane, 'command');
   assert.deepEqual(worker.command, ECHO('REPORT:'));
   assert.equal(worker.source, 'repo');
-  assert.equal(worker.unclosedLimit, 5);
   const reviewer = resolveArchetype({ repoRoot: root, archetype: 'reviewer', userPathOptions: ISOLATED });
   assert.equal(reviewer.model, 'host');
   assert.equal(reviewer.source, 'base');
@@ -125,7 +127,7 @@ test('a nested spawn inherits its parent from the environment, and a second prep
   assert.ok(second.ok);
   const p = second.ok ? second.prepared : null!;
   assert.equal(p.parent, first.ok ? first.prepared.id : null);
-  assert.match(p.nag, /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)/);
+  assert.match(p.nag, /## Unclosed dispatches \(1; 0 stopped and waiting on you\)/);
   assert.match(p.nag, new RegExp(`\`${first.ok ? first.prepared.name : ''}\``));
   assert.notEqual(p.name, first.ok ? first.prepared.name : '', 'names are unique per repo');
 });
@@ -139,7 +141,271 @@ test('a default name is archetype-<4 hex>, and a collision gets a counter', (t) 
   assert.ok(b.ok && b.prepared.name === `${a.ok ? a.prepared.name : ''}-2`);
 });
 
-test('the limit refuses the sixth spawn, and the catalog can raise it', (t) => {
+test('a retained dispatch name or id is a baseline: sibling host and command follow-ups get independent worktrees', (t) => {
+  const root = repo(t);
+  const parent = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Prepare the handoff.',
+    name: 'i5-handoff--revision',
+    lane: 'host',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(parent.ok);
+  const retained = parent.ok ? parent.prepared : null!;
+  recordOpened(root, retained);
+
+  // The retained branch has work beyond the recorded opening base. A name
+  // lookup must therefore use its branch tip, not merely the old base SHA.
+  writeFileSync(join(retained.cwd, 'handoff.txt'), 'retained work\n');
+  git(retained.cwd, ['add', 'handoff.txt']);
+  git(retained.cwd, ['-c', 'user.email=fadeno-test@example.invalid', '-c', 'user.name=fadeno test', 'commit', '-q', '-m', 'retain handoff']);
+  appendRow(root, { row: 'closed', id: retained.id, at: new Date().toISOString(), verb: 'reviewed', note: null });
+  const retainedTip = git(root, ['rev-parse', retained.workspace.branch!]).trim();
+
+  const host = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Review the retained handoff.',
+    name: 'review-follow-up',
+    from: 'i5-handoff--revision',
+    lane: 'host',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  const command = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Implement the retained handoff.',
+    name: 'worker-follow-up',
+    from: retained.id,
+    lane: 'command',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(host.ok, host.ok ? '' : host.refused);
+  assert.ok(command.ok, command.ok ? '' : command.refused);
+  const hostPrepared = host.ok ? host.prepared : null!;
+  const commandPrepared = command.ok ? command.prepared : null!;
+  assert.equal(hostPrepared.shared, false);
+  assert.equal(commandPrepared.shared, false);
+  assert.notEqual(hostPrepared.cwd, commandPrepared.cwd);
+  assert.notEqual(hostPrepared.workspace.branch, commandPrepared.workspace.branch);
+  assert.equal(hostPrepared.workspace.base, retainedTip);
+  assert.equal(commandPrepared.workspace.base, retainedTip);
+  assert.match(hostPrepared.workspace.branch!, /^fadeno\/review-follow-up$/);
+  assert.match(commandPrepared.workspace.branch!, /^fadeno\/worker-follow-up$/);
+  assert.doesNotMatch(hostPrepared.contract, /shared tree/);
+  assert.doesNotMatch(commandPrepared.contract, /shared tree/);
+  const literalRef = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Use the literal branch.',
+    name: 'literal-ref-follow-up',
+    from: retained.workspace.branch,
+    lane: 'host',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  const literalSha = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Use the literal SHA.',
+    name: 'literal-sha-follow-up',
+    from: retainedTip,
+    lane: 'command',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(literalRef.ok, literalRef.ok ? '' : literalRef.refused);
+  assert.ok(literalSha.ok, literalSha.ok ? '' : literalSha.refused);
+  assert.equal(literalRef.ok ? literalRef.prepared.shared : true, false);
+  assert.equal(literalSha.ok ? literalSha.prepared.shared : true, false);
+  assert.equal(literalRef.ok ? literalRef.prepared.workspace.base : null, retainedTip);
+  assert.equal(literalSha.ok ? literalSha.prepared.workspace.base : null, retainedTip);
+  assert.equal(resolveFromBaseline(root, 'i5-handoff--revision').ok, true);
+  assert.equal(resolveFromBaseline(root, retained.id).ok, true);
+});
+
+test('an explicit baseline refuses before writing, and a valid baseline never falls back to shared on worktree failure', (t) => {
+  const root = repo(t);
+  const invalid = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Do not start.',
+    from: 'not-a-dispatch-or-ref',
+    lane: 'host',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(!invalid.ok);
+  assert.match(invalid.refused, /did not match a dispatch name\/id or a Git commit\/ref/);
+  assert.ok(!existsSync(join(root, LEDGER_FILE)));
+  assert.ok(!existsSync(join(root, '.fadeno', 'local', 'worktrees')));
+
+  mkdirSync(join(root, '.fadeno', 'local', 'worktrees', 'occupied'), { recursive: true });
+  const failedCut = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Do not share this.',
+    name: 'occupied',
+    from: 'main',
+    lane: 'command',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(!failedCut.ok);
+  assert.match(failedCut.refused, /Refusing the shared-tree fallback/);
+  assert.ok(!existsSync(join(root, LEDGER_FILE)));
+});
+
+test('a retained dispatch refuses when its branch is gone instead of falling back to its opening base', (t) => {
+  const root = repo(t);
+  const parent = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Retain the base.',
+    name: 'retained-base',
+    lane: 'host',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(parent.ok);
+  const retained = parent.ok ? parent.prepared : null!;
+  recordOpened(root, retained);
+  const branch = retained.workspace.branch!;
+  const base = retained.workspace.base;
+  git(root, ['worktree', 'remove', '--force', retained.cwd]);
+  git(root, ['branch', '-D', branch]);
+
+  const resolved = resolveFromBaseline(root, retained.name);
+  assert.ok(!resolved.ok);
+  assert.match(resolved.ok ? '' : resolved.refused, /recorded branch\/result/);
+  assert.match(resolved.ok ? '' : resolved.refused, /opening base is not used as a substitute/);
+
+  const child = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Do not lose the retained result.',
+    name: 'base-follow-up',
+    from: retained.name,
+    lane: 'host',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(!child.ok);
+  assert.match(child.ok ? '' : child.refused, /Commit the desired state and pass that Git ref or commit SHA/);
+  assert.doesNotMatch(child.ok ? '' : child.refused, new RegExp(base));
+});
+
+test('a shared-tree dispatch cannot be used as a retained baseline', (t) => {
+  const root = repo(t);
+  const parent = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Work in the live tree.',
+    name: 'shared-source',
+    shared: true,
+    lane: 'host',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(parent.ok);
+  const retained = parent.ok ? parent.prepared : null!;
+  recordOpened(root, retained);
+
+  const resolved = resolveFromBaseline(root, retained.name);
+  assert.ok(!resolved.ok);
+  assert.match(resolved.ok ? '' : resolved.refused, /used the shared tree and has no retained branch/);
+  assert.match(resolved.ok ? '' : resolved.refused, /cannot be attributed to a retained ref/);
+  assert.match(resolved.ok ? '' : resolved.refused, /Commit the desired state and pass that Git ref or commit SHA/);
+});
+
+test('a dispatch reference and a Git ref with the same spelling are refused across namespaces', (t) => {
+  const root = repo(t);
+  const parent = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Retain the main-named dispatch.',
+    name: 'main',
+    lane: 'host',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(parent.ok);
+  const retained = parent.ok ? parent.prepared : null!;
+  recordOpened(root, retained);
+
+  const ambiguous = resolveFromBaseline(root, 'main');
+  assert.ok(!ambiguous.ok);
+  assert.match(ambiguous.ok ? '' : ambiguous.refused, /both a dispatch reference and a Git commit\/ref/);
+  assert.match(ambiguous.ok ? '' : ambiguous.refused, /refs\/heads\/main/);
+  assert.match(ambiguous.ok ? '' : ambiguous.refused, new RegExp(retained.id));
+
+  const qualifiedGit = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Use the qualified Git ref.',
+    name: 'qualified-main',
+    from: 'refs/heads/main',
+    lane: 'host',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(qualifiedGit.ok, qualifiedGit.ok ? '' : qualifiedGit.refused);
+  assert.equal(qualifiedGit.ok ? qualifiedGit.prepared.workspace.base : null, git(root, ['rev-parse', 'main']).trim());
+
+  const qualifiedDispatch = prepareDispatch({
+    repoRoot: root,
+    archetype: 'worker',
+    prompt: 'Use the full dispatch UUID.',
+    name: 'qualified-dispatch',
+    from: retained.id,
+    lane: 'command',
+    userPathOptions: ISOLATED,
+    env: {},
+  });
+  assert.ok(qualifiedDispatch.ok, qualifiedDispatch.ok ? '' : qualifiedDispatch.refused);
+  assert.equal(qualifiedDispatch.ok ? qualifiedDispatch.prepared.workspace.base : null, git(root, [ 'rev-parse', retained.workspace.branch! ]).trim());
+});
+
+test('an exact dispatch name that is another dispatch ID prefix is refused instead of guessed', (t) => {
+  const root = repo(t);
+  const exactName: OpenedRow = {
+    row: 'opened', id: '11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa', name: '22222222', at: new Date().toISOString(),
+    session: null, parent: null, archetype: 'worker', model: 'echo', effort: null, explicit_model: null,
+    lane: 'host', harness: 'codex', workspace: null, task: 'x', prompt: 'p',
+  };
+  const prefix: OpenedRow = {
+    ...exactName, id: '22222222-bbbb-bbbb-bbbb-bbbbbbbbbbbb', name: 'other',
+  };
+  appendRow(root, exactName);
+  appendRow(root, prefix);
+
+  const resolved = resolveFromBaseline(root, '22222222');
+  assert.ok(!resolved.ok);
+  assert.match(resolved.ok ? '' : resolved.refused, /both the exact name/);
+  assert.match(resolved.ok ? '' : resolved.refused, /full UUID/);
+});
+
+test('shared and from are rejected before prompt input, relay staging, or dispatch preparation', (t) => {
+  const root = repo(t);
+  const missingPrompt = join(root, 'does-not-exist.md');
+  const command = cli(root, ['dispatch', '--archetype', 'worker', '--shared', '--from', 'main', '--prompt-file', missingPrompt]);
+  assert.equal(command.status, 3);
+  assert.match(command.stderr, /`--shared` cannot be combined with `--from`/);
+  assert.doesNotMatch(command.stderr, /no such file/);
+
+  const host = cli(root, ['dispatch-open', '--archetype', 'worker', '--lane', 'host', '--shared', '--from', 'main', '--prompt-file', missingPrompt]);
+  assert.equal(host.status, 3);
+  assert.match(host.stderr, /`--shared` cannot be combined with `--from`/);
+  assert.doesNotMatch(host.stderr, /no such file/);
+  assert.equal(readDispatches(root).records.length, 0);
+  assert.ok(!existsSync(join(root, '.fadeno', 'local')), 'neither command nor host path staged anything');
+});
+
+test('unclosed dispatches never refuse another spawn, including legacy configured limits', (t) => {
   const root = repo(t);
   for (let i = 0; i < 5; i += 1) {
     const row: OpenedRow = {
@@ -152,16 +418,12 @@ test('the limit refuses the sixth spawn, and the catalog can raise it', (t) => {
   const whileRunning = prepareDispatch({ repoRoot: root, archetype: 'worker', prompt: 'six', lane: 'host', userPathOptions: ISOLATED, env: {} });
   assert.ok(whileRunning.ok, 'work in flight does not stand between a caller and the next dispatch');
 
-  // Stopped and unread, they do.
+  // Stopped and unread, they still do not.
   for (let i = 0; i < 5; i += 1) {
     appendRow(root, { row: 'stopped', id: `id-${i}`, at: '2026-09-01T01:00:00Z', final_message: 'done', dirty: { paths: [], truncated: false } });
   }
-  const refused = prepareDispatch({ repoRoot: root, archetype: 'worker', prompt: 'seven', lane: 'host', userPathOptions: ISOLATED, env: {} });
-  assert.ok(!refused.ok);
-  assert.match(refused.ok ? '' : refused.refused, /5 dispatches have stopped and are waiting for your decision, and the limit is 5/);
-  // The allowed one cut its worktree; the refused one added nothing to that.
-  const treesDir = join(root, '.fadeno', 'local', 'worktrees');
-  assert.deepEqual(readdirSync(treesDir), [whileRunning.ok ? whileRunning.prepared.name : ''], 'a refused spawn cuts nothing');
+  const another = prepareDispatch({ repoRoot: root, archetype: 'worker', prompt: 'seven', lane: 'host', userPathOptions: ISOLATED, env: {} });
+  assert.ok(another.ok, 'stopped dispatches remain advisory');
   const raised = tempRepo(t);
   git(raised, ['init', '-q', '-b', 'main']);
   git(raised, ['config', 'user.email', 'a@b.invalid']);
@@ -173,7 +435,7 @@ test('the limit refuses the sixth spawn, and the catalog can raise it', (t) => {
   writeFileSync(join(raised, LEDGER_FILE), readFileSync(join(root, LEDGER_FILE), 'utf8'));
   const allowed = prepareDispatch({ repoRoot: raised, archetype: 'worker', prompt: 'six', lane: 'host', userPathOptions: ISOLATED, env: {} });
   assert.ok(allowed.ok);
-  assert.match(allowed.ok ? allowed.prepared.nag : '', /\(5; 5 of 7 allowed are waiting on you\)/);
+  assert.match(allowed.ok ? allowed.prepared.nag : '', /\(5; 5 stopped and waiting on you\)/);
 });
 
 test('shared on request, and shared as a fallback when git cannot cut, each say so in the contract', (t) => {
@@ -291,6 +553,59 @@ test('cancel signals the recorded process group, the launcher records the stop w
   const again = await cancelDispatch(root, after);
   assert.ok(!again.ok && again.reason === 'not_running');
   assert.match(again.ok ? '' : again.message, /dispatch-close sleeper --failed/);
+});
+
+test('an EPERM direct signal falls back to the live launcher, records success only after consumption, and cleans scratch', async (t) => {
+  const root = repo(t, SLEEPS);
+  const outcome = prepareDispatch({ repoRoot: root, archetype: 'worker', prompt: 'sleep', name: 'cooperative', lane: 'command', userPathOptions: ISOLATED, env: {} });
+  assert.ok(outcome.ok);
+  const prepared = outcome.ok ? outcome.prepared : null!;
+  const running = runCommandDispatch({ repoRoot: root, prepared, env: { PATH: process.env.PATH ?? '' } });
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && readDispatches(root).records.length === 0) await new Promise((r) => setTimeout(r, 25));
+  const record = readDispatches(root).records[0]!;
+  const forcedEperm = () => {
+    const err = new Error('operation not permitted') as NodeJS.ErrnoException;
+    err.code = 'EPERM';
+    throw err;
+  };
+  const cancelled = await cancelDispatch(root, record, { graceMs: 5_000, kill: forcedEperm });
+  assert.ok(cancelled.ok, cancelled.ok ? '' : cancelled.message);
+  assert.equal(cancelled.ok ? cancelled.method : null, 'cooperative');
+  const result = await running;
+  assert.equal(result.signal, 'SIGTERM');
+  assert.ok(!groupAlive(result.processGroup));
+  const paths = cancellationPaths(root, record.id);
+  assert.equal(existsSync(paths.request), false);
+  assert.equal(existsSync(paths.ack), false);
+  assert.equal(readDispatches(root).records[0]!.stopped?.exit?.signal, 'SIGTERM');
+});
+
+test('an EPERM request that no launcher consumes fails loudly and leaves no false stopped row', async (t) => {
+  const root = repo(t, SLEEPS);
+  const outcome = prepareDispatch({ repoRoot: root, archetype: 'worker', prompt: 'sleep', name: 'orphan-request', lane: 'command', userPathOptions: ISOLATED, env: {} });
+  assert.ok(outcome.ok);
+  const prepared = outcome.ok ? outcome.prepared : null!;
+  const executor = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { cwd: root, detached: true, stdio: 'ignore' });
+  assert.ok(executor.pid);
+  t.after(() => {
+    try { process.kill(-executor.pid!, 'SIGKILL'); } catch { /* already gone */ }
+  });
+  recordOpened(root, prepared, { lane: 'command', processGroup: executor.pid });
+  const record = readDispatches(root).records[0]!;
+  const forcedEperm = () => {
+    const err = new Error('operation not permitted') as NodeJS.ErrnoException;
+    err.code = 'EPERM';
+    throw err;
+  };
+  const refused = await cancelDispatch(root, record, { graceMs: 250, kill: forcedEperm });
+  assert.ok(!refused.ok);
+  assert.match(refused.message, /Codex app sandbox denied the signal/);
+  assert.match(refused.message, /unsandboxed\/elevated command permission/);
+  assert.equal(readDispatches(root).records[0]!.stopped, null);
+  const paths = cancellationPaths(root, record.id);
+  assert.equal(existsSync(paths.request), false);
+  assert.equal(existsSync(paths.ack), false);
 });
 
 test('cancel refuses a host-lane dispatch and says whose it is to stop', async (t) => {

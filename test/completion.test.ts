@@ -22,12 +22,32 @@ test('completion: dial flags replace old flags', (t) => {
   assert.ok(complete(root, ['fadeno', 'dial', 'clear', '--']).includes('--session'));
   assert.ok(complete(root, ['fadeno', 'dispatch', '--']).includes('--archetype'));
   assert.ok(complete(root, ['fadeno', 'dispatch', '--']).includes('--name'));
+  assert.ok(complete(root, ['fadeno', 'dispatch', '']).includes('run'));
+  assert.ok(complete(root, ['fadeno', 'dispatch', 'run', '--']).includes('--archetype'));
+  assert.ok(complete(root, ['fadeno', 'dispatch', 'run', '--']).includes('--model'));
   // old flags gone
   assert.ok(!complete(root, ['fadeno', 'dispatch', '--']).includes('--executor'));
   assert.ok(!complete(root, ['fadeno', 'dispatch', '--']).includes('--loadout'));
 });
 
-test('completion: model remove offers user-catalog aliases, models verify offers dialed refs and keeps taking them', (t) => {
+test('completion: dispatch selectors include effective archetypes and registered model references', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
+    models: { echo: { provider: 'openai', id: 'echo-model', effort: 'default' } },
+    harnesses: { codex: { provider: 'openai', command: ['codex', '--model', '{model}'] } },
+    archetypes: { worker: {}, reviewer: {} },
+    dials: { worker: 'echo' },
+  }));
+  const selectors = complete(root, ['fadeno', 'dispatch', 'run', '']);
+  assert.ok(selectors.includes('worker'));
+  assert.ok(selectors.includes('reviewer'));
+  assert.ok(selectors.includes('echo'));
+  assert.ok(selectors.includes('echo-model'));
+  assert.ok(selectors.includes('openai/echo-model'));
+});
+
+test('completion: model remove offers user-catalog aliases, models verify offers registry refs and keeps taking them', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
@@ -55,11 +75,14 @@ test('completion: model remove offers user-catalog aliases, models verify offers
     assert.deepEqual(complete(root, ['fadeno', spelling, 'remove', 'per']), ['personal']);
   }
 
-  // `verify` narrows against the DIALED table, and accepts an alias, a
-  // delivered id, the canonical id, or `provider/id`.
+  // `verify` accepts a merged-registry alias, a delivered id, the canonical
+  // id, or `provider/id`, whether or not an archetype currently dials it.
   const refs = complete(root, ['fadeno', 'models', 'verify', '']);
-  assert.deepEqual(refs, ['alpha', 'alpha-id', 'openai/alpha-id', 'openai/personal-id', 'personal', 'personal-id']);
-  assert.ok(!refs.includes('projectonly'), 'a registered but undialed model is not a verify target');
+  assert.deepEqual(refs, [
+    'alpha', 'alpha-id', 'openai/alpha-id', 'openai/personal-id', 'openai/project-id',
+    'personal', 'personal-id', 'project-id', 'projectonly',
+  ]);
+  assert.ok(refs.includes('projectonly'), 'a registered but undialed model is a verify target');
   assert.ok(!refs.includes('host'));
 
   // `[<ref>...]` is variadic. Two declared slots meant the third argument

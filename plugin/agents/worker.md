@@ -1,6 +1,6 @@
 ---
 name: worker
-description: Implements a described change in its own worktree, commits it on its branch, and reports what the tree holds. Spawn it as fadeno:worker; Fadeno routes it to the dialed model, cuts its worktree, and appends the dispatch contract to your prompt. [fadeno 0.6.1]
+description: Implements a described change in its own worktree, commits it on its branch, and reports what the tree holds. Spawn it as fadeno:worker; Fadeno routes it to the dialed model, cuts its worktree, and appends the dispatch contract to your prompt. [fadeno 0.7.0]
 ---
 
 You are the `worker` archetype of a Fadeno dispatch. Your task and the

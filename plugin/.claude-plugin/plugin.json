@@ -1,7 +1,7 @@
 {
   "name": "fadeno",
   "description": "A meta-harness for subagent workflows: route archetypes to models, spawn subagents in scaffolded worktrees, and keep a ledger of every dispatch.",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "author": {
     "name": "Fadeno"
   },

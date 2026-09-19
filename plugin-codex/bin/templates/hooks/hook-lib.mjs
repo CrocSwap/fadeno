@@ -11,7 +11,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -169,15 +169,16 @@ export const PENDING_TTL_MS = 10 * 60 * 1000;
  * Where PreToolUse leaves what only it can see, for SubagentStart to pick up.
  *
  * The two events share no id: PreToolUse has a `tool_use_id`, SubagentStart
- * has an `agent_id`, and nothing links them. So the archetype and the session
- * are the only key there is, and the match is by arrival order.
+ * has an `agent_id`, and nothing links them. So PreToolUse reserves one
+ * exclusive session/archetype slot, and SubagentStart claims that slot with
+ * an atomic rename before it reads any plaintext.
  *
  * What is stashed here is deliberately only the LABEL — the task name and the
- * prompt when it was readable. Everything consequential (the dispatch id, the
- * worktree, the branch, the contract) is decided at SubagentStart, where the
- * agent id is known and the binding is exact. So the worst a mismatched pop
- * can do is put the wrong title on a row; it can never send an agent to
- * another agent's tree.
+ * prompt when it was readable — plus the repository identity that must match
+ * at both events. Everything consequential (the dispatch id, the worktree,
+ * the branch, the contract) is decided at SubagentStart, where the agent id
+ * is known. A second reservation fails before its agent exists; a recovery-
+ * state start gets a sealed fallback.
  */
 function pendingDir(sessionId, archetype, env = process.env) {
   const root = env.PLUGIN_DATA || env.CLAUDE_PLUGIN_DATA;
@@ -186,80 +187,250 @@ function pendingDir(sessionId, archetype, env = process.env) {
   return join(root, 'pending', key);
 }
 
-/** Stash one spawn's label. Best effort: a spawn is never failed over a title. */
-export function stashPending(sessionId, archetype, entry, env = process.env) {
-  const dir = pendingDir(sessionId, archetype, env);
-  if (dir == null) return false;
+function pendingSlot(dir) {
+  return join(dir, 'reservation.json');
+}
+
+function pendingEntry(dir, repoKey) {
+  return join(dir, `${repoKey}.json`);
+}
+
+function validRepoKey(repoKey) {
+  return typeof repoKey === 'string' && /^[a-f0-9]{64}$/.test(repoKey);
+}
+
+function drop(path) {
   try {
-    mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${Date.now()}-${randomUUID()}.json`);
-    writeFileSync(file, JSON.stringify({ at: Date.now(), ...entry }), 'utf8');
-    return true;
+    // Pending artifacts are files. Never recursively remove an untrusted path:
+    // a malformed scratch entry must not turn cleanup into a directory wipe.
+    rmSync(path, { force: true });
   } catch {
+    // Scratch cleanup is best effort; an unreadable record is never usable.
+  }
+}
+
+const PENDING_ARTIFACT_RE = /^(?:reservation\.json|[a-f0-9]{64}\.json)(?:\.(?:claimed|tmp|cleanup)-[A-Za-z0-9-]+)?$/;
+
+function pendingArtifact(name) {
+  return PENDING_ARTIFACT_RE.test(name);
+}
+
+function artifactRepoKey(name) {
+  const match = /^([a-f0-9]{64})\.json(?:\.(?:claimed|tmp|cleanup)-[A-Za-z0-9-]+)?$/.exec(name);
+  return match?.[1] ?? null;
+}
+
+function staleByMtime(path, now) {
+  try {
+    const age = now - statSync(path).mtimeMs;
+    return Number.isFinite(age) && age > PENDING_TTL_MS;
+  } catch {
+    // If age cannot be established, preserve the artifact. A cleanup failure
+    // must never become permission to delete a live plaintext file.
     return false;
   }
 }
 
-/**
- * Take the label this start belongs to, if it can be known.
- *
- * Returns `null` when nothing is pending, and `{ ambiguous: true, count }`
- * when more than one is. Two spawns of one archetype in flight cannot be told
- * apart here, and a pop that picked one would look confident while being a
- * coin flip. Declining to guess costs a dispatch its title; guessing costs it
- * the truth about what it was asked.
- *
- * Ambiguity POISONS the key rather than clearing it: every entry is rewritten
- * to carry the count and nothing else, so each of the sibling starts still to
- * come reports the same reason. Clearing outright would have let the second
- * agent find an empty key and be told its prompt was encrypted, which is a
- * different thing and was not true.
- */
-export function takePending(sessionId, archetype, env = process.env) {
-  const dir = pendingDir(sessionId, archetype, env);
-  if (dir == null) return null;
-  let names;
+function staleArtifact(path, parsed, now) {
+  if (typeof parsed?.at === 'number' && Number.isFinite(parsed.at)) return now - parsed.at > PENDING_TTL_MS;
+  // A corrupt reservation has no trustworthy `at`; its filesystem age is the
+  // bounded lazy-cleanup authority. Fresh corruption remains untouched until
+  // it is old enough that no in-flight writer can reasonably own it.
+  return staleByMtime(path, now);
+}
+
+/** Remove exactly this inode without racing a fresh replacement at `path`. */
+function retire(path) {
+  const retired = `${path}.cleanup-${randomUUID()}`;
   try {
-    names = readdirSync(dir).filter((n) => n.endsWith('.json')).sort();
+    renameSync(path, retired);
+  } catch {
+    // Another process may have claimed or removed it. Crucially, do not rm the
+    // original path: a concurrent process may already have created a fresh one.
+    return false;
+  }
+  drop(retired);
+  return true;
+}
+
+function removeEmpty(dir) {
+  try { rmdirSync(dir); } catch { /* live or unknown artifacts keep the slot */ }
+}
+
+function readObject(path) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    return parsed != null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
   } catch {
     return null;
   }
-  const drop = (name) => {
-    try {
-      rmSync(join(dir, name), { force: true });
-    } catch {
-      // a label that will not delete is a label read once more, never a failure
+}
+
+/** Remove expired plugin scratch, including entries left by a crashed hook. */
+export function cleanupPending(env = process.env, now = Date.now()) {
+  const root = env.PLUGIN_DATA || env.CLAUDE_PLUGIN_DATA;
+  if (typeof root !== 'string' || root.trim() === '') return 0;
+  const pendingRoot = join(root, 'pending');
+  let dirs;
+  try { dirs = readdirSync(pendingRoot, { withFileTypes: true }); } catch { return 0; }
+  let removed = 0;
+  for (const dirent of dirs) {
+    if (!dirent.isDirectory()) continue;
+    const dir = join(pendingRoot, dirent.name);
+    let files;
+    try { files = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const file of files) {
+      if (file.isDirectory() || !pendingArtifact(file.name)) continue;
+      const path = join(dir, file.name);
+      try { chmodSync(path, 0o600); } catch { /* remove by age if unreadable */ }
+      const parsed = readObject(path);
+      if (staleArtifact(path, parsed, now) && retire(path)) removed += 1;
     }
-  };
-  const fresh = [];
-  for (const name of names) {
-    let entry = null;
-    try {
-      entry = JSON.parse(readFileSync(join(dir, name), 'utf8'));
-    } catch {
-      // unreadable is indistinguishable from stale, and treated the same
-    }
-    if (entry == null || typeof entry.at !== 'number' || Date.now() - entry.at > PENDING_TTL_MS) drop(name);
-    else fresh.push({ name, entry });
+    removeEmpty(dir);
   }
-  if (fresh.length === 0) return null;
-  if (fresh.length > 1) {
-    const count = fresh.length;
-    for (const { name, entry } of fresh.slice(1)) {
-      try {
-        writeFileSync(join(dir, name), JSON.stringify({ at: entry.at, ambiguous: count }), 'utf8');
-      } catch {
-        // a label that will not rewrite is one more start told nothing, which
-        // is the same answer by a longer road
-      }
+  return removed;
+}
+
+/** Remove all reservations for a session when the harness tells us it ended. */
+export function clearPending(sessionId, env = process.env) {
+  const root = env.PLUGIN_DATA || env.CLAUDE_PLUGIN_DATA;
+  if (typeof root !== 'string' || root.trim() === '' || !str(sessionId)) return;
+  const pendingRoot = join(root, 'pending');
+  let dirs;
+  try { dirs = readdirSync(pendingRoot, { withFileTypes: true }); } catch { return; }
+  for (const dirent of dirs) {
+    if (!dirent.isDirectory()) continue;
+    const dir = join(pendingRoot, dirent.name);
+    let files;
+    try { files = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    const artifacts = files.filter((file) => !file.isDirectory() && pendingArtifact(file.name));
+    const parsed = new Map(artifacts.map((file) => [file.name, readObject(join(dir, file.name))]));
+    const provenRepoKeys = new Set();
+    for (const [name, record] of parsed) {
+      if (name.startsWith('reservation.json') && record?.sessionId === sessionId && validRepoKey(record.repoKey)) provenRepoKeys.add(record.repoKey);
     }
-    drop(fresh[0].name);
-    return { ambiguous: true, count };
+    for (const file of artifacts) {
+      const record = parsed.get(file.name);
+      // A parsed record proves its own ownership, including claimed forms.
+      // Once a session-owned reservation proves a repo key, the matching
+      // payload and its temp/claimed variants are associated artifacts too.
+      const repoKey = artifactRepoKey(file.name);
+      const belongs = record?.sessionId === sessionId || (record == null && repoKey != null && provenRepoKeys.has(repoKey));
+      if (belongs) retire(join(dir, file.name));
+    }
+    removeEmpty(dir);
   }
-  drop(fresh[0].name);
-  const entry = fresh[0].entry;
-  if (typeof entry.ambiguous === 'number') return { ambiguous: true, count: entry.ambiguous };
-  return { ambiguous: false, entry };
+}
+
+/** Reserve the one handoff slot and write its private payload. */
+export function stashPending(sessionId, archetype, repoKey, entry, env = process.env) {
+  const dir = pendingDir(sessionId, archetype, env);
+  if (dir == null || !validRepoKey(repoKey)) return null;
+  cleanupPending(env);
+  let created = false;
+  let entryCreated = false;
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    const id = randomUUID();
+    const at = Date.now();
+    writeFileSync(pendingSlot(dir), JSON.stringify({ version: 1, at, sessionId, repoKey, id, ready: entry.prompt != null }), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    created = true;
+    writeFileSync(pendingEntry(dir, repoKey), JSON.stringify({ version: 1, at, sessionId, repoKey, id, ...entry }), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    entryCreated = true;
+    return { id, repoKey };
+  } catch {
+    // A competing process owns an existing reservation. Never delete its
+    // slot or plaintext while reporting our own refusal.
+    if (created) {
+      drop(pendingSlot(dir));
+      if (entryCreated) drop(pendingEntry(dir, repoKey));
+    }
+    return null;
+  }
+}
+
+/** Complete a reserved slot after the CLI has consumed a staged token. */
+export function completePending(reservation, sessionId, archetype, entry, env = process.env) {
+  const dir = pendingDir(sessionId, archetype, env);
+  if (dir == null || reservation == null) return false;
+  const slot = pendingSlot(dir);
+  const metadata = readObject(slot);
+  if (metadata?.id !== reservation.id || metadata.repoKey !== reservation.repoKey || metadata.sessionId !== sessionId) return false;
+  const target = pendingEntry(dir, reservation.repoKey);
+  const temporary = `${target}.tmp-${reservation.id}`;
+  try {
+    // Test-only fault injection exercises the same rollback path as a real
+    // write/rename failure without putting permissions or platform quirks in
+    // the test contract. It never carries or prints plaintext.
+    if (env.FADENO_TEST_FAIL_PENDING_COMPLETION === '1') throw new Error('injected pending completion failure');
+    writeFileSync(temporary, JSON.stringify({ version: 1, at: metadata.at, sessionId, repoKey: reservation.repoKey, id: reservation.id, ...entry }), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    renameSync(temporary, target);
+    writeFileSync(slot, JSON.stringify({ ...metadata, ready: true }), { encoding: 'utf8', mode: 0o600 });
+    return true;
+  } catch {
+    drop(temporary);
+    return false;
+  }
+}
+
+/** Release a reservation that will not start, without touching repository evidence. */
+export function releasePending(reservation, sessionId, archetype, env = process.env) {
+  const dir = pendingDir(sessionId, archetype, env);
+  if (dir == null || reservation == null) return;
+  const metadata = readObject(pendingSlot(dir));
+  if (metadata?.id !== reservation.id || metadata.repoKey !== reservation.repoKey || metadata.sessionId !== sessionId) return;
+  retire(pendingEntry(dir, reservation.repoKey));
+  retire(pendingSlot(dir));
+  removeEmpty(dir);
+}
+
+/**
+ * Atomically claim the label this start belongs to, if it can be known.
+ *
+ * Returns `null` when nothing is pending, a sealed fallback reason when the
+ * reservation is still being finalized or its payload is unavailable, and a
+ * repository mismatch without touching the other repository's bytes. The
+ * rename is the single-use claim: concurrent hook processes cannot both read
+ * the same plaintext.
+ */
+export function takePending(sessionId, archetype, repoKey, env = process.env) {
+  const dir = pendingDir(sessionId, archetype, env);
+  if (dir == null || !validRepoKey(repoKey)) return { repositoryMismatch: true };
+  cleanupPending(env);
+  const slot = pendingSlot(dir);
+  const metadata = readObject(slot);
+  if (metadata == null) return null;
+  if (metadata.repoKey !== repoKey || metadata.sessionId !== sessionId) return { repositoryMismatch: true };
+  if (metadata.version !== 1 || typeof metadata.at !== 'number' || Date.now() - metadata.at > PENDING_TTL_MS) {
+    retire(pendingEntry(dir, metadata.repoKey));
+    retire(slot);
+    removeEmpty(dir);
+    return null;
+  }
+  // A start that arrives while PreToolUse is still recovering a staged token
+  // cannot safely wait or guess. It gets the defensive sealed fallback; the
+  // reservation remains private and expires if the first hook crashed.
+  if (metadata.ready !== true) return { reserved: true };
+  const claimed = `${slot}.claimed-${randomUUID()}`;
+  try {
+    // This rename is the process-safe single-use claim. Do not read the
+    // repository-keyed plaintext until it succeeds.
+    renameSync(slot, claimed);
+  } catch {
+    return null;
+  }
+  try {
+    const entry = readObject(pendingEntry(dir, repoKey));
+    if (entry == null || entry.version !== 1 || entry.id !== metadata.id || entry.repoKey !== repoKey || entry.sessionId !== sessionId || typeof entry.at !== 'number' || Date.now() - entry.at > PENDING_TTL_MS) {
+      return { missing: true };
+    }
+    if (typeof entry.ambiguous === 'number') return { ambiguous: true, count: entry.ambiguous };
+    return { ambiguous: false, entry };
+  } finally {
+    drop(pendingEntry(dir, repoKey));
+    drop(claimed);
+  }
 }
 
 /**
@@ -315,6 +486,13 @@ export function messageIsSealed(message) {
   return text.length >= 100 && /^[A-Za-z0-9_-]+={0,2}$/.test(text);
 }
 
+/** The Codex-safe staged task name: semantic slug plus the opaque token. */
+export function stagedTaskParts(taskName) {
+  if (typeof taskName !== 'string') return null;
+  const match = /^([a-z0-9](?:[a-z0-9_]*[a-z0-9])?)_([a-z0-9]{16})$/.exec(taskName);
+  return match == null ? null : { name: match[1], token: match[2] };
+}
+
 /**
  * The dispatch a prompt already belongs to, read from the contract header
  * Fadeno injected, or null.
@@ -363,6 +541,9 @@ export function proxyPrompt(relay, detail, name) {
     '```',
     '',
     `It dispatches ${detail}. The prompt is already in the file the command names; do not read it, describe it, or write any file.`,
+    'The command lane has no live inbox or mid-run messaging. Do not try to send it a follow-up or steer it while it runs; put requirements in the original prompt. To change course, let it stop, read the complete report, and start a new dispatch with a new prompt (use `--from <name|id>` only for a retained isolated branch).',
+    'The command\'s stdout is the report channel; stderr and a non-zero exit are failure context. Preserve stdout verbatim even when it is partial or the executor exits non-zero — do not replace it with a success or failure summary.',
+    `The detail view \`fadeno dispatches ${waitFor}\` may show only the bounded ledger preview. It is not the complete report. Use \`fadeno dispatches --output ${waitFor}\` after the dispatch stops to print the retained command-lane stdout in full; relay that output verbatim.`,
     'If `fadeno` is not found, run the same command once more with `"$CLAUDE_PLUGIN_ROOT/bin/fadeno"` in place of `fadeno`.',
     'If the command exits non-zero, relay its stdout and stderr and say the dispatch failed; do not attempt the task yourself.',
     // The dispatch outliving the harness's shell ceiling is ORDINARY, not a
@@ -373,7 +554,7 @@ export function proxyPrompt(relay, detail, name) {
     // told the agent had finished. So: wait in bites the harness allows, and
     // do not finish until the dispatch has.
     `If that call is killed, times out, or is moved to the background, the dispatch is still running and its report is still coming. Do not report yet. Run \`fadeno dispatch-wait ${waitFor}\` — it blocks until the dispatch stops and then prints the report, which you relay verbatim.`,
-    '`dispatch-wait` exits 2 with "still running" when it reaches its own bound before the dispatch does. That is not an error and nothing is wrong: run the exact same command again, as many times as it takes. Only exit 0 carries the report.',
+    '`dispatch-wait` exits 2 with "still running" when it reaches its own bound before the dispatch does. That is not an error and nothing is wrong: run the exact same command again, as many times as it takes. A stopped dispatch can return a non-zero executor status while still carrying stdout; relay that report and its stderr cause, and say it failed.',
     // Exit 5 is the one ending with nothing to relay. It used to be reachable
     // as exit 4 too — "no report is coming" for a dispatch that had in fact
     // committed its work and written its report — and 26 finished dispatches

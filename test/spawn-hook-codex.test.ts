@@ -17,7 +17,7 @@ import { cli, denial, hookPlugin, hookRepo } from './hook-helpers.ts';
  *
  * That splits the work by what each event can know. PreToolUse sees the model
  * and the message but not which subagent they become, so it REFUSES (a generic
- * spawn, a mis-dialed model, the unclosed limit) and otherwise gets out of the
+ * spawn or a mis-dialed model) and otherwise gets out of the
  * way. SubagentStart sees the agent id, so it OPENS — worktree, row, contract —
  * with a binding that cannot be mismatched.
  */
@@ -142,51 +142,32 @@ test('the stop hook resolves by agent id, without reading a transcript', (t) => 
   assert.notEqual(readDispatches(root).records[0]!.stopped, null);
 });
 
-test('a message Codex encrypted is recorded as sealed, never as the task', (t) => {
+test('a sealed message without a staged token is refused before an agent starts', (t) => {
   const plugin = hookPlugin(t);
   const root = hookRepo(t);
   plugin.hostMode(SESSION, true);
   // What gpt-6-astra actually sends: a Fernet token where the prompt should be.
   const ciphertext = `gAAAAABqoMPH${'3dC8T7a2foTpusoqb_4ryG0ZTjYcYJX63MZyw3dpVrcZNoJmqiOqork5QPkOXA5H'.repeat(2)}`;
-  const told = context(plugin.run(HOOK, spawnEvent(root, {
+  const reason = denial(plugin.run(HOOK, spawnEvent(root, {
     agent_type: 'fadeno-worker', task_name: 'sealed-one', message: ciphertext, model: 'gpt-5.6-sol', reasoning_effort: 'high',
   })));
-  assert.match(told, /Codex encrypted the message on this spawn/);
-  plugin.run(HOOK, startEvent(root, 'fadeno-worker', 'agent-3'));
-
-  const opened = readDispatches(root).records[0]!.opened!;
-  assert.equal(opened.prompt_sealed, true, 'a flag, so no reader has to parse prose to know');
-  assert.equal(opened.name, 'sealed-one', 'the task NAME still crosses; only the prompt is sealed');
-  assert.doesNotMatch(opened.task, /gAAAAA/, 'the ciphertext is never presented as the ask');
-  assert.match(opened.task, /Fadeno did not see this dispatch's prompt/);
-  assert.match(readFileSync(join(root, opened.prompt), 'utf8'), /Codex encrypted the spawn's message/);
+  assert.match(reason ?? '', /prompt-stage --name <semantic-name> --prompt-file <file> --json/);
+  assert.match(reason ?? '', /retry the same `fadeno-worker` spawn/);
+  assert.ok(reason?.endsWith(REPORT_REFUSAL_SENTENCE));
+  assert.equal(readDispatches(root).records.length, 0);
 });
 
-test('two spawns of one archetype in flight: Fadeno declines to guess which prompt is whose', (t) => {
+test('a second same-session same-archetype spawn is refused before an agent starts', (t) => {
   const plugin = hookPlugin(t);
   const root = hookRepo(t);
   plugin.hostMode(SESSION, true);
-  // Both PreToolUse events land before either SubagentStart — measured, and
-  // the reason nothing consequential may depend on matching them up.
-  plugin.run(HOOK, spawnEvent(root, { agent_type: 'fadeno-worker', task_name: 'alpha', message: 'Do ALPHA.', model: 'gpt-5.6-sol', reasoning_effort: 'high' }));
-  plugin.run(HOOK, spawnEvent(root, { agent_type: 'fadeno-worker', task_name: 'bravo', message: 'Do BRAVO.', model: 'gpt-5.6-sol', reasoning_effort: 'high' }));
-
-  plugin.run(HOOK, startEvent(root, 'fadeno-worker', 'agent-a'));
-  plugin.run(HOOK, startEvent(root, 'fadeno-worker', 'agent-b'));
-
-  const records = readDispatches(root).records;
-  assert.equal(records.length, 2, 'both dispatches exist, each bound to its own agent');
-  assert.deepEqual(records.map((r) => r.opened!.agent_id).sort(), ['agent-a', 'agent-b']);
-  for (const record of records) {
-    // Guessing would have put one agent's task on the other's row half the
-    // time. The absence is recorded instead, with the reason.
-    assert.equal(record.opened!.prompt_sealed, true);
-    assert.match(record.opened!.task, /2 worker spawns were in flight at once/);
-    // Each still got its OWN worktree and branch: the binding that matters is
-    // made at SubagentStart against the agent id and was never in doubt.
-    assert.ok(record.opened!.workspace?.branch != null);
-  }
-  assert.equal(new Set(records.map((r) => r.opened!.workspace!.branch)).size, 2);
+  const first = plugin.run(HOOK, spawnEvent(root, { agent_type: 'fadeno-worker', task_name: 'alpha', message: 'Do ALPHA.', model: 'gpt-5.6-sol', reasoning_effort: 'high' }));
+  const second = plugin.run(HOOK, spawnEvent(root, { agent_type: 'fadeno-worker', task_name: 'bravo', message: 'Do BRAVO.', model: 'gpt-5.6-sol', reasoning_effort: 'high' }));
+  assert.equal(denial(first), null);
+  const reason = denial(second);
+  assert.match(reason ?? '', /same Codex session/);
+  assert.match(reason ?? '', /managed foreground shell/);
+  assert.equal(readDispatches(root).records.length, 0, 'the refusal happens before either dispatch exists');
 });
 
 test('the dial decides the model, and a spawn that carries another is refused with the call to make', (t) => {
@@ -222,22 +203,22 @@ test('a model this session cannot deliver takes the command lane, refused with t
   assert.ok(reason != null);
   assert.match(reason, /this worker spawn goes through the command lane \(opus@xhigh on claude\)/);
   assert.match(reason, /runs as a process, not as a subagent/);
-  const command = reason.match(/\n\n    (fadeno dispatch [^\n]+)\n\n/)?.[1];
+  const command = reason.match(/\n\n    (\S+ dispatch [^\n]+)\n\n/)?.[1];
   assert.ok(command, reason);
-  assert.match(command, /^fadeno dispatch --archetype worker --prompt-file \S+\.fadeno\/local\/relay\/\S+\.md$/);
+  assert.match(command, /^\S+\/bin\/fadeno dispatch --archetype worker --prompt-file \S+\.fadeno\/local\/relay\/\S+\.md$/);
   assert.equal(readFileSync(command.match(/--prompt-file (\S+)$/)![1]!, 'utf8'), 'Fix the login bug.\n');
-  assert.match(reason, /## Unclosed dispatches \(1; 0 of 5 allowed are waiting on you\)/);
+  assert.match(reason, /## Unclosed dispatches \(1; 0 stopped and waiting on you\)/);
   assert.ok(reason.endsWith(REPORT_REFUSAL_SENTENCE));
 });
 
-test('a sealed message on the command lane cannot be staged, and says so instead of staging a blob', (t) => {
+test('a sealed message on the command lane without a staged token says how to stage it', (t) => {
   const plugin = hookPlugin(t);
   const root = hookRepo(t, { dials: { worker: 'opus' } });
   plugin.hostMode(SESSION, true);
   const ciphertext = `gAAAAABqoMPH${'x_-A9'.repeat(40)}`;
   const reason = denial(plugin.run(HOOK, spawnEvent(root, { agent_type: 'fadeno-worker', message: ciphertext })));
-  assert.match(reason ?? '', /Codex encrypted the message on this spawn, so Fadeno cannot stage the task for it/);
-  assert.match(reason ?? '', /fadeno dispatch --archetype worker --name <name> --prompt-file <file>/);
+  assert.match(reason ?? '', /prompt-stage --name <semantic-name> --prompt-file <file> --json/);
+  assert.match(reason ?? '', /retry the same `fadeno-worker` spawn/);
   assert.ok(!existsSync(join(root, '.fadeno', 'local', 'relay')), 'nothing was staged');
 });
 
@@ -266,22 +247,19 @@ test('an archetype with no lane at all is refused by name, not opened', (t) => {
   assert.ok(!existsSync(join(root, '.fadeno', 'dispatches.jsonl')), 'a refusal opens nothing');
 });
 
-test('the limit refuses the spawn, not the agent that already started', (t) => {
+test('stopped dispatches remain advisory and do not refuse a new spawn', (t) => {
   const plugin = hookPlugin(t);
   const root = hookRepo(t);
   plugin.hostMode(SESSION, true);
-  // Five dispatches STOPPED and unread. Five still running would refuse
-  // nothing: the limit counts work waiting on a person.
+  // Five dispatches STOPPED and unread. They remain visible in the reminder
+  // but do not block another spawn.
   for (let i = 0; i < 5; i += 1) {
     cli(root, ['dispatch-open', '--archetype', 'judge', '--lane', 'host', '--name', `j${i}`], `job ${i}`);
     cli(root, ['dispatch-stop', `j${i}`], 'done', { FADENO_HARNESS: 'codex' });
   }
-  // The open now happens at SubagentStart, one event AFTER the last point a
-  // spawn can be stopped. A limit enforced only there would let the agent
-  // start and then leave it running with no contract, so the check moved
-  // forward — into the same dry run that resolves the lane.
-  const reason = denial(plugin.run(HOOK, spawnEvent(root, { agent_type: 'fadeno-worker', message: 'more', model: 'gpt-5.6-sol', reasoning_effort: 'high' })));
-  assert.match(reason ?? '', /dispatches have stopped and are waiting for your decision, and the limit is 5/);
+  const passed = plugin.run(HOOK, spawnEvent(root, { agent_type: 'fadeno-worker', message: 'more', model: 'gpt-5.6-sol', reasoning_effort: 'high' }));
+  assert.equal(passed.out?.hookSpecificOutput.permissionDecision, undefined);
+  assert.match(passed.out?.hookSpecificOutput.additionalContext ?? '', /Fadeno is opening a `worker` dispatch/);
   assert.equal(readDispatches(root).records.length, 5, 'the sixth was never opened');
 });
 

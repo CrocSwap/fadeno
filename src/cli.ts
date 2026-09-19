@@ -12,11 +12,11 @@ import {
   runDispatch,
   runDispatchClose,
   runDispatchOpen,
-  runDispatchOutput,
-  runDispatchShow,
+  runDispatchRead,
   runDispatchStop,
   runDispatchWait,
-  runDispatches,
+  resolveDispatchSelector,
+  type DispatchReadResult,
   runWorktrees,
   NotADispatchError,
   type OpenLane,
@@ -45,7 +45,7 @@ import { modelAgrees } from './lib/ledger.ts';
 import { packageVersion } from './lib/paths.ts';
 import { renderFocusedHelp, renderGlobalHelp, resolveHelpPath } from './lib/cli-help.ts';
 import { formatAge } from './lib/contracts.ts';
-import { sharedFromRefusal } from './lib/spawn.ts';
+import { DEFAULT_COMMAND_HEARTBEAT_MS, outputPaths, sharedFromRefusal } from './lib/spawn.ts';
 import { readStdin } from './lib/stdin.ts';
 
 export const KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
@@ -57,6 +57,34 @@ function lastStderrLine(excerpt: string | null | undefined, max = 160): string |
   const line = excerpt.split('\n').map((l) => l.trim()).filter((l) => l !== '').at(-1);
   if (line == null) return null;
   return line.length <= max ? line : `${line.slice(0, max)}…`;
+}
+
+/** The executor's non-zero exit code is still a failure when it wrote a report. */
+function executorFailureStatus(stopped: { exit?: { code: number | null; signal: string | null } } | null | undefined): number | null {
+  const exit = stopped?.exit;
+  // A signal is often the intentional `cancel` path. Preserve the existing
+  // wait contract for that report; an actual provider exit code is the
+  // failure status that must not be turned into success.
+  if (exit?.code == null || exit.code === 0) return null;
+  return exit.code;
+}
+
+/** Status and the actionable stderr tail for a failed command-lane report. */
+function executorFailureContext(
+  name: string,
+  id: string,
+  stopped: { exit?: { code: number | null; signal: string | null }; stderr_excerpt?: string | null; reconstructed?: boolean } | null | undefined,
+): string | null {
+  const status = executorFailureStatus(stopped);
+  if (status == null || stopped?.reconstructed === true) return null;
+  const exit = stopped?.exit;
+  const ending = exit?.signal != null ? `killed by ${exit.signal}` : `exit ${exit?.code ?? 1}`;
+  const cause = lastStderrLine(stopped?.stderr_excerpt);
+  return (
+    `${name} failed: ${ending}` +
+    (cause != null ? `; stderr ends: ${cause}` : '') +
+    (stopped?.stderr_excerpt != null ? `; full stderr at ${outputPaths(id).stderr}` : '')
+  );
 }
 
 function ageOf(record: { opened?: { at: string } | null }): string {
@@ -243,7 +271,7 @@ function optionalTarget(values: TargetFlags): Target | undefined {
   return selected[0];
 }
 
-function printDispatchPreparing(values: { name?: string; archetype?: string; model?: string }): void {
+function printDispatchPreparing(values: { name?: string | null; archetype?: string | null; model?: string | null }): void {
   const details = [
     values.name?.trim() ? `name "${values.name.trim()}"` : null,
     values.archetype?.trim() ? `archetype ${values.archetype.trim()}` : null,
@@ -253,6 +281,114 @@ function printDispatchPreparing(values: { name?: string; archetype?: string; mod
   console.error(
     `dispatch${target}: preparation underway — this dispatch has not opened a ledger row or started an executor yet.`,
   );
+}
+
+interface DispatchLaunchCliOptions {
+  archetype?: string | null;
+  model?: string | null;
+  name?: string | null;
+  shared?: boolean;
+  from?: string | null;
+  promptFile?: string | null;
+  session?: string | null;
+  parent?: string | null;
+  heartbeat?: string | null;
+}
+
+/** Print the command-lane result shared by every dispatch launch spelling. */
+async function runDispatchLaunch(options: DispatchLaunchCliOptions): Promise<number> {
+  const policy = sharedFromRefusal(Boolean(options.shared), options.from ?? null);
+  if (policy != null) {
+    console.error(policy);
+    return 3;
+  }
+  printDispatchPreparing({ name: options.name, archetype: options.archetype, model: options.model });
+  const promptFile = options.promptFile;
+  const outcome = await runDispatch({
+    archetype: options.archetype ?? null,
+    model: options.model ?? null,
+    name: options.name ?? null,
+    shared: Boolean(options.shared),
+    from: options.from ?? null,
+    promptFile,
+    prompt: promptFile == null ? readStdin() : undefined,
+    session: options.session ?? null,
+    parent: options.parent,
+    onEcho: (line) => console.error(line),
+    heartbeatMs: options.heartbeat != null ? Number(options.heartbeat) * 1000 : DEFAULT_COMMAND_HEARTBEAT_MS,
+  });
+  if (!outcome.ok) {
+    console.error(outcome.refused);
+    return 3;
+  }
+  const r = outcome.result;
+  if (r.stdout.length > 0) process.stdout.write(r.stdout.endsWith('\n') ? r.stdout : `${r.stdout}\n`);
+  const ending = r.signal != null ? `killed by ${r.signal}` : `exit ${r.exitCode}`;
+  const where = r.opened.workspace?.branch != null ? `branch ${r.opened.workspace.branch}` : 'shared tree';
+  const empty = r.stdout.trim().length === 0;
+  // The reason a run failed is in its last words, and "stderr at <path>"
+  // is not the reason. Four workers died minutes apart on "Grok Build
+  // usage balance exhausted" and the host read `exit 1` five times before
+  // opening a file.
+  const bad = r.exitCode !== 0 || r.signal != null || empty;
+  const lastWords = bad ? lastStderrLine(r.stopped.stderr_excerpt) : null;
+  console.error(
+    `dispatch ${r.name} (${r.id}) stopped: ${ending}; ${where}` +
+      (empty ? '; NO OUTPUT — the executor wrote nothing' : '') +
+      (lastWords != null ? `; stderr ends: ${lastWords}` : '') +
+      (r.stderrBytes > 0 ? `; full stderr at ${r.stderrPath}` : '') +
+      `. Close it: fadeno dispatch-close ${r.name} --merged|--kept|--discarded|--failed|--reviewed`,
+  );
+  if (r.exitCode === 0 && empty) return 1;
+  return r.exitCode ?? 1;
+}
+
+/** Render the one shared read result used by `dispatch` and `dispatches`. */
+function printDispatchRead(read: DispatchReadResult, json: boolean, readCommand: 'dispatch' | 'dispatches'): number {
+  if (read.kind === 'output') {
+    const out = read.result;
+    const name = out.record.opened?.name ?? out.record.id;
+    const failureStatus = executorFailureStatus(out.record.stopped);
+    if (out.text == null) {
+      const failure = executorFailureContext(name, out.record.id, out.record.stopped);
+      console.error(
+        `${name}: no report recorded${out.record.state === 'open' ? ' — it is still open' : ''}.` +
+          (failure == null ? '' : ` ${failure}.`),
+      );
+      return 1;
+    }
+    // A running dispatch has output but no REPORT. Handing back the stream so
+    // far with nothing said is the worst answer this command can give: a proxy
+    // whose Bash call was killed recovered exactly this and had to work out
+    // for itself that it held an interim log. Say it on stderr so relayed
+    // stdout stays verbatim.
+    if (out.record.stopped == null) {
+      console.error(
+        `${name} has not stopped: what follows is its output so far, not a report. ` +
+          `Run this again when it stops (\`fadeno ${readCommand}\` shows the state).`,
+      );
+    }
+    if (out.source === 'final_message' && out.record.opened?.lane === 'command') {
+      console.error(
+        `${name}: the retained command-lane stdout transcript is unavailable; the following text is only the stopped row's bounded final-message excerpt, not the complete report. ` +
+          'The full report cannot be recovered from this ledger excerpt.',
+      );
+    }
+    if (failureStatus != null) {
+      const failure = executorFailureContext(name, out.record.id, out.record.stopped);
+      if (failure != null) console.error(`${failure}; report follows.`);
+    }
+    process.stdout.write(out.text.endsWith('\n') ? out.text : `${out.text}\n`);
+    return out.record.stopped == null ? 2 : failureStatus ?? 0;
+  }
+  if (read.kind === 'show') {
+    if (json) console.log(JSON.stringify(read.result.record));
+    else for (const line of renderDispatchDetail(read.result)) console.log(line);
+    return 0;
+  }
+  if (json) console.log(JSON.stringify(read.result));
+  else for (const line of renderDispatches(read.result)) console.log(line);
+  return 0;
 }
 
 /** Write activity bytes without decoding or adding a newline. */
@@ -767,50 +903,81 @@ async function main(argv: string[]): Promise<number> {
       throw new Error('Usage: fadeno dial [<archetype> [<model>[@effort] [--harness <id>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | resolve --archetype <name>]');
     }
     case 'dispatch': {
-      const policy = sharedFromRefusal(Boolean(values.shared), values.from ?? null);
-      if (policy != null) {
-        console.error(policy);
-        return 3;
+      const [, first, selector] = positionals;
+      const isRun = first === 'run';
+      const launchOptionsPresent = [
+        values.name,
+        values['prompt-file'],
+        values.shared,
+        values.from,
+        values['session-id'],
+        values.parent,
+        values.heartbeat,
+      ].some((value) => value != null && value !== false);
+      const launchSelectorPresent = values.archetype != null || values.model != null;
+      const readOptionsPresent = values.all === true || values.tail != null || values.output != null || values.json === true;
+
+      if (isRun) {
+        if (positionals.length > 3) {
+          throw new Error('Usage: fadeno dispatch run <archetype-or-model> [launch options], or fadeno dispatch run --archetype|--model <selector> [launch options].');
+        }
+        if (selector != null && launchSelectorPresent) {
+          throw new Error('fadeno dispatch run cannot combine a positional selector with --archetype or --model; use one selector form.');
+        }
+        if (readOptionsPresent) {
+          throw new Error('fadeno dispatch run accepts launch options, not --all, --tail, --json, or --output; use `fadeno dispatch` for reads.');
+        }
+        let launch: DispatchLaunchCliOptions = {
+          archetype: values.archetype ?? null,
+          model: values.model ?? null,
+          name: values.name ?? null,
+          shared: Boolean(values.shared),
+          from: values.from ?? null,
+          promptFile: values['prompt-file'] ?? null,
+          session: values['session-id'] ?? null,
+          parent: values.parent ?? null,
+          heartbeat: values.heartbeat ?? null,
+        };
+        if (selector != null) {
+          const resolved = resolveDispatchSelector({ selector });
+          launch = resolved.kind === 'archetype'
+            ? { ...launch, archetype: resolved.archetype, model: null }
+            : { ...launch, archetype: null, model: resolved.model };
+        } else if (!launchSelectorPresent) {
+          throw new Error('Usage: fadeno dispatch run <archetype-or-model> [launch options], or fadeno dispatch run --archetype|--model <selector> [launch options].');
+        }
+        return runDispatchLaunch(launch);
       }
-      printDispatchPreparing({ name: values.name, archetype: values.archetype, model: values.model });
-      const promptFile = values['prompt-file'];
-      const outcome = await runDispatch({
-        archetype: values.archetype ?? null,
-        model: values.model ?? null,
-        name: values.name ?? null,
-        shared: Boolean(values.shared),
-        from: values.from ?? null,
-        promptFile,
-        prompt: promptFile == null ? readStdin() : undefined,
-        session: values['session-id'] ?? null,
-        parent: values.parent,
-        onEcho: (line) => console.error(line),
-        heartbeatMs: values.heartbeat != null ? Number(values.heartbeat) * 1000 : 30_000,
-      });
-      if (!outcome.ok) {
-        console.error(outcome.refused);
-        return 3;
+
+      if (launchSelectorPresent || launchOptionsPresent) {
+        if (first != null) {
+          throw new Error(`fadeno dispatch cannot combine positional read selector "${first}" with launch selectors or launch options; use fadeno dispatch run ${first} for a positional launch.`);
+        }
+        if (readOptionsPresent) {
+          throw new Error('fadeno dispatch launch forms cannot combine --all, --tail, --json, or --output; use `fadeno dispatch` without --archetype/--model for reads.');
+        }
+        return runDispatchLaunch({
+          archetype: values.archetype ?? null,
+          model: values.model ?? null,
+          name: values.name ?? null,
+          shared: Boolean(values.shared),
+          from: values.from ?? null,
+          promptFile: values['prompt-file'] ?? null,
+          session: values['session-id'] ?? null,
+          parent: values.parent ?? null,
+          heartbeat: values.heartbeat ?? null,
+        });
       }
-      const r = outcome.result;
-      if (r.stdout.length > 0) process.stdout.write(r.stdout.endsWith('\n') ? r.stdout : `${r.stdout}\n`);
-      const ending = r.signal != null ? `killed by ${r.signal}` : `exit ${r.exitCode}`;
-      const where = r.opened.workspace?.branch != null ? `branch ${r.opened.workspace.branch}` : 'shared tree';
-      const empty = r.stdout.trim().length === 0;
-      // The reason a run failed is in its last words, and "stderr at <path>"
-      // is not the reason. Four workers died minutes apart on "Grok Build
-      // usage balance exhausted" and the host read `exit 1` five times before
-      // opening a file.
-      const bad = r.exitCode !== 0 || r.signal != null || empty;
-      const lastWords = bad ? lastStderrLine(r.stopped.stderr_excerpt) : null;
-      console.error(
-        `dispatch ${r.name} (${r.id}) stopped: ${ending}; ${where}` +
-          (empty ? '; NO OUTPUT — the executor wrote nothing' : '') +
-          (lastWords != null ? `; stderr ends: ${lastWords}` : '') +
-          (r.stderrBytes > 0 ? `; full stderr at ${r.stderrPath}` : '') +
-          `. Close it: fadeno dispatch-close ${r.name} --merged|--kept|--discarded|--failed|--reviewed`,
-      );
-      if (r.exitCode === 0 && empty) return 1;
-      return r.exitCode ?? 1;
+
+      if (positionals.length > 2) {
+        throw new Error('Usage: fadeno dispatch [--all] [--tail <count>] [--json], fadeno dispatch <name|id> [--json], or fadeno dispatch --output <name|id>.');
+      }
+      return printDispatchRead(runDispatchRead({
+        ref: first ?? null,
+        output: values.output ?? null,
+        tail: values.tail != null ? Number(values.tail) : undefined,
+        all: Boolean(values.all),
+      }), Boolean(values.json), 'dispatch');
     }
     case 'dispatch-open': {
       if (!values.archetype) {
@@ -1026,6 +1193,8 @@ async function main(argv: string[]): Promise<number> {
             : s.exit.signal != null
               ? ` (killed by ${s.exit.signal})`
               : ` (exit ${s.exit.code})`;
+        const failureStatus = executorFailureStatus(s);
+        const failure = executorFailureContext(name, outcome.record.id, s);
         if (outcome.text == null) {
           if (!values.json) {
             const why = lastStderrLine(s?.stderr_excerpt);
@@ -1048,10 +1217,14 @@ async function main(argv: string[]): Promise<number> {
           // stderr, never stdout: what follows on stdout is the report
           // verbatim, because a proxy relays it.
           if (s?.reconstructed === true) console.error(`${name} stopped${how}; its report was recovered from what it left on disk, and follows.${stillWaiting}`);
+          else if (failure != null) console.error(`${failure}; its report follows.${stillWaiting}`);
           else if (refs.length > 1) console.error(`${name} stopped; its report follows.${stillWaiting}`);
           process.stdout.write(outcome.text.endsWith('\n') ? outcome.text : `${outcome.text}\n`);
         }
-        return 0;
+        // A report is still the executor's stdout, but a non-zero executor is
+        // not success. Preserve the report bytes on stdout and carry the
+        // provider failure through the command status and stderr context.
+        return failureStatus ?? 0;
       }
       // Still running when the bound elapsed. Exit 2, the same code
       // `dispatches --output` uses for "not finished". The message is one
@@ -1092,43 +1265,17 @@ async function main(argv: string[]): Promise<number> {
         const progress = readLogsProgress(source);
         await writeStdoutBytes(progress.chunk);
         if (progress.stopped && progress.drained) return 0;
-        await waitForLogsChange(source);
+        await waitForLogsChange(source, progress.token);
       }
     }
     case 'dispatches': {
       const [, ref] = positionals;
-      if (values.output != null) {
-        const out = runDispatchOutput({ ref: values.output });
-        if (out.text == null) {
-          const name = out.record.opened?.name ?? out.record.id;
-          console.error(`${name}: no report recorded${out.record.state === 'open' ? ' — it is still open' : ''}.`);
-          return 1;
-        }
-        // A running dispatch has output but no REPORT. Handing back the
-        // stream so far with nothing said is the worst answer this command
-        // can give: a proxy whose Bash call was killed recovered exactly this
-        // and had to work out for itself that it held an interim log. Say it,
-        // on stderr so the relayed stdout stays verbatim.
-        if (out.record.stopped == null) {
-          const name = out.record.opened?.name ?? out.record.id.slice(0, 8);
-          console.error(
-            `${name} has not stopped: what follows is its output so far, not a report. ` +
-              'Run this again when it stops (`fadeno dispatches` shows the state).',
-          );
-        }
-        process.stdout.write(out.text.endsWith('\n') ? out.text : `${out.text}\n`);
-        return out.record.stopped == null ? 2 : 0;
-      }
-      if (ref != null) {
-        const detail = runDispatchShow({ ref });
-        if (values.json) console.log(JSON.stringify(detail.record));
-        else for (const line of renderDispatchDetail(detail)) console.log(line);
-        return 0;
-      }
-      const result = runDispatches({ tail: values.tail != null ? Number(values.tail) : undefined, all: Boolean(values.all) });
-      if (values.json) console.log(JSON.stringify(result));
-      else for (const line of renderDispatches(result)) console.log(line);
-      return 0;
+      return printDispatchRead(runDispatchRead({
+        ref: ref ?? null,
+        output: values.output ?? null,
+        tail: values.tail != null ? Number(values.tail) : undefined,
+        all: Boolean(values.all),
+      }), Boolean(values.json), 'dispatches');
     }
     default:
       console.error(`Unknown command: ${command}\n`);
